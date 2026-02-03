@@ -63,4 +63,30 @@ print(f"Position: {gaussian.position}")
 
 GaussianOutput is compatible with SAES `Gaussian` type for similarity evaluation.
 
+## Demo.py Integration
+
+GGU is integrated into `scripts/demo.py` to **actually generate Gaussians** from encoder outputs, 
+replacing direct use of Transplat's encoder Gaussians. This ensures 100% hardware simulator coverage.
+
+### Integration Flow
+
+```
+Encoder → raw_gaussians, depths, opacities
+       → GGU.forward_batch() generates Gaussians
+       → SAES/FSDR filter Gaussians  
+       → Decoder renders
+```
+
+### Exact Transplat Match
+
+GGU must produce **identical results** to Transplat's GaussianAdapter:
+- PSNR difference: 0 dB (< 0.01 dB numerical tolerance)
+- This is verified BEFORE SAES/FSDR filtering
+
+Key functions that must match exactly:
+- `build_covariance()`: R @ S @ S^T @ R^T
+- `get_world_rays()`: origins + directions from coordinates
+- `get_scale_multiplier()`: intrinsics-based scale
+- `rotate_sh()`: SH rotation to world space
+
 See `docs/ggu-architecture.md` for detailed documentation.

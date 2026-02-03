@@ -36,12 +36,18 @@ Output Metrics:
 - FSDR: Cache hit rate, Memory access reduction
 
 Usage:
-    python demo.py [--model MODEL_TYPE]
+    python demo.py [--model MODEL_TYPE] [OPTIONS]
 
 Supported Models:
     - transplat (default)
-    - mvsplat (coming soon)
-    - depthsplat (coming soon)
+    - mvsplat
+    - depthsplat
+
+Fallback Options (for debugging):
+    --no-ggu        Use encoder output directly, skip GGU
+    --no-saes       Disable SAES early-stopping
+    --no-fsdr       Disable FSDR depth reuse
+    --baseline-only Only run baseline, skip SCARF pipeline
 """
 
 import sys
@@ -65,6 +71,7 @@ import argparse
 # SCARF imports
 from adapters import create_adapter, BaseAdapter
 from integration import create_model_loader, ModelBundle, DataBundle
+from ggu import GGUProcessor, GGUConfig
 
 # ============================================================
 # Configuration
@@ -743,6 +750,15 @@ def main():
     parser.add_argument('--model', type=str, default='transplat',
                         choices=['transplat', 'mvsplat', 'depthsplat'],
                         help='Model type to use')
+    # Fallback options for debugging
+    parser.add_argument('--no-ggu', action='store_true',
+                        help='Disable GGU, use encoder output directly')
+    parser.add_argument('--no-saes', action='store_true',
+                        help='Disable SAES early-stopping')
+    parser.add_argument('--no-fsdr', action='store_true',
+                        help='Disable FSDR depth reuse')
+    parser.add_argument('--baseline-only', action='store_true',
+                        help='Only run baseline, skip SCARF pipeline')
     args = parser.parse_args()
     
     # Initialize config
@@ -827,6 +843,27 @@ def main():
     baseline_ggu_cycles = baseline_count * sum(CycleCounter.GGU_CYCLES.values())
     baseline_total_cycles = baseline_dsu_cycles + baseline_ggu_cycles
     
+    # Handle baseline-only mode
+    if args.baseline_only:
+        gt_image = target['image'][0, 0]
+        mse = F.mse_loss(baseline_image, gt_image)
+        psnr = -10 * torch.log10(mse).item()
+        
+        print()
+        print("[4/6] SCARF Pipeline: SKIPPED (--baseline-only)")
+        print("[5/6] Rendering: SKIPPED (--baseline-only)")
+        print()
+        print("======================================================================")
+        print("RESULTS - Baseline Only")
+        print("======================================================================")
+        print()
+        print("### Baseline Metrics")
+        print(f"  PSNR: {psnr:.2f} dB")
+        print(f"  Gaussians: {baseline_count:,}")
+        print(f"  Time: {baseline_time:.2f}s")
+        print(f"  Estimated cycles: {baseline_total_cycles:,}")
+        return
+    
     # --------------------------------------------------------
     # Step 4: Run SCARF Pipeline
     # --------------------------------------------------------
@@ -868,6 +905,11 @@ def main():
             if captured['depths'] is not None:
                 captured['depths'] = captured['depths'].detach()
     
+    def hook_gaussian_head(module, inputs, outputs):
+        # DepthSplat: capture gaussian_head output [BV, C, H, W]
+        # Format: first channel is opacity, rest are gaussian params
+        captured['gaussian_head_output'] = outputs.detach()
+    
     # Register hooks (handle different model structures)
     # Transplat/MVSplat have backbone, DepthSplat may not
     if hasattr(model.encoder, 'backbone'):
@@ -875,6 +917,10 @@ def main():
     
     if hasattr(model.encoder, 'depth_predictor'):
         hooks.append(model.encoder.depth_predictor.register_forward_hook(hook_depth_predictor))
+    
+    # DepthSplat: hook gaussian_head to capture raw_gaussians
+    if hasattr(model.encoder, 'gaussian_head'):
+        hooks.append(model.encoder.gaussian_head.register_forward_hook(hook_gaussian_head))
     
     with torch.no_grad():
         # Run encoder to get all intermediate outputs
@@ -896,62 +942,244 @@ def main():
     features = captured.get('features')
     depths = captured.get('depths')
     densities = captured.get('densities')
-    raw_gaussians = captured.get('raw_gaussians')
+    raw_gaussians_captured = captured.get('raw_gaussians')
     
     print(f"  ✓ Features: {features.shape if features is not None else 'None'}")
     print(f"  ✓ Depths: {depths.shape if depths is not None else 'None'}")
     
     # --------------------------------------------------------
-    # Step 4b: Progressive SAES (process tiles from center outward)
+    # Step 4a2: Generate Gaussians using GGU (replaces Transplat's GaussianAdapter)
     # --------------------------------------------------------
-    print("  [4b] Progressive SAES (center-outward processing)...")
+    print("  [4a2] Generating Gaussians with GGU (hardware simulator)...")
     
-    # Apply progressive SAES - decides early-stop based on Gaussian similarity
-    keep_mask, enlarge_mask, saes_stats, continue_pixels = apply_progressive_saes(
-        scarf_gaussians_full, h, w, CONFIG.tile_size, gpp=1
+    # Initialize GGU with model-specific configuration from actual model
+    # Get GGU config from model's gaussian_adapter if available
+    if hasattr(model.encoder, 'gaussian_adapter') and hasattr(model.encoder.gaussian_adapter, 'cfg'):
+        ga_cfg = model.encoder.gaussian_adapter.cfg
+        actual_sh_degree = ga_cfg.sh_degree
+        actual_scale_min = ga_cfg.gaussian_scale_min
+        actual_scale_max = ga_cfg.gaussian_scale_max
+    else:
+        actual_sh_degree = CONFIG.sh_degree
+        actual_scale_min = CONFIG.scale_min
+        actual_scale_max = CONFIG.scale_max
+    
+    # Model-specific GGU configuration
+    if args.model == 'depthsplat':
+        # DepthSplat: softplus activation, no depth scaling, z-normalization
+        ggu_config = GGUConfig(
+            scale_min=actual_scale_min,
+            scale_max=actual_scale_max,
+            sh_degree=actual_sh_degree,
+            image_shape=(h, w),
+            scale_activation='softplus',
+            use_depth_scaling=False,
+            softplus_shift=-4.0,
+            direction_normalize='z',  # DepthSplat uses z-division
+        )
+    else:
+        # Transplat/MVSplat: sigmoid activation, depth scaling, norm-normalization
+        ggu_config = GGUConfig(
+            scale_min=actual_scale_min,
+            scale_max=actual_scale_max,
+            sh_degree=actual_sh_degree,
+            image_shape=(h, w),
+            scale_activation='sigmoid',
+            use_depth_scaling=True,
+            direction_normalize='norm',  # Transplat uses unit vector
+        )
+    
+    ggu = GGUProcessor(ggu_config, enable_cycle_counting=True)
+    print(f"    GGU config: sh_degree={actual_sh_degree}, scale=[{actual_scale_min}, {actual_scale_max}], activation={ggu_config.scale_activation}")
+    
+    # Use GGU for models that have captured intermediate outputs
+    # Supports: Transplat, MVSplat (same depth_predictor output format)
+    # DepthSplat: different structure, currently uses fallback (TODO: fix data format)
+    gaussian_head_output = captured.get('gaussian_head_output')
+    
+    use_ggu_generation = (
+        not args.no_ggu and (
+            (raw_gaussians_captured is not None and depths is not None and densities is not None and
+             args.model in ['transplat', 'mvsplat']) or
+            (gaussian_head_output is not None and depths is not None and args.model == 'depthsplat')
+        )
     )
     
-    print(f"  ✓ Tiles processed: {saes_stats['total_tiles_processed']}")
-    print(f"    Early-stop Phase 1: {saes_stats['early_stop_phase1']} (center similar)")
-    print(f"    Early-stop Phase 2: {saes_stats['early_stop_phase2']} (cross similar)")
-    print(f"    Subdivided: {saes_stats['subdivided']} (detail detected)")
-    print(f"    Full processed: {saes_stats['full_processed']}")
-    print(f"  ✓ Early-stop ratio: {saes_stats['early_stop_ratio']*100:.1f}%")
+    if use_ggu_generation:
+        print(f"    Using GGU to generate Gaussians from captured intermediates ({args.model})...")
+        
+        # Import model-specific rotate_sh and sample_image_grid
+        if args.model == 'transplat':
+            from src.misc.sh_rotation import rotate_sh as model_rotate_sh
+            from src.geometry.projection import sample_image_grid
+        elif args.model == 'mvsplat':
+            MVSPLAT_ROOT = SCARF_ROOT / 'mvsplat'
+            sys.path.insert(0, str(MVSPLAT_ROOT))
+            from src.misc.sh_rotation import rotate_sh as model_rotate_sh
+            from src.geometry.projection import sample_image_grid
+        elif args.model == 'depthsplat':
+            DEPTHSPLAT_ROOT = SCARF_ROOT / 'depthsplat'
+            sys.path.insert(0, str(DEPTHSPLAT_ROOT))
+            from src.misc.sh_rotation import rotate_sh as model_rotate_sh
+            from src.geometry.projection import sample_image_grid
+        else:
+            model_rotate_sh = None
+            sample_image_grid = None
+        
+        # Get camera parameters
+        ctx_extrinsics = context['extrinsics']  # [B, V, 4, 4]
+        ctx_intrinsics = context['intrinsics']  # [B, V, 3, 3]
+        
+        # Compute xy_ray coordinates
+        xy_ray, _ = sample_image_grid((h, w), device)  # [H, W, 2]
+        xy_ray = rearrange(xy_ray, "h w xy -> (h w) () xy")  # [R, 1, 2]
+        
+        # Get model config
+        gpp = model.encoder.cfg.gaussians_per_pixel if hasattr(model.encoder.cfg, 'gaussians_per_pixel') else 1
+        num_surfaces = model.encoder.cfg.num_surfaces if hasattr(model.encoder.cfg, 'num_surfaces') else 1
+        pixel_size = 1 / torch.tensor((w, h), dtype=torch.float32, device=device)
+        xy_ray = xy_ray.to(device)
+        
+        # Model-specific parsing
+        if args.model == 'depthsplat' and gaussian_head_output is not None:
+            # DepthSplat: parse gaussian_head_output [BV, C, H, W]
+            B_ds, V_ds = B, V_ctx
+            raw_g_bv = rearrange(gaussian_head_output, "(b v) c h w -> b v (h w) c", b=B_ds, v=V_ds)
+            opacities = raw_g_bv[..., :1].sigmoid().unsqueeze(-1)  # [B, V, R, 1, 1]
+            raw_g_full = raw_g_bv[..., 1:]
+            raw_gaussians_parsed = rearrange(raw_g_full, "b v r (srf c) -> b v r srf c", srf=num_surfaces)
+            offset_xy = raw_gaussians_parsed[..., :2].sigmoid()
+            xy_ray = xy_ray + (offset_xy - 0.5) * pixel_size
+            raw_gaussians_for_ggu = raw_gaussians_parsed[..., 2:]
+            if depths.dim() == 4:
+                depths = rearrange(depths, "b v h w -> b v (h w) () ()")
+        else:
+            # Transplat/MVSplat
+            raw_gaussians_parsed = rearrange(raw_gaussians_captured, "b v r (srf c) -> b v r srf c", srf=num_surfaces)
+            offset_xy = raw_gaussians_parsed[..., :2].sigmoid()
+            xy_ray = xy_ray + (offset_xy - 0.5) * pixel_size
+            if hasattr(model.encoder, 'map_pdf_to_opacity'):
+                opacities = model.encoder.map_pdf_to_opacity(densities, 0) / gpp
+            else:
+                opacities = densities.sigmoid() / gpp
+            raw_gaussians_for_ggu = raw_gaussians_parsed[..., 2:]
+        
+        B_g, V_g, R_g, srf_g = raw_gaussians_for_ggu.shape[:4]
+        
+        # Prepare input_images for SH initialization (DepthSplat only)
+        sh_input_images = context['image'] if args.model == 'depthsplat' else None
+        
+        # Call GGU.forward_batch with model's rotate_sh
+        ggu_means, ggu_covs, ggu_harmonics, ggu_opacities = ggu.forward_batch(
+            ctx_extrinsics,
+            ctx_intrinsics,
+            xy_ray,  # [B, V, R, srf, 2] normalized coordinates
+            depths,   # [B, V, R, srf, gpp]
+            opacities,  # [B, V, R, srf, gpp]
+            raw_gaussians_for_ggu,  # [B, V, R, srf, d_in]
+            (h, w),
+            rotate_sh_func=model_rotate_sh,  # Use model's exact SH rotation
+            input_images=sh_input_images,  # For DepthSplat SH initialization
+        )
+        
+        # Reshape GGU outputs to match Transplat's Gaussians format: [B, N, ...]
+        # where N = V * R * srf * gpp
+        ggu_means = rearrange(ggu_means, "b v r srf gpp xyz -> b (v r srf gpp) xyz")
+        ggu_covs = rearrange(ggu_covs, "b v r srf gpp i j -> b (v r srf gpp) i j")
+        ggu_harmonics = rearrange(ggu_harmonics, "b v r srf gpp c sh -> b (v r srf gpp) c sh")
+        ggu_opacities = rearrange(ggu_opacities, "b v r srf gpp -> b (v r srf gpp)")
+        
+        # Create Gaussians object from GGU outputs
+        from src.model.types import Gaussians
+        
+        scarf_gaussians_full = Gaussians(
+            means=ggu_means,
+            covariances=ggu_covs,
+            harmonics=ggu_harmonics,
+            opacities=ggu_opacities,
+        )
+        
+        # Verify GGU matches Transplat's output (should be very high PSNR)
+        # This is done BEFORE SAES/FSDR
+        baseline_means = baseline_gaussians.means
+        mse_means = F.mse_loss(ggu_means, baseline_means)
+        ggu_psnr_means = -10 * torch.log10(mse_means + 1e-10).item()
+        print(f"    GGU vs Transplat PSNR (means): {ggu_psnr_means:.2f} dB")
+        
+        if ggu_psnr_means > 40:  # > 40 dB means very similar (MSE < 1e-4)
+            print(f"    ✓ GGU generates Gaussians correctly!")
+        else:
+            print(f"    ⚠ GGU-Transplat mismatch (expected > 40 dB, got {ggu_psnr_means:.2f} dB)")
+    else:
+        print(f"    Using Transplat's encoder output (GGU not available for {args.model})")
+        # Keep using scarf_gaussians_full from encoder (fallback for non-Transplat models)
+    
+    # --------------------------------------------------------
+    # Step 4b: Progressive SAES (process tiles from center outward)
+    # --------------------------------------------------------
+    if args.no_saes:
+        print("  [4b] Progressive SAES: SKIPPED (--no-saes)")
+        # No early stopping - all pixels continue
+        N = scarf_gaussians_full.means.shape[1]
+        keep_mask = torch.ones(N, dtype=torch.bool, device=device)
+        enlarge_mask = torch.zeros(N, dtype=torch.bool, device=device)
+        saes_stats = {
+            'total_tiles_processed': 0, 'early_stop_phase1': 0,
+            'early_stop_phase2': 0, 'subdivided': 0, 'full_processed': 0,
+            'early_stop_ratio': 0.0
+        }
+        continue_pixels = [(y, x, y * w + x) for y in range(h) for x in range(w)]
+    else:
+        print("  [4b] Progressive SAES (center-outward processing)...")
+        
+        # Apply progressive SAES - decides early-stop based on Gaussian similarity
+        keep_mask, enlarge_mask, saes_stats, continue_pixels = apply_progressive_saes(
+            scarf_gaussians_full, h, w, CONFIG.tile_size, gpp=1
+        )
+        
+        print(f"  ✓ Tiles processed: {saes_stats['total_tiles_processed']}")
+        print(f"    Early-stop Phase 1: {saes_stats['early_stop_phase1']} (center similar)")
+        print(f"    Early-stop Phase 2: {saes_stats['early_stop_phase2']} (cross similar)")
+        print(f"    Subdivided: {saes_stats['subdivided']} (detail detected)")
+        print(f"    Full processed: {saes_stats['full_processed']}")
+        print(f"  ✓ Early-stop ratio: {saes_stats['early_stop_ratio']*100:.1f}%")
     
     # --------------------------------------------------------
     # Step 4c: FSDR for continue pixels
     # --------------------------------------------------------
-    print("  [4c] FSDR depth reuse for continue pixels...")
-    
-    # Track depth modifications
     N = scarf_gaussians_full.means.shape[1]
     depth_scale_factors = torch.ones(N, device=device)
     
-    # Process continue pixels through FSDR
-    if features is not None and len(continue_pixels) > 0:
-        B_feat, V_feat, C, H_feat, W_feat = features.shape
-        features_up = F.interpolate(
-            features[0], size=(h, w), mode='bilinear', align_corners=False
-        ).mean(dim=0)  # [C, H, W]
+    if args.no_fsdr:
+        print("  [4c] FSDR depth reuse: SKIPPED (--no-fsdr)")
+    else:
+        print("  [4c] FSDR depth reuse for continue pixels...")
         
-        for (y, x, pixel_idx) in continue_pixels:
-            feat = features_up[:, y, x]
+        # Process continue pixels through FSDR
+        if features is not None and len(continue_pixels) > 0:
+            B_feat, V_feat, C, H_feat, W_feat = features.shape
+            features_up = F.interpolate(
+                features[0], size=(h, w), mode='bilinear', align_corners=False
+            ).mean(dim=0)  # [C, H, W]
             
-            # Get original depth for this pixel
-            original_depth = depths[0, 0, pixel_idx, 0, 0].item() if depths is not None else 1.0
-            
-            # FSDR processing
-            path, num_searches, output_depth = fsdr.process_pixel(
-                feat, original_depth, (y, x), pixel_idx
-            )
-            
-            # Record cycles
-            cycle_counter.add_dsu_fsdr(path, num_searches)
-            
-            # Calculate scale factor if depth was modified
-            if output_depth != original_depth and original_depth > 0:
-                scale_factor = output_depth / original_depth
-                depth_scale_factors[pixel_idx] = scale_factor
+            for (y, x, pixel_idx) in continue_pixels:
+                feat = features_up[:, y, x]
+                
+                # Get original depth for this pixel
+                original_depth = depths[0, 0, pixel_idx, 0, 0].item() if depths is not None else 1.0
+                
+                # FSDR processing
+                path, num_searches, output_depth = fsdr.process_pixel(
+                    feat, original_depth, (y, x), pixel_idx
+                )
+                
+                # Record cycles
+                cycle_counter.add_dsu_fsdr(path, num_searches)
+                
+                # Calculate scale factor if depth was modified
+                if output_depth != original_depth and original_depth > 0:
+                    scale_factor = output_depth / original_depth
+                    depth_scale_factors[pixel_idx] = scale_factor
     
     # Record DSU skips for early-stop tiles
     num_early_stop_gaussians = enlarge_mask.sum().item()

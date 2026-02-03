@@ -15,8 +15,8 @@ class GGUConfig:
     
     Default values match common Transplat configurations.
     For specific models, override with actual values from GaussianAdapterCfg:
-    - RE10K: scale_min=0.5, scale_max=15.0, sh_degree=4
-    - ACID: scale_min=0.001, scale_max=0.1, sh_degree=2
+    - Transplat/MVSplat: scale_activation='sigmoid', use_depth_scaling=True
+    - DepthSplat: scale_activation='softplus', use_depth_scaling=False
     
     Attributes:
         scale_min: Minimum scale value (Transplat: gaussian_scale_min)
@@ -24,12 +24,20 @@ class GGUConfig:
         sh_degree: Spherical harmonics degree (Transplat: sh_degree)
         depth_scale_multiplier: Fallback multiplier if intrinsics not provided
         image_shape: Default image shape for coordinate normalization
+        scale_activation: 'sigmoid' (Transplat/MVSplat) or 'softplus' (DepthSplat)
+        use_depth_scaling: Whether to multiply scales by depth (False for DepthSplat)
+        softplus_shift: Shift for softplus activation (DepthSplat uses -4.0)
     """
     scale_min: float = 0.5      # RE10K default
     scale_max: float = 15.0     # RE10K default
     sh_degree: int = 4          # RE10K default
     depth_scale_multiplier: float = 0.1
     image_shape: Tuple[int, int] = (256, 256)
+    # Model-specific configurations
+    scale_activation: str = 'sigmoid'  # 'sigmoid' or 'softplus'
+    use_depth_scaling: bool = True     # True for Transplat/MVSplat, False for DepthSplat
+    softplus_shift: float = -4.0       # Only used when scale_activation='softplus'
+    direction_normalize: str = 'norm'  # 'norm' (Transplat) or 'z' (DepthSplat)
     
     def __post_init__(self):
         if self.scale_min < 0:
@@ -38,6 +46,8 @@ class GGUConfig:
             raise ValueError("scale_max must be > scale_min")
         if self.sh_degree < 0 or self.sh_degree > 4:
             raise ValueError("sh_degree must be in [0, 4]")
+        if self.scale_activation not in ('sigmoid', 'softplus'):
+            raise ValueError("scale_activation must be 'sigmoid' or 'softplus'")
     
     @property
     def num_sh_coeffs(self) -> int:
