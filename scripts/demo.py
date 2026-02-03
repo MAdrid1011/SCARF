@@ -397,8 +397,26 @@ def load_model_and_data(model_type: str = 'transplat'):
     # Create model loader
     loader = create_model_loader(model_type)
     
-    # Determine checkpoint path
-    checkpoint_path = str(SCARF_ROOT / 'transplat' / 'checkpoints' / 're10k.ckpt')
+    # Determine checkpoint path based on model type
+    checkpoint_paths = {
+        'transplat': SCARF_ROOT / 'transplat' / 'checkpoints' / 're10k.ckpt',
+        'mvsplat': SCARF_ROOT / 'mvsplat' / 'checkpoints' / 're10k.ckpt',
+        'depthsplat': SCARF_ROOT / 'depthsplat' / 'checkpoints' / 're10k.ckpt',
+    }
+    
+    checkpoint_path = checkpoint_paths.get(model_type)
+    if checkpoint_path is None:
+        raise ValueError(f"Unknown model type: {model_type}")
+    
+    checkpoint_path = str(checkpoint_path)
+    
+    # Check if checkpoint exists
+    if not Path(checkpoint_path).exists():
+        raise FileNotFoundError(
+            f"Checkpoint not found: {checkpoint_path}\n"
+            f"Please download the checkpoint for {model_type}.\n"
+            f"See docs/multi-model-demo-guide.md for instructions."
+        )
     
     # Load model
     model_bundle = loader.load_model(checkpoint_path)
@@ -410,253 +428,308 @@ def load_model_and_data(model_type: str = 'transplat'):
 
 
 # ============================================================
-# SAES: Scene-Adaptive Early-Stopping
+# SAES: Scene-Adaptive Early-Stopping (Progressive Version)
 # ============================================================
-def compute_tile_similarity_from_features(features: torch.Tensor, H: int, W: int, tile_size: int) -> torch.Tensor:
+class ProgressiveSAES:
     """
-    Compute tile similarity from features (BEFORE depth search).
+    Progressive Adaptive Early-Stopping for SCARF.
     
-    Uses feature cosine similarity between pixels within tiles.
-    High similarity = homogeneous region = candidate for early-stop.
+    Core idea: Process tiles from center outward, decide early-stop or subdivide
+    based on Gaussian similarity (covariance, SH, opacity) as we go.
     
-    Args:
-        features: [B, V, C, H_feat, W_feat] feature maps
-        H, W: Target image dimensions
-        tile_size: Tile size in pixels
-    
-    Returns:
-        similarities: [tiles_h, tiles_w] similarity scores in [0, 1]
+    Processing order for 4x4 tile:
+        Phase 1: Center 4 pixels → check similarity → early-stop?
+        Phase 2: Cross 8 pixels → check similarity → early-stop?
+        Phase 3: Corners 4 pixels → complete
+        
+    If similarity < LOW_THRESHOLD at Phase 1: subdivide into 4 sub-tiles
     """
-    # Upsample features to image resolution
-    B, V, C, H_feat, W_feat = features.shape
-    features_up = F.interpolate(
-        features.view(B*V, C, H_feat, W_feat),
-        size=(H, W),
-        mode='bilinear',
-        align_corners=False
-    )  # [B*V, C, H, W]
     
-    # Average over views
-    features_up = features_up.view(B, V, C, H, W).mean(dim=1)  # [B, C, H, W]
+    # Thresholds for early-stop decisions
+    # Tuned for quality loss < 3dB while maximizing speedup
+    HIGH_THRESHOLD = 0.98   # Early-stop if similarity > 98% (balanced)
+    LOW_THRESHOLD = 0.90    # (Reserved for future subdivide feature)
+    MIN_TILE_SIZE = 2       # (Reserved for future subdivide feature)
+    ENABLE_SUBDIVIDE = False  # Disable subdivide for now (performance issue)
     
-    # Normalize features for cosine similarity
-    features_norm = F.normalize(features_up, dim=1)  # [B, C, H, W]
+    def __init__(self, H: int, W: int, initial_tile_size: int = 4):
+        self.H = H
+        self.W = W
+        self.initial_tile_size = initial_tile_size
+        
+        # Statistics
+        self.stats = {
+            'total_tiles_processed': 0,
+            'early_stop_phase1': 0,
+            'early_stop_phase2': 0,
+            'subdivided': 0,
+            'full_processed': 0,
+            'gaussians_saved': 0,
+            'gaussians_output': 0,
+        }
     
-    tiles_h = H // tile_size
-    tiles_w = W // tile_size
+    @staticmethod
+    def get_spiral_order(tile_size: int) -> List[List[Tuple[int, int]]]:
+        """Generate center-first spiral processing order."""
+        if tile_size == 4:
+            return [
+                # Phase 1: Center 4 pixels
+                [(1, 1), (1, 2), (2, 1), (2, 2)],
+                # Phase 2: Cross 8 pixels
+                [(0, 1), (0, 2), (1, 0), (1, 3), (2, 0), (2, 3), (3, 1), (3, 2)],
+                # Phase 3: Corners 4 pixels
+                [(0, 0), (0, 3), (3, 0), (3, 3)],
+            ]
+        elif tile_size == 2:
+            return [
+                # All 4 pixels at once
+                [(0, 0), (0, 1), (1, 0), (1, 1)],
+            ]
+        else:
+            # For other sizes, just return all pixels
+            return [[(y, x) for y in range(tile_size) for x in range(tile_size)]]
     
-    similarities = torch.zeros(tiles_h, tiles_w, device=features.device)
+    @staticmethod
+    def compute_gaussian_similarity(gaussians: List[Dict]) -> float:
+        """
+        Compute similarity among a group of Gaussians.
+        
+        Based on Challenge.md criteria:
+        - Covariance cosine similarity
+        - SH cosine similarity
+        - Opacity L2 distance
+        
+        Returns average pairwise similarity in [0, 1].
+        """
+        if len(gaussians) < 2:
+            return 1.0
+        
+        n = len(gaussians)
+        total_sim = 0.0
+        count = 0
+        
+        for i in range(n):
+            for j in range(i + 1, n):
+                g1, g2 = gaussians[i], gaussians[j]
+                
+                # Covariance similarity (flatten 3x3 matrix)
+                cov1 = g1['covariance'].flatten()
+                cov2 = g2['covariance'].flatten()
+                cov_sim = F.cosine_similarity(cov1.unsqueeze(0), cov2.unsqueeze(0)).item()
+                cov_sim = (cov_sim + 1) / 2  # Map [-1, 1] to [0, 1]
+                
+                # SH similarity
+                sh1 = g1['harmonics'].flatten()
+                sh2 = g2['harmonics'].flatten()
+                sh_sim = F.cosine_similarity(sh1.unsqueeze(0), sh2.unsqueeze(0)).item()
+                sh_sim = (sh_sim + 1) / 2
+                
+                # Opacity similarity (1 - normalized L2 distance)
+                opacity_dist = abs(g1['opacity'] - g2['opacity'])
+                opacity_sim = 1.0 - min(opacity_dist, 1.0)
+                
+                # Weighted combination (matching Challenge.md emphasis)
+                pair_sim = 0.4 * cov_sim + 0.4 * sh_sim + 0.2 * opacity_sim
+                total_sim += pair_sim
+                count += 1
+        
+        return total_sim / count if count > 0 else 1.0
     
-    for th in range(tiles_h):
-        for tw in range(tiles_w):
-            y0, y1 = th * tile_size, (th + 1) * tile_size
-            x0, x1 = tw * tile_size, (tw + 1) * tile_size
+    def process_tile(
+        self,
+        tile_y: int, tile_x: int,
+        tile_size: int,
+        gaussians_full,  # Full Gaussians object
+        W: int,
+        gpp: int = 1,  # Gaussians per pixel
+    ) -> Tuple[List[int], List[int], bool, int]:
+        """
+        Process a single tile with progressive early-stopping.
+        
+        Returns:
+            keep_indices: Indices of Gaussians to keep
+            enlarge_indices: Indices of Gaussians to enlarge covariance
+            early_stopped: Whether this tile was early-stopped
+            phase_stopped: Which phase early-stopped (0=subdivided, 1-3=phase, -1=full)
+        """
+        self.stats['total_tiles_processed'] += 1
+        
+        spiral_order = self.get_spiral_order(tile_size)
+        processed_gaussians = []
+        processed_indices = []
+        
+        for phase_idx, phase_pixels in enumerate(spiral_order):
+            # Process this phase's pixels
+            for (local_y, local_x) in phase_pixels:
+                global_y = tile_y + local_y
+                global_x = tile_x + local_x
+                pixel_idx = global_y * W + global_x
+                
+                # Get Gaussian data for this pixel
+                for g in range(gpp):
+                    flat_idx = pixel_idx * gpp + g
+                    if flat_idx < gaussians_full.means.shape[1]:
+                        gaussian_data = {
+                            'covariance': gaussians_full.covariances[0, flat_idx],
+                            'harmonics': gaussians_full.harmonics[0, flat_idx],
+                            'opacity': gaussians_full.opacities[0, flat_idx].item(),
+                        }
+                        processed_gaussians.append(gaussian_data)
+                        processed_indices.append(flat_idx)
             
-            # Get tile features
-            tile_feat = features_norm[0, :, y0:y1, x0:x1]  # [C, tile_h, tile_w]
-            
-            # Compute average cosine similarity between all pixel pairs
-            # Reshape to [num_pixels, C]
-            tile_flat = tile_feat.permute(1, 2, 0).reshape(-1, C)  # [16, C] for 4x4 tile
-            
-            # Compute pairwise cosine similarities
-            cos_sim_matrix = torch.mm(tile_flat, tile_flat.t())  # [16, 16]
-            
-            # Average off-diagonal elements (exclude self-similarity)
-            n_pixels = cos_sim_matrix.shape[0]
-            mask = ~torch.eye(n_pixels, dtype=torch.bool, device=cos_sim_matrix.device)
-            avg_sim = cos_sim_matrix[mask].mean().item()
-            
-            # Scale to [0, 1] - cosine similarity is already [-1, 1]
-            # We map it so 1.0 = very similar, 0.0 = very different
-            sim = (avg_sim + 1) / 2  # Map [-1, 1] to [0, 1]
-            similarities[th, tw] = sim
+            # Check similarity after this phase (need at least 4 Gaussians)
+            if len(processed_gaussians) >= 4:
+                similarity = self.compute_gaussian_similarity(processed_gaussians)
+                
+                # Early-stop: high similarity
+                if similarity >= self.HIGH_THRESHOLD:
+                    if phase_idx == 0:
+                        self.stats['early_stop_phase1'] += 1
+                    else:
+                        self.stats['early_stop_phase2'] += 1
+                    
+                    # Keep only center Gaussians, mark for enlargement
+                    center_indices = processed_indices[:4]  # First 4 (center)
+                    self.stats['gaussians_saved'] += (tile_size * tile_size * gpp) - len(center_indices)
+                    self.stats['gaussians_output'] += len(center_indices)
+                    return center_indices, center_indices, True, phase_idx + 1
+                
+                # Subdivide: low similarity at phase 1 (currently disabled)
+                if self.ENABLE_SUBDIVIDE and phase_idx == 0 and similarity < self.LOW_THRESHOLD and tile_size > self.MIN_TILE_SIZE:
+                    self.stats['subdivided'] += 1
+                    # Return signal to subdivide
+                    return [], [], False, 0  # phase_stopped=0 means subdivide
+        
+        # Full processing complete
+        self.stats['full_processed'] += 1
+        self.stats['gaussians_output'] += len(processed_indices)
+        return processed_indices, [], False, -1
     
-    return similarities
+    def process_all_tiles_fast(
+        self,
+        gaussians_full,
+        gpp: int = 1,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
+        """
+        Fast batch processing of all tiles with progressive SAES.
+        
+        Optimized version: compute all similarities at once, then make decisions.
+        
+        Returns:
+            keep_mask: Boolean mask for Gaussians to keep
+            enlarge_mask: Boolean mask for Gaussians to enlarge
+            stats: Processing statistics
+        """
+        N = gaussians_full.means.shape[1]
+        device = gaussians_full.means.device
+        
+        keep_mask = torch.ones(N, dtype=torch.bool, device=device)
+        enlarge_mask = torch.zeros(N, dtype=torch.bool, device=device)
+        
+        # Reset stats
+        self.stats = {k: 0 for k in self.stats}
+        
+        tiles_h = self.H // self.initial_tile_size
+        tiles_w = self.W // self.initial_tile_size
+        tile_size = self.initial_tile_size
+        
+        # Pre-compute center pixel indices for all tiles
+        for th in range(tiles_h):
+            for tw in range(tiles_w):
+                self.stats['total_tiles_processed'] += 1
+                
+                tile_y = th * tile_size
+                tile_x = tw * tile_size
+                
+                # Get center 4 pixels (Phase 1)
+                center_pixels = [
+                    (tile_y + 1, tile_x + 1),
+                    (tile_y + 1, tile_x + 2),
+                    (tile_y + 2, tile_x + 1),
+                    (tile_y + 2, tile_x + 2),
+                ]
+                
+                # Collect center Gaussians
+                center_gaussians = []
+                center_indices = []
+                for (y, x) in center_pixels:
+                    pixel_idx = y * self.W + x
+                    if pixel_idx < N:
+                        center_indices.append(pixel_idx)
+                        center_gaussians.append({
+                            'covariance': gaussians_full.covariances[0, pixel_idx],
+                            'harmonics': gaussians_full.harmonics[0, pixel_idx],
+                            'opacity': gaussians_full.opacities[0, pixel_idx].item(),
+                        })
+                
+                if len(center_gaussians) < 4:
+                    self.stats['full_processed'] += 1
+                    continue
+                
+                # Compute center similarity
+                similarity = self.compute_gaussian_similarity(center_gaussians)
+                
+                if similarity >= self.HIGH_THRESHOLD:
+                    # Early-stop at Phase 1: keep only center pixels
+                    self.stats['early_stop_phase1'] += 1
+                    
+                    # Mark non-center pixels for removal
+                    for y in range(tile_y, tile_y + tile_size):
+                        for x in range(tile_x, tile_x + tile_size):
+                            pixel_idx = y * self.W + x
+                            if pixel_idx < N and pixel_idx not in center_indices:
+                                keep_mask[pixel_idx] = False
+                    
+                    # Mark center for enlargement
+                    for idx in center_indices:
+                        enlarge_mask[idx] = True
+                else:
+                    # Continue processing (keep all pixels)
+                    self.stats['full_processed'] += 1
+        
+        # Compute final stats
+        num_kept = keep_mask.sum().item()
+        self.stats['gaussians_output'] = num_kept
+        self.stats['gaussians_saved'] = N - num_kept
+        self.stats['keep_ratio'] = num_kept / N if N > 0 else 0
+        self.stats['early_stop_ratio'] = (
+            self.stats['early_stop_phase1'] + self.stats['early_stop_phase2']
+        ) / max(1, self.stats['total_tiles_processed'])
+        
+        return keep_mask, enlarge_mask, self.stats
 
 
-def apply_saes_decisions(
-    similarities: torch.Tensor,
+def apply_progressive_saes(
+    gaussians_full,
     H: int, W: int,
-    tile_size: int,
-    threshold: float
-) -> Tuple[torch.Tensor, Dict, List]:
+    tile_size: int = 4,
+    gpp: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor, Dict, List]:
     """
-    Apply SAES tile-level decisions.
+    Apply progressive SAES to Gaussians.
     
     Returns:
-        early_stop_mask: [tiles_h, tiles_w] bool mask for early-stop tiles
-        stats: Statistics dictionary
-        continue_pixels: List of (y, x, pixel_idx) for continue tiles
+        keep_mask: Boolean mask for Gaussians to keep
+        enlarge_mask: Boolean mask for Gaussians to enlarge  
+        stats: Processing statistics
+        continue_pixels: List of pixels that need FSDR processing
     """
-    tiles_h = H // tile_size
-    tiles_w = W // tile_size
+    saes = ProgressiveSAES(H, W, tile_size)
+    keep_mask, enlarge_mask, stats = saes.process_all_tiles_fast(gaussians_full, gpp)
     
-    early_stop_mask = similarities >= threshold
-    
-    stats = {
-        'total_tiles': tiles_h * tiles_w,
-        'early_stop': early_stop_mask.sum().item(),
-        'full_continue': (~early_stop_mask).sum().item(),
-    }
-    
-    # Collect continue tile pixels for FSDR
+    # Collect pixels that were NOT early-stopped (for FSDR)
     continue_pixels = []
-    for th in range(tiles_h):
-        for tw in range(tiles_w):
-            if not early_stop_mask[th, tw]:
-                y0, y1 = th * tile_size, (th + 1) * tile_size
-                x0, x1 = tw * tile_size, (tw + 1) * tile_size
-                for y in range(y0, y1):
-                    for x in range(x0, x1):
-                        pixel_idx = y * W + x
-                        continue_pixels.append((y, x, pixel_idx))
+    for idx in range(keep_mask.shape[0]):
+        if keep_mask[idx] and not enlarge_mask[idx]:
+            # This Gaussian was kept but not from early-stop
+            pixel_idx = idx // gpp
+            y = pixel_idx // W
+            x = pixel_idx % W
+            # Boundary check
+            if y < H and x < W:
+                continue_pixels.append((y, x, pixel_idx))
     
-    return early_stop_mask, stats, continue_pixels
-
-
-# ============================================================
-# SCARF Gaussian Generation
-# ============================================================
-def generate_scarf_gaussians(
-    early_stop_mask: torch.Tensor,
-    depths: torch.Tensor,
-    densities: torch.Tensor,
-    raw_gaussians: torch.Tensor,
-    context: Dict,
-    H: int, W: int,
-    tile_size: int,
-    cycle_counter: CycleCounter,
-    fsdr: FSDRSimulator,
-    features: torch.Tensor,
-    continue_pixels: List,
-    gaussians_full,  # Full Gaussians object to modify
-) -> Tuple[torch.Tensor, torch.Tensor, Dict, torch.Tensor]:
-    """
-    Generate Gaussians using SCARF logic with SAES and FSDR.
-    
-    FSDR now TRULY modifies depth values for cache hits.
-    
-    For early-stop tiles: Keep only corner gaussians, enlarge covariance
-    For continue tiles: Process through FSDR, modify depths based on cache
-    
-    Returns:
-        keep_mask, enlarge_mask, stats, depth_scale_factors
-    """
-    from src.model.types import Gaussians
-    from src.geometry.projection import sample_image_grid
-    
-    device = depths.device
-    B, V, R, srf, gpp = depths.shape
-    
-    # Initialize GGU
-    from ggu import GGUConfig, GGUProcessor
-    ggu_config = GGUConfig(
-        scale_min=CONFIG.scale_min,
-        scale_max=CONFIG.scale_max,
-        sh_degree=CONFIG.sh_degree,
-        image_shape=(H, W),
-    )
-    ggu = GGUProcessor(ggu_config, enable_cycle_counting=True)
-    
-    tiles_h = H // tile_size
-    tiles_w = W // tile_size
-    
-    # Track depth modifications from FSDR
-    depth_scale_factors = torch.ones(gaussians_full.means.shape[1], device=device)
-    
-    # Process depth search with FSDR for continue tiles
-    # FSDR now TRULY affects depth values
-    if features is not None and len(continue_pixels) > 0:
-        B_feat, V_feat, C, H_feat, W_feat = features.shape
-        features_up = F.interpolate(
-            features[0], size=(H, W), mode='bilinear', align_corners=False
-        )  # [V, C, H, W]
-        
-        # Get original depth values from gaussians (z coordinate)
-        original_depths = gaussians_full.means[0, :, 2].clone()  # [N]
-        
-        for y, x, pixel_idx in continue_pixels:
-            # Get feature for this pixel (average over views)
-            feat = features_up[:, :, y, x].mean(dim=0)  # [C]
-            
-            # Get original depth
-            if pixel_idx < len(original_depths):
-                original_depth = original_depths[pixel_idx].item()
-            else:
-                original_depth = original_depths[0].item()
-            
-            # Process through FSDR - now returns modified depth!
-            path, num_searches, output_depth = fsdr.process_pixel(feat, original_depth, (y, x), pixel_idx)
-            
-            # Record cycles
-            cycle_counter.add_dsu_fsdr(path, num_searches)
-            
-            # Calculate depth scale factor for this pixel
-            if original_depth > 0 and output_depth != original_depth:
-                scale_factor = output_depth / original_depth
-                # Apply to corresponding gaussians (both views)
-                for v in range(V):
-                    idx = pixel_idx * V * srf * gpp + v * srf * gpp
-                    for s in range(srf):
-                        for g in range(gpp):
-                            flat_idx = idx + s * gpp + g
-                            if flat_idx < len(depth_scale_factors):
-                                depth_scale_factors[flat_idx] = scale_factor
-    
-    # Record DSU skips for early-stop tiles
-    num_early_stop_pixels = int(early_stop_mask.sum().item()) * tile_size * tile_size * 2  # 2 views
-    for _ in range(num_early_stop_pixels):
-        cycle_counter.add_dsu_skip()
-    
-    # Now apply masking based on SAES decisions
-    pixels_per_view = H * W
-    N = gaussians_full.means.shape[1]  # Total gaussians
-    
-    # Create masks
-    keep_mask = torch.ones(N, dtype=torch.bool, device=device)
-    enlarge_mask = torch.zeros(N, dtype=torch.bool, device=device)
-    
-    for th in range(tiles_h):
-        for tw in range(tiles_w):
-            y0, y1 = th * tile_size, (th + 1) * tile_size
-            x0, x1 = tw * tile_size, (tw + 1) * tile_size
-            
-            if early_stop_mask[th, tw]:
-                # Early-stop: keep only corners, enlarge covariance
-                for y in range(y0, y1):
-                    for x in range(x0, x1):
-                        pixel_idx = y * W + x
-                        is_corner = (y == y0 or y == y1-1) and (x == x0 or x == x1-1)
-                        
-                        # For both views
-                        for v in range(V):
-                            # Calculate index in flattened tensor
-                            idx = pixel_idx * V * srf * gpp + v * srf * gpp
-                            for s in range(srf):
-                                for g in range(gpp):
-                                    flat_idx = idx + s * gpp + g
-                                    if flat_idx < N:
-                                        if not is_corner:
-                                            keep_mask[flat_idx] = False
-                                        else:
-                                            enlarge_mask[flat_idx] = True
-    
-    # Count gaussians
-    num_kept = keep_mask.sum().item()
-    num_depth_modified = (depth_scale_factors != 1.0).sum().item()
-    
-    stats = {
-        'gaussians_baseline': N,
-        'gaussians_output': num_kept,
-        'early_stop_gaussians': N - num_kept,
-        'depth_modified_gaussians': num_depth_modified,
-    }
-    
-    # Record GGU cycles
-    cycle_counter.add_ggu(num_kept)
-    
-    return keep_mask, enlarge_mask, stats, depth_scale_factors
+    return keep_mask, enlarge_mask, stats, continue_pixels
 
 
 # ============================================================
@@ -729,7 +802,15 @@ def main():
     
     t0 = time.time()
     with torch.no_grad():
-        baseline_gaussians = model.encoder(context, False)
+        encoder_output = model.encoder(context, False)
+        
+        # Handle different encoder output formats
+        # DepthSplat may return dict with 'gaussians' key when return_depth=True
+        if isinstance(encoder_output, dict):
+            baseline_gaussians = encoder_output.get('gaussians', encoder_output)
+        else:
+            baseline_gaussians = encoder_output
+        
         tgt_ext = target['extrinsics']
         tgt_int = target['intrinsics']
         baseline_output = model.decoder.forward(
@@ -764,28 +845,53 @@ def main():
     
     # Capture intermediate outputs from encoder
     captured = {}
+    hooks = []
     
     def hook_backbone(module, inputs, outputs):
-        trans_features, cnn_features = outputs
-        captured['features'] = trans_features.detach()
-        captured['cnn_features'] = cnn_features.detach() if cnn_features is not None else None
+        # Handle different backbone output formats
+        if isinstance(outputs, tuple) and len(outputs) == 2:
+            trans_features, cnn_features = outputs
+            captured['features'] = trans_features.detach()
+            captured['cnn_features'] = cnn_features.detach() if cnn_features is not None else None
+        else:
+            captured['features'] = outputs.detach() if hasattr(outputs, 'detach') else None
     
     def hook_depth_predictor(module, inputs, outputs):
-        depths, densities, raw_gaussians = outputs
-        captured['depths'] = depths.detach()
-        captured['densities'] = densities.detach()
-        captured['raw_gaussians'] = raw_gaussians.detach()
+        # Handle different depth predictor output formats
+        if isinstance(outputs, tuple) and len(outputs) >= 3:
+            depths, densities, raw_gaussians = outputs[:3]
+            captured['depths'] = depths.detach()
+            captured['densities'] = densities.detach()
+            captured['raw_gaussians'] = raw_gaussians.detach()
+        elif isinstance(outputs, dict):
+            captured['depths'] = outputs.get('depths', outputs.get('depth'))
+            if captured['depths'] is not None:
+                captured['depths'] = captured['depths'].detach()
     
-    # Register hooks
-    hook1 = model.encoder.backbone.register_forward_hook(hook_backbone)
-    hook2 = model.encoder.depth_predictor.register_forward_hook(hook_depth_predictor)
+    # Register hooks (handle different model structures)
+    # Transplat/MVSplat have backbone, DepthSplat may not
+    if hasattr(model.encoder, 'backbone'):
+        hooks.append(model.encoder.backbone.register_forward_hook(hook_backbone))
+    
+    if hasattr(model.encoder, 'depth_predictor'):
+        hooks.append(model.encoder.depth_predictor.register_forward_hook(hook_depth_predictor))
     
     with torch.no_grad():
         # Run encoder to get all intermediate outputs
-        scarf_gaussians_full = model.encoder(context, False)
+        encoder_output = model.encoder(context, False)
+        
+        # Handle different encoder output formats
+        if isinstance(encoder_output, dict):
+            scarf_gaussians_full = encoder_output.get('gaussians', encoder_output)
+            # DepthSplat may return depths in the dict
+            if 'depths' in encoder_output and captured.get('depths') is None:
+                captured['depths'] = encoder_output['depths'].detach()
+        else:
+            scarf_gaussians_full = encoder_output
     
-    hook1.remove()
-    hook2.remove()
+    # Remove hooks
+    for hook in hooks:
+        hook.remove()
     
     features = captured.get('features')
     depths = captured.get('depths')
@@ -796,46 +902,72 @@ def main():
     print(f"  ✓ Depths: {depths.shape if depths is not None else 'None'}")
     
     # --------------------------------------------------------
-    # Step 4b: SAES tile decisions (BEFORE depth search conceptually)
+    # Step 4b: Progressive SAES (process tiles from center outward)
     # --------------------------------------------------------
-    print("  [4b] SAES tile decisions...")
+    print("  [4b] Progressive SAES (center-outward processing)...")
     
-    similarities = compute_tile_similarity_from_features(features, h, w, CONFIG.tile_size)
-    
-    # Debug: show similarity distribution
-    sim_flat = similarities.flatten()
-    print(f"  Similarity stats: min={sim_flat.min():.3f}, max={sim_flat.max():.3f}, mean={sim_flat.mean():.3f}, std={sim_flat.std():.3f}")
-    
-    # Adaptive threshold: use percentile to ensure some continue tiles
-    # Target: ~40% early-stop (conservative for quality < 3dB loss)
-    sorted_sims = torch.sort(sim_flat, descending=True)[0]
-    target_early_stop_ratio = 0.4
-    threshold_idx = int(len(sorted_sims) * target_early_stop_ratio)
-    adaptive_threshold = sorted_sims[threshold_idx].item()
-    print(f"  Adaptive threshold for {target_early_stop_ratio*100:.0f}% early-stop: {adaptive_threshold:.3f}")
-    
-    # Use adaptive threshold instead of fixed
-    effective_threshold = max(adaptive_threshold, 0.85)  # At least 0.85 similarity for early-stop
-    print(f"  Using effective threshold: {effective_threshold:.3f}")
-    
-    early_stop_mask, saes_stats, continue_pixels = apply_saes_decisions(
-        similarities, h, w, CONFIG.tile_size, effective_threshold
+    # Apply progressive SAES - decides early-stop based on Gaussian similarity
+    keep_mask, enlarge_mask, saes_stats, continue_pixels = apply_progressive_saes(
+        scarf_gaussians_full, h, w, CONFIG.tile_size, gpp=1
     )
     
-    early_pct = saes_stats['early_stop'] / saes_stats['total_tiles'] * 100
-    print(f"  ✓ SAES: {saes_stats['early_stop']}/{saes_stats['total_tiles']} tiles early-stop ({early_pct:.1f}%)")
+    print(f"  ✓ Tiles processed: {saes_stats['total_tiles_processed']}")
+    print(f"    Early-stop Phase 1: {saes_stats['early_stop_phase1']} (center similar)")
+    print(f"    Early-stop Phase 2: {saes_stats['early_stop_phase2']} (cross similar)")
+    print(f"    Subdivided: {saes_stats['subdivided']} (detail detected)")
+    print(f"    Full processed: {saes_stats['full_processed']}")
+    print(f"  ✓ Early-stop ratio: {saes_stats['early_stop_ratio']*100:.1f}%")
     
     # --------------------------------------------------------
-    # Step 4c: Process with SCARF (DSU + FSDR + GGU)
+    # Step 4c: FSDR for continue pixels
     # --------------------------------------------------------
-    print("  [4c] Processing with SCARF (DSU + FSDR + GGU)...")
+    print("  [4c] FSDR depth reuse for continue pixels...")
     
-    keep_mask, enlarge_mask, gaussian_stats, depth_scale_factors = generate_scarf_gaussians(
-        early_stop_mask, depths, densities, raw_gaussians,
-        context, h, w, CONFIG.tile_size,
-        cycle_counter, fsdr, features, continue_pixels,
-        scarf_gaussians_full  # Pass full gaussians for depth modification
-    )
+    # Track depth modifications
+    N = scarf_gaussians_full.means.shape[1]
+    depth_scale_factors = torch.ones(N, device=device)
+    
+    # Process continue pixels through FSDR
+    if features is not None and len(continue_pixels) > 0:
+        B_feat, V_feat, C, H_feat, W_feat = features.shape
+        features_up = F.interpolate(
+            features[0], size=(h, w), mode='bilinear', align_corners=False
+        ).mean(dim=0)  # [C, H, W]
+        
+        for (y, x, pixel_idx) in continue_pixels:
+            feat = features_up[:, y, x]
+            
+            # Get original depth for this pixel
+            original_depth = depths[0, 0, pixel_idx, 0, 0].item() if depths is not None else 1.0
+            
+            # FSDR processing
+            path, num_searches, output_depth = fsdr.process_pixel(
+                feat, original_depth, (y, x), pixel_idx
+            )
+            
+            # Record cycles
+            cycle_counter.add_dsu_fsdr(path, num_searches)
+            
+            # Calculate scale factor if depth was modified
+            if output_depth != original_depth and original_depth > 0:
+                scale_factor = output_depth / original_depth
+                depth_scale_factors[pixel_idx] = scale_factor
+    
+    # Record DSU skips for early-stop tiles
+    num_early_stop_gaussians = enlarge_mask.sum().item()
+    for _ in range(num_early_stop_gaussians):
+        cycle_counter.add_dsu_skip()
+    
+    # Record GGU cycles for kept Gaussians
+    num_kept = keep_mask.sum().item()
+    cycle_counter.add_ggu(num_kept)
+    
+    gaussian_stats = {
+        'gaussians_baseline': N,
+        'gaussians_output': num_kept,
+        'early_stop_gaussians': N - num_kept,
+        'depth_modified_gaussians': (depth_scale_factors != 1.0).sum().item(),
+    }
     
     # Apply FSDR depth modifications to gaussian means
     # FSDR now TRULY affects the 3D positions!
@@ -943,10 +1075,13 @@ def main():
     reduction = (1 - gaussian_stats['gaussians_output'] / gaussian_stats['gaussians_baseline']) * 100
     print(f"  Reduction: {reduction:.1f}%")
     print()
-    print("### SAES Tile Distribution")
-    print(f"  Total tiles: {saes_stats['total_tiles']}")
-    print(f"  Early-stop:    {saes_stats['early_stop']:5d} ({saes_stats['early_stop']/saes_stats['total_tiles']*100:.1f}%)")
-    print(f"  Full-continue: {saes_stats['full_continue']:5d} ({saes_stats['full_continue']/saes_stats['total_tiles']*100:.1f}%)")
+    print("### Progressive SAES Results")
+    print(f"  Total tiles processed: {saes_stats['total_tiles_processed']}")
+    print(f"  Early-stop Phase 1 (center): {saes_stats['early_stop_phase1']}")
+    print(f"  Early-stop Phase 2 (cross):  {saes_stats['early_stop_phase2']}")
+    print(f"  Subdivided (detail):         {saes_stats['subdivided']}")
+    print(f"  Full processed:              {saes_stats['full_processed']}")
+    print(f"  Overall early-stop ratio: {saes_stats['early_stop_ratio']*100:.1f}%")
     print()
     print("### FSDR Statistics (for continue tiles)")
     if fsdr_stats['total_pixels'] > 0:

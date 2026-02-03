@@ -1,3 +1,9 @@
 [submodule "transplat"]
 	path = transplat
 	url = https://github.com/MAdrid1011/transplat.git
+[submodule "mvsplat"]
+	path = mvsplat
+	url = https://github.com/MAdrid1011/mvsplat.git
+[submodule "depthsplat"]
+	path = depthsplat
+	url = https://github.com/MAdrid1011/depthsplat.git
