@@ -1,0 +1,13 @@
+# Ignore all data files (large binaries)
+*.ckpt
+*.torch
+*.pt
+*.pth
+
+# Keep directory structure
+!.gitignore
+!README.md
+
+# Ignore dataset directories
+re10k/
+checkpoints/

@@ -15,6 +15,13 @@ Example:
     validator = QualityValidator()
     validator.record_sample(rendered, ground_truth)
     print(validator.get_metrics())
+    
+    # Real inference (requires transplat)
+    from benchmark import TransplatRunner, SCARFHooks
+    runner = TransplatRunner(
+        checkpoint_path='checkpoints/re10k.ckpt',
+        dataset_root='datasets/re10k/',
+    )
 """
 
 from .cycle_counter import (
@@ -37,6 +44,15 @@ from .benchmark_runner import (
     SCARFResult,
     BenchmarkRunner,
 )
+from .scarf_hooks import (
+    HookResult,
+    SCARFHooks,
+)
+from .transplat_runner import (
+    InferenceResult,
+    BenchmarkResult,
+    TransplatRunner,
+)
 
 
 __all__ = [
@@ -56,4 +72,11 @@ __all__ = [
     'BaselineResult',
     'SCARFResult',
     'BenchmarkRunner',
+    # SCARF hooks
+    'HookResult',
+    'SCARFHooks',
+    # Transplat runner
+    'InferenceResult',
+    'BenchmarkResult',
+    'TransplatRunner',
 ]
