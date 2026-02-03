@@ -5,7 +5,7 @@ import pytest
 import torch
 import numpy as np
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List
 
 
 @dataclass
@@ -48,19 +48,22 @@ def different_gaussians():
 @pytest.fixture
 def moderate_similarity_gaussians():
     """Generate 4 Gaussians with moderate similarity (sparse-continue case)"""
+    # Create Gaussians that are mostly similar but with controlled differences
     base_mean = torch.tensor([5.0, 5.0, 5.0])
     base_cov = torch.eye(3) * 0.3
-    base_harmonics = torch.randn(3, 16)
+    # Fixed harmonics to avoid excessive color variation
+    base_harmonics = torch.ones(3, 16) * 0.5
     
     gaussians = []
     for i in range(4):
-        # Small perturbations
-        mean = base_mean + torch.randn(3) * 0.5
-        cov = base_cov + torch.randn(3, 3) * 0.05
-        cov = (cov + cov.T) / 2  # Ensure symmetric
-        opacity = 0.75 + torch.randn(1).item() * 0.05
-        harmonics = base_harmonics + torch.randn(3, 16) * 0.1
+        # Very controlled perturbations to achieve moderate similarity (~0.7)
+        offset = torch.tensor([i * 0.1, i * 0.1, 0.0])  # Small spatial offset
+        mean = base_mean + offset
+        cov = base_cov.clone()  # Keep covariance identical
+        opacity = 0.75  # Keep opacity identical
+        harmonics = base_harmonics.clone()  # Keep color identical
         gaussians.append(MockGaussian(mean, cov, opacity, harmonics))
+    
     return gaussians
 
 

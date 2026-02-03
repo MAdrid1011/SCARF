@@ -7,7 +7,7 @@ probe Gaussians on position, covariance, color, and opacity dispersions.
 import pytest
 import torch
 import numpy as np
-from conftest import MockGaussian
+from .conftest import MockGaussian
 
 
 # Import will fail until implementation exists - this is expected in TDD

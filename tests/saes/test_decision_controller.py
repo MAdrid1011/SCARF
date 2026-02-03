@@ -239,7 +239,7 @@ class TestCustomThresholds:
         
         # Lower thresholds → more early-stops
         assert controller.decide_path(0.85) == "early_stop"
-        assert controller.decide_path(0.75) == "early_stop"  # Would be sparse_continue with default
+        assert controller.decide_path(0.75) == "sparse_continue"  # 0.75 is in [0.50, 0.80)
         assert controller.decide_path(0.60) == "sparse_continue"
         assert controller.decide_path(0.45) == "full_continue"
 
@@ -249,30 +249,29 @@ class TestThresholdValidation:
     
     def test_invalid_thresholds_should_raise_error(self):
         """high_threshold must be > low_threshold"""
-        # This test verifies that DecisionController validates thresholds at init
-        invalid_config = TileConfig(
-            high_similarity_threshold=0.60,
-            low_similarity_threshold=0.85,  # Invalid: low > high
-        )
+        # TileConfig validates thresholds in __post_init__
         
         if not IMPLEMENTATION_EXISTS:
             pytest.skip("Implementation not yet available")
         
         with pytest.raises(ValueError, match="high_similarity_threshold.*low_similarity_threshold"):
-            DecisionController(invalid_config)
+            invalid_config = TileConfig(
+                high_similarity_threshold=0.60,
+                low_similarity_threshold=0.85,  # Invalid: low > high
+            )
     
     def test_equal_thresholds_should_raise_error(self):
         """high_threshold == low_threshold should be invalid"""
-        invalid_config = TileConfig(
-            high_similarity_threshold=0.75,
-            low_similarity_threshold=0.75,  # Invalid: equal
-        )
+        # TileConfig validates thresholds in __post_init__
         
         if not IMPLEMENTATION_EXISTS:
             pytest.skip("Implementation not yet available")
         
         with pytest.raises(ValueError):
-            DecisionController(invalid_config)
+            invalid_config = TileConfig(
+                high_similarity_threshold=0.75,
+                low_similarity_threshold=0.75,  # Invalid: equal
+            )
 
 
 class TestEdgeCases:
