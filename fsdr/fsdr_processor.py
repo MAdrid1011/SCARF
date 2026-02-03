@@ -5,7 +5,7 @@ Main processing engine for Feature-Similarity Depth Reuse.
 """
 import time
 import torch
-from typing import Callable, Tuple, Optional
+from typing import Callable, Tuple, Optional, TYPE_CHECKING
 
 from .types import FSDRConfig, CacheEntry, FSDRResult
 from .lsh_hasher import LSHHasher
@@ -13,6 +13,19 @@ from .cache_table import CacheTable
 from .depth_corrector import DepthCorrector
 from .light_verifier import LightVerifier
 from .profiler import FSDRProfiler
+
+if TYPE_CHECKING:
+    from benchmark.cycle_counter import CycleCounter
+
+# Hardware cycle constants for FSDR operations
+FSDR_CYCLE_CONSTANTS = {
+    'hash': 3,           # LSH signature generation
+    'lookup': 5,         # Cache lookup
+    'direct_reuse': 1,   # Pass-through
+    'interpolation': 4,  # Weighted blend
+    'light_verify_base': 3,  # Base cycles, plus per-depth
+    'insert': 2,         # Cache insertion
+}
 
 
 class FSDRProcessor:
@@ -70,6 +83,8 @@ class FSDRProcessor:
         config: FSDRConfig,
         depth_candidates: torch.Tensor,
         enable_profiling: bool = True,
+        enable_cycle_counting: bool = False,
+        cycle_counter: Optional['CycleCounter'] = None,
     ):
         """
         Initialize FSDR processor.
@@ -78,11 +93,15 @@ class FSDRProcessor:
             config: FSDR configuration
             depth_candidates: [D] depth candidate values
             enable_profiling: Whether to collect profiling data
+            enable_cycle_counting: Whether to count hardware cycles
+            cycle_counter: Optional external CycleCounter instance
         """
         self.config = config
         self.depth_candidates = depth_candidates
         self.num_depths = len(depth_candidates)
         self.enable_profiling = enable_profiling
+        self.enable_cycle_counting = enable_cycle_counting
+        self.cycle_counter = cycle_counter
         
         # Initialize components
         self.lsh_hasher = LSHHasher(config)
@@ -92,6 +111,11 @@ class FSDRProcessor:
         
         # Profiler
         self.profiler = FSDRProfiler(num_depths=self.num_depths)
+    
+    def _record_cycles(self, operation: str, cycles: int, memory_accesses: int = 0):
+        """Record cycles if cycle counting is enabled."""
+        if self.enable_cycle_counting and self.cycle_counter is not None:
+            self.cycle_counter.record('fsdr', operation, cycles, memory_accesses)
     
     def process_pixel(
         self,
@@ -126,11 +150,13 @@ class FSDRProcessor:
         t0 = time.perf_counter_ns()
         signature = self.lsh_hasher.hash(feature)
         timing['signature'] = time.perf_counter_ns() - t0
+        self._record_cycles('hash', FSDR_CYCLE_CONSTANTS['hash'])
         
         # Phase 2: Cache lookup
         t0 = time.perf_counter_ns()
         entry, hamming_dist = self.cache_table.lookup(signature)
         timing['lookup'] = time.perf_counter_ns() - t0
+        self._record_cycles('lookup', FSDR_CYCLE_CONSTANTS['lookup'], memory_accesses=1)
         
         # Phase 3: Hit/Miss processing
         if entry is not None:
@@ -170,10 +196,12 @@ class FSDRProcessor:
         if strategy == 'direct_reuse':
             depth = self.depth_corrector.direct_reuse(entry)
             num_searches = 0
+            self._record_cycles('direct_reuse', FSDR_CYCLE_CONSTANTS['direct_reuse'])
             
         elif strategy == 'interpolation':
             depth = self.depth_corrector.interpolate(entry, hamming_dist)
             num_searches = 0
+            self._record_cycles('interpolation', FSDR_CYCLE_CONSTANTS['interpolation'])
             
         else:  # light_verify
             depth, num_searches = self.light_verifier.verify(
@@ -181,6 +209,9 @@ class FSDRProcessor:
             )
             # Update cache with verified depth
             self.cache_table.update(entry, depth)
+            # Light verify cycles: base + per-depth cycles
+            light_verify_cycles = FSDR_CYCLE_CONSTANTS['light_verify_base'] + num_searches * 14
+            self._record_cycles('light_verify', light_verify_cycles, memory_accesses=num_searches)
         
         timing['correction'] = time.perf_counter_ns() - t0
         
@@ -204,7 +235,7 @@ class FSDRProcessor:
         """Handle cache miss processing."""
         t0 = time.perf_counter_ns()
         
-        # Full depth search
+        # Full depth search (cycles tracked by DSU if integrated)
         probs = prob_fn(feature, self.depth_candidates)
         
         # Compute expected depth
@@ -217,6 +248,7 @@ class FSDRProcessor:
         new_entry = self._create_cache_entry(signature, position, probs, depth)
         self.cache_table.insert(new_entry)
         timing['insert'] = time.perf_counter_ns() - t0
+        self._record_cycles('insert', FSDR_CYCLE_CONSTANTS['insert'], memory_accesses=1)
         
         return FSDRResult(
             depth=depth,
