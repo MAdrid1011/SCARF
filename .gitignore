@@ -208,3 +208,4 @@ __marimo__/
 
 # Output files
 outputs/
+.milestones/
