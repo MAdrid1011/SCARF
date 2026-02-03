@@ -66,13 +66,21 @@ def random_feature(feature_dim) -> torch.Tensor:
 @pytest.fixture
 def similar_feature_pair(feature_dim) -> Tuple[torch.Tensor, torch.Tensor]:
     """Generate two similar feature vectors (cosine similarity > 0.9)."""
+    torch.manual_seed(42)  # Deterministic for reliability
     base = torch.randn(feature_dim)
     base = base / torch.norm(base)
     
-    # Add small noise
-    noise = torch.randn(feature_dim) * 0.1
+    # Add very small noise to ensure high similarity
+    noise = torch.randn(feature_dim) * 0.05  # Smaller noise for higher similarity
     similar = base + noise
     similar = similar / torch.norm(similar)
+    
+    # Verify similarity is high enough
+    cosine_sim = float(torch.dot(base, similar))
+    if cosine_sim < 0.9:
+        # If still not high enough, interpolate more towards base
+        similar = 0.95 * base + 0.05 * similar
+        similar = similar / torch.norm(similar)
     
     return base, similar
 

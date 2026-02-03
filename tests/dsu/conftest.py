@@ -179,6 +179,19 @@ def peaked_cost_volume(num_depth_candidates, feature_map_size) -> torch.Tensor:
     return volume
 
 
+@pytest.fixture
+def mock_probability_distribution(num_depth_candidates) -> torch.Tensor:
+    """Mock probability distribution with clear peak."""
+    probs = torch.zeros(num_depth_candidates)
+    peak_idx = num_depth_candidates // 2
+    
+    for i in range(num_depth_candidates):
+        dist = abs(i - peak_idx)
+        probs[i] = np.exp(-dist * 0.5)
+    
+    return probs / probs.sum()
+
+
 # ============================================================================
 # Helper Functions
 # ============================================================================

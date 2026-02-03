@@ -211,13 +211,13 @@ class TestQuaternionNormalization:
         """Test 90-degree rotation around z-axis."""
         # Quaternion for 90-degree rotation around z: [cos(45°), 0, 0, sin(45°)]
         angle = np.pi / 2
-        quat = torch.tensor([np.cos(angle/2), 0.0, 0.0, np.sin(angle/2)])
+        quat = torch.tensor([np.cos(angle/2), 0.0, 0.0, np.sin(angle/2)], dtype=torch.float32)
         
         R = quaternion_to_rotation_matrix(quat)
         
         # Should map x → y, y → -x
-        x_axis = torch.tensor([1.0, 0.0, 0.0])
-        y_axis = torch.tensor([0.0, 1.0, 0.0])
+        x_axis = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)
+        y_axis = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
         
         rotated_x = R @ x_axis
         rotated_y = R @ y_axis
@@ -246,18 +246,18 @@ class TestSHRotator:
         # Degree-1 has 3 coefficients (indices 1, 2, 3)
         sh_1 = torch.tensor([[1.0, 0.0, 0.0],
                             [0.0, 1.0, 0.0],
-                            [0.0, 0.0, 1.0]])  # [3 channels, 3 coeffs]
+                            [0.0, 0.0, 1.0]], dtype=torch.float32)  # [3 channels, 3 coeffs]
         
         # 90-degree rotation around z
         angle = np.pi / 2
-        quat = torch.tensor([np.cos(angle/2), 0.0, 0.0, np.sin(angle/2)])
+        quat = torch.tensor([np.cos(angle/2), 0.0, 0.0, np.sin(angle/2)], dtype=torch.float32)
         R = quaternion_to_rotation_matrix(quat)
         
         # Rotate degree-1 coefficients
         rotated_sh_1 = sh_1 @ R.T
         
         # First channel [1,0,0] should become [0,1,0]
-        assert torch.allclose(rotated_sh_1[0], torch.tensor([0.0, 1.0, 0.0]), atol=1e-5)
+        assert torch.allclose(rotated_sh_1[0], torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32), atol=1e-5)
 
 
 class TestGGUProcessorIntegration:
