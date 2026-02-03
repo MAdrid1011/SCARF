@@ -33,6 +33,19 @@ CYCLE_CONSTANTS = {
     'saes.similarity': 6,
     'saes.decision': 1,
     'saes.merge': 4,
+    
+    # Encoder cycles (per element/operation)
+    'encoder.conv_mac': 1,       # Per MAC in systolic array
+    'encoder.conv_setup': 10,    # Convolution setup overhead
+    'encoder.gemm_tile': 10,     # GEMM tile overhead
+    'encoder.activation': 1,     # Per element activation (LUT-based)
+    'encoder.norm_mean': 1,      # Per element mean accumulation
+    'encoder.norm_var': 1,       # Per element var accumulation
+    'encoder.norm_apply': 1,     # Per element normalize
+    'encoder.norm_overhead': 2,  # Division/sqrt overhead
+    'encoder.bilinear_coord': 1, # Coordinate calculation
+    'encoder.bilinear_sample': 1,# 4-point sampling
+    'encoder.bilinear_interp': 2,# Interpolation (4 MACs)
 }
 
 

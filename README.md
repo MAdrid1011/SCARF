@@ -34,6 +34,12 @@ SCARF/
 ├── mvsplat/               # MVSplat submodule
 ├── depthsplat/            # DepthSplat submodule
 ├── adapters/              # Model-specific adapters
+├── encoder/               # Encoder compute unit simulators
+│   ├── conv_engine.py     # Convolution engine (systolic array)
+│   ├── gemm_unit.py       # Matrix multiplication unit
+│   ├── activation_unit.py # ReLU/GELU/SiLU/Sigmoid
+│   ├── normalization_unit.py # LN/BN/IN/GN
+│   └── bilinear_unit.py   # Bilinear interpolation
 ├── dsu/                   # Depth Search Unit simulator
 ├── ggu/                   # Gaussian Generation Unit simulator
 ├── fsdr/                  # Feature-Similarity Depth Reuse
