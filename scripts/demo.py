@@ -802,7 +802,15 @@ def main():
     
     t0 = time.time()
     with torch.no_grad():
-        baseline_gaussians = model.encoder(context, False)
+        encoder_output = model.encoder(context, False)
+        
+        # Handle different encoder output formats
+        # DepthSplat may return dict with 'gaussians' key when return_depth=True
+        if isinstance(encoder_output, dict):
+            baseline_gaussians = encoder_output.get('gaussians', encoder_output)
+        else:
+            baseline_gaussians = encoder_output
+        
         tgt_ext = target['extrinsics']
         tgt_int = target['intrinsics']
         baseline_output = model.decoder.forward(
@@ -837,28 +845,53 @@ def main():
     
     # Capture intermediate outputs from encoder
     captured = {}
+    hooks = []
     
     def hook_backbone(module, inputs, outputs):
-        trans_features, cnn_features = outputs
-        captured['features'] = trans_features.detach()
-        captured['cnn_features'] = cnn_features.detach() if cnn_features is not None else None
+        # Handle different backbone output formats
+        if isinstance(outputs, tuple) and len(outputs) == 2:
+            trans_features, cnn_features = outputs
+            captured['features'] = trans_features.detach()
+            captured['cnn_features'] = cnn_features.detach() if cnn_features is not None else None
+        else:
+            captured['features'] = outputs.detach() if hasattr(outputs, 'detach') else None
     
     def hook_depth_predictor(module, inputs, outputs):
-        depths, densities, raw_gaussians = outputs
-        captured['depths'] = depths.detach()
-        captured['densities'] = densities.detach()
-        captured['raw_gaussians'] = raw_gaussians.detach()
+        # Handle different depth predictor output formats
+        if isinstance(outputs, tuple) and len(outputs) >= 3:
+            depths, densities, raw_gaussians = outputs[:3]
+            captured['depths'] = depths.detach()
+            captured['densities'] = densities.detach()
+            captured['raw_gaussians'] = raw_gaussians.detach()
+        elif isinstance(outputs, dict):
+            captured['depths'] = outputs.get('depths', outputs.get('depth'))
+            if captured['depths'] is not None:
+                captured['depths'] = captured['depths'].detach()
     
-    # Register hooks
-    hook1 = model.encoder.backbone.register_forward_hook(hook_backbone)
-    hook2 = model.encoder.depth_predictor.register_forward_hook(hook_depth_predictor)
+    # Register hooks (handle different model structures)
+    # Transplat/MVSplat have backbone, DepthSplat may not
+    if hasattr(model.encoder, 'backbone'):
+        hooks.append(model.encoder.backbone.register_forward_hook(hook_backbone))
+    
+    if hasattr(model.encoder, 'depth_predictor'):
+        hooks.append(model.encoder.depth_predictor.register_forward_hook(hook_depth_predictor))
     
     with torch.no_grad():
         # Run encoder to get all intermediate outputs
-        scarf_gaussians_full = model.encoder(context, False)
+        encoder_output = model.encoder(context, False)
+        
+        # Handle different encoder output formats
+        if isinstance(encoder_output, dict):
+            scarf_gaussians_full = encoder_output.get('gaussians', encoder_output)
+            # DepthSplat may return depths in the dict
+            if 'depths' in encoder_output and captured.get('depths') is None:
+                captured['depths'] = encoder_output['depths'].detach()
+        else:
+            scarf_gaussians_full = encoder_output
     
-    hook1.remove()
-    hook2.remove()
+    # Remove hooks
+    for hook in hooks:
+        hook.remove()
     
     features = captured.get('features')
     depths = captured.get('depths')
