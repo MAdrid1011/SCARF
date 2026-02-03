@@ -65,6 +65,7 @@ import argparse
 # SCARF imports
 from adapters import create_adapter, BaseAdapter
 from integration import create_model_loader, ModelBundle, DataBundle
+from ggu import GGUProcessor, GGUConfig
 
 # ============================================================
 # Configuration
@@ -896,10 +897,119 @@ def main():
     features = captured.get('features')
     depths = captured.get('depths')
     densities = captured.get('densities')
-    raw_gaussians = captured.get('raw_gaussians')
+    raw_gaussians_captured = captured.get('raw_gaussians')
     
     print(f"  ✓ Features: {features.shape if features is not None else 'None'}")
     print(f"  ✓ Depths: {depths.shape if depths is not None else 'None'}")
+    
+    # --------------------------------------------------------
+    # Step 4a2: Generate Gaussians using GGU (replaces Transplat's GaussianAdapter)
+    # --------------------------------------------------------
+    print("  [4a2] Generating Gaussians with GGU (hardware simulator)...")
+    
+    # Initialize GGU with model-specific configuration
+    ggu_config = GGUConfig(
+        scale_min=CONFIG.scale_min,
+        scale_max=CONFIG.scale_max,
+        sh_degree=CONFIG.sh_degree,
+        image_shape=(h, w),
+    )
+    ggu = GGUProcessor(ggu_config, enable_cycle_counting=True)
+    
+    # For Transplat: use captured intermediate outputs to generate Gaussians
+    # This REPLACES direct use of scarf_gaussians_full from encoder
+    use_ggu_generation = (
+        raw_gaussians_captured is not None and 
+        depths is not None and 
+        densities is not None and
+        args.model == 'transplat'  # Currently verified for Transplat
+    )
+    
+    if use_ggu_generation:
+        print("    Using GGU to generate Gaussians from captured intermediates...")
+        
+        # Import Transplat's rotate_sh for exact SH rotation matching
+        from src.misc.sh_rotation import rotate_sh as transplat_rotate_sh
+        from src.geometry.projection import sample_image_grid
+        
+        # Get camera parameters
+        ctx_extrinsics = context['extrinsics']  # [B, V, 4, 4]
+        ctx_intrinsics = context['intrinsics']  # [B, V, 3, 3]
+        
+        # Compute xy_ray coordinates (matching Transplat's encoder)
+        xy_ray, _ = sample_image_grid((h, w), device)  # [H, W, 2]
+        xy_ray = rearrange(xy_ray, "h w xy -> (h w) () xy")  # [R, 1, 2]
+        
+        # Parse raw_gaussians for offset_xy
+        num_surfaces = model.encoder.cfg.num_surfaces if hasattr(model.encoder.cfg, 'num_surfaces') else 1
+        raw_gaussians_parsed = rearrange(
+            raw_gaussians_captured,
+            "b v r (srf c) -> b v r srf c",
+            srf=num_surfaces,
+        )
+        offset_xy = raw_gaussians_parsed[..., :2].sigmoid()
+        pixel_size = 1 / torch.tensor((w, h), dtype=torch.float32, device=device)
+        xy_ray = xy_ray.to(device)
+        xy_ray = xy_ray + (offset_xy - 0.5) * pixel_size  # Apply offset
+        
+        # Get gpp (gaussians per pixel)
+        gpp = model.encoder.cfg.gaussians_per_pixel if hasattr(model.encoder.cfg, 'gaussians_per_pixel') else 1
+        
+        # Map densities to opacities (matching Transplat's map_pdf_to_opacity)
+        if hasattr(model.encoder, 'map_pdf_to_opacity'):
+            opacities = model.encoder.map_pdf_to_opacity(densities, 0) / gpp
+        else:
+            opacities = densities.sigmoid() / gpp
+        
+        # Prepare raw_gaussians for GGU (skip offset_xy)
+        raw_gaussians_for_ggu = raw_gaussians_parsed[..., 2:]  # [B, V, R, srf, d_in]
+        
+        # Expand dims for GGU forward_batch
+        # GGU expects: [B, V, R, srf, gpp, ...] for some tensors
+        B_g, V_g, R_g, srf_g = raw_gaussians_for_ggu.shape[:4]
+        
+        # Call GGU.forward_batch with Transplat's rotate_sh
+        ggu_means, ggu_covs, ggu_harmonics, ggu_opacities = ggu.forward_batch(
+            ctx_extrinsics,
+            ctx_intrinsics,
+            xy_ray,  # [B, V, R, srf, 2] normalized coordinates
+            depths,   # [B, V, R, srf, gpp]
+            opacities,  # [B, V, R, srf, gpp]
+            raw_gaussians_for_ggu,  # [B, V, R, srf, d_in]
+            (h, w),
+            rotate_sh_func=transplat_rotate_sh,  # Use Transplat's exact SH rotation
+        )
+        
+        # Reshape GGU outputs to match Transplat's Gaussians format: [B, N, ...]
+        # where N = V * R * srf * gpp
+        ggu_means = rearrange(ggu_means, "b v r srf gpp xyz -> b (v r srf gpp) xyz")
+        ggu_covs = rearrange(ggu_covs, "b v r srf gpp i j -> b (v r srf gpp) i j")
+        ggu_harmonics = rearrange(ggu_harmonics, "b v r srf gpp c sh -> b (v r srf gpp) c sh")
+        ggu_opacities = rearrange(ggu_opacities, "b v r srf gpp -> b (v r srf gpp)")
+        
+        # Create Gaussians object from GGU outputs
+        from src.model.types import Gaussians
+        
+        scarf_gaussians_full = Gaussians(
+            means=ggu_means,
+            covariances=ggu_covs,
+            harmonics=ggu_harmonics,
+            opacities=ggu_opacities,
+        )
+        
+        # Verify GGU matches Transplat's output (should be very high PSNR)
+        # This is done BEFORE SAES/FSDR
+        baseline_means = baseline_gaussians.means
+        mse_means = F.mse_loss(ggu_means, baseline_means)
+        ggu_psnr_means = -10 * torch.log10(mse_means + 1e-10).item()
+        print(f"    GGU vs Transplat PSNR (means): {ggu_psnr_means:.2f} dB")
+        if ggu_psnr_means > 40:  # > 40 dB means very similar (MSE < 1e-4)
+            print(f"    ✓ GGU generates Gaussians correctly!")
+        else:
+            print(f"    ⚠ GGU-Transplat mismatch (expected > 40 dB, got {ggu_psnr_means:.2f} dB)")
+    else:
+        print(f"    Using Transplat's encoder output (GGU not available for {args.model})")
+        # Keep using scarf_gaussians_full from encoder (fallback for non-Transplat models)
     
     # --------------------------------------------------------
     # Step 4b: Progressive SAES (process tiles from center outward)
