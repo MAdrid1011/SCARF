@@ -869,6 +869,11 @@ def main():
             if captured['depths'] is not None:
                 captured['depths'] = captured['depths'].detach()
     
+    def hook_gaussian_head(module, inputs, outputs):
+        # DepthSplat: capture gaussian_head output [BV, C, H, W]
+        # Format: first channel is opacity, rest are gaussian params
+        captured['gaussian_head_output'] = outputs.detach()
+    
     # Register hooks (handle different model structures)
     # Transplat/MVSplat have backbone, DepthSplat may not
     if hasattr(model.encoder, 'backbone'):
@@ -876,6 +881,10 @@ def main():
     
     if hasattr(model.encoder, 'depth_predictor'):
         hooks.append(model.encoder.depth_predictor.register_forward_hook(hook_depth_predictor))
+    
+    # DepthSplat: hook gaussian_head to capture raw_gaussians
+    if hasattr(model.encoder, 'gaussian_head'):
+        hooks.append(model.encoder.gaussian_head.register_forward_hook(hook_gaussian_head))
     
     with torch.no_grad():
         # Run encoder to get all intermediate outputs
@@ -907,68 +916,100 @@ def main():
     # --------------------------------------------------------
     print("  [4a2] Generating Gaussians with GGU (hardware simulator)...")
     
-    # Initialize GGU with model-specific configuration
+    # Initialize GGU with model-specific configuration from actual model
+    # Get GGU config from model's gaussian_adapter if available
+    if hasattr(model.encoder, 'gaussian_adapter') and hasattr(model.encoder.gaussian_adapter, 'cfg'):
+        ga_cfg = model.encoder.gaussian_adapter.cfg
+        actual_sh_degree = ga_cfg.sh_degree
+        actual_scale_min = ga_cfg.gaussian_scale_min
+        actual_scale_max = ga_cfg.gaussian_scale_max
+    else:
+        actual_sh_degree = CONFIG.sh_degree
+        actual_scale_min = CONFIG.scale_min
+        actual_scale_max = CONFIG.scale_max
+    
     ggu_config = GGUConfig(
-        scale_min=CONFIG.scale_min,
-        scale_max=CONFIG.scale_max,
-        sh_degree=CONFIG.sh_degree,
+        scale_min=actual_scale_min,
+        scale_max=actual_scale_max,
+        sh_degree=actual_sh_degree,
         image_shape=(h, w),
     )
     ggu = GGUProcessor(ggu_config, enable_cycle_counting=True)
+    print(f"    GGU config: sh_degree={actual_sh_degree}, scale=[{actual_scale_min}, {actual_scale_max}]")
     
-    # For Transplat: use captured intermediate outputs to generate Gaussians
-    # This REPLACES direct use of scarf_gaussians_full from encoder
+    # Use GGU for models that have captured intermediate outputs
+    # Supports: Transplat, MVSplat (same depth_predictor output format)
+    # DepthSplat: different structure, currently uses fallback (TODO: fix data format)
+    gaussian_head_output = captured.get('gaussian_head_output')
+    
     use_ggu_generation = (
-        raw_gaussians_captured is not None and 
-        depths is not None and 
-        densities is not None and
-        args.model == 'transplat'  # Currently verified for Transplat
+        raw_gaussians_captured is not None and depths is not None and densities is not None and
+        args.model in ['transplat', 'mvsplat']
+        # Note: DepthSplat GGU integration pending - different raw_gaussians format
     )
     
     if use_ggu_generation:
-        print("    Using GGU to generate Gaussians from captured intermediates...")
+        print(f"    Using GGU to generate Gaussians from captured intermediates ({args.model})...")
         
-        # Import Transplat's rotate_sh for exact SH rotation matching
-        from src.misc.sh_rotation import rotate_sh as transplat_rotate_sh
-        from src.geometry.projection import sample_image_grid
+        # Import model-specific rotate_sh and sample_image_grid
+        if args.model == 'transplat':
+            from src.misc.sh_rotation import rotate_sh as model_rotate_sh
+            from src.geometry.projection import sample_image_grid
+        elif args.model == 'mvsplat':
+            MVSPLAT_ROOT = SCARF_ROOT / 'mvsplat'
+            sys.path.insert(0, str(MVSPLAT_ROOT))
+            from src.misc.sh_rotation import rotate_sh as model_rotate_sh
+            from src.geometry.projection import sample_image_grid
+        elif args.model == 'depthsplat':
+            DEPTHSPLAT_ROOT = SCARF_ROOT / 'depthsplat'
+            sys.path.insert(0, str(DEPTHSPLAT_ROOT))
+            from src.misc.sh_rotation import rotate_sh as model_rotate_sh
+            from src.geometry.projection import sample_image_grid
+        else:
+            model_rotate_sh = None
+            sample_image_grid = None
         
         # Get camera parameters
         ctx_extrinsics = context['extrinsics']  # [B, V, 4, 4]
         ctx_intrinsics = context['intrinsics']  # [B, V, 3, 3]
         
-        # Compute xy_ray coordinates (matching Transplat's encoder)
+        # Compute xy_ray coordinates
         xy_ray, _ = sample_image_grid((h, w), device)  # [H, W, 2]
         xy_ray = rearrange(xy_ray, "h w xy -> (h w) () xy")  # [R, 1, 2]
         
-        # Parse raw_gaussians for offset_xy
+        # Get model config
+        gpp = model.encoder.cfg.gaussians_per_pixel if hasattr(model.encoder.cfg, 'gaussians_per_pixel') else 1
         num_surfaces = model.encoder.cfg.num_surfaces if hasattr(model.encoder.cfg, 'num_surfaces') else 1
-        raw_gaussians_parsed = rearrange(
-            raw_gaussians_captured,
-            "b v r (srf c) -> b v r srf c",
-            srf=num_surfaces,
-        )
-        offset_xy = raw_gaussians_parsed[..., :2].sigmoid()
         pixel_size = 1 / torch.tensor((w, h), dtype=torch.float32, device=device)
         xy_ray = xy_ray.to(device)
-        xy_ray = xy_ray + (offset_xy - 0.5) * pixel_size  # Apply offset
         
-        # Get gpp (gaussians per pixel)
-        gpp = model.encoder.cfg.gaussians_per_pixel if hasattr(model.encoder.cfg, 'gaussians_per_pixel') else 1
-        
-        # Map densities to opacities (matching Transplat's map_pdf_to_opacity)
-        if hasattr(model.encoder, 'map_pdf_to_opacity'):
-            opacities = model.encoder.map_pdf_to_opacity(densities, 0) / gpp
+        # Model-specific parsing
+        if args.model == 'depthsplat' and gaussian_head_output is not None:
+            # DepthSplat: parse gaussian_head_output [BV, C, H, W]
+            B_ds, V_ds = B, V_ctx
+            raw_g_bv = rearrange(gaussian_head_output, "(b v) c h w -> b v (h w) c", b=B_ds, v=V_ds)
+            opacities = raw_g_bv[..., :1].sigmoid().unsqueeze(-1)  # [B, V, R, 1, 1]
+            raw_g_full = raw_g_bv[..., 1:]
+            raw_gaussians_parsed = rearrange(raw_g_full, "b v r (srf c) -> b v r srf c", srf=num_surfaces)
+            offset_xy = raw_gaussians_parsed[..., :2].sigmoid()
+            xy_ray = xy_ray + (offset_xy - 0.5) * pixel_size
+            raw_gaussians_for_ggu = raw_gaussians_parsed[..., 2:]
+            if depths.dim() == 4:
+                depths = rearrange(depths, "b v h w -> b v (h w) () ()")
         else:
-            opacities = densities.sigmoid() / gpp
+            # Transplat/MVSplat
+            raw_gaussians_parsed = rearrange(raw_gaussians_captured, "b v r (srf c) -> b v r srf c", srf=num_surfaces)
+            offset_xy = raw_gaussians_parsed[..., :2].sigmoid()
+            xy_ray = xy_ray + (offset_xy - 0.5) * pixel_size
+            if hasattr(model.encoder, 'map_pdf_to_opacity'):
+                opacities = model.encoder.map_pdf_to_opacity(densities, 0) / gpp
+            else:
+                opacities = densities.sigmoid() / gpp
+            raw_gaussians_for_ggu = raw_gaussians_parsed[..., 2:]
         
-        # Prepare raw_gaussians for GGU (skip offset_xy)
-        raw_gaussians_for_ggu = raw_gaussians_parsed[..., 2:]  # [B, V, R, srf, d_in]
-        
-        # Expand dims for GGU forward_batch
-        # GGU expects: [B, V, R, srf, gpp, ...] for some tensors
         B_g, V_g, R_g, srf_g = raw_gaussians_for_ggu.shape[:4]
         
-        # Call GGU.forward_batch with Transplat's rotate_sh
+        # Call GGU.forward_batch with model's rotate_sh
         ggu_means, ggu_covs, ggu_harmonics, ggu_opacities = ggu.forward_batch(
             ctx_extrinsics,
             ctx_intrinsics,
@@ -977,7 +1018,7 @@ def main():
             opacities,  # [B, V, R, srf, gpp]
             raw_gaussians_for_ggu,  # [B, V, R, srf, d_in]
             (h, w),
-            rotate_sh_func=transplat_rotate_sh,  # Use Transplat's exact SH rotation
+            rotate_sh_func=model_rotate_sh,  # Use model's exact SH rotation
         )
         
         # Reshape GGU outputs to match Transplat's Gaussians format: [B, N, ...]
