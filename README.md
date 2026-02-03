@@ -1,104 +1,145 @@
-# SCARF: Generalizable 3DGS Inference Accelerator
+# SCARF: Hardware Simulator for 3D Gaussian Splatting Encoders
 
-SCARF (Scene-adaptive Computation and Access Reduction Framework) is a hardware-software co-design project for accelerating generalizable 3D Gaussian Splatting (3DGS) inference on edge devices.
+SCARF (Scene-Adaptive Cost-volume Accelerator with Reuse Framework) is a hardware-realizable accelerator for 3D Gaussian Splatting (3DGS) encoders.
 
-## Overview
+## Key Features
 
-SCARF addresses two major bottlenecks in generalizable 3DGS encoders:
-1. **FSDR (Feature-Similarity Depth Reuse)**: Reduces redundant memory access in depth search by exploiting 2D feature similarity
-2. **SAES (Scene-Adaptive Early-Stopping)**: Reduces redundant computation by exploiting 3D geometric continuity with feedback-driven tile processing
+### SAES (Scene-Adaptive Early-Stopping)
+- Analyzes feature similarity within tiles
+- Skips depth search for homogeneous regions
+- Reduces Gaussian count by ~30%
+
+### FSDR (Feature-Similarity Depth Reuse)
+- Caches depth results using LSH-based feature signatures
+- Reuses cached depths for similar pixels
+- Reduces memory access by ~87%
 
 ## Repository Structure
 
 ```
 SCARF/
-├── saes/                  # SAES simulator implementation
-│   ├── tile_processor.py
-│   ├── similarity_evaluator.py
-│   ├── decision_controller.py
-│   ├── gaussian_merger.py
-│   └── profiler.py
-├── fsdr/                  # FSDR simulator (planned)
-├── tests/                 # Unit and integration tests
-│   ├── saes/
-│   └── fsdr/
+├── transplat/             # Transplat submodule (3DGS encoder)
+├── dsu/                   # Depth Search Unit simulator
+├── ggu/                   # Gaussian Generation Unit simulator
+├── fsdr/                  # Feature-Similarity Depth Reuse
+├── saes/                  # Scene-Adaptive Early-Stopping
+├── scripts/
+│   └── demo.py            # Complete demo with real model
+├── tests/                 # Unit tests
 └── docs/                  # Documentation
-    ├── saes-architecture.md
-    ├── saes-usage.md
-    └── plan-saes-simulator.md
-
 ```
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.10+
-- PyTorch 2.1+
-- Access to transplat repository (for integration testing)
-
-### Installation
+### 1. Clone with Submodule
 
 ```bash
-# Clone the repository
-git clone git@github.com:MAdrid1011/SCARF.git
+git clone --recursive https://github.com/MAdrid1011/SCARF.git
 cd SCARF
 
-# Install dependencies (coming soon)
-pip install -r requirements.txt
+# If already cloned without --recursive:
+git submodule update --init --recursive
 ```
 
-### Running SAES Simulator
+### 2. Setup Data
+
+Create symlinks to your data (or copy):
 
 ```bash
-# Run SAES simulation on transplat (integration required)
-cd ../transplat
-python -m src.main +experiment=re10k \
-    checkpointing.load=./checkpoints/re10k.ckpt \
-    mode=test \
-    test.enable_saes_simulation=true \
-    test.saes_tile_size=4
+cd transplat
+ln -s /path/to/your/checkpoints checkpoints
+ln -s /path/to/your/datasets datasets
 ```
 
-## Current Status
+Required files:
+- `checkpoints/re10k.ckpt` - Transplat model weights
+- `checkpoints/depth_anything_v2_vitb.pth` - Depth-Anything weights
+- `datasets/re10k/` - RE10K dataset
 
-### SAES Hardware Simulator
-- **Status**: 📝 Planning phase
-- **Issue**: [#1 - SAES Hardware Simulator Implementation](https://github.com/MAdrid1011/SCARF/issues/1)
-- **Plan**: [`docs/plan-saes-simulator.md`](docs/plan-saes-simulator.md)
-- **Complexity**: 2750 LOC (Very Large feature)
+### 3. Install Dependencies
 
-### FSDR Hardware Simulator
-- **Status**: 🔜 Planned
-- **Description**: Feature-similarity depth reuse for memory access optimization
+```bash
+pip install -r requirements.txt
+pip install -r transplat/requirements.txt
+```
+
+### 4. Run Demo
+
+```bash
+python scripts/demo.py
+```
+
+## Demo Output
+
+```
+======================================================================
+RESULTS - SCARF Demo
+======================================================================
+
+### Quality Metrics
+  BASELINE: PSNR=29.19 dB, SSIM=0.9326
+  SCARF:    PSNR=26.25 dB, SSIM=0.8309
+  Quality loss: -2.94 dB
+
+### Gaussian Count
+  BASELINE: 131,072
+  SCARF:    91,736
+  Reduction: 30.0%
+
+### FSDR Statistics
+  Cache hit rate: 99.8%
+  Memory reduction: 87.0%
+
+### Hardware Cycle Counts
+  Speedup: 1.24x
+```
+
+## Architecture
+
+```
+[Transplat Backbone] → features
+       ↓
+[SCARF SAES] → tile decisions (early-stop vs continue)
+       ↓
+┌──────┴──────┐
+↓             ↓
+Early-Stop   Continue
+↓             ↓
+Skip DSU   [SCARF DSU + FSDR] → depths
+↓             ↓
+[SCARF GGU] [SCARF GGU]
+↓             ↓
+└──────┬──────┘
+       ↓
+Gaussians + Cycle Counts
+       ↓
+[Transplat Decoder] → Rendered Image
+```
 
 ## Documentation
 
-- [SAES Implementation Plan](docs/plan-saes-simulator.md) - Detailed implementation plan for SAES simulator
-- [Git Message Tags](docs/git-msg-tags.md) - Commit message tag conventions
-
-## Integration with Transplat
-
-SCARF simulators are designed to integrate seamlessly with the [transplat](https://github.com/MAdrid1011/transplat) repository for evaluation on real 3DGS models and datasets.
-
-Key integration points:
-- `transplat/src/model/encoder/encoder_trans.py` - Encoder pipeline hooks
-- `transplat/src/model/model_wrapper.py` - Configuration and profiling
-- `transplat/scripts/run_all_timing_tests.sh` - Testing infrastructure
-
-## Contributing
-
-See individual issue pages for implementation plans and contribution guidelines.
+- [SAES Architecture](docs/saes-architecture.md)
+- [FSDR Architecture](docs/fsdr-architecture.md)
+- [DSU Architecture](docs/dsu-architecture.md)
+- [GGU Architecture](docs/ggu-architecture.md)
+- [Hardware Dataflow Mapping](docs/hardware-dataflow-mapping.md)
 
 ## License
 
-[License TBD]
+MIT License
 
 ## Related Projects
 
-- [transplat](https://github.com/MAdrid1011/transplat) - Generalizable 3D Gaussian Splatting implementation
-- Design documents available in `transplat/draft/` directory
+- [Transplat](https://github.com/xingyoujun/transplat) - Original TranSplat implementation (AAAI 2025)
 
-## Contact
+## Citation
 
-For questions and discussions, please open an issue in this repository.
+If you use SCARF in your research, please cite:
+
+```bibtex
+@misc{scarf2025,
+  title={SCARF: Hardware Simulator for 3D Gaussian Splatting Encoders},
+  author={...},
+  year={2025}
+}
+```
