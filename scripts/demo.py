@@ -928,14 +928,33 @@ def main():
         actual_scale_min = CONFIG.scale_min
         actual_scale_max = CONFIG.scale_max
     
-    ggu_config = GGUConfig(
-        scale_min=actual_scale_min,
-        scale_max=actual_scale_max,
-        sh_degree=actual_sh_degree,
-        image_shape=(h, w),
-    )
+    # Model-specific GGU configuration
+    if args.model == 'depthsplat':
+        # DepthSplat: softplus activation, no depth scaling, z-normalization
+        ggu_config = GGUConfig(
+            scale_min=actual_scale_min,
+            scale_max=actual_scale_max,
+            sh_degree=actual_sh_degree,
+            image_shape=(h, w),
+            scale_activation='softplus',
+            use_depth_scaling=False,
+            softplus_shift=-4.0,
+            direction_normalize='z',  # DepthSplat uses z-division
+        )
+    else:
+        # Transplat/MVSplat: sigmoid activation, depth scaling, norm-normalization
+        ggu_config = GGUConfig(
+            scale_min=actual_scale_min,
+            scale_max=actual_scale_max,
+            sh_degree=actual_sh_degree,
+            image_shape=(h, w),
+            scale_activation='sigmoid',
+            use_depth_scaling=True,
+            direction_normalize='norm',  # Transplat uses unit vector
+        )
+    
     ggu = GGUProcessor(ggu_config, enable_cycle_counting=True)
-    print(f"    GGU config: sh_degree={actual_sh_degree}, scale=[{actual_scale_min}, {actual_scale_max}]")
+    print(f"    GGU config: sh_degree={actual_sh_degree}, scale=[{actual_scale_min}, {actual_scale_max}], activation={ggu_config.scale_activation}")
     
     # Use GGU for models that have captured intermediate outputs
     # Supports: Transplat, MVSplat (same depth_predictor output format)
@@ -943,9 +962,9 @@ def main():
     gaussian_head_output = captured.get('gaussian_head_output')
     
     use_ggu_generation = (
-        raw_gaussians_captured is not None and depths is not None and densities is not None and
-        args.model in ['transplat', 'mvsplat']
-        # Note: DepthSplat GGU integration pending - different raw_gaussians format
+        (raw_gaussians_captured is not None and depths is not None and densities is not None and
+         args.model in ['transplat', 'mvsplat']) or
+        (gaussian_head_output is not None and depths is not None and args.model == 'depthsplat')
     )
     
     if use_ggu_generation:
@@ -1009,6 +1028,9 @@ def main():
         
         B_g, V_g, R_g, srf_g = raw_gaussians_for_ggu.shape[:4]
         
+        # Prepare input_images for SH initialization (DepthSplat only)
+        sh_input_images = context['image'] if args.model == 'depthsplat' else None
+        
         # Call GGU.forward_batch with model's rotate_sh
         ggu_means, ggu_covs, ggu_harmonics, ggu_opacities = ggu.forward_batch(
             ctx_extrinsics,
@@ -1019,6 +1041,7 @@ def main():
             raw_gaussians_for_ggu,  # [B, V, R, srf, d_in]
             (h, w),
             rotate_sh_func=model_rotate_sh,  # Use model's exact SH rotation
+            input_images=sh_input_images,  # For DepthSplat SH initialization
         )
         
         # Reshape GGU outputs to match Transplat's Gaussians format: [B, N, ...]
@@ -1044,6 +1067,7 @@ def main():
         mse_means = F.mse_loss(ggu_means, baseline_means)
         ggu_psnr_means = -10 * torch.log10(mse_means + 1e-10).item()
         print(f"    GGU vs Transplat PSNR (means): {ggu_psnr_means:.2f} dB")
+        
         if ggu_psnr_means > 40:  # > 40 dB means very similar (MSE < 1e-4)
             print(f"    ✓ GGU generates Gaussians correctly!")
         else:

@@ -118,11 +118,13 @@ class GGUProcessor:
         coordinates: torch.Tensor,
         extrinsics: torch.Tensor,
         intrinsics: torch.Tensor,
+        direction_normalize: str = 'norm',  # 'norm' (Transplat) or 'z' (DepthSplat)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Get world rays from normalized coordinates.
         
-        Matches Transplat's get_world_rays exactly.
+        Args:
+            direction_normalize: 'norm' for Transplat (unit vector), 'z' for DepthSplat (divide by z)
         
         Hardware: ~60 multiplications + matrix inverse
         """
@@ -133,7 +135,14 @@ class GGUProcessor:
         # Apply inverse intrinsics (unproject)
         K_inv = torch.linalg.inv(intrinsics)
         directions = einsum(K_inv, coords_h, "... i j, ... j -> ... i")
-        directions = directions / (directions.norm(dim=-1, keepdim=True) + 1e-8)
+        
+        # Normalize directions - configurable for different models
+        if direction_normalize == 'norm':
+            # Transplat/MVSplat: normalize to unit vector
+            directions = directions / (directions.norm(dim=-1, keepdim=True) + 1e-8)
+        else:
+            # DepthSplat: divide by z component
+            directions = directions / (directions[..., -1:] + 1e-8)
         
         # Homogenize direction for transform (w=0 for vectors)
         dirs_h = F.pad(directions, (0, 1), value=0)
@@ -258,6 +267,7 @@ class GGUProcessor:
         raw_gaussians: torch.Tensor,   # [B, V, R, srf, d_in]
         image_shape: Tuple[int, int],
         rotate_sh_func: Optional[callable] = None,  # Transplat's rotate_sh function
+        input_images: Optional[torch.Tensor] = None,  # [B, V, 3, H, W] for SH init (DepthSplat)
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Batch forward pass for SCARF GGU.
@@ -294,11 +304,24 @@ class GGUProcessor:
         raw_rotation = raw_gaussians[..., 3:7]
         raw_sh = raw_gaussians[..., 7:7+3*num_sh]
         
-        # 1. Map scales (matches Transplat exactly)
-        scales = self.config.scale_min + (self.config.scale_max - self.config.scale_min) * torch.sigmoid(raw_scales)
-        scale_mult = self.get_scale_multiplier(intrinsics, h, w)
-        scale_mult = scale_mult[:, :, None, None, None]
-        scales = scales[:, :, :, :, None, :] * depths[..., None] * scale_mult[..., None]
+        # 1. Map scales - configurable activation and depth scaling
+        if self.config.scale_activation == 'sigmoid':
+            # Transplat/MVSplat: sigmoid + depth * multiplier
+            scales = self.config.scale_min + (self.config.scale_max - self.config.scale_min) * torch.sigmoid(raw_scales)
+            if self.config.use_depth_scaling:
+                scale_mult = self.get_scale_multiplier(intrinsics, h, w)
+                scale_mult = scale_mult[:, :, None, None, None]
+                scales = scales[:, :, :, :, None, :] * depths[..., None] * scale_mult[..., None]
+            else:
+                scales = scales[:, :, :, :, None, :]
+        else:
+            # DepthSplat: softplus with clamp, no depth scaling
+            scales = torch.clamp(
+                F.softplus(raw_scales + self.config.softplus_shift),
+                min=self.config.scale_min,
+                max=self.config.scale_max
+            )
+            scales = scales[:, :, :, :, None, :]
         
         # 2. Normalize rotation
         rotations = raw_rotation / (raw_rotation.norm(dim=-1, keepdim=True) + 1e-8)
@@ -317,12 +340,27 @@ class GGUProcessor:
         intrinsics_exp = intrinsics[:, :, None, None, None, :, :]
         extrinsics_exp = extrinsics[:, :, None, None, None, :, :]
         
-        origins, directions = self.get_world_rays(coords_exp, extrinsics_exp, intrinsics_exp)
+        origins, directions = self.get_world_rays(
+            coords_exp, extrinsics_exp, intrinsics_exp, 
+            direction_normalize=self.config.direction_normalize
+        )
         means = origins + directions * depths[..., None]
         
         # 6. Process SH - apply mask and expand for gpp dimension
         sh = raw_sh.reshape(*raw_sh.shape[:-1], 3, num_sh)  # [B, V, R, srf, 3, num_sh]
         sh = sh * sh_mask  # Apply mask
+        
+        # Optional: Initialize SH DC component with input images (DepthSplat)
+        if input_images is not None:
+            # input_images: [B, V, 3, H, W]
+            # RGB2SH: (rgb - 0.5) / C0
+            C0 = 0.28209479177387814
+            imgs = rearrange(input_images, "b v c h w -> b v (h w) () c")  # [B, V, R, 1, 3]
+            sh_dc_init = (imgs - 0.5) / C0  # [B, V, R, 1, 3]
+            # Add to DC component (index 0) before expanding
+            # sh shape: [B, V, R, srf, 3, num_sh], sh[..., 0] shape: [B, V, R, srf, 3]
+            sh[..., 0] = sh[..., 0] + sh_dc_init  # [B, V, R, srf, 3]
+        
         sh = sh[:, :, :, :, None, :, :].expand(-1, -1, -1, -1, gpp, -1, -1)  # [B, V, R, srf, gpp, 3, num_sh]
         
         # 7. Rotate SH to world space (matches Transplat's rotate_sh call)
