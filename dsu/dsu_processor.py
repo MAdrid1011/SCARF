@@ -4,12 +4,23 @@ DSU Processor
 Main processing engine for Depth Search Unit.
 """
 import torch
-from typing import Tuple, Callable, Optional
+from typing import Tuple, Callable, Optional, TYPE_CHECKING
 
 from .types import DSUConfig, DSUResult
 from .depth_sampler import DepthSampler
 from .cost_volume import CostVolume
 from .softmax_aggregator import SoftmaxAggregator
+
+if TYPE_CHECKING:
+    from benchmark.cycle_counter import CycleCounter
+
+# Hardware cycle constants for DSU operations
+DSU_CYCLE_CONSTANTS = {
+    'project': 8,    # 3D-2D projection
+    'sample': 4,     # Bilinear sampling
+    'cost': 2,       # Cost computation
+    'softmax': 6,    # Softmax aggregation
+}
 
 
 class DSUProcessor:
@@ -43,12 +54,32 @@ class DSUProcessor:
         )
     """
     
-    def __init__(self, config: DSUConfig):
-        """Initialize DSU processor."""
+    def __init__(
+        self,
+        config: DSUConfig,
+        enable_cycle_counting: bool = False,
+        cycle_counter: Optional['CycleCounter'] = None,
+    ):
+        """
+        Initialize DSU processor.
+        
+        Args:
+            config: DSU configuration
+            enable_cycle_counting: Whether to count hardware cycles
+            cycle_counter: Optional external CycleCounter instance
+        """
         self.config = config
+        self.enable_cycle_counting = enable_cycle_counting
+        self.cycle_counter = cycle_counter
+        
         self.depth_sampler = DepthSampler(config)
         self.cost_volume = CostVolume(config)
         self.aggregator = SoftmaxAggregator(config)
+    
+    def _record_cycles(self, operation: str, cycles: int, memory_accesses: int = 0):
+        """Record cycles if cycle counting is enabled."""
+        if self.enable_cycle_counting and self.cycle_counter is not None:
+            self.cycle_counter.record('dsu', operation, cycles, memory_accesses)
     
     def search_depth(
         self,
@@ -74,20 +105,27 @@ class DSUProcessor:
         Returns:
             DSUResult with depth and statistics
         """
+        num_depths = len(depth_candidates)
+        
         # Sample target features at all depths
         target_features = self.depth_sampler.sample_target_features(
             target_feature_map, ref_coord, depth_candidates,
             ref_intrinsics, ref_extrinsics,
             tgt_intrinsics, tgt_extrinsics,
         )
+        # Record cycles: project + sample per depth
+        self._record_cycles('project', DSU_CYCLE_CONSTANTS['project'] * num_depths)
+        self._record_cycles('sample', DSU_CYCLE_CONSTANTS['sample'] * num_depths, memory_accesses=num_depths)
         
         # Compute costs
         costs = self.cost_volume.compute_costs(ref_feature, target_features)
+        self._record_cycles('cost', DSU_CYCLE_CONSTANTS['cost'] * num_depths)
         
         # Aggregate to depth
         depth, probs = self.aggregator.aggregate(
             costs, depth_candidates, return_distribution=True
         )
+        self._record_cycles('softmax', DSU_CYCLE_CONSTANTS['softmax'])
         
         # Extract statistics
         best_idx, peak_prob, second_idx, spread = self.aggregator.extract_statistics(

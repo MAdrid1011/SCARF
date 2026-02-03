@@ -4,12 +4,22 @@ GGU Processor
 Main processing engine for Gaussian Generation Unit.
 """
 import torch
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from .types import GGUConfig, GaussianOutput
 from .position_calculator import PositionCalculator
 from .covariance_builder import CovarianceBuilder
 from .sh_rotator import SHRotator
+
+if TYPE_CHECKING:
+    from benchmark.cycle_counter import CycleCounter
+
+# Hardware cycle constants for GGU operations
+GGU_CYCLE_CONSTANTS = {
+    'position': 2,      # Position calculation
+    'covariance': 5,    # Covariance building
+    'sh_rotation': 3,   # SH rotation
+}
 
 
 class GGUProcessor:
@@ -37,12 +47,32 @@ class GGUProcessor:
         )
     """
     
-    def __init__(self, config: GGUConfig):
-        """Initialize GGU processor."""
+    def __init__(
+        self,
+        config: GGUConfig,
+        enable_cycle_counting: bool = False,
+        cycle_counter: Optional['CycleCounter'] = None,
+    ):
+        """
+        Initialize GGU processor.
+        
+        Args:
+            config: GGU configuration
+            enable_cycle_counting: Whether to count hardware cycles
+            cycle_counter: Optional external CycleCounter instance
+        """
         self.config = config
+        self.enable_cycle_counting = enable_cycle_counting
+        self.cycle_counter = cycle_counter
+        
         self.position_calc = PositionCalculator(config)
         self.cov_builder = CovarianceBuilder(config)
         self.sh_rotator = SHRotator(config)
+    
+    def _record_cycles(self, operation: str, cycles: int, memory_accesses: int = 0):
+        """Record cycles if cycle counting is enabled."""
+        if self.enable_cycle_counting and self.cycle_counter is not None:
+            self.cycle_counter.record('ggu', operation, cycles, memory_accesses)
     
     def generate_gaussian(
         self,
@@ -77,6 +107,7 @@ class GGUProcessor:
         mean = self.position_calc.compute_position(
             pixel_coord, depth, intrinsics, extrinsics
         )
+        self._record_cycles('position', GGU_CYCLE_CONSTANTS['position'])
         
         # 2. Build covariance
         scales = self.cov_builder.map_scales(raw_scales, depth)
@@ -85,9 +116,11 @@ class GGUProcessor:
         # 3. Transform to world space
         R_c2w = extrinsics[:3, :3]
         world_cov = self.cov_builder.transform_to_world(local_cov, R_c2w)
+        self._record_cycles('covariance', GGU_CYCLE_CONSTANTS['covariance'])
         
         # 4. Rotate spherical harmonics
         world_sh = self.sh_rotator.rotate(raw_sh, R_c2w)
+        self._record_cycles('sh_rotation', GGU_CYCLE_CONSTANTS['sh_rotation'])
         
         # 5. Compute opacity
         opacity = float(torch.sigmoid(torch.tensor(density)))
