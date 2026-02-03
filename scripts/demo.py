@@ -36,12 +36,18 @@ Output Metrics:
 - FSDR: Cache hit rate, Memory access reduction
 
 Usage:
-    python demo.py [--model MODEL_TYPE]
+    python demo.py [--model MODEL_TYPE] [OPTIONS]
 
 Supported Models:
     - transplat (default)
-    - mvsplat (coming soon)
-    - depthsplat (coming soon)
+    - mvsplat
+    - depthsplat
+
+Fallback Options (for debugging):
+    --no-ggu        Use encoder output directly, skip GGU
+    --no-saes       Disable SAES early-stopping
+    --no-fsdr       Disable FSDR depth reuse
+    --baseline-only Only run baseline, skip SCARF pipeline
 """
 
 import sys
@@ -744,6 +750,15 @@ def main():
     parser.add_argument('--model', type=str, default='transplat',
                         choices=['transplat', 'mvsplat', 'depthsplat'],
                         help='Model type to use')
+    # Fallback options for debugging
+    parser.add_argument('--no-ggu', action='store_true',
+                        help='Disable GGU, use encoder output directly')
+    parser.add_argument('--no-saes', action='store_true',
+                        help='Disable SAES early-stopping')
+    parser.add_argument('--no-fsdr', action='store_true',
+                        help='Disable FSDR depth reuse')
+    parser.add_argument('--baseline-only', action='store_true',
+                        help='Only run baseline, skip SCARF pipeline')
     args = parser.parse_args()
     
     # Initialize config
@@ -827,6 +842,27 @@ def main():
     baseline_dsu_cycles = baseline_count * sum(CycleCounter.DSU_CYCLES.values())
     baseline_ggu_cycles = baseline_count * sum(CycleCounter.GGU_CYCLES.values())
     baseline_total_cycles = baseline_dsu_cycles + baseline_ggu_cycles
+    
+    # Handle baseline-only mode
+    if args.baseline_only:
+        gt_image = target['image'][0, 0]
+        mse = F.mse_loss(baseline_image, gt_image)
+        psnr = -10 * torch.log10(mse).item()
+        
+        print()
+        print("[4/6] SCARF Pipeline: SKIPPED (--baseline-only)")
+        print("[5/6] Rendering: SKIPPED (--baseline-only)")
+        print()
+        print("======================================================================")
+        print("RESULTS - Baseline Only")
+        print("======================================================================")
+        print()
+        print("### Baseline Metrics")
+        print(f"  PSNR: {psnr:.2f} dB")
+        print(f"  Gaussians: {baseline_count:,}")
+        print(f"  Time: {baseline_time:.2f}s")
+        print(f"  Estimated cycles: {baseline_total_cycles:,}")
+        return
     
     # --------------------------------------------------------
     # Step 4: Run SCARF Pipeline
@@ -962,9 +998,11 @@ def main():
     gaussian_head_output = captured.get('gaussian_head_output')
     
     use_ggu_generation = (
-        (raw_gaussians_captured is not None and depths is not None and densities is not None and
-         args.model in ['transplat', 'mvsplat']) or
-        (gaussian_head_output is not None and depths is not None and args.model == 'depthsplat')
+        not args.no_ggu and (
+            (raw_gaussians_captured is not None and depths is not None and densities is not None and
+             args.model in ['transplat', 'mvsplat']) or
+            (gaussian_head_output is not None and depths is not None and args.model == 'depthsplat')
+        )
     )
     
     if use_ggu_generation:
@@ -1079,54 +1117,69 @@ def main():
     # --------------------------------------------------------
     # Step 4b: Progressive SAES (process tiles from center outward)
     # --------------------------------------------------------
-    print("  [4b] Progressive SAES (center-outward processing)...")
-    
-    # Apply progressive SAES - decides early-stop based on Gaussian similarity
-    keep_mask, enlarge_mask, saes_stats, continue_pixels = apply_progressive_saes(
-        scarf_gaussians_full, h, w, CONFIG.tile_size, gpp=1
-    )
-    
-    print(f"  ✓ Tiles processed: {saes_stats['total_tiles_processed']}")
-    print(f"    Early-stop Phase 1: {saes_stats['early_stop_phase1']} (center similar)")
-    print(f"    Early-stop Phase 2: {saes_stats['early_stop_phase2']} (cross similar)")
-    print(f"    Subdivided: {saes_stats['subdivided']} (detail detected)")
-    print(f"    Full processed: {saes_stats['full_processed']}")
-    print(f"  ✓ Early-stop ratio: {saes_stats['early_stop_ratio']*100:.1f}%")
+    if args.no_saes:
+        print("  [4b] Progressive SAES: SKIPPED (--no-saes)")
+        # No early stopping - all pixels continue
+        N = scarf_gaussians_full.means.shape[1]
+        keep_mask = torch.ones(N, dtype=torch.bool, device=device)
+        enlarge_mask = torch.zeros(N, dtype=torch.bool, device=device)
+        saes_stats = {
+            'total_tiles_processed': 0, 'early_stop_phase1': 0,
+            'early_stop_phase2': 0, 'subdivided': 0, 'full_processed': 0,
+            'early_stop_ratio': 0.0
+        }
+        continue_pixels = [(y, x, y * w + x) for y in range(h) for x in range(w)]
+    else:
+        print("  [4b] Progressive SAES (center-outward processing)...")
+        
+        # Apply progressive SAES - decides early-stop based on Gaussian similarity
+        keep_mask, enlarge_mask, saes_stats, continue_pixels = apply_progressive_saes(
+            scarf_gaussians_full, h, w, CONFIG.tile_size, gpp=1
+        )
+        
+        print(f"  ✓ Tiles processed: {saes_stats['total_tiles_processed']}")
+        print(f"    Early-stop Phase 1: {saes_stats['early_stop_phase1']} (center similar)")
+        print(f"    Early-stop Phase 2: {saes_stats['early_stop_phase2']} (cross similar)")
+        print(f"    Subdivided: {saes_stats['subdivided']} (detail detected)")
+        print(f"    Full processed: {saes_stats['full_processed']}")
+        print(f"  ✓ Early-stop ratio: {saes_stats['early_stop_ratio']*100:.1f}%")
     
     # --------------------------------------------------------
     # Step 4c: FSDR for continue pixels
     # --------------------------------------------------------
-    print("  [4c] FSDR depth reuse for continue pixels...")
-    
-    # Track depth modifications
     N = scarf_gaussians_full.means.shape[1]
     depth_scale_factors = torch.ones(N, device=device)
     
-    # Process continue pixels through FSDR
-    if features is not None and len(continue_pixels) > 0:
-        B_feat, V_feat, C, H_feat, W_feat = features.shape
-        features_up = F.interpolate(
-            features[0], size=(h, w), mode='bilinear', align_corners=False
-        ).mean(dim=0)  # [C, H, W]
+    if args.no_fsdr:
+        print("  [4c] FSDR depth reuse: SKIPPED (--no-fsdr)")
+    else:
+        print("  [4c] FSDR depth reuse for continue pixels...")
         
-        for (y, x, pixel_idx) in continue_pixels:
-            feat = features_up[:, y, x]
+        # Process continue pixels through FSDR
+        if features is not None and len(continue_pixels) > 0:
+            B_feat, V_feat, C, H_feat, W_feat = features.shape
+            features_up = F.interpolate(
+                features[0], size=(h, w), mode='bilinear', align_corners=False
+            ).mean(dim=0)  # [C, H, W]
             
-            # Get original depth for this pixel
-            original_depth = depths[0, 0, pixel_idx, 0, 0].item() if depths is not None else 1.0
-            
-            # FSDR processing
-            path, num_searches, output_depth = fsdr.process_pixel(
-                feat, original_depth, (y, x), pixel_idx
-            )
-            
-            # Record cycles
-            cycle_counter.add_dsu_fsdr(path, num_searches)
-            
-            # Calculate scale factor if depth was modified
-            if output_depth != original_depth and original_depth > 0:
-                scale_factor = output_depth / original_depth
-                depth_scale_factors[pixel_idx] = scale_factor
+            for (y, x, pixel_idx) in continue_pixels:
+                feat = features_up[:, y, x]
+                
+                # Get original depth for this pixel
+                original_depth = depths[0, 0, pixel_idx, 0, 0].item() if depths is not None else 1.0
+                
+                # FSDR processing
+                path, num_searches, output_depth = fsdr.process_pixel(
+                    feat, original_depth, (y, x), pixel_idx
+                )
+                
+                # Record cycles
+                cycle_counter.add_dsu_fsdr(path, num_searches)
+                
+                # Calculate scale factor if depth was modified
+                if output_depth != original_depth and original_depth > 0:
+                    scale_factor = output_depth / original_depth
+                    depth_scale_factors[pixel_idx] = scale_factor
     
     # Record DSU skips for early-stop tiles
     num_early_stop_gaussians = enlarge_mask.sum().item()
