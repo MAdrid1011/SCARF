@@ -5,9 +5,9 @@ Adapter for Transplat model.
 """
 import torch
 import torch.nn.functional as F
-from typing import Dict
+from typing import Dict, Tuple
 
-from .base_adapter import BaseAdapter
+from .base_adapter import BaseAdapter, GaussianParams
 
 
 class TransplatAdapter(BaseAdapter):
@@ -122,3 +122,25 @@ class TransplatAdapter(BaseAdapter):
             'hamming_threshold': 4,
             'high_confidence_threshold': 0.8,
         }
+    
+    def get_scale_range(self) -> Tuple[float, float]:
+        """Transplat uses (0.5, 15.0) scale range."""
+        return (0.5, 15.0)
+    
+    def parse_raw_gaussian(
+        self,
+        raw_gaussian: torch.Tensor,
+        sh_degree: int = 4,
+    ) -> GaussianParams:
+        """
+        Parse Transplat's raw Gaussian format.
+        
+        Format: [scales(3), rotation(4), sh(3*num_sh)]
+        """
+        num_sh = (sh_degree + 1) ** 2
+        
+        return GaussianParams(
+            raw_scales=raw_gaussian[:3],
+            raw_rotation=raw_gaussian[3:7],
+            raw_sh=raw_gaussian[7:7+3*num_sh],
+        )

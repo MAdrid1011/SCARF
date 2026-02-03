@@ -1,9 +1,11 @@
 """
-Position Calculator
+Position Calculator - Standalone Implementation
 
-3D position calculation from pixel and depth.
+3D position calculation matching Transplat's GaussianAdapter exactly.
+No dependency on Transplat modules.
 """
 import torch
+from typing import Tuple
 
 from .types import GGUConfig
 
@@ -12,37 +14,129 @@ class PositionCalculator:
     """
     Calculate 3D world position from pixel coordinates and depth.
     
+    Matches Transplat's get_world_rays() + mean = origin + direction * depth
+    
     Hardware Mapping:
-        - Matrix inverse/solve: ~100 LUTs
+        - Matrix inverse: ~100 LUTs (or precomputed)
         - Matrix multiply: ~100 LUTs, 6 DSPs
-        - Total: ~200 LUTs, 6 DSPs, 3 cycles
+        - Normalize: ~50 LUTs
+        - Total: ~250 LUTs, 6 DSPs, 3 cycles
     """
     
     def __init__(self, config: GGUConfig):
         """Initialize position calculator."""
         self.config = config
     
-    def get_ray_direction(
+    def unproject_to_ray(
         self,
-        pixel_coord: torch.Tensor,
-        intrinsics: torch.Tensor,
+        coordinates: torch.Tensor,  # [2] normalized (x, y) in [0, 1]
+        intrinsics: torch.Tensor,   # [3, 3]
     ) -> torch.Tensor:
-        """Compute normalized ray direction in camera space."""
-        uv_homog = torch.tensor([pixel_coord[0], pixel_coord[1], 1.0])
-        ray = torch.linalg.solve(intrinsics, uv_homog)
-        return ray / (torch.norm(ray) + 1e-8)
+        """
+        Compute normalized ray direction in camera space.
+        
+        Matches Transplat's unproject() function.
+        
+        Args:
+            coordinates: [2] normalized (x, y) in [0, 1]
+            intrinsics: [3, 3] camera intrinsics
+        
+        Returns:
+            [3] normalized ray direction in camera space
+        """
+        # Homogenize: (x, y) -> (x, y, 1)
+        coords_homog = torch.tensor([
+            coordinates[0].item(),
+            coordinates[1].item(),
+            1.0
+        ], dtype=intrinsics.dtype)
+        
+        # Apply inverse intrinsics
+        K_inv = torch.linalg.inv(intrinsics)
+        ray_direction = K_inv @ coords_homog
+        
+        # Normalize
+        ray_direction = ray_direction / (torch.norm(ray_direction) + 1e-8)
+        
+        return ray_direction
+    
+    def get_world_rays(
+        self,
+        coordinates: torch.Tensor,  # [2] normalized (x, y) in [0, 1]
+        extrinsics: torch.Tensor,   # [4, 4] camera-to-world
+        intrinsics: torch.Tensor,   # [3, 3]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get world-space ray origin and direction.
+        
+        Matches Transplat's get_world_rays() exactly.
+        
+        Args:
+            coordinates: [2] normalized (x, y) in [0, 1]
+            extrinsics: [4, 4] camera-to-world matrix
+            intrinsics: [3, 3] camera intrinsics
+        
+        Returns:
+            origins: [3] world-space origin
+            directions: [3] world-space direction (normalized)
+        """
+        # Get camera-space ray direction
+        direction_cam = self.unproject_to_ray(coordinates, intrinsics)
+        
+        # Transform direction to world space (homogeneous)
+        # direction_homog = (dx, dy, dz, 0) for vectors
+        direction_homog = torch.tensor([
+            direction_cam[0].item(),
+            direction_cam[1].item(), 
+            direction_cam[2].item(),
+            0.0
+        ], dtype=extrinsics.dtype)
+        
+        # Apply camera-to-world transform
+        direction_world = extrinsics @ direction_homog
+        direction_world = direction_world[:3]
+        
+        # Origin is the camera position (last column of extrinsics)
+        origin = extrinsics[:3, 3]
+        
+        return origin, direction_world
     
     def compute_position(
         self,
-        pixel_coord: torch.Tensor,
+        pixel_coord: torch.Tensor,  # [2] (row, col) or (y, x) in pixels
         depth: float,
-        intrinsics: torch.Tensor,
-        extrinsics: torch.Tensor,
+        intrinsics: torch.Tensor,   # [3, 3]
+        extrinsics: torch.Tensor,   # [4, 4]
+        image_shape: Tuple[int, int] = (256, 256),
     ) -> torch.Tensor:
-        """Compute 3D world position from pixel and depth."""
-        ray_cam = self.get_ray_direction(pixel_coord, intrinsics)
-        R_c2w = extrinsics[:3, :3]
-        t_c2w = extrinsics[:3, 3]
-        ray_world = R_c2w @ ray_cam
-        position = t_c2w + ray_world * depth
+        """
+        Compute 3D world position from pixel and depth.
+        
+        Matches Transplat: mean = origin + direction * depth
+        
+        Args:
+            pixel_coord: [2] (y, x) pixel coordinates
+            depth: Depth value in world units
+            intrinsics: [3, 3] camera intrinsics
+            extrinsics: [4, 4] camera extrinsics (c2w)
+            image_shape: (H, W) for normalization
+        
+        Returns:
+            [3] world-space 3D position
+        """
+        h, w = image_shape
+        
+        # Convert pixel (y, x) to normalized (x, y) in [0, 1]
+        # Transplat uses: coordinates = (index + 0.5) / length
+        normalized_coords = torch.tensor([
+            (float(pixel_coord[1]) + 0.5) / w,  # x
+            (float(pixel_coord[0]) + 0.5) / h,  # y
+        ], dtype=intrinsics.dtype)
+        
+        # Get world rays
+        origin, direction = self.get_world_rays(normalized_coords, extrinsics, intrinsics)
+        
+        # Compute position: mean = origin + direction * depth
+        position = origin + direction * depth
+        
         return position

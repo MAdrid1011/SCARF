@@ -13,9 +13,10 @@ Example:
     
     adapter = create_adapter('transplat')
     probs = adapter.extract_depth_distribution(cost_volume, depth_candidates)
+    params = adapter.parse_raw_gaussian(raw_gaussian)
 """
 
-from .base_adapter import BaseAdapter
+from .base_adapter import BaseAdapter, GaussianParams
 from .transplat_adapter import TransplatAdapter
 from .mvsplat_adapter import MVSplatAdapter
 from .depthsplat_adapter import DepthSplatAdapter
@@ -48,6 +49,7 @@ def create_adapter(model_type: str) -> BaseAdapter:
 
 __all__ = [
     'BaseAdapter',
+    'GaussianParams',
     'TransplatAdapter',
     'MVSplatAdapter', 
     'DepthSplatAdapter',
