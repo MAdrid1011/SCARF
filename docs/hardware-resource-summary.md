@@ -64,7 +64,7 @@ This document summarizes the hardware resource requirements for the complete SCA
 
 ## 3. Complete System Summary
 
-### 3.1 Resource Totals
+### 3.1 Resource Totals (Core SCARF)
 
 | Module | LUTs | DSPs | SRAM | ROM |
 |--------|------|------|------|-----|
@@ -73,7 +73,26 @@ This document summarizes the hardware resource requirements for the complete SCA
 | GGU | 900 | 36 | 0 | 0 |
 | SAES | 3,100 | 30 | 64B | 0 |
 | Infrastructure | 900 | 0 | 4.6KB | 0 |
-| **Total** | **11,750** | **272** | **~6KB** | **0.5KB** |
+| **Core Total** | **11,750** | **272** | **~6KB** | **0.5KB** |
+
+### 3.2 Resource Totals (Encoder Units)
+
+| Module | LUTs | DSPs | SRAM | ROM |
+|--------|------|------|------|-----|
+| Conv Engine | 50,000 | 256 | 64KB | 0 |
+| GEMM Unit | 20,000 | 128 | 32KB | 0 |
+| Activation Unit | 2,000 | 8 | 1KB | 0 |
+| Normalization Unit | 3,000 | 16 | 2KB | 0 |
+| Bilinear Unit | 800 | 8 | 0 | 0 |
+| **Encoder Total** | **75,800** | **416** | **~99KB** | **0** |
+
+### 3.3 Combined System Total
+
+| Category | LUTs | DSPs | SRAM | ROM |
+|----------|------|------|------|-----|
+| Core SCARF | 11,750 | 272 | ~6KB | 0.5KB |
+| Encoder Units | 75,800 | 416 | ~99KB | 0 |
+| **Full System** | **87,550** | **688** | **~105KB** | **0.5KB** |
 
 ### 3.2 Memory Summary
 
