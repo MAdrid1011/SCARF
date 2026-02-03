@@ -225,30 +225,278 @@ class TransplatLoader(BaseModelLoader):
 
 
 class MVSplatLoader(BaseModelLoader):
-    """Loader for MVSplat model (placeholder)."""
+    """Loader for MVSplat model."""
     
-    def load_model(self, checkpoint_path: str, config_path: Optional[str] = None,
-                   device: Optional[torch.device] = None) -> ModelBundle:
-        raise NotImplementedError("MVSplat loader not yet implemented")
+    def __init__(self, mvsplat_root: Optional[Path] = None):
+        """
+        Initialize MVSplat loader.
+        
+        Args:
+            mvsplat_root: Path to mvsplat repository root.
+                         If None, uses SCARF/mvsplat submodule.
+        """
+        if mvsplat_root is None:
+            self.mvsplat_root = Path(__file__).parent.parent / 'mvsplat'
+        else:
+            self.mvsplat_root = Path(mvsplat_root)
+        
+        self._original_cwd = None
     
-    def load_data(self, model_bundle: ModelBundle, dataset_name: str = 're10k',
-                  num_samples: int = 1) -> DataBundle:
-        raise NotImplementedError("MVSplat loader not yet implemented")
+    def _setup_imports(self):
+        """Setup sys.path for MVSplat imports."""
+        import sys
+        import os
+        
+        self._original_cwd = os.getcwd()
+        os.chdir(self.mvsplat_root)
+        
+        if str(self.mvsplat_root) not in sys.path:
+            sys.path.insert(0, str(self.mvsplat_root))
+    
+    def _restore_cwd(self):
+        """Restore original working directory."""
+        import os
+        if self._original_cwd:
+            os.chdir(self._original_cwd)
+    
+    def load_model(
+        self,
+        checkpoint_path: str,
+        config_path: Optional[str] = None,
+        device: Optional[torch.device] = None,
+    ) -> ModelBundle:
+        """Load MVSplat model."""
+        self._setup_imports()
+        
+        try:
+            from src.config import load_typed_root_config
+            from src.model.model_wrapper import ModelWrapper
+            from src.model.encoder import get_encoder
+            from src.model.decoder import get_decoder
+            from src.loss import get_losses
+            from src.misc.step_tracker import StepTracker
+            from src.global_cfg import set_cfg
+            from hydra import compose, initialize_config_dir
+            from hydra.core.global_hydra import GlobalHydra
+            
+            if device is None:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            
+            # Load checkpoint
+            ckpt = torch.load(checkpoint_path, map_location='cpu')
+            
+            # Setup hydra config
+            if config_path is None:
+                config_path = str(self.mvsplat_root / 'config')
+            
+            GlobalHydra.instance().clear()
+            
+            with initialize_config_dir(config_dir=config_path, version_base=None):
+                cfg_dict = compose(config_name="main", overrides=["+experiment=re10k"])
+            
+            cfg_dict.mode = 'test'
+            set_cfg(cfg_dict)
+            cfg = load_typed_root_config(cfg_dict)
+            
+            # Build model
+            encoder, encoder_visualizer = get_encoder(cfg.model.encoder)
+            decoder = get_decoder(cfg.model.decoder, cfg.dataset)
+            losses = get_losses(cfg.loss)
+            step_tracker = StepTracker()
+            
+            model = ModelWrapper(
+                cfg.optimizer, cfg.test, cfg.train,
+                encoder, encoder_visualizer, decoder, losses, step_tracker
+            )
+            
+            # Load weights
+            state_dict = ckpt.get('state_dict', ckpt)
+            model_state = model.state_dict()
+            filtered_state = {k: v for k, v in state_dict.items() 
+                              if k in model_state and v.shape == model_state[k].shape}
+            model.load_state_dict(filtered_state, strict=False)
+            
+            model = model.to(device)
+            model.eval()
+            
+            return ModelBundle(
+                encoder=model.encoder,
+                decoder=model.decoder,
+                model=model,
+                config=cfg,
+                device=device,
+            )
+        finally:
+            self._restore_cwd()
+    
+    def load_data(
+        self,
+        model_bundle: ModelBundle,
+        dataset_name: str = 're10k',
+        num_samples: int = 1,
+    ) -> DataBundle:
+        """Load MVSplat test data."""
+        self._setup_imports()
+        
+        try:
+            from src.dataset.data_module import DataModule, get_data_shim
+            
+            cfg = model_bundle.config
+            cfg.dataset.test_len = num_samples
+            
+            data_module = DataModule(cfg.dataset, cfg.data_loader)
+            data_module.setup("test")
+            test_loader = data_module.test_dataloader()
+            
+            # Get first batch
+            batch = next(iter(test_loader))
+            
+            # Apply data shim
+            data_shim = get_data_shim(model_bundle.encoder)
+            batch = data_shim(batch)
+            
+            return DataBundle(batch=batch, data_shim=data_shim)
+        finally:
+            self._restore_cwd()
     
     def get_model_type(self) -> str:
         return 'mvsplat'
 
 
 class DepthSplatLoader(BaseModelLoader):
-    """Loader for DepthSplat model (placeholder)."""
+    """Loader for DepthSplat model."""
     
-    def load_model(self, checkpoint_path: str, config_path: Optional[str] = None,
-                   device: Optional[torch.device] = None) -> ModelBundle:
-        raise NotImplementedError("DepthSplat loader not yet implemented")
+    def __init__(self, depthsplat_root: Optional[Path] = None):
+        """
+        Initialize DepthSplat loader.
+        
+        Args:
+            depthsplat_root: Path to depthsplat repository root.
+                            If None, uses SCARF/depthsplat submodule.
+        """
+        if depthsplat_root is None:
+            self.depthsplat_root = Path(__file__).parent.parent / 'depthsplat'
+        else:
+            self.depthsplat_root = Path(depthsplat_root)
+        
+        self._original_cwd = None
     
-    def load_data(self, model_bundle: ModelBundle, dataset_name: str = 're10k',
-                  num_samples: int = 1) -> DataBundle:
-        raise NotImplementedError("DepthSplat loader not yet implemented")
+    def _setup_imports(self):
+        """Setup sys.path for DepthSplat imports."""
+        import sys
+        import os
+        
+        self._original_cwd = os.getcwd()
+        os.chdir(self.depthsplat_root)
+        
+        if str(self.depthsplat_root) not in sys.path:
+            sys.path.insert(0, str(self.depthsplat_root))
+    
+    def _restore_cwd(self):
+        """Restore original working directory."""
+        import os
+        if self._original_cwd:
+            os.chdir(self._original_cwd)
+    
+    def load_model(
+        self,
+        checkpoint_path: str,
+        config_path: Optional[str] = None,
+        device: Optional[torch.device] = None,
+    ) -> ModelBundle:
+        """Load DepthSplat model."""
+        self._setup_imports()
+        
+        try:
+            from src.config import load_typed_root_config
+            from src.model.model_wrapper import ModelWrapper
+            from src.model.encoder import get_encoder
+            from src.model.decoder import get_decoder
+            from src.loss import get_losses
+            from src.misc.step_tracker import StepTracker
+            from src.global_cfg import set_cfg
+            from hydra import compose, initialize_config_dir
+            from hydra.core.global_hydra import GlobalHydra
+            
+            if device is None:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            
+            # Load checkpoint
+            ckpt = torch.load(checkpoint_path, map_location='cpu')
+            
+            # Setup hydra config
+            if config_path is None:
+                config_path = str(self.depthsplat_root / 'config')
+            
+            GlobalHydra.instance().clear()
+            
+            with initialize_config_dir(config_dir=config_path, version_base=None):
+                cfg_dict = compose(config_name="main", overrides=["+experiment=re10k"])
+            
+            cfg_dict.mode = 'test'
+            set_cfg(cfg_dict)
+            cfg = load_typed_root_config(cfg_dict)
+            
+            # Build model
+            encoder, encoder_visualizer = get_encoder(cfg.model.encoder)
+            decoder = get_decoder(cfg.model.decoder, cfg.dataset)
+            losses = get_losses(cfg.loss)
+            step_tracker = StepTracker()
+            
+            model = ModelWrapper(
+                cfg.optimizer, cfg.test, cfg.train,
+                encoder, encoder_visualizer, decoder, losses, step_tracker
+            )
+            
+            # Load weights
+            state_dict = ckpt.get('state_dict', ckpt)
+            model_state = model.state_dict()
+            filtered_state = {k: v for k, v in state_dict.items() 
+                              if k in model_state and v.shape == model_state[k].shape}
+            model.load_state_dict(filtered_state, strict=False)
+            
+            model = model.to(device)
+            model.eval()
+            
+            return ModelBundle(
+                encoder=model.encoder,
+                decoder=model.decoder,
+                model=model,
+                config=cfg,
+                device=device,
+            )
+        finally:
+            self._restore_cwd()
+    
+    def load_data(
+        self,
+        model_bundle: ModelBundle,
+        dataset_name: str = 're10k',
+        num_samples: int = 1,
+    ) -> DataBundle:
+        """Load DepthSplat test data."""
+        self._setup_imports()
+        
+        try:
+            from src.dataset.data_module import DataModule, get_data_shim
+            
+            cfg = model_bundle.config
+            cfg.dataset.test_len = num_samples
+            
+            data_module = DataModule(cfg.dataset, cfg.data_loader)
+            data_module.setup("test")
+            test_loader = data_module.test_dataloader()
+            
+            # Get first batch
+            batch = next(iter(test_loader))
+            
+            # Apply data shim
+            data_shim = get_data_shim(model_bundle.encoder)
+            batch = data_shim(batch)
+            
+            return DataBundle(batch=batch, data_shim=data_shim)
+        finally:
+            self._restore_cwd()
     
     def get_model_type(self) -> str:
         return 'depthsplat'

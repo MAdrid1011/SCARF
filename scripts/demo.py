@@ -397,8 +397,26 @@ def load_model_and_data(model_type: str = 'transplat'):
     # Create model loader
     loader = create_model_loader(model_type)
     
-    # Determine checkpoint path
-    checkpoint_path = str(SCARF_ROOT / 'transplat' / 'checkpoints' / 're10k.ckpt')
+    # Determine checkpoint path based on model type
+    checkpoint_paths = {
+        'transplat': SCARF_ROOT / 'transplat' / 'checkpoints' / 're10k.ckpt',
+        'mvsplat': SCARF_ROOT / 'mvsplat' / 'checkpoints' / 're10k.ckpt',
+        'depthsplat': SCARF_ROOT / 'depthsplat' / 'checkpoints' / 're10k.ckpt',
+    }
+    
+    checkpoint_path = checkpoint_paths.get(model_type)
+    if checkpoint_path is None:
+        raise ValueError(f"Unknown model type: {model_type}")
+    
+    checkpoint_path = str(checkpoint_path)
+    
+    # Check if checkpoint exists
+    if not Path(checkpoint_path).exists():
+        raise FileNotFoundError(
+            f"Checkpoint not found: {checkpoint_path}\n"
+            f"Please download the checkpoint for {model_type}.\n"
+            f"See docs/multi-model-demo-guide.md for instructions."
+        )
     
     # Load model
     model_bundle = loader.load_model(checkpoint_path)

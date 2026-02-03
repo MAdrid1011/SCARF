@@ -14,11 +14,26 @@ SCARF (Scene-Adaptive Cost-volume Accelerator with Reuse Framework) is a hardwar
 - Reuses cached depths for similar pixels
 - Reduces memory access by ~87%
 
+## Supported Models
+
+SCARF supports multiple 3D Gaussian Splatting models:
+
+| Model | Status | Description |
+|-------|--------|-------------|
+| **Transplat** | ✅ Full | Transformer-based with depth priors |
+| **MVSplat** | ✅ Full | Multi-view stereo with cost volume |
+| **DepthSplat** | ✅ Full | DINOv2 features with 3-view support |
+
+See [Multi-Model Demo Guide](docs/multi-model-demo-guide.md) for detailed instructions.
+
 ## Repository Structure
 
 ```
 SCARF/
 ├── transplat/             # Transplat submodule (3DGS encoder)
+├── mvsplat/               # MVSplat submodule
+├── depthsplat/            # DepthSplat submodule
+├── adapters/              # Model-specific adapters
 ├── dsu/                   # Depth Search Unit simulator
 ├── ggu/                   # Gaussian Generation Unit simulator
 ├── fsdr/                  # Feature-Similarity Depth Reuse
@@ -66,7 +81,14 @@ pip install -r transplat/requirements.txt
 ### 4. Run Demo
 
 ```bash
-python scripts/demo.py
+# Run with Transplat (default)
+python scripts/demo.py --model transplat
+
+# Run with MVSplat
+python scripts/demo.py --model mvsplat
+
+# Run with DepthSplat
+python scripts/demo.py --model depthsplat
 ```
 
 ## Demo Output
