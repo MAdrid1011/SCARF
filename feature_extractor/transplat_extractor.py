@@ -106,6 +106,7 @@ class TransplatFeatureExtractor:
         self,
         images: torch.Tensor,
         extrinsics: Optional[torch.Tensor] = None,
+        intrinsics: Optional[torch.Tensor] = None,  # Unused, for API compatibility
         attn_splits: int = 2,
     ) -> TransplatFeatureOutput:
         """
@@ -114,6 +115,7 @@ class TransplatFeatureExtractor:
         Args:
             images: Input images [B, V, 3, H, W]
             extrinsics: Camera extrinsics [B, V, 4, 4]
+            intrinsics: Camera intrinsics [B, V, 3, 3] (unused in Transplat)
             attn_splits: Attention window splits (default: 2)
             
         Returns:

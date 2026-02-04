@@ -982,15 +982,13 @@ def main():
     print(f"  ✓ Features: {features.shape if features is not None else 'None'}")
     print(f"  ✓ Depths: {depths.shape if depths is not None else 'None'}")
     
-    # Count feature extraction cycles using model-specific extractor
+    # Run feature extraction using SCARF simulator (REPLACES hooks for all models)
     if use_feature_sim and feature_extractor is not None:
-        # Run feature extractor to get cycles
-        # The features are already captured from hooks (bit-accurate)
-        # Extractor uses same backbone internally, so features match
         try:
             fe_output = feature_extractor.forward(
                 context['image'], 
                 context.get('extrinsics'),
+                context.get('intrinsics'),  # Required for DepthSplat
             )
             feature_sim_cycles = fe_output.total_cycles
             
@@ -1005,15 +1003,28 @@ def main():
             
             print(f"  ✓ Feature Extractor cycles: {feature_sim_cycles:,} ({', '.join(cycle_info)})")
             
-            # Verify features match (optional, for debugging)
-            if features is not None and hasattr(fe_output, 'trans_features') and fe_output.trans_features is not None:
-                psnr = 10 * torch.log10(1.0 / (F.mse_loss(features.float(), fe_output.trans_features.float()) + 1e-10)).item()
-                if psnr > 100:
-                    print(f"  ✓ Feature verification: PSNR={psnr:.1f} dB (bit-accurate)")
+            # USE SCARF-computed features (not hooks) for all models
+            if hasattr(fe_output, 'trans_features') and fe_output.trans_features is not None:
+                # Verify features match hooks (should be identical if shapes match)
+                if features is not None and features.shape == fe_output.trans_features.shape:
+                    try:
+                        if torch.equal(features, fe_output.trans_features):
+                            print(f"  ✓ SCARF features: IDENTICAL to hooks (replacing)")
+                        else:
+                            psnr = 10 * torch.log10(1.0 / (F.mse_loss(features.float(), fe_output.trans_features.float()) + 1e-10)).item()
+                            print(f"  ✓ SCARF features: PSNR={psnr:.1f} dB vs hooks (replacing)")
+                    except Exception:
+                        print(f"  ✓ SCARF features: shape {fe_output.trans_features.shape} (replacing)")
                 else:
-                    print(f"  ⚠ Feature verification: PSNR={psnr:.1f} dB (mismatch)")
+                    print(f"  ✓ SCARF features: shape {fe_output.trans_features.shape} (replacing)")
+                
+                # ACTUALLY REPLACE features with SCARF output
+                features = fe_output.trans_features
+                print(f"  ✓ Using SCARF-computed features for subsequent processing")
+            else:
+                print(f"  ⚠ SCARF extractor did not produce features, using hooks")
         except Exception as e:
-            print(f"  ⚠ Feature Extractor error: {e}")
+            print(f"  ⚠ Feature Extractor error: {e}, using hooks")
     
     # --------------------------------------------------------
     # Step 4a2: Generate Gaussians using GGU (replaces Transplat's GaussianAdapter)

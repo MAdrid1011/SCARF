@@ -96,6 +96,7 @@ class MVSplatFeatureExtractor(TransplatFeatureExtractor):
         self,
         images: torch.Tensor,
         extrinsics: Optional[torch.Tensor] = None,
+        intrinsics: Optional[torch.Tensor] = None,  # Unused, for API compatibility
         attn_splits: int = 2,
     ) -> MVSplatFeatureOutput:
         """
@@ -104,6 +105,7 @@ class MVSplatFeatureExtractor(TransplatFeatureExtractor):
         Args:
             images: Input images [B, V, 3, H, W]
             extrinsics: Camera extrinsics [B, V, 4, 4] (unused in MVSplat)
+            intrinsics: Camera intrinsics [B, V, 3, 3] (unused in MVSplat)
             attn_splits: Attention window splits
             
         Returns:
