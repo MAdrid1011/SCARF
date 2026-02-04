@@ -759,6 +759,8 @@ def main():
                         help='Disable FSDR depth reuse')
     parser.add_argument('--baseline-only', action='store_true',
                         help='Only run baseline, skip SCARF pipeline')
+    parser.add_argument('--use-feature-sim', action='store_true',
+                        help='Use feature extraction hardware simulator (cycle-accurate)')
     args = parser.parse_args()
     
     # Initialize config
@@ -873,6 +875,21 @@ def main():
     
     t0 = time.time()
     
+    # Feature extraction hardware simulator (optional)
+    feature_sim_cycles = 0
+    if args.use_feature_sim:
+        from feature_extractor import FeatureExtractorSimulator, FeatureExtractorConfig
+        fe_config = FeatureExtractorConfig(
+            model_type=args.model,
+            feature_channels=128,
+            num_transformer_layers=6 if args.model != 'depthsplat' else 0,
+            enable_cycle_counting=True,
+        )
+        feature_sim = FeatureExtractorSimulator(fe_config, device=device)
+        if hasattr(model.encoder, 'backbone'):
+            feature_sim.load_from_backbone(model.encoder.backbone)
+            print(f"    Feature Simulator: Loaded backbone weights")
+    
     # Initialize FSDR
     fsdr = FSDRSimulator(
         feature_dim=CONFIG.feature_dim,
@@ -946,6 +963,12 @@ def main():
     
     print(f"  ✓ Features: {features.shape if features is not None else 'None'}")
     print(f"  ✓ Depths: {depths.shape if depths is not None else 'None'}")
+    
+    # Count feature extraction cycles if simulator enabled
+    if args.use_feature_sim and hasattr(model.encoder, 'backbone'):
+        fe_output = feature_sim.forward(context['image'], context.get('extrinsics'))
+        feature_sim_cycles = fe_output.total_cycles
+        print(f"  ✓ Feature Sim cycles: {feature_sim_cycles:,} (CNN: {fe_output.cnn_cycles:,}, Transformer: {fe_output.transformer_cycles:,})")
     
     # --------------------------------------------------------
     # Step 4a2: Generate Gaussians using GGU (replaces Transplat's GaussianAdapter)
@@ -1332,14 +1355,17 @@ def main():
     print(f"    GGU cycles: {baseline_ggu_cycles:,}")
     print(f"    Total:      {baseline_total_cycles:,}")
     print()
+    scarf_total_cycles = cycle_stats['total_cycles'] + feature_sim_cycles
     print(f"  SCARF:")
+    if feature_sim_cycles > 0:
+        print(f"    Feature Extraction: {feature_sim_cycles:,}")
     print(f"    DSU cycles: {cycle_stats['dsu_cycles']:,}")
     print(f"    GGU cycles: {cycle_stats['ggu_cycles']:,}")
-    print(f"    Total:      {cycle_stats['total_cycles']:,}")
+    print(f"    Total:      {scarf_total_cycles:,}")
     print()
-    cycle_reduction = (1 - cycle_stats['total_cycles'] / baseline_total_cycles) * 100 if baseline_total_cycles > 0 else 0
+    cycle_reduction = (1 - scarf_total_cycles / baseline_total_cycles) * 100 if baseline_total_cycles > 0 else 0
     print(f"  Cycle reduction: {cycle_reduction:.1f}%")
-    print(f"  Speedup: {baseline_total_cycles / cycle_stats['total_cycles']:.2f}x" if cycle_stats['total_cycles'] > 0 else "  Speedup: N/A")
+    print(f"  Speedup: {baseline_total_cycles / scarf_total_cycles:.2f}x" if scarf_total_cycles > 0 else "  Speedup: N/A")
     print()
     print("### Summary")
     print(f"  Quality loss:     {scarf_psnr - baseline_psnr:+.2f} dB")
