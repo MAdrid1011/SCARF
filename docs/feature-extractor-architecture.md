@@ -187,10 +187,58 @@ Feature Maps [B, V, 128, H/8, W/8]
 Gaussians
 ```
 
-### 5.1 Fallback Mode
+### 5.1 Feature Replacement Mode (Default)
 
-The `--use-feature-sim` flag controls feature extraction:
-- **Enabled**: Use hardware simulator (cycle-accurate)
-- **Disabled (default)**: Use original PyTorch backbone (faster, no cycle info)
+By default, SCARF uses hardware simulators to **actually compute features** (not just count cycles):
 
-This preserves the ability to quickly validate quality without hardware simulation overhead.
+- **Enabled (default)**: Use hardware simulator to produce features
+  - Features computed by simulator are used for depth prediction
+  - Bit-accurate: PSNR > 100 dB vs original PyTorch
+  - Zero quality loss from feature extraction itself
+- **Disabled (`--no-feature-sim`)**: Use original PyTorch backbone (fallback)
+
+### 5.2 Model-Specific Extractors
+
+Each model has its own feature extractor due to architectural differences:
+
+| Model | Extractor Class | Components |
+|-------|----------------|------------|
+| Transplat | `TransplatFeatureExtractor` | CNN + Transformer + DepthAnythingV2 |
+| MVSplat | `MVSplatFeatureExtractor` | CNN + Transformer |
+| DepthSplat | `DepthSplatFeatureExtractor` | CNN + DINOv2 + Transformer |
+
+All extractors guarantee bit-accurate output by:
+1. Loading weights from original PyTorch modules
+2. Using identical computation (same PyTorch ops internally)
+3. Tracking hardware cycles separately from computation
+
+---
+
+## 6. Bit-Accuracy Guarantee
+
+The feature extraction simulators are designed for **zero quality loss**:
+
+```python
+# Bit-accuracy verification
+original_features = model.encoder.backbone(images)
+scarf_features = feature_extractor.forward(images)
+
+# This should be > 100 dB (essentially bit-identical)
+psnr = compute_psnr(original_features, scarf_features)
+assert psnr > 100.0, "Features must be bit-accurate"
+```
+
+### 6.1 How Bit-Accuracy is Achieved
+
+1. **Same weights**: Loaded directly from original model
+2. **Same operations**: Uses PyTorch's F.conv2d, F.layer_norm, etc.
+3. **Same precision**: fp32 throughout
+4. **Cycle counting only**: Hardware units count cycles but don't modify computation
+
+### 6.2 Quality Loss Sources
+
+The only sources of quality loss in SCARF are:
+- **SAES**: Intentional early-stopping for speedup (configurable)
+- **FSDR**: Intentional depth reuse for speedup (configurable)
+
+Feature extraction itself introduces **zero loss**.
