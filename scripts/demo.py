@@ -888,6 +888,9 @@ def main():
     
     use_feature_sim = not args.no_feature_sim and has_backbone
     
+    # ViT simulator for DepthSplat (DINOv2)
+    vit_sim = None
+    
     if args.no_feature_sim:
         print(f"    Feature Simulator: SKIPPED (--no-feature-sim)")
     elif use_feature_sim and hasattr(model.encoder, 'backbone'):
@@ -902,18 +905,35 @@ def main():
         feature_sim.load_from_backbone(model.encoder.backbone)
         print(f"    Feature Simulator: Loaded backbone weights (SCARF hardware)")
     elif args.model == 'depthsplat':
-        # DepthSplat uses DINOv2 - estimate cycles based on ViT-B/14 architecture
-        # ViT-B: 12 layers, 768 dim, 12 heads, patch=14
-        # Estimate: 12 * (attention + FFN) per 256x256 image
-        # attention: (256/14)^2 * 768 * 768 * 4 / 128 cycles
-        # FFN: (256/14)^2 * 768 * 3072 * 2 / 128 cycles
-        seq_len = (256 // 14) ** 2  # ~324 patches
-        d_model = 768
-        num_layers = 12
-        attn_cycles_per_layer = seq_len * d_model * d_model * 4 // 128
-        ffn_cycles_per_layer = seq_len * d_model * 3072 * 2 // 128
-        feature_sim_cycles = num_layers * (attn_cycles_per_layer + ffn_cycles_per_layer)
-        print(f"    Feature Simulator: DINOv2 (ViT-B/14) cycles estimated: {feature_sim_cycles:,}")
+        # DepthSplat uses DINOv2 - use ViT hardware simulator
+        from feature_extractor import ViTSimulator, ViTConfig
+        
+        # Find DINOv2 pretrained model (may be nested in depth_predictor)
+        dinov2_model = None
+        vit_type = 'vits'  # default
+        
+        # Check direct attribute
+        if hasattr(model.encoder, 'pretrained'):
+            dinov2_model = model.encoder.pretrained
+        # Check in depth_predictor
+        elif hasattr(model.encoder, 'depth_predictor') and hasattr(model.encoder.depth_predictor, 'pretrained'):
+            dinov2_model = model.encoder.depth_predictor.pretrained
+        
+        # Detect ViT type
+        if hasattr(model.encoder, 'vit_type'):
+            vit_type = model.encoder.vit_type
+        elif hasattr(model.encoder, 'depth_predictor') and hasattr(model.encoder.depth_predictor, 'vit_type'):
+            vit_type = model.encoder.depth_predictor.vit_type
+        
+        vit_config = ViTConfig(vit_type=vit_type, patch_size=14)
+        vit_sim = ViTSimulator(vit_config, device=device)
+        
+        # Load weights from DINOv2 pretrained model
+        if dinov2_model is not None:
+            vit_sim.load_from_dinov2(dinov2_model)
+            print(f"    Feature Simulator: DINOv2 ({vit_type}) loaded via ViTSimulator (SCARF hardware)")
+        else:
+            print(f"    Feature Simulator: DINOv2 ({vit_type}) ViTSimulator (weights not loaded)")
     else:
         print(f"    Feature Simulator: No backbone found")
     
@@ -996,6 +1016,37 @@ def main():
         fe_output = feature_sim.forward(context['image'], context.get('extrinsics'))
         feature_sim_cycles = fe_output.total_cycles
         print(f"  ✓ Feature Sim cycles: {feature_sim_cycles:,} (CNN: {fe_output.cnn_cycles:,}, Transformer: {fe_output.transformer_cycles:,})")
+    elif vit_sim is not None:
+        # DepthSplat: Use ViT simulator to compute DINOv2 features
+        # This completely replaces the original DINOv2 forward pass
+        from einops import rearrange
+        
+        b, v = context['image'].shape[:2]
+        concat_images = rearrange(context['image'], "b v c h w -> (b v) c h w")
+        
+        # Resize to patch-aligned size (DINOv2 uses 14x14 patches)
+        ori_h, ori_w = concat_images.shape[-2:]
+        resize_h, resize_w = ori_h // 14 * 14, ori_w // 14 * 14
+        concat_resized = F.interpolate(concat_images, (resize_h, resize_w), mode='bilinear', align_corners=True)
+        
+        # Normalize images (same as DINOv2)
+        shape = [1, 3, 1, 1]
+        mean = torch.tensor([0.485, 0.456, 0.406]).reshape(*shape).to(device)
+        std = torch.tensor([0.229, 0.224, 0.225]).reshape(*shape).to(device)
+        concat_norm = (concat_resized - mean) / std
+        
+        # Run ViT simulator (replaces pretrained.get_intermediate_layers)
+        intermediate_layer_idx = {'vits': [2, 5, 8, 11], 'vitb': [2, 5, 8, 11], 'vitl': [4, 11, 17, 23]}
+        vit_type = vit_sim.config.vit_type
+        
+        vit_features, vit_cycles = vit_sim.get_intermediate_layers(
+            concat_norm, 
+            layer_indices=intermediate_layer_idx.get(vit_type, [2, 5, 8, 11]),
+            return_class_token=False
+        )
+        feature_sim_cycles = vit_cycles
+        
+        print(f"  ✓ ViT Sim cycles: {feature_sim_cycles:,} (DINOv2 {vit_type}, {len(vit_features)} intermediate layers)")
     
     # --------------------------------------------------------
     # Step 4a2: Generate Gaussians using GGU (replaces Transplat's GaussianAdapter)
