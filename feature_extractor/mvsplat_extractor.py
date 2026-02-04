@@ -103,14 +103,48 @@ class MVSplatFeatureExtractor(TransplatFeatureExtractor):
         
         Args:
             images: Input images [B, V, 3, H, W]
-            extrinsics: Camera extrinsics [B, V, 4, 4]
+            extrinsics: Camera extrinsics [B, V, 4, 4] (unused in MVSplat)
             attn_splits: Attention window splits
             
         Returns:
             MVSplatFeatureOutput with features and cycle counts
         """
-        # Use parent class forward
-        parent_output = super().forward(images, extrinsics, attn_splits)
+        if self.backbone is None:
+            raise RuntimeError("Backbone not loaded. Use from_encoder() to create extractor.")
+        
+        b, v, c, h, w = images.shape
+        
+        # Use original backbone for bit-accurate features
+        # Note: MVSplat backbone doesn't use extrinsics in forward
+        with torch.no_grad():
+            trans_features, cnn_features = self.backbone(
+                images,
+                attn_splits=attn_splits,
+                return_cnn_features=True,
+            )
+        
+        # Count cycles
+        cnn_cycles = self._count_cnn_cycles(h, w)
+        transformer_cycles = self._count_transformer_cycles(h // 8, w // 8)
+        
+        # Adjust transformer cycles if cross-attention is disabled
+        if self.transformer_config.get('wo_cross_attn', False):
+            transformer_cycles = transformer_cycles // 2
+        
+        cycle_breakdown = {
+            'cnn': cnn_cycles,
+            'transformer': transformer_cycles,
+        }
+        
+        from .transplat_extractor import TransplatFeatureOutput
+        parent_output = TransplatFeatureOutput(
+            trans_features=trans_features,
+            cnn_features=cnn_features,
+            cnn_cycles=cnn_cycles,
+            transformer_cycles=transformer_cycles,
+            total_cycles=cnn_cycles + transformer_cycles,
+            cycle_breakdown=cycle_breakdown,
+        )
         
         # Adjust transformer cycles if cross-attention is disabled
         transformer_cycles = parent_output.transformer_cycles

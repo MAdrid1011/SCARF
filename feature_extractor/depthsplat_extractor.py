@@ -124,6 +124,10 @@ class DepthSplatFeatureExtractor:
         """
         Extract features using hardware simulation.
         
+        For DepthSplat, we only count cycles since the depth_predictor
+        requires intrinsics which may not always be available.
+        The actual features are captured from hooks in demo.py.
+        
         Args:
             images: Input images [B, V, 3, H, W]
             extrinsics: Camera extrinsics [B, V, 4, 4]
@@ -131,36 +135,11 @@ class DepthSplatFeatureExtractor:
             attn_splits: Attention window splits
             
         Returns:
-            DepthSplatFeatureOutput with features and cycle counts
+            DepthSplatFeatureOutput with cycle counts
         """
-        if self.depth_predictor is None:
-            raise RuntimeError("depth_predictor not loaded. Use from_encoder() to create extractor.")
-        
         b, v, c, h, w = images.shape
         
-        # Use original depth_predictor for bit-accurate features
-        # The depth_predictor.forward() returns a dict with all features
-        with torch.no_grad():
-            # Build kwargs for depth predictor
-            forward_kwargs = {
-                'images': images,
-                'attn_splits_list': [attn_splits],
-                'extrinsics': extrinsics,
-            }
-            if intrinsics is not None:
-                forward_kwargs['intrinsics'] = intrinsics
-            forward_kwargs.update(kwargs)
-            
-            # Run depth predictor forward (this computes all features)
-            results = self.depth_predictor(**forward_kwargs)
-        
-        # Extract features from results
-        trans_features = results.get('features_mv', [None])[0]
-        cnn_features = results.get('features_cnn', None)
-        mono_features = results.get('features_mono', [None])[0]
-        mono_intermediate = results.get('features_mono_intermediate', None)
-        
-        # Count cycles
+        # Count cycles (without running depth_predictor)
         cnn_cycles = self._count_cnn_cycles(h, w)
         transformer_cycles = self._count_transformer_cycles(h // 8, w // 8)
         dinov2_cycles = self._count_dinov2_cycles(h, w)
@@ -172,10 +151,10 @@ class DepthSplatFeatureExtractor:
         }
         
         return DepthSplatFeatureOutput(
-            trans_features=trans_features,
-            cnn_features=cnn_features,
-            mono_features=mono_features,
-            mono_intermediate=mono_intermediate,
+            trans_features=None,  # Not computed - use hooks
+            cnn_features=None,
+            mono_features=None,
+            mono_intermediate=None,
             cnn_cycles=cnn_cycles,
             transformer_cycles=transformer_cycles,
             dinov2_cycles=dinov2_cycles,

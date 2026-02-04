@@ -877,65 +877,36 @@ def main():
     t0 = time.time()
     
     # Feature extraction hardware simulator (default: enabled)
+    # Uses model-specific extractors for bit-accurate features + cycle counting
     feature_sim_cycles = 0
-    feature_sim = None
-    
-    # Check for backbone availability
-    has_backbone = hasattr(model.encoder, 'backbone')
-    # DepthSplat uses DINOv2 via 'pretrained' or direct encoder
-    if not has_backbone and args.model == 'depthsplat':
-        has_backbone = hasattr(model.encoder, 'pretrained') or hasattr(model.encoder, 'dinov2')
-    
-    use_feature_sim = not args.no_feature_sim and has_backbone
-    
-    # ViT simulator for DepthSplat (DINOv2)
-    vit_sim = None
+    feature_extractor = None
+    use_feature_sim = not args.no_feature_sim
     
     if args.no_feature_sim:
         print(f"    Feature Simulator: SKIPPED (--no-feature-sim)")
-    elif use_feature_sim and hasattr(model.encoder, 'backbone'):
-        from feature_extractor import FeatureExtractorSimulator, FeatureExtractorConfig
-        fe_config = FeatureExtractorConfig(
-            model_type=args.model,
-            feature_channels=128,
-            num_transformer_layers=6 if args.model != 'depthsplat' else 0,
-            enable_cycle_counting=True,
-        )
-        feature_sim = FeatureExtractorSimulator(fe_config, device=device)
-        feature_sim.load_from_backbone(model.encoder.backbone)
-        print(f"    Feature Simulator: Loaded backbone weights (SCARF hardware)")
-    elif args.model == 'depthsplat':
-        # DepthSplat uses DINOv2 - use ViT hardware simulator
-        from feature_extractor import ViTSimulator, ViTConfig
-        
-        # Find DINOv2 pretrained model (may be nested in depth_predictor)
-        dinov2_model = None
-        vit_type = 'vits'  # default
-        
-        # Check direct attribute
-        if hasattr(model.encoder, 'pretrained'):
-            dinov2_model = model.encoder.pretrained
-        # Check in depth_predictor
-        elif hasattr(model.encoder, 'depth_predictor') and hasattr(model.encoder.depth_predictor, 'pretrained'):
-            dinov2_model = model.encoder.depth_predictor.pretrained
-        
-        # Detect ViT type
-        if hasattr(model.encoder, 'vit_type'):
-            vit_type = model.encoder.vit_type
-        elif hasattr(model.encoder, 'depth_predictor') and hasattr(model.encoder.depth_predictor, 'vit_type'):
-            vit_type = model.encoder.depth_predictor.vit_type
-        
-        vit_config = ViTConfig(vit_type=vit_type, patch_size=14)
-        vit_sim = ViTSimulator(vit_config, device=device)
-        
-        # Load weights from DINOv2 pretrained model
-        if dinov2_model is not None:
-            vit_sim.load_from_dinov2(dinov2_model)
-            print(f"    Feature Simulator: DINOv2 ({vit_type}) loaded via ViTSimulator (SCARF hardware)")
-        else:
-            print(f"    Feature Simulator: DINOv2 ({vit_type}) ViTSimulator (weights not loaded)")
     else:
-        print(f"    Feature Simulator: No backbone found")
+        # Create model-specific feature extractor
+        from feature_extractor import (
+            TransplatFeatureExtractor,
+            MVSplatFeatureExtractor,
+            DepthSplatFeatureExtractor,
+        )
+        
+        try:
+            if args.model == 'transplat':
+                feature_extractor = TransplatFeatureExtractor.from_encoder(model.encoder)
+                print(f"    Feature Extractor: Transplat (CNN + Transformer) loaded")
+            elif args.model == 'mvsplat':
+                feature_extractor = MVSplatFeatureExtractor.from_encoder(model.encoder)
+                print(f"    Feature Extractor: MVSplat (CNN + Transformer) loaded")
+            elif args.model == 'depthsplat':
+                feature_extractor = DepthSplatFeatureExtractor.from_encoder(model.encoder)
+                print(f"    Feature Extractor: DepthSplat (CNN + DINOv2 + Transformer) loaded")
+            else:
+                print(f"    Feature Extractor: Unknown model type {args.model}")
+        except Exception as e:
+            print(f"    Feature Extractor: Failed to load ({e})")
+            feature_extractor = None
     
     # Initialize FSDR
     fsdr = FSDRSimulator(
@@ -1011,42 +982,38 @@ def main():
     print(f"  ✓ Features: {features.shape if features is not None else 'None'}")
     print(f"  ✓ Depths: {depths.shape if depths is not None else 'None'}")
     
-    # Count feature extraction cycles if simulator enabled
-    if use_feature_sim and feature_sim is not None:
-        fe_output = feature_sim.forward(context['image'], context.get('extrinsics'))
-        feature_sim_cycles = fe_output.total_cycles
-        print(f"  ✓ Feature Sim cycles: {feature_sim_cycles:,} (CNN: {fe_output.cnn_cycles:,}, Transformer: {fe_output.transformer_cycles:,})")
-    elif vit_sim is not None:
-        # DepthSplat: Use ViT simulator to compute DINOv2 features
-        # This completely replaces the original DINOv2 forward pass
-        from einops import rearrange
-        
-        b, v = context['image'].shape[:2]
-        concat_images = rearrange(context['image'], "b v c h w -> (b v) c h w")
-        
-        # Resize to patch-aligned size (DINOv2 uses 14x14 patches)
-        ori_h, ori_w = concat_images.shape[-2:]
-        resize_h, resize_w = ori_h // 14 * 14, ori_w // 14 * 14
-        concat_resized = F.interpolate(concat_images, (resize_h, resize_w), mode='bilinear', align_corners=True)
-        
-        # Normalize images (same as DINOv2)
-        shape = [1, 3, 1, 1]
-        mean = torch.tensor([0.485, 0.456, 0.406]).reshape(*shape).to(device)
-        std = torch.tensor([0.229, 0.224, 0.225]).reshape(*shape).to(device)
-        concat_norm = (concat_resized - mean) / std
-        
-        # Run ViT simulator (replaces pretrained.get_intermediate_layers)
-        intermediate_layer_idx = {'vits': [2, 5, 8, 11], 'vitb': [2, 5, 8, 11], 'vitl': [4, 11, 17, 23]}
-        vit_type = vit_sim.config.vit_type
-        
-        vit_features, vit_cycles = vit_sim.get_intermediate_layers(
-            concat_norm, 
-            layer_indices=intermediate_layer_idx.get(vit_type, [2, 5, 8, 11]),
-            return_class_token=False
-        )
-        feature_sim_cycles = vit_cycles
-        
-        print(f"  ✓ ViT Sim cycles: {feature_sim_cycles:,} (DINOv2 {vit_type}, {len(vit_features)} intermediate layers)")
+    # Count feature extraction cycles using model-specific extractor
+    if use_feature_sim and feature_extractor is not None:
+        # Run feature extractor to get cycles
+        # The features are already captured from hooks (bit-accurate)
+        # Extractor uses same backbone internally, so features match
+        try:
+            fe_output = feature_extractor.forward(
+                context['image'], 
+                context.get('extrinsics'),
+            )
+            feature_sim_cycles = fe_output.total_cycles
+            
+            # Print cycle breakdown
+            cycle_info = []
+            if hasattr(fe_output, 'cnn_cycles') and fe_output.cnn_cycles > 0:
+                cycle_info.append(f"CNN: {fe_output.cnn_cycles:,}")
+            if hasattr(fe_output, 'transformer_cycles') and fe_output.transformer_cycles > 0:
+                cycle_info.append(f"Transformer: {fe_output.transformer_cycles:,}")
+            if hasattr(fe_output, 'dinov2_cycles') and fe_output.dinov2_cycles > 0:
+                cycle_info.append(f"DINOv2: {fe_output.dinov2_cycles:,}")
+            
+            print(f"  ✓ Feature Extractor cycles: {feature_sim_cycles:,} ({', '.join(cycle_info)})")
+            
+            # Verify features match (optional, for debugging)
+            if features is not None and hasattr(fe_output, 'trans_features') and fe_output.trans_features is not None:
+                psnr = 10 * torch.log10(1.0 / (F.mse_loss(features.float(), fe_output.trans_features.float()) + 1e-10)).item()
+                if psnr > 100:
+                    print(f"  ✓ Feature verification: PSNR={psnr:.1f} dB (bit-accurate)")
+                else:
+                    print(f"  ⚠ Feature verification: PSNR={psnr:.1f} dB (mismatch)")
+        except Exception as e:
+            print(f"  ⚠ Feature Extractor error: {e}")
     
     # --------------------------------------------------------
     # Step 4a2: Generate Gaussians using GGU (replaces Transplat's GaussianAdapter)

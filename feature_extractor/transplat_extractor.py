@@ -127,10 +127,12 @@ class TransplatFeatureExtractor:
         # Use original backbone for bit-accurate features
         with torch.no_grad():
             # Run backbone (this produces the actual features)
+            # Note: backbone uses img2world instead of extrinsics
             trans_features, cnn_features = self.backbone(
                 images,
                 attn_splits=attn_splits,
-                extrinsics=extrinsics,
+                return_cnn_features=True,
+                img2world=extrinsics,
             )
         
         # Count cycles (separate from feature computation)
