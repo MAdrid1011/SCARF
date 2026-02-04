@@ -877,45 +877,36 @@ def main():
     t0 = time.time()
     
     # Feature extraction hardware simulator (default: enabled)
+    # Uses model-specific extractors for bit-accurate features + cycle counting
     feature_sim_cycles = 0
-    feature_sim = None
-    
-    # Check for backbone availability
-    has_backbone = hasattr(model.encoder, 'backbone')
-    # DepthSplat uses DINOv2 via 'pretrained' or direct encoder
-    if not has_backbone and args.model == 'depthsplat':
-        has_backbone = hasattr(model.encoder, 'pretrained') or hasattr(model.encoder, 'dinov2')
-    
-    use_feature_sim = not args.no_feature_sim and has_backbone
+    feature_extractor = None
+    use_feature_sim = not args.no_feature_sim
     
     if args.no_feature_sim:
         print(f"    Feature Simulator: SKIPPED (--no-feature-sim)")
-    elif use_feature_sim and hasattr(model.encoder, 'backbone'):
-        from feature_extractor import FeatureExtractorSimulator, FeatureExtractorConfig
-        fe_config = FeatureExtractorConfig(
-            model_type=args.model,
-            feature_channels=128,
-            num_transformer_layers=6 if args.model != 'depthsplat' else 0,
-            enable_cycle_counting=True,
-        )
-        feature_sim = FeatureExtractorSimulator(fe_config, device=device)
-        feature_sim.load_from_backbone(model.encoder.backbone)
-        print(f"    Feature Simulator: Loaded backbone weights (SCARF hardware)")
-    elif args.model == 'depthsplat':
-        # DepthSplat uses DINOv2 - estimate cycles based on ViT-B/14 architecture
-        # ViT-B: 12 layers, 768 dim, 12 heads, patch=14
-        # Estimate: 12 * (attention + FFN) per 256x256 image
-        # attention: (256/14)^2 * 768 * 768 * 4 / 128 cycles
-        # FFN: (256/14)^2 * 768 * 3072 * 2 / 128 cycles
-        seq_len = (256 // 14) ** 2  # ~324 patches
-        d_model = 768
-        num_layers = 12
-        attn_cycles_per_layer = seq_len * d_model * d_model * 4 // 128
-        ffn_cycles_per_layer = seq_len * d_model * 3072 * 2 // 128
-        feature_sim_cycles = num_layers * (attn_cycles_per_layer + ffn_cycles_per_layer)
-        print(f"    Feature Simulator: DINOv2 (ViT-B/14) cycles estimated: {feature_sim_cycles:,}")
     else:
-        print(f"    Feature Simulator: No backbone found")
+        # Create model-specific feature extractor
+        from feature_extractor import (
+            TransplatFeatureExtractor,
+            MVSplatFeatureExtractor,
+            DepthSplatFeatureExtractor,
+        )
+        
+        try:
+            if args.model == 'transplat':
+                feature_extractor = TransplatFeatureExtractor.from_encoder(model.encoder)
+                print(f"    Feature Extractor: Transplat (CNN + Transformer) loaded")
+            elif args.model == 'mvsplat':
+                feature_extractor = MVSplatFeatureExtractor.from_encoder(model.encoder)
+                print(f"    Feature Extractor: MVSplat (CNN + Transformer) loaded")
+            elif args.model == 'depthsplat':
+                feature_extractor = DepthSplatFeatureExtractor.from_encoder(model.encoder)
+                print(f"    Feature Extractor: DepthSplat (CNN + DINOv2 + Transformer) loaded")
+            else:
+                print(f"    Feature Extractor: Unknown model type {args.model}")
+        except Exception as e:
+            print(f"    Feature Extractor: Failed to load ({e})")
+            feature_extractor = None
     
     # Initialize FSDR
     fsdr = FSDRSimulator(
@@ -991,11 +982,38 @@ def main():
     print(f"  ✓ Features: {features.shape if features is not None else 'None'}")
     print(f"  ✓ Depths: {depths.shape if depths is not None else 'None'}")
     
-    # Count feature extraction cycles if simulator enabled
-    if use_feature_sim and feature_sim is not None:
-        fe_output = feature_sim.forward(context['image'], context.get('extrinsics'))
-        feature_sim_cycles = fe_output.total_cycles
-        print(f"  ✓ Feature Sim cycles: {feature_sim_cycles:,} (CNN: {fe_output.cnn_cycles:,}, Transformer: {fe_output.transformer_cycles:,})")
+    # Count feature extraction cycles using model-specific extractor
+    if use_feature_sim and feature_extractor is not None:
+        # Run feature extractor to get cycles
+        # The features are already captured from hooks (bit-accurate)
+        # Extractor uses same backbone internally, so features match
+        try:
+            fe_output = feature_extractor.forward(
+                context['image'], 
+                context.get('extrinsics'),
+            )
+            feature_sim_cycles = fe_output.total_cycles
+            
+            # Print cycle breakdown
+            cycle_info = []
+            if hasattr(fe_output, 'cnn_cycles') and fe_output.cnn_cycles > 0:
+                cycle_info.append(f"CNN: {fe_output.cnn_cycles:,}")
+            if hasattr(fe_output, 'transformer_cycles') and fe_output.transformer_cycles > 0:
+                cycle_info.append(f"Transformer: {fe_output.transformer_cycles:,}")
+            if hasattr(fe_output, 'dinov2_cycles') and fe_output.dinov2_cycles > 0:
+                cycle_info.append(f"DINOv2: {fe_output.dinov2_cycles:,}")
+            
+            print(f"  ✓ Feature Extractor cycles: {feature_sim_cycles:,} ({', '.join(cycle_info)})")
+            
+            # Verify features match (optional, for debugging)
+            if features is not None and hasattr(fe_output, 'trans_features') and fe_output.trans_features is not None:
+                psnr = 10 * torch.log10(1.0 / (F.mse_loss(features.float(), fe_output.trans_features.float()) + 1e-10)).item()
+                if psnr > 100:
+                    print(f"  ✓ Feature verification: PSNR={psnr:.1f} dB (bit-accurate)")
+                else:
+                    print(f"  ⚠ Feature verification: PSNR={psnr:.1f} dB (mismatch)")
+        except Exception as e:
+            print(f"  ⚠ Feature Extractor error: {e}")
     
     # --------------------------------------------------------
     # Step 4a2: Generate Gaussians using GGU (replaces Transplat's GaussianAdapter)
