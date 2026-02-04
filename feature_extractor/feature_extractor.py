@@ -62,12 +62,19 @@ class FeatureExtractorSimulator:
             self.cnn_sim = CNNEncoderSimulator(self.config.cnn_config, self.device)
             self.cnn_sim.load_from_pytorch(backbone.backbone)
         
-        # Load Transformer (if applicable)
+        # Load Transformer (if applicable and compatible)
+        # Note: Transplat uses custom transformer layers, not standard PyTorch TransformerEncoderLayer
+        # We only simulate CNN cycles and estimate transformer cycles based on layer count
         if hasattr(backbone, 'transformer') and self.config.num_transformer_layers > 0:
-            self.transformer_sim = TransformerSimulator(
-                self.config.transformer_config, self.device
-            )
-            self.transformer_sim.load_from_pytorch(backbone.transformer)
+            try:
+                self.transformer_sim = TransformerSimulator(
+                    self.config.transformer_config, self.device
+                )
+                self.transformer_sim.load_from_pytorch(backbone.transformer)
+            except (AttributeError, TypeError):
+                # Custom transformer not compatible with standard simulation
+                # Fall back to cycle estimation based on layer structure
+                self.transformer_sim = None
     
     def forward(
         self,
@@ -155,6 +162,19 @@ class FeatureExtractorSimulator:
                     if self.transformer_sim is not None:
                         _, transformer_cycles = self.transformer_sim.forward(cur_features_list)
                         cycle_breakdown['transformer'] = transformer_cycles
+                    else:
+                        # Estimate cycles for custom transformer (Transplat uses non-standard layers)
+                        # Based on: 6 layers × (attention + FFN) × sequence_length × d_model
+                        if len(cur_features_list) > 0:
+                            feat = cur_features_list[0]
+                            seq_len = feat.shape[2] * feat.shape[3]  # H * W
+                            d_model = feat.shape[1]  # C
+                            num_layers = self.config.num_transformer_layers
+                            # Estimate: attention (4 GEMMs) + FFN (2 GEMMs) per layer
+                            # Each GEMM: seq_len * d_model * d_model / 128 (GEMM unit throughput)
+                            gemm_cycles_per_op = (seq_len * d_model * d_model) // 128
+                            transformer_cycles = num_layers * 6 * gemm_cycles_per_op
+                            cycle_breakdown['transformer_estimated'] = transformer_cycles
                 else:
                     trans_features = cur_features_list
                 

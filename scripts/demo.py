@@ -44,10 +44,11 @@ Supported Models:
     - depthsplat
 
 Fallback Options (for debugging):
-    --no-ggu        Use encoder output directly, skip GGU
-    --no-saes       Disable SAES early-stopping
-    --no-fsdr       Disable FSDR depth reuse
-    --baseline-only Only run baseline, skip SCARF pipeline
+    --no-feature-sim  Use original backbone, skip feature extraction simulator
+    --no-ggu          Use encoder output directly, skip GGU
+    --no-saes         Disable SAES early-stopping
+    --no-fsdr         Disable FSDR depth reuse
+    --baseline-only   Only run baseline, skip SCARF pipeline
 """
 
 import sys
@@ -759,8 +760,8 @@ def main():
                         help='Disable FSDR depth reuse')
     parser.add_argument('--baseline-only', action='store_true',
                         help='Only run baseline, skip SCARF pipeline')
-    parser.add_argument('--use-feature-sim', action='store_true',
-                        help='Use feature extraction hardware simulator (cycle-accurate)')
+    parser.add_argument('--no-feature-sim', action='store_true',
+                        help='Use original backbone, skip feature extraction simulator')
     args = parser.parse_args()
     
     # Initialize config
@@ -875,9 +876,21 @@ def main():
     
     t0 = time.time()
     
-    # Feature extraction hardware simulator (optional)
+    # Feature extraction hardware simulator (default: enabled)
     feature_sim_cycles = 0
-    if args.use_feature_sim:
+    feature_sim = None
+    
+    # Check for backbone availability
+    has_backbone = hasattr(model.encoder, 'backbone')
+    # DepthSplat uses DINOv2 via 'pretrained' or direct encoder
+    if not has_backbone and args.model == 'depthsplat':
+        has_backbone = hasattr(model.encoder, 'pretrained') or hasattr(model.encoder, 'dinov2')
+    
+    use_feature_sim = not args.no_feature_sim and has_backbone
+    
+    if args.no_feature_sim:
+        print(f"    Feature Simulator: SKIPPED (--no-feature-sim)")
+    elif use_feature_sim and hasattr(model.encoder, 'backbone'):
         from feature_extractor import FeatureExtractorSimulator, FeatureExtractorConfig
         fe_config = FeatureExtractorConfig(
             model_type=args.model,
@@ -886,9 +899,23 @@ def main():
             enable_cycle_counting=True,
         )
         feature_sim = FeatureExtractorSimulator(fe_config, device=device)
-        if hasattr(model.encoder, 'backbone'):
-            feature_sim.load_from_backbone(model.encoder.backbone)
-            print(f"    Feature Simulator: Loaded backbone weights")
+        feature_sim.load_from_backbone(model.encoder.backbone)
+        print(f"    Feature Simulator: Loaded backbone weights (SCARF hardware)")
+    elif args.model == 'depthsplat':
+        # DepthSplat uses DINOv2 - estimate cycles based on ViT-B/14 architecture
+        # ViT-B: 12 layers, 768 dim, 12 heads, patch=14
+        # Estimate: 12 * (attention + FFN) per 256x256 image
+        # attention: (256/14)^2 * 768 * 768 * 4 / 128 cycles
+        # FFN: (256/14)^2 * 768 * 3072 * 2 / 128 cycles
+        seq_len = (256 // 14) ** 2  # ~324 patches
+        d_model = 768
+        num_layers = 12
+        attn_cycles_per_layer = seq_len * d_model * d_model * 4 // 128
+        ffn_cycles_per_layer = seq_len * d_model * 3072 * 2 // 128
+        feature_sim_cycles = num_layers * (attn_cycles_per_layer + ffn_cycles_per_layer)
+        print(f"    Feature Simulator: DINOv2 (ViT-B/14) cycles estimated: {feature_sim_cycles:,}")
+    else:
+        print(f"    Feature Simulator: No backbone found")
     
     # Initialize FSDR
     fsdr = FSDRSimulator(
@@ -965,7 +992,7 @@ def main():
     print(f"  ✓ Depths: {depths.shape if depths is not None else 'None'}")
     
     # Count feature extraction cycles if simulator enabled
-    if args.use_feature_sim and hasattr(model.encoder, 'backbone'):
+    if use_feature_sim and feature_sim is not None:
         fe_output = feature_sim.forward(context['image'], context.get('extrinsics'))
         feature_sim_cycles = fe_output.total_cycles
         print(f"  ✓ Feature Sim cycles: {feature_sim_cycles:,} (CNN: {fe_output.cnn_cycles:,}, Transformer: {fe_output.transformer_cycles:,})")
