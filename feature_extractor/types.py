@@ -20,6 +20,7 @@ class CNNConfig:
     
     @property
     def downscale_factor(self) -> int:
+        # num_output_scales=1 means 8x downscale, num_output_scales=0 means 4x
         return 8 if self.num_output_scales == 1 else 4
 
 

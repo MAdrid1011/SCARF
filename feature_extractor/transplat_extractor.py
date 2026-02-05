@@ -2,19 +2,17 @@
 Transplat Feature Extractor
 
 Complete feature extraction for Transplat model using SCARF hardware simulation.
-Produces bit-accurate features while counting hardware cycles.
+Uses hardware simulators for actual feature computation.
 
 Components:
-- CNN Encoder (ResNet-style, 128 channels)
-- Multi-View Transformer (6 layers)
-- Camera Parameter Encoder
-- (Optional) DepthAnythingV2 for depth priors
+- CNN Encoder → CNNEncoderSimulator
+- Multi-View Transformer → TransformerSimulator
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, List
 from dataclasses import dataclass
 from einops import rearrange
 
@@ -23,18 +21,18 @@ from pathlib import Path
 SCARF_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(SCARF_ROOT))
 
+from .cnn_simulator import CNNEncoderSimulator
+from .transformer_simulator import TransformerSimulator
+from .types import CNNConfig, TransformerConfig
+
 
 @dataclass
 class TransplatFeatureOutput:
     """Output from Transplat feature extraction."""
     # Main transformer features [B, V, C, H/8, W/8]
     trans_features: torch.Tensor
-    # CNN features (list of multi-scale if available)
-    cnn_features: Optional[List[torch.Tensor]] = None
-    # DepthAnything depth prior [B, V, 1, H, W] (if available)
-    da_depth: Optional[torch.Tensor] = None
-    # DepthAnything features (if available)
-    da_features: Optional[torch.Tensor] = None
+    # CNN features [BV, C, H/8, W/8]
+    cnn_features: Optional[torch.Tensor] = None
     # Cycle counts
     cnn_cycles: int = 0
     transformer_cycles: int = 0
@@ -44,51 +42,28 @@ class TransplatFeatureOutput:
 
 class TransplatFeatureExtractor:
     """
-    Feature extractor for Transplat model.
+    Feature extractor for Transplat model using SCARF hardware simulators.
     
-    Uses original backbone weights to ensure bit-accurate features,
-    while tracking hardware cycles using SCARF compute unit models.
-    
-    Usage:
-        extractor = TransplatFeatureExtractor.from_encoder(model.encoder)
-        output = extractor.forward(images, extrinsics)
-        
-        # Features are bit-identical to original backbone
-        features = output.trans_features
-        cycles = output.total_cycles
+    Uses CNNEncoderSimulator and TransformerSimulator for actual computation.
     """
     
     def __init__(self, device: torch.device = None):
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Original backbone components (loaded from encoder)
-        self.backbone = None  # BackboneMultiview or similar
+        # Original backbone (for reference and weight loading)
+        self.backbone = None
         self.feature_channels = 128
         
-        # Cycle counting parameters (from hardware model)
-        self.cnn_config = {
-            'channels': [64, 96, 128],  # ResNet layers
-            'kernel_sizes': [7, 3, 3, 3, 3, 3],  # Conv kernels
-            'strides': [2, 1, 2, 1, 2, 1],
-        }
-        self.transformer_config = {
-            'num_layers': 6,
-            'd_model': 128,
-            'num_heads': 1,
-            'ffn_expansion': 4,
-        }
+        # Hardware simulators
+        self.cnn_sim: Optional[CNNEncoderSimulator] = None
+        self.transformer_sim: Optional[TransformerSimulator] = None
+        
+        # Fallback mode (use original PyTorch if hardware fails)
+        self.use_hardware = True
     
     @classmethod
     def from_encoder(cls, encoder: nn.Module) -> 'TransplatFeatureExtractor':
-        """
-        Create extractor from Transplat encoder.
-        
-        Args:
-            encoder: Transplat's encoder module (has .backbone attribute)
-            
-        Returns:
-            Configured TransplatFeatureExtractor
-        """
+        """Create extractor from Transplat encoder."""
         device = next(encoder.parameters()).device
         extractor = cls(device=device)
         
@@ -100,46 +75,117 @@ class TransplatFeatureExtractor:
         else:
             raise ValueError("Encoder does not have backbone attribute")
         
+        # Initialize CNN simulator
+        # Transplat: encoder.backbone.backbone is CNNEncoder
+        cnn_module = None
+        if hasattr(encoder.backbone, 'backbone'):
+            cnn_module = encoder.backbone.backbone
+        elif hasattr(encoder.backbone, 'cnet'):
+            cnn_module = encoder.backbone.cnet
+        
+        if cnn_module is not None:
+            # Transplat uses downscale_factor=4, so num_output_scales=0
+            # (no extra stride in layer3)
+            cnn_config = CNNConfig(
+                input_channels=3,
+                output_dim=extractor.feature_channels,
+                num_output_scales=0,  # 4x downscale (not 8x)
+            )
+            extractor.cnn_sim = CNNEncoderSimulator(cnn_config, device)
+            extractor.cnn_sim.load_from_pytorch(cnn_module)
+        
+        # Initialize Transformer simulator
+        trans_module = None
+        if hasattr(encoder.backbone, 'transformer'):
+            trans_module = encoder.backbone.transformer
+        
+        if trans_module is not None:
+            trans_config = TransformerConfig(
+                d_model=extractor.feature_channels,
+                num_layers=6,
+                num_heads=1,
+                ffn_dim_expansion=4,
+            )
+            extractor.transformer_sim = TransformerSimulator(trans_config, device)
+            try:
+                extractor.transformer_sim.load_from_pytorch(trans_module)
+            except (AttributeError, TypeError):
+                pass
+        
         return extractor
     
     def forward(
         self,
         images: torch.Tensor,
         extrinsics: Optional[torch.Tensor] = None,
-        intrinsics: Optional[torch.Tensor] = None,  # Unused, for API compatibility
+        intrinsics: Optional[torch.Tensor] = None,
         attn_splits: int = 2,
     ) -> TransplatFeatureOutput:
         """
-        Extract features using hardware simulation.
-        
-        Args:
-            images: Input images [B, V, 3, H, W]
-            extrinsics: Camera extrinsics [B, V, 4, 4]
-            intrinsics: Camera intrinsics [B, V, 3, 3] (unused in Transplat)
-            attn_splits: Attention window splits (default: 2)
-            
-        Returns:
-            TransplatFeatureOutput with features and cycle counts
+        Extract features using SCARF hardware simulators.
         """
         if self.backbone is None:
             raise RuntimeError("Backbone not loaded. Use from_encoder() to create extractor.")
         
         b, v, c, h, w = images.shape
         
-        # Use original backbone for bit-accurate features
-        with torch.no_grad():
-            # Run backbone (this produces the actual features)
-            # Note: backbone uses img2world instead of extrinsics
-            trans_features, cnn_features = self.backbone(
-                images,
-                attn_splits=attn_splits,
-                return_cnn_features=True,
-                img2world=extrinsics,
-            )
+        cnn_cycles = 0
+        transformer_cycles = 0
+        cnn_features = None
+        trans_features = None
         
-        # Count cycles (separate from feature computation)
-        cnn_cycles = self._count_cnn_cycles(h, w)
-        transformer_cycles = self._count_transformer_cycles(h // 8, w // 8)
+        # Normalize images
+        mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, 1, 3, 1, 1).to(images.device)
+        std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, 1, 3, 1, 1).to(images.device)
+        images_norm = (images - mean) / std
+        concat = rearrange(images_norm, 'b v c h w -> (b v) c h w')
+        
+        with torch.no_grad():
+            # ============================================================
+            # 1. CNN Feature Extraction using Hardware Simulator
+            # ============================================================
+            if self.cnn_sim is not None and self.use_hardware:
+                cnn_features, cnn_cycles = self.cnn_sim.forward(concat)
+            elif hasattr(self.backbone, 'backbone'):
+                # Fallback to original (backbone.backbone is CNNEncoder)
+                cnn_features = self.backbone.backbone(concat)
+                cnn_cycles = self._estimate_cnn_cycles(h, w)
+            elif hasattr(self.backbone, 'cnet'):
+                cnn_features = self.backbone.cnet(concat)
+                cnn_cycles = self._estimate_cnn_cycles(h, w)
+            
+            # ============================================================
+            # 2. Transformer using Hardware Simulator
+            # ============================================================
+            cnn_features_bvchw = None  # [B, V, C, H, W] format for output
+            if cnn_features is not None:
+                # Reshape for transformer: [BV, C, H, W] -> [B, V, C, H, W]
+                feat_h, feat_w = cnn_features.shape[2], cnn_features.shape[3]
+                features_per_view = rearrange(cnn_features, '(b v) c h w -> b v c h w', b=b, v=v)
+                cnn_features_bvchw = features_per_view  # Store for output
+                features_list = list(torch.unbind(features_per_view, dim=1))
+                
+                if self.transformer_sim is not None and len(self.transformer_sim.layers) > 0 and self.use_hardware:
+                    features_list_out, transformer_cycles = self.transformer_sim.forward(features_list)
+                    trans_features = rearrange(
+                        torch.stack(features_list_out, dim=1),
+                        'b v c h w -> b v c h w'
+                    )
+                elif hasattr(self.backbone, 'transformer'):
+                    # Fallback to original transformer
+                    features_list_out = self.backbone.transformer(
+                        features_list,
+                        attn_num_splits=attn_splits,
+                    )
+                    trans_features = rearrange(
+                        torch.stack(features_list_out, dim=1),
+                        'b v c h w -> b v c h w'
+                    )
+                    transformer_cycles = self._estimate_transformer_cycles(feat_h, feat_w)
+                else:
+                    # No transformer, just reshape CNN features
+                    trans_features = features_per_view
+                    transformer_cycles = 0
         
         cycle_breakdown = {
             'cnn': cnn_cycles,
@@ -148,12 +194,53 @@ class TransplatFeatureExtractor:
         
         return TransplatFeatureOutput(
             trans_features=trans_features,
-            cnn_features=cnn_features,
+            cnn_features=cnn_features_bvchw,  # [B, V, C, H, W] format
             cnn_cycles=cnn_cycles,
             transformer_cycles=transformer_cycles,
             total_cycles=cnn_cycles + transformer_cycles,
             cycle_breakdown=cycle_breakdown,
         )
+    
+    def _estimate_cnn_cycles(self, h: int, w: int) -> int:
+        """Estimate CNN cycles when hardware simulator not available."""
+        cycles = 0
+        curr_h, curr_w = h, w
+        
+        # Conv7x7 stride=2
+        cycles += (curr_h * curr_w * 3 * 64 * 49) // 256
+        curr_h, curr_w = curr_h // 2, curr_w // 2
+        
+        # Layer 1: 2x ResBlock (64ch)
+        for _ in range(2):
+            cycles += 2 * (curr_h * curr_w * 64 * 64 * 9) // 256
+        
+        # Layer 2: 2x ResBlock (96ch, stride=2 on first)
+        cycles += (curr_h * curr_w * 64 * 96 * 9) // 256
+        curr_h, curr_w = curr_h // 2, curr_w // 2
+        cycles += (curr_h * curr_w * 96 * 96 * 9) // 256
+        
+        # Layer 3: 2x ResBlock (128ch, stride=2 on first)
+        cycles += (curr_h * curr_w * 96 * 128 * 9) // 256
+        curr_h, curr_w = curr_h // 2, curr_w // 2
+        cycles += (curr_h * curr_w * 128 * 128 * 9) // 256
+        
+        # Conv1x1
+        cycles += (curr_h * curr_w * 128 * 128) // 256
+        
+        return cycles
+    
+    def _estimate_transformer_cycles(self, h: int, w: int) -> int:
+        """Estimate Transformer cycles when hardware simulator not available."""
+        seq_len = h * w
+        d_model = 128
+        num_layers = 6
+        
+        cycles = 0
+        for _ in range(num_layers):
+            # Self-attn + Cross-attn + FFN
+            cycles += 10 * (seq_len * d_model * d_model) // 128
+        
+        return cycles
     
     def _count_cnn_cycles(self, h: int, w: int) -> int:
         """

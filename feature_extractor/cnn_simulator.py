@@ -163,6 +163,10 @@ class ResidualBlockSim:
         y = self.norm2(y)
         cycles.norm += 5 * y.numel()
         
+        # ReLU after norm2 (matches original ResidualBlock!)
+        y = F.relu(y)
+        cycles.activation += y.numel()
+        
         # Downsample residual if needed
         if self.has_downsample and self.downsample_conv is not None:
             identity = F.conv2d(identity, self.downsample_conv, stride=self.stride)
@@ -244,8 +248,9 @@ class CNNEncoderSimulator:
             sim.load_from_pytorch(block)
             self.layer3.append(sim)
         
-        # Final 1x1 conv
+        # Final 1x1 conv (with bias!)
         self.conv2_weight = encoder.conv2.weight.to(self.device)
+        self.conv2_bias = encoder.conv2.bias.to(self.device) if encoder.conv2.bias is not None else None
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, int]:
         """
@@ -276,8 +281,8 @@ class CNNEncoderSimulator:
             x, cycles = block.forward(x)
             total_cycles += cycles
         
-        # Final 1x1 conv
-        out = F.conv2d(x, self.conv2_weight)
+        # Final 1x1 conv (with bias)
+        out = F.conv2d(x, self.conv2_weight, bias=self.conv2_bias)
         _, conv_cycles = self.conv_engine.forward(x, self.conv2_weight)
         total_cycles += conv_cycles.total_cycles
         

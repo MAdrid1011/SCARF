@@ -945,6 +945,13 @@ def main():
         # Format: first channel is opacity, rest are gaussian params
         captured['gaussian_head_output'] = outputs.detach()
     
+    def hook_da_model(module, inputs, outputs):
+        # Capture DepthAnythingV2 output (da_depth, out_feature/dino_feature)
+        if isinstance(outputs, tuple) and len(outputs) >= 2:
+            da_depth, out_feature = outputs[:2]
+            captured['da_depth'] = da_depth.detach()
+            captured['dino_feature_raw'] = out_feature.detach()
+    
     # Register hooks (handle different model structures)
     # Transplat/MVSplat have backbone, DepthSplat may not
     if hasattr(model.encoder, 'backbone'):
@@ -952,6 +959,10 @@ def main():
     
     if hasattr(model.encoder, 'depth_predictor'):
         hooks.append(model.encoder.depth_predictor.register_forward_hook(hook_depth_predictor))
+    
+    # Transplat: hook da_model (DepthAnythingV2) to capture dino_feature
+    if hasattr(model.encoder, 'da_model'):
+        hooks.append(model.encoder.da_model.register_forward_hook(hook_da_model))
     
     # DepthSplat: hook gaussian_head to capture raw_gaussians
     if hasattr(model.encoder, 'gaussian_head'):
@@ -1021,10 +1032,117 @@ def main():
                 # ACTUALLY REPLACE features with SCARF output
                 features = fe_output.trans_features
                 print(f"  ✓ Using SCARF-computed features for subsequent processing")
+                
+                # ============================================================
+                # RE-RUN depth prediction and gaussian generation with SCARF features
+                # This ensures end-to-end hardware simulation
+                # ============================================================
+                if args.model in ['transplat', 'mvsplat'] and features is not None:
+                    print(f"  [4a-hw] Re-running depth prediction with hardware features...")
+                    
+                    # Get required inputs from context/target
+                    near = context.get('near', target.get('near', torch.tensor([0.5], device=device)))
+                    far = context.get('far', target.get('far', torch.tensor([100.0], device=device)))
+                    if near.dim() == 0:
+                        near = near.unsqueeze(0)
+                    if far.dim() == 0:
+                        far = far.unsqueeze(0)
+                    
+                    # Get cnn_features if available
+                    cnn_features_hw = fe_output.cnn_features if hasattr(fe_output, 'cnn_features') else None
+                    
+                    # For Transplat: Directly call da_model to get dino_feature and da_depth
+                    # (hooks don't work because encoder_trans.py uses .forward() directly)
+                    dino_feature_hw = None
+                    da_depth_hw = None
+                    
+                    if args.model == 'transplat' and hasattr(model.encoder, 'da_model'):
+                        print(f"    [4a-hw-dino] Computing DINOv2 features with da_model...")
+                        with torch.no_grad():
+                            # Prepare images for da_model (same as encoder_trans.py)
+                            b, v, c, h_img, w_img = context['image'].shape
+                            
+                            # Normalize images
+                            da_images = context['image'].clone()
+                            mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, 1, 3, 1, 1).to(device)
+                            std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, 1, 3, 1, 1).to(device)
+                            da_images = (da_images - mean) / std
+                            da_images = da_images[:, :, [2, 0, 1]]  # RGB -> BGR
+                            
+                            da_images_flat = da_images.view(b*v, c, h_img, w_img)
+                            da_images_resized = F.interpolate(da_images_flat, (252, 252), mode='bilinear', align_corners=True)
+                            
+                            # Call da_model (DepthAnythingV2)
+                            da_depth_raw, out_feature = model.encoder.da_model.forward(da_images_resized)
+                            
+                            # Process da_depth (same as encoder_trans.py)
+                            da_depth_hw = F.interpolate(da_depth_raw[None], (h_img, w_img), mode='bilinear', align_corners=True)
+                            da_depth_hw = da_depth_hw.view(b, v, 1, h_img, w_img)
+                            # Normalize to 0-1
+                            da_depth_flat = da_depth_hw.flatten(2)
+                            da_max = torch.max(da_depth_flat, dim=-1, keepdim=True)[0]
+                            da_min = torch.min(da_depth_flat, dim=-1, keepdim=True)[0]
+                            da_depth_hw = (da_depth_flat - da_min) / (da_max - da_min + 1e-8)
+                            da_depth_hw = da_depth_hw.reshape(b, v, 1, h_img, w_img)
+                            
+                            # Process dino_feature
+                            dino_feature_hw = out_feature.view(b, v, out_feature.shape[1], out_feature.shape[2], out_feature.shape[3])
+                            
+                            print(f"      ✓ da_depth: {da_depth_hw.shape}")
+                            print(f"      ✓ dino_feature: {dino_feature_hw.shape}")
+                    
+                    # Build extra_info dict (required by depth_predictor)
+                    extra_info_hw = {
+                        'images': rearrange(context['image'], 'b v c h w -> (v b) c h w'),
+                    }
+                    
+                    # Run depth_predictor with hardware features
+                    # Note: Different models have different depth_predictor signatures
+                    with torch.no_grad():
+                        if args.model == 'transplat':
+                            # Transplat requires da_depth, dino_feature, extra_info, cnn_features
+                            hw_depths, hw_densities, hw_raw_gaussians = model.encoder.depth_predictor(
+                                features,  # Hardware-computed features
+                                context['intrinsics'],
+                                context['extrinsics'],
+                                near,
+                                far,
+                                gaussians_per_pixel=1,
+                                deterministic=True,
+                                extra_info=extra_info_hw,
+                                cnn_features=cnn_features_hw,
+                                da_depth=da_depth_hw,
+                                dino_feature=dino_feature_hw,
+                            )
+                        elif args.model == 'mvsplat':
+                            # MVSplat: needs extra_info and cnn_features, but no da_depth/dino_feature
+                            hw_depths, hw_densities, hw_raw_gaussians = model.encoder.depth_predictor(
+                                features,  # Hardware-computed features
+                                context['intrinsics'],
+                                context['extrinsics'],
+                                near,
+                                far,
+                                gaussians_per_pixel=1,
+                                deterministic=True,
+                                extra_info=extra_info_hw,
+                                cnn_features=cnn_features_hw,
+                            )
+                    
+                    # Replace captured values with hardware-computed values
+                    depths = hw_depths
+                    densities = hw_densities
+                    raw_gaussians_captured = hw_raw_gaussians
+                    
+                    print(f"    ✓ Hardware depths: {hw_depths.shape}")
+                    print(f"    ✓ Hardware densities: {hw_densities.shape}")
+                    print(f"    ✓ Hardware raw_gaussians: {hw_raw_gaussians.shape}")
+                    
             else:
                 print(f"  ⚠ SCARF extractor did not produce features, using hooks")
         except Exception as e:
             print(f"  ⚠ Feature Extractor error: {e}, using hooks")
+            import traceback
+            traceback.print_exc()
     
     # --------------------------------------------------------
     # Step 4a2: Generate Gaussians using GGU (replaces Transplat's GaussianAdapter)
@@ -1245,7 +1363,20 @@ def main():
                 feat = features_up[:, y, x]
                 
                 # Get original depth for this pixel
-                original_depth = depths[0, 0, pixel_idx, 0, 0].item() if depths is not None else 1.0
+                # Handle different depth formats: 
+                # - Transplat/MVSplat: [B, V, H*W, srf, dpt] (5D)
+                # - DepthSplat: [B, V, H, W] (4D)
+                if depths is not None:
+                    if depths.dim() == 5:
+                        original_depth = depths[0, 0, pixel_idx, 0, 0].item()
+                    elif depths.dim() == 4:
+                        # DepthSplat format: [B, V, H, W]
+                        py, px = y, x
+                        original_depth = depths[0, 0, py, px].item()
+                    else:
+                        original_depth = 1.0
+                else:
+                    original_depth = 1.0
                 
                 # FSDR processing
                 path, num_searches, output_depth = fsdr.process_pixel(
