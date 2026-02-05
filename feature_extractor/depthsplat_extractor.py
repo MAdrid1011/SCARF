@@ -163,102 +163,120 @@ class DepthSplatFeatureExtractor:
         mono_features = None
         
         # ============================================================
-        # 1. CNN Feature Extraction (using backbone + CNNEncoderSimulator)
+        # 1. CNN Feature Extraction using Hardware Simulator
+        # Note: DepthSplat uses 4x downsample, simulator uses 8x, so we resize
         # ============================================================
-        if self.backbone is not None:
+        target_h, target_w = h // 4, w // 4  # DepthSplat's expected output resolution
+        
+        if self.cnn_sim is not None:
             with torch.no_grad():
-                # Run original backbone for bit-accurate features
+                # Use hardware simulator for feature computation
+                cnn_features_sim, cnn_cycles = self.cnn_sim.forward(concat)
+                # Resize from 8x downsample to 4x downsample
+                cnn_features = F.interpolate(
+                    cnn_features_sim, (target_h, target_w),
+                    mode='bilinear', align_corners=True
+                )
+        elif self.backbone is not None:
+            with torch.no_grad():
+                # Fallback to original backbone
                 features_list = self.backbone(concat)
-                # Reverse: resolution from low to high
                 features_list = features_list[::-1]
-                cnn_features = features_list[0]  # Lowest resolution (main feature)
-                
-                # Count cycles using simulator
-                if self.cnn_sim is not None:
-                    _, cnn_cycles = self.cnn_sim.forward(concat)
+                cnn_features = features_list[0]
         
         # ============================================================
-        # 2. MV Transformer (using transformer + TransformerSimulator)
+        # 2. MV Transformer using Hardware Simulator
         # ============================================================
-        if self.transformer is not None and cnn_features is not None:
+        cnn_features_bvchw = None  # [B, V, C, H, W] format for output
+        if cnn_features is not None:
             with torch.no_grad():
-                # Add position encoding
-                from depthsplat.src.model.encoder.unimatch.utils import mv_feature_add_position
-                features_pos = mv_feature_add_position(
-                    cnn_features, attn_splits, self.feature_channels
-                )
+                # Reshape for transformer: [BV, C, H, W] -> [B, V, C, H, W]
+                features_per_view = rearrange(cnn_features, "(b v) c h w -> b v c h w", b=b, v=v)
+                cnn_features_bvchw = features_per_view  # Store for output
+                features_list = list(torch.unbind(features_per_view, dim=1))
                 
-                # Reshape for transformer: [BV, C, H, W] -> list of [B, C, H, W]
-                features_list = list(
-                    torch.unbind(
-                        rearrange(features_pos, "(b v) c h w -> b v c h w", b=b, v=v), 
-                        dim=1
-                    )
-                )
-                
-                # Run original transformer for bit-accurate features
-                features_list_mv = self.transformer(
-                    features_list,
-                    attn_num_splits=attn_splits,
-                )
-                
-                # Stack back: list of [B, C, H, W] -> [BV, C, H, W]
-                trans_features = rearrange(
-                    torch.stack(features_list_mv, dim=1), 
-                    "b v c h w -> (b v) c h w"
-                )
-                
-                # Count cycles using simulator or estimate
                 if self.transformer_sim is not None and len(self.transformer_sim.layers) > 0:
-                    _, transformer_cycles = self.transformer_sim.forward(features_list)
-                else:
-                    # Estimate cycles: 6 layers × (attn + ffn) per layer
+                    # Use hardware simulator for feature computation
+                    features_list_out, transformer_cycles = self.transformer_sim.forward(features_list)
+                    trans_features = torch.stack(features_list_out, dim=1)  # [B, V, C, H, W]
+                elif self.transformer is not None:
+                    # Fallback to original transformer
+                    from depthsplat.src.model.encoder.unimatch.utils import mv_feature_add_position
+                    features_pos = mv_feature_add_position(
+                        cnn_features, attn_splits, self.feature_channels
+                    )
+                    features_list = list(
+                        torch.unbind(
+                            rearrange(features_pos, "(b v) c h w -> b v c h w", b=b, v=v),
+                            dim=1
+                        )
+                    )
+                    features_list_mv = self.transformer(
+                        features_list,
+                        attn_num_splits=attn_splits,
+                    )
+                    trans_features = torch.stack(features_list_mv, dim=1)  # [B, V, C, H, W]
+                    # Estimate cycles
                     seq_len = cnn_features.shape[2] * cnn_features.shape[3]
                     d_model = self.feature_channels
-                    # Self-attn: 4 GEMMs, Cross-attn: 4 GEMMs, FFN: 2 GEMMs = 10 GEMMs per layer
                     gemm_per_layer = 10 * (seq_len * d_model * d_model) // 128
                     transformer_cycles = 6 * gemm_per_layer
+                else:
+                    # No transformer, just use CNN features (reshaped to [B, V, C, H, W])
+                    trans_features = features_per_view
+                    transformer_cycles = 0
         
         # ============================================================
-        # 3. DINOv2 Feature Extraction (using pretrained + ViTSimulator)
+        # 3. DINOv2 Feature Extraction (using ViTSimulator hardware)
         # ============================================================
-        if self.pretrained is not None:
+        ori_h, ori_w = concat.shape[-2:]
+        resize_h, resize_w = ori_h // 14 * 14, ori_w // 14 * 14
+        concat_resized = F.interpolate(
+            concat, (resize_h, resize_w), mode='bilinear', align_corners=True
+        )
+        
+        intermediate_layer_idx = {
+            'vits': [2, 5, 8, 11],
+            'vitb': [2, 5, 8, 11],
+            'vitl': [4, 11, 17, 23],
+        }
+        
+        if self.vit_sim is not None:
             with torch.no_grad():
-                # Resize to patch-aligned size
-                ori_h, ori_w = concat.shape[-2:]
-                resize_h, resize_w = ori_h // 14 * 14, ori_w // 14 * 14
-                concat_resized = F.interpolate(
-                    concat, (resize_h, resize_w), mode='bilinear', align_corners=True
+                # Use hardware simulator for actual computation
+                mono_intermediate, dinov2_cycles = self.vit_sim.get_intermediate_layers(
+                    concat_resized,
+                    layer_indices=intermediate_layer_idx[self.vit_type],
+                    return_class_token=False
                 )
                 
-                # Run original DINOv2 for bit-accurate features
-                intermediate_layer_idx = {
-                    'vits': [2, 5, 8, 11],
-                    'vitb': [2, 5, 8, 11],
-                    'vitl': [4, 11, 17, 23],
-                }
+                # Get last layer features
+                last_feat = mono_intermediate[-1]  # [B, N, D] without CLS token
+                last_feat = last_feat.reshape(
+                    concat.shape[0], resize_h // 14, resize_w // 14, -1
+                ).permute(0, 3, 1, 2).contiguous()
+                mono_features = F.interpolate(
+                    last_feat, (ori_h // 8, ori_w // 8),
+                    mode='bilinear', align_corners=True
+                )
+        elif self.pretrained is not None:
+            # Fallback to original DINOv2
+            with torch.no_grad():
                 mono_intermediate = list(
                     self.pretrained.get_intermediate_layers(
-                        concat_resized, 
-                        intermediate_layer_idx[self.vit_type], 
+                        concat_resized,
+                        intermediate_layer_idx[self.vit_type],
                         return_class_token=False
                     )
                 )
-                
-                # Reshape and resize last feature
                 last_feat = mono_intermediate[-1]
                 last_feat = last_feat.reshape(
                     concat.shape[0], resize_h // 14, resize_w // 14, -1
                 ).permute(0, 3, 1, 2).contiguous()
                 mono_features = F.interpolate(
-                    last_feat, (ori_h // 8, ori_w // 8), 
+                    last_feat, (ori_h // 8, ori_w // 8),
                     mode='bilinear', align_corners=True
                 )
-                
-                # Count cycles using ViT simulator
-                if self.vit_sim is not None:
-                    vit_output = self.vit_sim.forward(concat_resized)
-                    dinov2_cycles = vit_output.total_cycles
         
         cycle_breakdown = {
             'cnn': cnn_cycles,
@@ -268,7 +286,7 @@ class DepthSplatFeatureExtractor:
         
         return DepthSplatFeatureOutput(
             trans_features=trans_features,
-            cnn_features=cnn_features,
+            cnn_features=cnn_features_bvchw,  # [B, V, C, H, W] format
             mono_features=mono_features,
             cnn_cycles=cnn_cycles,
             transformer_cycles=transformer_cycles,
