@@ -17,6 +17,7 @@ SCARF_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(SCARF_ROOT))
 
 from encoder import GEMMUnit, NormalizationUnit, ActivationUnit
+from encoder.softmax_unit import SoftmaxUnit
 from encoder.types import EncoderConfig, NormType, ActivationType
 from .types import TransformerConfig
 
@@ -35,6 +36,7 @@ class AttentionSim:
         
         config = EncoderConfig()
         self.gemm_unit = GEMMUnit(config.gemm)
+        self.softmax_unit = SoftmaxUnit()
         
         # Weights
         self.in_proj_weight: Optional[torch.Tensor] = None
@@ -54,30 +56,37 @@ class AttentionSim:
         B, N, C = x.shape
         cycles = 0
         
-        # QKV projection: [B, N, C] @ [3C, C].T -> [B, N, 3C]
-        qkv = F.linear(x, self.in_proj_weight, self.in_proj_bias)
-        _, c = self.gemm_unit.matmul(x.reshape(-1, C), self.in_proj_weight.T)
+        # QKV projection: [B, N, C] @ [3C, C].T -> [B, N, 3C] — GEMMUnit
+        qkv, c = self.gemm_unit.matmul(x.reshape(-1, C), self.in_proj_weight.T)
         cycles += c.total_cycles
+        if self.in_proj_bias is not None:
+            qkv = qkv + self.in_proj_bias.unsqueeze(0)
+        qkv = qkv.reshape(B, N, -1)
         
         # Split Q, K, V
         q, k, v = qkv.chunk(3, dim=-1)
         
-        # Attention: softmax(QK^T / sqrt(d)) V
+        # Attention: softmax(QK^T / sqrt(d)) V — GEMMUnit
         scale = 1.0 / math.sqrt(self.head_dim)
-        attn = torch.matmul(q, k.transpose(-2, -1)) * scale
-        _, c = self.gemm_unit.matmul(q.reshape(-1, C), k.reshape(-1, C).T)
+        attn, c = self.gemm_unit.matmul(q.reshape(-1, C), k.reshape(-1, C).T)
+        attn = attn.reshape(B, N, N) * scale
         cycles += c.total_cycles
         
-        attn = F.softmax(attn, dim=-1)
+        # Softmax — SoftmaxUnit
+        attn, sm_cyc = self.softmax_unit.forward(attn, dim=-1)
+        cycles += sm_cyc.total_cycles
         
-        out = torch.matmul(attn, v)
-        _, c = self.gemm_unit.matmul(attn.reshape(-1, N), v.reshape(-1, C))
+        # Attn @ V — GEMMUnit
+        out, c = self.gemm_unit.matmul(attn.reshape(-1, N), v.reshape(-1, C))
+        out = out.reshape(B, N, C)
         cycles += c.total_cycles
         
-        # Output projection
-        out = F.linear(out, self.out_proj_weight, self.out_proj_bias)
-        _, c = self.gemm_unit.matmul(out.reshape(-1, C), self.out_proj_weight.T)
+        # Output projection — GEMMUnit
+        out_flat, c = self.gemm_unit.matmul(out.reshape(-1, C), self.out_proj_weight.T)
         cycles += c.total_cycles
+        if self.out_proj_bias is not None:
+            out_flat = out_flat + self.out_proj_bias.unsqueeze(0)
+        out = out_flat.reshape(B, N, C)
         
         return out, cycles
 
@@ -110,20 +119,21 @@ class FFNSim:
         """FFN forward with cycle counting."""
         cycles = 0
         
-        # Linear1
-        h = F.linear(x, self.linear1_weight, self.linear1_bias)
-        _, c = self.gemm_unit.matmul(x.reshape(-1, self.d_model), self.linear1_weight.T)
+        # Linear1 — GEMMUnit
+        h, c = self.gemm_unit.matmul(x.reshape(-1, self.d_model), self.linear1_weight.T)
+        cycles += c.total_cycles
+        if self.linear1_bias is not None:
+            h = h + self.linear1_bias.unsqueeze(0)
+        
+        # GELU — ActivationUnit
+        h, c = self.activation.forward(h)
         cycles += c.total_cycles
         
-        # GELU
-        h = F.gelu(h)
-        _, c = self.activation.forward(h)
+        # Linear2 — GEMMUnit
+        out, c = self.gemm_unit.matmul(h.reshape(-1, self.ffn_dim), self.linear2_weight.T)
         cycles += c.total_cycles
-        
-        # Linear2
-        out = F.linear(h, self.linear2_weight, self.linear2_bias)
-        _, c = self.gemm_unit.matmul(h.reshape(-1, self.ffn_dim), self.linear2_weight.T)
-        cycles += c.total_cycles
+        if self.linear2_bias is not None:
+            out = out + self.linear2_bias.unsqueeze(0)
         
         return out, cycles
 

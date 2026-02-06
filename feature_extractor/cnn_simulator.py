@@ -76,21 +76,20 @@ class Conv7x7LayerSim:
         """
         cycles = LayerCycles()
         
-        # Conv7x7 stride=2 padding=3
-        # Use PyTorch for correctness, count cycles from hardware model
-        out = F.conv2d(x, self.conv_weight, stride=2, padding=3)
-        conv_out, conv_cycles = self.conv_engine.forward(x, self.conv_weight, stride=2, padding=3)
+        # Conv7x7 stride=2 padding=3 — ConvEngine
+        out, conv_cycles = self.conv_engine.forward(x, self.conv_weight, stride=2, padding=3)
         cycles.conv = conv_cycles.total_cycles
         
-        # InstanceNorm - use PyTorch for correctness, count cycles from hardware model
-        out = F.instance_norm(out, weight=self.norm_weight, bias=self.norm_bias)
-        # Cycle count: 5 * N elements for instance norm
-        cycles.norm = 5 * out.numel()
+        # InstanceNorm — NormalizationUnit
+        self.norm_unit.dim = out.shape[1]
+        self.norm_unit.weight = self.norm_weight
+        self.norm_unit.bias = self.norm_bias
+        out, norm_cycles = self.norm_unit.forward(out)
+        cycles.norm = norm_cycles.total_cycles
         
-        # ReLU - use PyTorch for correctness, count cycles from hardware model
-        out = F.relu(out)
-        # Cycle count: 1 * N elements for ReLU
-        cycles.activation = out.numel()
+        # ReLU — ActivationUnit
+        out, relu_cycles = self.activation_unit.forward(out)
+        cycles.activation = relu_cycles.total_cycles
         
         return out, cycles.total
 
@@ -142,43 +141,41 @@ class ResidualBlockSim:
         
         identity = x
         
-        # Conv1 path
-        y = F.conv2d(x, self.conv1_weight, stride=self.stride, 
-                     padding=self.dilation, dilation=self.dilation)
-        # Estimate conv cycles: H*W*Cin*Cout*K*K / 256 (systolic array throughput)
-        conv1_macs = y.shape[2] * y.shape[3] * self.conv1_weight.shape[1] * self.conv1_weight.shape[0] * 9
-        cycles.conv += conv1_macs // 256 + 1
+        # Conv1 — ConvEngine
+        y, conv1_c = self.conv_engine.forward(x, self.conv1_weight, stride=self.stride,
+                                               padding=self.dilation, dilation=self.dilation)
+        cycles.conv += conv1_c.total_cycles
         
         y = self.norm1(y)
-        cycles.norm += 5 * y.numel()  # InstanceNorm: 5 cycles per element
+        cycles.norm += 5 * y.numel()
         
-        y = F.relu(y)
-        cycles.activation += y.numel()  # ReLU: 1 cycle per element
+        # ReLU — ActivationUnit
+        y, relu_c = self.activation_unit.forward(y)
+        cycles.activation += relu_c.total_cycles
         
-        # Conv2 path
-        y = F.conv2d(y, self.conv2_weight, padding=self.dilation, dilation=self.dilation)
-        conv2_macs = y.shape[2] * y.shape[3] * self.conv2_weight.shape[1] * self.conv2_weight.shape[0] * 9
-        cycles.conv += conv2_macs // 256 + 1
+        # Conv2 — ConvEngine
+        y, conv2_c = self.conv_engine.forward(y, self.conv2_weight, padding=self.dilation,
+                                               dilation=self.dilation)
+        cycles.conv += conv2_c.total_cycles
         
         y = self.norm2(y)
         cycles.norm += 5 * y.numel()
         
-        # ReLU after norm2 (matches original ResidualBlock!)
-        y = F.relu(y)
-        cycles.activation += y.numel()
+        # ReLU — ActivationUnit
+        y, relu_c = self.activation_unit.forward(y)
+        cycles.activation += relu_c.total_cycles
         
         # Downsample residual if needed
         if self.has_downsample and self.downsample_conv is not None:
-            identity = F.conv2d(identity, self.downsample_conv, stride=self.stride)
-            ds_macs = identity.shape[2] * identity.shape[3] * self.downsample_conv.shape[1] * self.downsample_conv.shape[0]
-            cycles.conv += ds_macs // 256 + 1
+            identity, ds_c = self.conv_engine.forward(identity, self.downsample_conv, stride=self.stride)
+            cycles.conv += ds_c.total_cycles
             
             identity = self.downsample_norm(identity)
             cycles.norm += 5 * identity.numel()
         
-        # Add residual and final ReLU
-        out = F.relu(identity + y)
-        cycles.activation += out.numel()  # ReLU: 1 cycle per element
+        # Add residual and final ReLU — ActivationUnit
+        out, relu_c = self.activation_unit.forward(identity + y)
+        cycles.activation += relu_c.total_cycles
         
         return out, cycles.total
 
@@ -281,9 +278,8 @@ class CNNEncoderSimulator:
             x, cycles = block.forward(x)
             total_cycles += cycles
         
-        # Final 1x1 conv (with bias)
-        out = F.conv2d(x, self.conv2_weight, bias=self.conv2_bias)
-        _, conv_cycles = self.conv_engine.forward(x, self.conv2_weight)
+        # Final 1x1 conv (with bias) — ConvEngine
+        out, conv_cycles = self.conv_engine.forward(x, self.conv2_weight, self.conv2_bias)
         total_cycles += conv_cycles.total_cycles
         
         return out, total_cycles

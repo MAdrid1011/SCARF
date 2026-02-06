@@ -8,6 +8,8 @@ import torch
 from typing import Tuple
 
 from .types import GGUConfig
+from encoder import ActivationUnit
+from encoder.types import ActivationType
 
 
 class CovarianceBuilder:
@@ -32,6 +34,7 @@ class CovarianceBuilder:
     def __init__(self, config: GGUConfig):
         """Initialize covariance builder."""
         self.config = config
+        self.sigmoid_unit = ActivationUnit(ActivationType.SIGMOID)
     
     def get_scale_multiplier(
         self,
@@ -88,11 +91,12 @@ class CovarianceBuilder:
         Returns:
             [3] mapped scale values
         """
-        # Sigmoid mapping to [scale_min, scale_max]
+        # Sigmoid mapping to [scale_min, scale_max] (ActivationUnit)
+        sigmoid_out, _ = self.sigmoid_unit.forward(raw_scales)
         base_scales = (
             self.config.scale_min + 
             (self.config.scale_max - self.config.scale_min) * 
-            torch.sigmoid(raw_scales)
+            sigmoid_out
         )
         
         # Compute scale multiplier

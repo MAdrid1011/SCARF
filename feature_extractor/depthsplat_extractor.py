@@ -26,6 +26,7 @@ from .vit_simulator import ViTSimulator, ViTConfig
 from .cnn_simulator import CNNEncoderSimulator
 from .transformer_simulator import TransformerSimulator
 from .types import CNNConfig, TransformerConfig
+from encoder import BilinearUnit
 
 
 @dataclass
@@ -69,6 +70,7 @@ class DepthSplatFeatureExtractor:
         self.cnn_sim: Optional[CNNEncoderSimulator] = None
         self.transformer_sim: Optional[TransformerSimulator] = None
         self.vit_sim: Optional[ViTSimulator] = None
+        self.bilinear = BilinearUnit()
     
     @classmethod
     def from_encoder(cls, encoder: nn.Module) -> 'DepthSplatFeatureExtractor':
@@ -172,9 +174,9 @@ class DepthSplatFeatureExtractor:
             with torch.no_grad():
                 # Use hardware simulator for feature computation
                 cnn_features_sim, cnn_cycles = self.cnn_sim.forward(concat)
-                # Resize from 8x downsample to 4x downsample
-                cnn_features = F.interpolate(
-                    cnn_features_sim, (target_h, target_w),
+                # Resize from 8x downsample to 4x downsample (BilinearUnit)
+                cnn_features, _ = self.bilinear.interpolate(
+                    cnn_features_sim, size=(target_h, target_w),
                     mode='bilinear', align_corners=True
                 )
         elif self.backbone is not None:
@@ -231,8 +233,8 @@ class DepthSplatFeatureExtractor:
         # ============================================================
         ori_h, ori_w = concat.shape[-2:]
         resize_h, resize_w = ori_h // 14 * 14, ori_w // 14 * 14
-        concat_resized = F.interpolate(
-            concat, (resize_h, resize_w), mode='bilinear', align_corners=True
+        concat_resized, _ = self.bilinear.interpolate(
+            concat, size=(resize_h, resize_w), mode='bilinear', align_corners=True
         )
         
         intermediate_layer_idx = {
@@ -255,8 +257,8 @@ class DepthSplatFeatureExtractor:
                 last_feat = last_feat.reshape(
                     concat.shape[0], resize_h // 14, resize_w // 14, -1
                 ).permute(0, 3, 1, 2).contiguous()
-                mono_features = F.interpolate(
-                    last_feat, (ori_h // 8, ori_w // 8),
+                mono_features, _ = self.bilinear.interpolate(
+                    last_feat, size=(ori_h // 8, ori_w // 8),
                     mode='bilinear', align_corners=True
                 )
         elif self.pretrained is not None:

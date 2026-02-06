@@ -2,7 +2,7 @@
 Convolution Engine
 
 Hardware simulator for systolic array based convolution.
-Supports 1x1, 3x3, 7x7 kernels used in 3DGS encoders.
+Supports configurable kernel sizes (default: 1, 3, 7, 14) and transposed convolution.
 """
 
 import torch
@@ -28,8 +28,7 @@ class ConvEngine:
     - Memory access patterns
     - Resource utilization
     
-    Supported kernel sizes: 1, 3, 7
-    Supported strides: 1, 2
+    Supports configurable kernel sizes and transposed convolution.
     """
     
     def __init__(self, config: Optional[ConvConfig] = None):
@@ -50,40 +49,94 @@ class ConvEngine:
         stride: int = 1,
         padding: int = 0,
         dilation: int = 1,
+        groups: int = 1,
     ) -> Tuple[torch.Tensor, CycleStats]:
         """
         Perform convolution with cycle tracking.
         
         Args:
             input: Input tensor [B, Cin, H, W]
-            weight: Weight tensor [Cout, Cin, K, K]
+            weight: Weight tensor [Cout, Cin/groups, K, K]
             bias: Optional bias tensor [Cout]
             stride: Convolution stride
             padding: Convolution padding
             dilation: Convolution dilation
+            groups: Number of groups for grouped convolution
             
         Returns:
             output: Output tensor [B, Cout, H', W']
             cycles: Cycle statistics
         """
-        # Validate kernel size
-        kernel_size = weight.shape[2]
-        if kernel_size not in self.config.supported_kernels:
-            raise ValueError(
-                f"Kernel size {kernel_size} not supported. "
-                f"Supported: {self.config.supported_kernels}"
-            )
-        
         # Compute output using PyTorch (reference implementation)
         output = F.conv2d(
             input, weight, bias,
-            stride=stride, padding=padding, dilation=dilation
+            stride=stride, padding=padding, dilation=dilation, groups=groups
         )
         
         # Calculate cycle count
         cycles = self._compute_cycles(input, weight, output, stride)
         self._total_cycles += cycles.total_cycles
         
+        return output, cycles
+    
+    def forward_transposed(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        stride: int = 1,
+        padding: int = 0,
+        output_padding: int = 0,
+        groups: int = 1,
+    ) -> Tuple[torch.Tensor, CycleStats]:
+        """
+        Perform transposed convolution with cycle tracking.
+        
+        Hardware implementation: zero-insertion on input followed by standard convolution.
+        
+        Args:
+            input: Input tensor [B, Cin, H, W]
+            weight: Weight tensor [Cin, Cout/groups, K, K]
+            bias: Optional bias tensor [Cout]
+            stride: Transposed convolution stride
+            padding: Transposed convolution padding
+            output_padding: Additional output size adjustment
+            groups: Number of groups
+            
+        Returns:
+            output: Output tensor [B, Cout, H', W']
+            cycles: Cycle statistics
+        """
+        output = F.conv_transpose2d(
+            input, weight, bias,
+            stride=stride, padding=padding, output_padding=output_padding, groups=groups
+        )
+        
+        # Cycle model: transposed conv ≈ standard conv on zero-inserted input
+        # Zero-insertion expands input by stride, then standard conv
+        B, Cout, H_out, W_out = output.shape
+        Cin = weight.shape[0]
+        K = weight.shape[2]
+        total_macs = B * H_out * W_out * Cin * Cout * K * K
+        pe_throughput = self.config.pe_array_size ** 2
+        compute_cycles = (total_macs + pe_throughput - 1) // pe_throughput
+        # Extra overhead for zero-insertion address generation
+        setup_cycles = ENCODER_CYCLES['conv_setup'] * 2
+        weight_load_cycles = Cin * Cout * K * K // self.config.pe_array_size
+        total = compute_cycles + setup_cycles + weight_load_cycles
+        
+        cycles = CycleStats(
+            total_cycles=total,
+            compute_cycles=compute_cycles,
+            memory_cycles=setup_cycles + weight_load_cycles,
+            breakdown={
+                'compute': compute_cycles,
+                'setup': setup_cycles,
+                'weight_load': weight_load_cycles,
+                'type': 'transposed',
+            }
+        )
+        self._total_cycles += cycles.total_cycles
         return output, cycles
     
     def _compute_cycles(
