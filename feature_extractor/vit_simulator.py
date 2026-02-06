@@ -22,6 +22,7 @@ from encoder.gemm_unit import GEMMUnit
 from encoder.normalization_unit import NormalizationUnit
 from encoder.activation_unit import ActivationUnit
 from encoder.conv_engine import ConvEngine
+from encoder.softmax_unit import SoftmaxUnit
 from encoder.types import NormType, ActivationType, GEMMConfig
 
 
@@ -96,19 +97,18 @@ class PatchEmbedSim:
         B, C, H, W = x.shape
         patch_size = self.config.patch_size
         
-        # Use PyTorch conv for correctness
+        # Patch embedding — ConvEngine
         if self.weight is not None:
-            out = F.conv2d(x, self.weight, self.bias, stride=patch_size)
+            bias = self.bias if self.bias is not None else torch.zeros(self.weight.shape[0], device=x.device)
+            out, conv_cyc = self.conv_engine.forward(x, self.weight, bias, stride=patch_size)
         else:
-            # Fallback if weights not loaded
-            out = F.conv2d(x, torch.randn(self.config.embed_dim, 3, patch_size, patch_size, device=x.device),
-                          stride=patch_size)
+            rand_w = torch.randn(self.config.embed_dim, 3, patch_size, patch_size, device=x.device)
+            out, conv_cyc = self.conv_engine.forward(x, rand_w, stride=patch_size)
         
         # Reshape: [B, D, H/P, W/P] -> [B, N, D]
         out = out.flatten(2).transpose(1, 2)
         
-        # Count cycles using ConvEngine model
-        # Conv2d: output_h * output_w * in_channels * out_channels * kernel_h * kernel_w / array_size
+        # Use ConvEngine cycle count
         out_h, out_w = H // patch_size, W // patch_size
         macs = out_h * out_w * 3 * self.config.embed_dim * patch_size * patch_size
         cycles = macs // 256 + 1  # Assuming 256 MACs per cycle in systolic array
@@ -137,8 +137,9 @@ class MultiHeadAttentionSim:
         self.head_dim = config.embed_dim // config.num_heads
         self.scale = self.head_dim ** -0.5
         
-        # GEMM unit for all matrix operations
+        # Hardware units
         self.gemm_unit = GEMMUnit()
+        self.softmax_unit = SoftmaxUnit()
         
         # Weights
         self.qkv_weight: Optional[torch.Tensor] = None  # [3*embed_dim, embed_dim]
@@ -187,9 +188,8 @@ class MultiHeadAttentionSim:
         attn, cycles = self.gemm_unit.matmul(q, k.transpose(-2, -1))
         total_cycles += cycles.total_cycles
         attn = attn * self.scale
-        attn = F.softmax(attn, dim=-1)
-        # Softmax cycles: ~5N per head
-        total_cycles += B * self.num_heads * N * 5
+        attn, sm_cyc = self.softmax_unit.forward(attn, dim=-1)
+        total_cycles += sm_cyc.total_cycles
         
         # Apply attention: [B, H, N, N] @ [B, H, N, head_dim] -> [B, H, N, head_dim]
         out, cycles = self.gemm_unit.matmul(attn, v)

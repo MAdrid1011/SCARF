@@ -165,6 +165,24 @@ class TransplatFeatureExtractor:
                 cnn_features_bvchw = features_per_view  # Store for output
                 features_list = list(torch.unbind(features_per_view, dim=1))
                 
+                # Add camera parameter encoding (matches backbone.forward)
+                if hasattr(self.backbone, 'cam_param_encoder') and extrinsics is not None:
+                    img2world = torch.inverse(extrinsics).contiguous()
+                    feature_list_with_cam = []
+                    for v_id, cur_features in enumerate(features_list):
+                        feature_list_with_cam.append(
+                            self.backbone.cam_param_encoder(cur_features, img2world[:, v_id])
+                        )
+                    features_list = feature_list_with_cam
+                
+                # Add position encoding before transformer (matches backbone.forward)
+                from transplat.src.model.encoder.backbone.backbone_multiview import (
+                    feature_add_position_list,
+                )
+                features_list = feature_add_position_list(
+                    features_list, attn_splits, self.feature_channels
+                )
+                
                 if self.transformer_sim is not None and len(self.transformer_sim.layers) > 0 and self.use_hardware:
                     features_list_out, transformer_cycles = self.transformer_sim.forward(features_list)
                     trans_features = rearrange(

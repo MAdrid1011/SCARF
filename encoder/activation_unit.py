@@ -30,6 +30,7 @@ class ActivationUnit:
     - GELU: 256-entry LUT with interpolation
     - SiLU: 256-entry LUT with interpolation
     - Sigmoid: 256-entry LUT with interpolation
+    - Softplus: 256-entry LUT with interpolation (log(1 + exp(x)))
     
     All LUT-based activations use linear interpolation for accuracy.
     """
@@ -76,6 +77,11 @@ class ActivationUnit:
         sigmoid_y = 1.0 / (1.0 + np.exp(-x))
         self._luts['sigmoid'] = (torch.tensor(x, dtype=torch.float32),
                                   torch.tensor(sigmoid_y, dtype=torch.float32))
+        
+        # Softplus: log(1 + exp(x))
+        softplus_y = np.log1p(np.exp(x))
+        self._luts['softplus'] = (torch.tensor(x, dtype=torch.float32),
+                                   torch.tensor(softplus_y, dtype=torch.float32))
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, CycleStats]:
         """
@@ -97,6 +103,8 @@ class ActivationUnit:
             output = F.silu(x)
         elif self.activation_type == ActivationType.SIGMOID:
             output = torch.sigmoid(x)
+        elif self.activation_type == ActivationType.SOFTPLUS:
+            output = F.softplus(x)
         else:
             raise ValueError(f"Unknown activation type: {self.activation_type}")
         

@@ -15,6 +15,7 @@ class ActivationType(Enum):
     GELU = "gelu"
     SILU = "silu"
     SIGMOID = "sigmoid"
+    SOFTPLUS = "softplus"
 
 
 class NormType(Enum):
@@ -72,8 +73,8 @@ class ConvConfig:
     # Systolic array dimensions
     pe_array_size: int = 16  # 16x16 PE array
     
-    # Supported kernel sizes
-    supported_kernels: Tuple[int, ...] = (1, 3, 7)
+    # Supported kernel sizes (extensible for patch embedding etc.)
+    supported_kernels: Tuple[int, ...] = (1, 3, 5, 7, 9, 14)
     
     # Memory configuration
     weight_buffer_kb: int = 64
@@ -184,4 +185,6 @@ ENCODER_RESOURCES = {
     'activation_unit': ResourceEstimate(luts=2000, dsps=8, sram_bytes=1024),
     'normalization_unit': ResourceEstimate(luts=3000, dsps=16, sram_bytes=2048),
     'bilinear_unit': ResourceEstimate(luts=800, dsps=8, sram_bytes=0),
+    'pooling_unit': ResourceEstimate(luts=500, dsps=4, sram_bytes=512),
+    'pad_unit': ResourceEstimate(luts=200, dsps=0, sram_bytes=0),
 }
