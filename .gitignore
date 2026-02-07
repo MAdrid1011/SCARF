@@ -209,3 +209,6 @@ __marimo__/
 # Output files
 outputs/
 .milestones/
+
+# Vendored / cached model weights (torch.hub downloads)
+hub/
