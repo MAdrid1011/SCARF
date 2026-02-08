@@ -37,10 +37,8 @@ class DepthSplatAdapter(MVSplatAdapter):
         }
     
     def get_saes_config_overrides(self) -> Dict:
-        """DepthSplat-specific SAES configuration."""
-        return {
-            'early_stop_threshold': 0.92,  # Slightly higher
-        }
+        """DepthSplat SAES: uses universal configuration (no overrides)."""
+        return {}
     
     def supports_three_view(self) -> bool:
         """DepthSplat uses 3 views for robust depth."""
