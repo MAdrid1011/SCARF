@@ -18,13 +18,6 @@ class ActivationType(Enum):
     SOFTPLUS = "softplus"
 
 
-class NormType(Enum):
-    """Supported normalization types."""
-    LAYER = "layer"
-    BATCH = "batch"
-    INSTANCE = "instance"
-    GROUP = "group"
-
 
 @dataclass
 class CycleStats:
@@ -71,7 +64,7 @@ class ResourceEstimate:
 class ConvConfig:
     """Convolution engine configuration."""
     # Systolic array dimensions
-    pe_array_size: int = 16  # 16x16 PE array
+    pe_array_size: int = 32  # 32x32 PE array = 1024 MACs/cycle
     
     # Supported kernel sizes (extensible for patch embedding etc.)
     supported_kernels: Tuple[int, ...] = (1, 3, 5, 7, 9, 14)
@@ -84,23 +77,29 @@ class ConvConfig:
 @dataclass
 class GEMMConfig:
     """GEMM unit configuration."""
-    # Tile dimensions
-    tile_m: int = 8
-    tile_n: int = 16
+    # Tile dimensions (systolic array size)
+    tile_m: int = 32
+    tile_n: int = 32
     
     # Array size
-    array_m: int = 8
-    array_n: int = 16
+    array_m: int = 32
+    array_n: int = 32
     
     # Memory
-    buffer_kb: int = 32
+    buffer_kb: int = 128
 
 
 @dataclass
 class BilinearConfig:
     """Bilinear interpolation configuration."""
-    # Parallel channels
-    parallel_channels: int = 8
+    # Parallel channels (how many channels are sampled per cycle)
+    parallel_channels: int = 32
+    
+    # Parallel spatial samplers (how many output pixels are processed per cycle)
+    # Models having multiple bilinear sampling engines operating in parallel.
+    # Each sampler independently computes one output pixel's bilinear interpolation.
+    # Typical values: 1 (minimal), 8 (moderate ASIC), 16 (aggressive ASIC)
+    parallel_samplers: int = 16
     
     # Coordinate precision (fixed-point bits)
     coord_frac_bits: int = 8

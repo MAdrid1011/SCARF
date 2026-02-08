@@ -117,7 +117,7 @@ class TransplatAdapter(BaseAdapter):
     def get_cost_type(self) -> str:
         return 'cost'
     
-    def get_fsdr_config_overrides(self) -> Dict:
+    def get_fsgr_config_overrides(self) -> Dict:
         return {
             'hamming_threshold': 4,
             'high_confidence_threshold': 0.8,

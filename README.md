@@ -28,7 +28,7 @@ SCARF (Scene-Adaptive Cost-volume Accelerator with Reuse Framework) is a hardwar
 - Skips depth search for homogeneous regions
 - Reduces Gaussian count by ~30%
 
-### FSDR (Feature-Similarity Depth Reuse)
+### FSGR (Feature-Similarity Gaussian Reuse)
 - Caches depth results using LSH-based feature signatures
 - Reuses cached depths for similar pixels
 - Reduces memory access by ~87%
@@ -74,7 +74,7 @@ SCARF/
 │   └── depthsplat_predictor.py
 ├── ggu/                   # Gaussian Generation Unit simulator
 ├── dsu/                   # Depth Search Unit simulator
-├── fsdr/                  # Feature-Similarity Depth Reuse
+├── fsgr/                  # Feature-Similarity Gaussian Reuse
 ├── saes/                  # Scene-Adaptive Early-Stopping
 ├── adapters/              # Model-specific adapters
 ├── integration/           # Model loader & bundle utilities
@@ -161,8 +161,8 @@ python scripts/demo.py --model mvsplat
 # Run with DepthSplat
 python scripts/demo.py --model depthsplat
 
-# Disable FSDR and/or SAES optimizations (pure HW sim only)
-python scripts/demo.py --model transplat --no-fsdr --no-saes
+# Disable FSGR and/or SAES optimizations (pure HW sim only)
+python scripts/demo.py --model transplat --no-fsgr --no-saes
 ```
 
 ## Architecture
@@ -189,12 +189,12 @@ Input Images + Camera Params
 │  (Activation, Sigmoid, Conv…)    │  all routed through hardware units
 └──────────────┬───────────────────┘
                ↓ Gaussians + Cycle Counts
-        [Optional SAES / FSDR]
+        [Optional SAES / FSGR]
                ↓
         Model Decoder → Rendered Image
 ```
 
-When SAES and FSDR are enabled (default), they sit between Depth Predictor and GGU:
+When SAES and FSGR are enabled (default), they sit between Depth Predictor and GGU:
 
 ```
 ┌──────────────────────────────────┐
@@ -203,7 +203,7 @@ When SAES and FSDR are enabled (default), they sit between Depth Predictor and G
 └──────────────┬───────────────────┘
                ↓
 ┌──────────────────────────────────┐
-│  SCARF FSDR                      │  LSH-based depth cache
+│  SCARF FSGR                      │  LSH-based depth cache
 │  → Reuse cached depth results    │
 └──────────────┬───────────────────┘
 ```
@@ -212,7 +212,7 @@ When SAES and FSDR are enabled (default), they sit between Depth Predictor and G
 
 - [Multi-Model Demo Guide](docs/multi-model-demo-guide.md)
 - [SAES Architecture](docs/saes-architecture.md)
-- [FSDR Architecture](docs/fsdr-architecture.md)
+- [FSGR Architecture](docs/fsgr-architecture.md)
 - [DSU Architecture](docs/dsu-architecture.md)
 - [GGU Architecture](docs/ggu-architecture.md)
 - [Hardware Dataflow Mapping](docs/hardware-dataflow-mapping.md)

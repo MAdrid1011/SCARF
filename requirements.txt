@@ -2,11 +2,10 @@
 # Covers both hardware simulation and software inference.
 # Versions pinned to the tested conda environment (Python 3.10.14, CUDA 12.1).
 # =============================================================================
-
-# --- PyTorch (install via --index-url https://download.pytorch.org/whl/cu121) ---
-torch==2.1.2
-torchvision==0.16.2
-torchaudio==2.1.2
+#
+# NOTE: Do NOT install this file directly with `pip install -r requirements.txt`.
+#       Use `bash install.sh` for one-click installation (handles build ordering).
+# =============================================================================
 
 # --- Core scientific ---
 numpy==1.26.4
@@ -27,7 +26,7 @@ beartype==0.22.9
 opencv-python==4.6.0.66
 scikit-image==0.25.2
 lpips==0.1.4
-mmcv==2.1.0
+colorspacious==1.1.2
 
 # --- 3D / geometry ---
 e3nn==0.5.9
@@ -49,6 +48,3 @@ wandb==0.23.1
 black==25.12.0
 ruff==0.14.10
 pytest==9.0.2
-
-# --- Rasterizer (build from source) ---
-git+https://github.com/dcharatan/diff-gaussian-rasterization-modified

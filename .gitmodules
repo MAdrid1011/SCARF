@@ -1,6 +1,6 @@
 [submodule "transplat"]
 	path = transplat
-	url = https://github.com/MAdrid1011/transplat.git
+	url = https://github.com/xingyoujun/transplat.git
 [submodule "mvsplat"]
 	path = mvsplat
 	url = https://github.com/MAdrid1011/mvsplat.git

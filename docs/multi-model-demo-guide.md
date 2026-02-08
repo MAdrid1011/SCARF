@@ -118,7 +118,7 @@ Each model has optimized SAES thresholds via adapters:
 | MVSplat | 0.85 | 6.0 |
 | DepthSplat | 0.92 | 6.0 |
 
-### FSDR Configurations
+### FSGR Configurations
 
 | Model | Hamming Threshold | High Confidence |
 |-------|------------------|-----------------|
@@ -194,7 +194,7 @@ Early   Continue
 Stop    Tiles
   │       │
   │       ▼
-  │   [FSDR]     ← Depth reuse optimization
+  │   [FSGR]     ← Depth reuse optimization
   │       │
   └───┬───┘
       ▼
@@ -210,5 +210,5 @@ Stop    Tiles
 ## See Also
 
 - [SAES Architecture](saes-architecture.md)
-- [FSDR Architecture](fsdr-architecture.md)
+- [FSGR Architecture](fsgr-architecture.md)
 - [Benchmark Guide](benchmark-guide.md)
