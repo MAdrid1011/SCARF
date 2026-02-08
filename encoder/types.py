@@ -18,6 +18,13 @@ class ActivationType(Enum):
     SOFTPLUS = "softplus"
 
 
+class NormType(Enum):
+    """Supported normalization types."""
+    LAYER = "layer"
+    BATCH = "batch"
+    INSTANCE = "instance"
+    GROUP = "group"
+
 
 @dataclass
 class CycleStats:
@@ -62,22 +69,30 @@ class ResourceEstimate:
 
 @dataclass
 class ConvConfig:
-    """Convolution engine configuration."""
+    """Convolution engine configuration.
+    
+    Base: 32×32 systolic array = 1024 MACs/cycle.
+    Production (48×48 = 2304 MACs) is modeled via HW_SCALE_C=2.0 in compute_ablation.
+    """
     # Systolic array dimensions
-    pe_array_size: int = 32  # 32x32 PE array = 1024 MACs/cycle
+    pe_array_size: int = 32  # 32x32 PE array (1024 MACs/cycle base)
     
     # Supported kernel sizes (extensible for patch embedding etc.)
     supported_kernels: Tuple[int, ...] = (1, 3, 5, 7, 9, 14)
     
     # Memory configuration
-    weight_buffer_kb: int = 64
-    input_buffer_lines: int = 8
+    weight_buffer_kb: int = 128
+    input_buffer_lines: int = 16
 
 
 @dataclass
 class GEMMConfig:
-    """GEMM unit configuration."""
-    # Tile dimensions (systolic array size)
+    """GEMM unit configuration.
+    
+    Base: 32×32 tile = 1024 MACs/cycle.
+    Production (48×48) modeled via HW_SCALE_C=2.0 in compute_ablation.
+    """
+    # Tile dimensions
     tile_m: int = 32
     tile_n: int = 32
     
@@ -86,20 +101,14 @@ class GEMMConfig:
     array_n: int = 32
     
     # Memory
-    buffer_kb: int = 128
+    buffer_kb: int = 64
 
 
 @dataclass
 class BilinearConfig:
     """Bilinear interpolation configuration."""
-    # Parallel channels (how many channels are sampled per cycle)
+    # Parallel channels (32-ch for SCARF BilinearUnit)
     parallel_channels: int = 32
-    
-    # Parallel spatial samplers (how many output pixels are processed per cycle)
-    # Models having multiple bilinear sampling engines operating in parallel.
-    # Each sampler independently computes one output pixel's bilinear interpolation.
-    # Typical values: 1 (minimal), 8 (moderate ASIC), 16 (aggressive ASIC)
-    parallel_samplers: int = 16
     
     # Coordinate precision (fixed-point bits)
     coord_frac_bits: int = 8

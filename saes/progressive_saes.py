@@ -52,24 +52,19 @@ class ProgressiveSAES:
         3. Gaussian similarity check (from S3 probe Gaussians)
     """
 
-    # Probe pixel positions within a 4x4 tile (center quad)
-    PROBE_POSITIONS = [(1, 1), (1, 2), (2, 1), (2, 2)]
-    # Single probe for Level 0 (center pixel)
-    L0_PROBE = (1, 1)
+    # Probe pixel positions within a 4x4 tile (CORNER layout for true bilinear)
+    # Corner probes ensure all 12 non-probe pixels lie INSIDE the convex hull,
+    # enabling genuine bilinear blending rather than nearest-probe assignment.
+    # With center probes (1,1),(1,2),(2,1),(2,2), clamped bilinear degenerates
+    # to nearest-probe for ALL 12 outer pixels — no actual blending occurs.
+    PROBE_POSITIONS = [(0, 0), (0, 3), (3, 0), (3, 3)]
 
-    # Non-probe positions (the 12 pixels to interpolate/replicate)
+    # Non-probe positions (the 12 pixels to interpolate via bilinear blending)
     NON_PROBE_POSITIONS = [
-        (0, 0), (0, 1), (0, 2), (0, 3),
-        (1, 0),                 (1, 3),
-        (2, 0),                 (2, 3),
-        (3, 0), (3, 1), (3, 2), (3, 3),
-    ]
-    # All positions except L0 probe (for Level 0 replication: 15 pixels)
-    L0_OTHER_POSITIONS = [
-        (0, 0), (0, 1), (0, 2), (0, 3),
-        (1, 0),         (1, 2), (1, 3),
+                (0, 1), (0, 2),
+        (1, 0), (1, 1), (1, 2), (1, 3),
         (2, 0), (2, 1), (2, 2), (2, 3),
-        (3, 0), (3, 1), (3, 2), (3, 3),
+                (3, 1), (3, 2),
     ]
 
     def __init__(self, H: int, W: int, initial_tile_size: int = 4,
@@ -102,21 +97,21 @@ class ProgressiveSAES:
         }
 
         # Precompute bilinear weights for all non-probe positions
+        # Corner probes at (0,0),(0,3),(3,0),(3,3): normalized coords ty=py/3, tx=px/3
+        # All non-probe pixels are INSIDE the convex hull → true bilinear blending
         self._interp_weights = {}
         for (py, px) in self.NON_PROBE_POSITIONS:
-            ty = (py - 1.0)
-            tx = (px - 1.0)
-            ty_c = max(0.0, min(1.0, ty))
-            tx_c = max(0.0, min(1.0, tx))
-            w00 = (1.0 - ty_c) * (1.0 - tx_c)
-            w01 = (1.0 - ty_c) * tx_c
-            w10 = ty_c * (1.0 - tx_c)
-            w11 = ty_c * tx_c
+            ty = py / 3.0   # normalized [0, 1] between corners
+            tx = px / 3.0   # normalized [0, 1] between corners
+            w00 = (1.0 - ty) * (1.0 - tx)  # probe (0,0)
+            w01 = (1.0 - ty) * tx           # probe (0,3)
+            w10 = ty * (1.0 - tx)           # probe (3,0)
+            w11 = ty * tx                   # probe (3,3)
             self._interp_weights[(py, px)] = (w00, w01, w10, w11)
 
     @staticmethod
     def classify_tiles_by_features(features, h: int, w: int, tile_size: int,
-                                   threshold: float = 0.02) -> Dict[Tuple[int, int], float]:
+                                   threshold: float = 0.02) -> Tuple[Dict[Tuple[int, int], float], 'torch.Tensor']:
         """
         Classify tiles by feature variance from S1 feature maps.
 
@@ -128,6 +123,7 @@ class ProgressiveSAES:
 
         Returns:
             tile_variances: dict (th, tw) -> feature_variance (float)
+            feat_norm: normalized upsampled features [C, H, W] for FSGI
         """
         # Handle different feature shapes
         if features.dim() == 5:
@@ -135,7 +131,7 @@ class ProgressiveSAES:
         elif features.dim() == 4:
             feat = features     # [V, C, H_feat, W_feat]
         else:
-            return {}
+            return {}, None
 
         # Average over views
         feat = feat.mean(dim=0)  # [C, H_feat, W_feat]
@@ -145,7 +141,7 @@ class ProgressiveSAES:
             feat.unsqueeze(0), size=(h, w), mode='bilinear', align_corners=False
         )[0]  # [C, H, W]
 
-        # Normalize features for variance computation
+        # Normalize features for variance computation AND for FSGI similarity
         feat_norm = feat_up / (feat_up.norm(dim=0, keepdim=True) + 1e-8)
 
         tiles_h = h // tile_size
@@ -164,13 +160,16 @@ class ProgressiveSAES:
                 var_score = channel_std.mean().item()
                 tile_variances[(th, tw)] = var_score
 
-        return tile_variances
+        return tile_variances, feat_norm
 
     @staticmethod
     def check_depth_uniformity(depths, th: int, tw: int, tile_size: int,
                                h: int, w: int, threshold: float = 0.03) -> bool:
         """
         Check if probe pixel depths within a tile are uniform.
+
+        Uses corner probe positions for maximum spatial coverage.
+        If all 4 corners have similar depth, the interior is likely uniform.
 
         Args:
             depths: depth tensor [B, V, H, W] or [B, V, N, 1, 1]
@@ -182,7 +181,8 @@ class ProgressiveSAES:
         Returns:
             True if tile has uniform depth
         """
-        probe_positions = [(1, 1), (1, 2), (2, 1), (2, 2)]
+        # Corner probes — same as PROBE_POSITIONS for consistency
+        probe_positions = [(0, 0), (0, 3), (3, 0), (3, 3)]
         tile_y, tile_x = th * tile_size, tw * tile_size
 
         probe_depths = []
@@ -213,10 +213,15 @@ class ProgressiveSAES:
         return relative_std < threshold
 
     @staticmethod
-    def compute_tile_similarity(gaussians_full, probe_indices: List[int]) -> float:
+    def compute_tile_similarity(gaussians_full, probe_indices: List[int],
+                                include_position: bool = True) -> float:
         """
-        Compute similarity among probe Gaussians for a tile (Level 2 check).
-        Weighted metric: cov(0.3) + SH(0.3) + opacity(0.15) + position(0.25).
+        Compute similarity among probe Gaussians for a tile.
+
+        Weighted metric:
+          With position (L2):  cov(0.30) + SH(0.30) + opacity(0.15) + position(0.25)
+          Without position (L1): cov(0.40) + SH(0.40) + opacity(0.20)
+            (L1 already checks depth uniformity; position term penalizes corner probes)
         """
         n = len(probe_indices)
         if n < 2:
@@ -230,10 +235,11 @@ class ProgressiveSAES:
         harmo = gaussians_full.harmonics[0]
         opacs = gaussians_full.opacities[0]
 
-        probe_means = means[probe_indices]
-        pos_std = probe_means.std(dim=0).mean().item()
-        pos_range = probe_means.abs().max().item() + 1e-8
-        pos_sim = 1.0 - min(pos_std / pos_range, 1.0)
+        if include_position:
+            probe_means = means[probe_indices]
+            pos_std = probe_means.std(dim=0).mean().item()
+            pos_range = probe_means.abs().max().item() + 1e-8
+            pos_sim = 1.0 - min(pos_std / pos_range, 1.0)
 
         for i in range(n):
             for j in range(i + 1, n):
@@ -253,7 +259,11 @@ class ProgressiveSAES:
                 op2 = opacs[idx_j].item() if opacs[idx_j].dim() == 0 else opacs[idx_j].squeeze().item()
                 opacity_sim = 1.0 - min(abs(op1 - op2), 1.0)
 
-                pair_sim = 0.3 * cov_sim + 0.3 * sh_sim + 0.15 * opacity_sim + 0.25 * pos_sim
+                if include_position:
+                    pair_sim = 0.3 * cov_sim + 0.3 * sh_sim + 0.15 * opacity_sim + 0.25 * pos_sim
+                else:
+                    # Appearance-only metric for L1 (depth already validated)
+                    pair_sim = 0.4 * cov_sim + 0.4 * sh_sim + 0.2 * opacity_sim
                 total_sim += pair_sim
                 count += 1
 
@@ -330,18 +340,45 @@ class ProgressiveSAES:
 
     def interpolate_tile(self, gaussians_full, tile_y: int, tile_x: int,
                          probe_indices: List[int],
-                         non_probe_pixel_map: Dict[Tuple[int, int], int]):
+                         non_probe_pixel_map: Dict[Tuple[int, int], int],
+                         level: str = 'bilinear'):
         """
-        Level 1/2: Bilinear interpolation of appearance from 4 probe Gaussians.
-        Positions are kept original. Modifies gaussians_full IN PLACE.
+        Bilinear interpolation of appearance from 4 corner-probe Gaussians.
+        
+        With corner probes at (0,0),(0,3),(3,0),(3,3), all 12 non-probe pixels
+        lie INSIDE the convex hull, enabling genuine bilinear blending.
+        
+        Quality improvements (ASIC-implementable, ~6 extra cycles/tile):
+          1. Adaptive covariance safety: scales with actual probe variance
+          2. SH magnitude preservation: interpolated SH preserves average brightness
+          3. Opacity clamped to probe range: prevents transparency artifacts
+        
+        Positions (means) are kept original. Modifies gaussians_full IN PLACE.
         """
         covs = gaussians_full.covariances
         harmo = gaussians_full.harmonics
         opacs = gaussians_full.opacities
 
-        p_covs = covs[0, probe_indices]
-        p_harmo = harmo[0, probe_indices]
-        p_opacs = opacs[0, probe_indices]
+        p_covs = covs[0, probe_indices]   # [4, ...]
+        p_harmo = harmo[0, probe_indices]  # [4, ...]
+        p_opacs = opacs[0, probe_indices]  # [4, ...]
+
+        # Adaptive covariance safety factor: higher when probes differ more
+        # ASIC: one variance computation per tile (not per pixel)
+        cov_var = p_covs.var(dim=0).mean().item()
+        cov_mean = p_covs.abs().mean().item() + 1e-8
+        cov_safety = 1.0 + min(0.03, 0.5 * cov_var / cov_mean)
+
+        # SH DC magnitude for preservation
+        if p_harmo.dim() >= 2:
+            dc_norms = p_harmo.flatten(1).norm(dim=1)  # [4]
+            avg_dc_norm = dc_norms.mean().item() + 1e-8
+        else:
+            avg_dc_norm = None
+
+        # Opacity range for clamping
+        opac_min = p_opacs.min()
+        opac_max = p_opacs.max()
 
         for (local_y, local_x) in self.NON_PROBE_POSITIONS:
             if (local_y, local_x) not in non_probe_pixel_map:
@@ -350,16 +387,32 @@ class ProgressiveSAES:
             flat_idx = non_probe_pixel_map[(local_y, local_x)]
             w00, w01, w10, w11 = self._interp_weights[(local_y, local_x)]
 
-            covs[0, flat_idx] = (w00 * p_covs[0] + w01 * p_covs[1] +
-                                 w10 * p_covs[2] + w11 * p_covs[3]) * 1.02
-            harmo[0, flat_idx] = (w00 * p_harmo[0] + w01 * p_harmo[1] +
-                                  w10 * p_harmo[2] + w11 * p_harmo[3])
-            opacs[0, flat_idx] = (w00 * p_opacs[0] + w01 * p_opacs[1] +
-                                  w10 * p_opacs[2] + w11 * p_opacs[3])
+            new_cov = (w00 * p_covs[0] + w01 * p_covs[1] +
+                       w10 * p_covs[2] + w11 * p_covs[3]) * cov_safety
+            new_harmo = (w00 * p_harmo[0] + w01 * p_harmo[1] +
+                         w10 * p_harmo[2] + w11 * p_harmo[3])
+            new_opac = (w00 * p_opacs[0] + w01 * p_opacs[1] +
+                        w10 * p_opacs[2] + w11 * p_opacs[3])
+
+            # SH magnitude preservation: rescale to preserve average brightness
+            if avg_dc_norm is not None and new_harmo.dim() >= 1:
+                new_norm = new_harmo.flatten().norm().item() + 1e-8
+                scale = avg_dc_norm / new_norm
+                # Only apply gentle correction (avoid amplifying noise)
+                scale = max(0.9, min(1.1, scale))
+                new_harmo = new_harmo * scale
+
+            # Opacity: clamp to probe range to prevent artifacts
+            new_opac = torch.clamp(new_opac, opac_min, opac_max)
+
+            covs[0, flat_idx] = new_cov
+            harmo[0, flat_idx] = new_harmo
+            opacs[0, flat_idx] = new_opac
 
     def process_all_tiles(self, gaussians_full, gpp: int = 1,
                           tile_variances: Dict = None,
-                          depths=None) -> Tuple[torch.Tensor, Dict]:
+                          depths=None,
+                          feat_norm=None) -> Tuple[torch.Tensor, Dict]:
         """
         Multi-level tile processing (SAES v3).
 
@@ -374,6 +427,10 @@ class ProgressiveSAES:
             gpp: Gaussians per pixel
             tile_variances: dict from classify_tiles_by_features()
             depths: depth tensor for Level 1 check
+            feat_norm: normalized features [C, H, W] — currently unused,
+                       reserved for future FSGI (Feature-Similarity Guided
+                       Interpolation) where interpolation weights are derived
+                       from feature-space distances instead of spatial bilinear.
 
         Returns:
             modified_mask: Boolean mask - True for pixels modified (L0/L1/L2)
@@ -429,7 +486,8 @@ class ProgressiveSAES:
                                         non_probe_map[(ly, lx)] = pix_idx
 
                                 self.interpolate_tile(gaussians_full, tile_y, tile_x,
-                                                      probe_indices, non_probe_map)
+                                                      probe_indices, non_probe_map,
+                                                      level='bilinear')
 
                                 for idx in non_probe_map.values():
                                     modified_mask[idx] = True
@@ -456,11 +514,14 @@ class ProgressiveSAES:
                                 probe_indices.append(pix_idx)
 
                         if len(probe_indices) == 4:
-                            # Secondary check: verify probe Gaussians are actually similar
+                            # Secondary check: verify probe Gaussians are appearance-similar
                             # (depth uniform doesn't guarantee appearance uniform)
+                            # Use appearance-only metric (no position) since corner probes
+                            # are inherently far apart — position already checked via depth
                             probe_sim = self.compute_tile_similarity(
-                                gaussians_full, probe_indices)
-                            if probe_sim < 0.95:
+                                gaussians_full, probe_indices,
+                                include_position=False)
+                            if probe_sim < 0.90:
                                 # Depth is uniform but appearance diverges - skip L1
                                 pass
                             elif not self.probe_cross_check(gaussians_full, probe_indices):
@@ -476,7 +537,8 @@ class ProgressiveSAES:
                                         non_probe_map[(ly, lx)] = pix_idx
 
                                 self.interpolate_tile(gaussians_full, tile_y, tile_x,
-                                                      probe_indices, non_probe_map)
+                                                      probe_indices, non_probe_map,
+                                                      level='bilinear')
 
                                 for idx in non_probe_map.values():
                                     modified_mask[idx] = True
@@ -511,7 +573,8 @@ class ProgressiveSAES:
                                     non_probe_map[(ly, lx)] = pix_idx
 
                             self.interpolate_tile(gaussians_full, tile_y, tile_x,
-                                                  probe_indices, non_probe_map)
+                                                  probe_indices, non_probe_map,
+                                                  level='bilinear')
 
                             for idx in non_probe_map.values():
                                 modified_mask[idx] = True
@@ -581,10 +644,11 @@ def apply_progressive_saes(
         stats: Per-level processing statistics
         continue_pixels: List of (y, x, pixel_idx) for unmodified pixels
     """
-    # Classify tiles by feature variance (Level 0)
+    # Classify tiles by feature variance (Level 0) + get normalized features for FSGI
     tile_variances = None
+    feat_norm = None
     if features is not None and hasattr(features, 'shape'):
-        tile_variances = ProgressiveSAES.classify_tiles_by_features(
+        tile_variances, feat_norm = ProgressiveSAES.classify_tiles_by_features(
             features, H, W, tile_size,
             threshold=feature_var_threshold if feature_var_threshold is not None else 0.012)
 
@@ -596,7 +660,8 @@ def apply_progressive_saes(
     modified_mask, stats = saes.process_all_tiles(
         gaussians_full, gpp,
         tile_variances=tile_variances,
-        depths=depths)
+        depths=depths,
+        feat_norm=feat_norm)
 
     # Collect unmodified pixels (for FSGR)
     continue_pixels = []
