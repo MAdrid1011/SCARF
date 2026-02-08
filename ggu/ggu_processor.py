@@ -12,7 +12,7 @@ Hardware Unit Reuse:
 """
 import torch
 from einops import einsum, rearrange
-from typing import Optional, Tuple, TYPE_CHECKING
+from typing import Any, Optional, Tuple
 import sys
 from pathlib import Path
 
@@ -26,8 +26,6 @@ from .types import GGUConfig, GaussianOutput
 from encoder import GEMMUnit, ActivationUnit, PadUnit
 from encoder.types import ActivationType, CycleStats
 
-if TYPE_CHECKING:
-    from benchmark.cycle_counter import CycleCounter
 
 # Hardware cycle constants for GGU operations (fallback when units not used)
 GGU_CYCLE_CONSTANTS = {
@@ -65,7 +63,7 @@ class GGUProcessor:
         self,
         config: GGUConfig,
         enable_cycle_counting: bool = False,
-        cycle_counter: Optional['CycleCounter'] = None,
+        cycle_counter: Optional[Any] = None,
     ):
         """
         Initialize GGU processor.

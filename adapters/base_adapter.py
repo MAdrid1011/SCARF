@@ -102,16 +102,16 @@ class BaseAdapter(ABC):
         """Return cost type: 'correlation' or 'cost'."""
         return 'correlation'
     
-    def supports_fsdr(self) -> bool:
-        """Whether this model supports FSDR optimization."""
+    def supports_fsgr(self) -> bool:
+        """Whether this model supports FSGR optimization."""
         return True
     
     def supports_saes(self) -> bool:
         """Whether this model supports SAES optimization."""
         return True
     
-    def get_fsdr_config_overrides(self) -> Dict:
-        """Get model-specific FSDR configuration overrides."""
+    def get_fsgr_config_overrides(self) -> Dict:
+        """Get model-specific FSGR configuration overrides."""
         return {}
     
     def get_saes_config_overrides(self) -> Dict:

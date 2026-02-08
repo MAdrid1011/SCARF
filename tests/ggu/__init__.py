@@ -1,1 +1,0 @@
-# GGU test package

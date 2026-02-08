@@ -1,33 +1,25 @@
 """
 SAES: Scene-Adaptive Early-Stopping Dataflow
 
-A hardware simulator for tile-based feedback processing in generalizable 3DGS encoders.
+Multi-level early-stopping for tile-based feedback processing
+in generalizable 3DGS encoders.
+
+Key Component:
+- ProgressiveSAES: Multi-level (L0/L1/L2) early-stopping ASIC model
+
+Example:
+    from saes import ProgressiveSAES, apply_progressive_saes
+
+    saes = ProgressiveSAES(config)
+    result = apply_progressive_saes(saes, gaussians, depths, features)
 """
 
-from .types import (
-    TileConfig,
-    GaussianSimilarityMetrics,
-    TileProcessingResult,
-    SAESProfilingResult,
-    Gaussian,
-)
-from .similarity_evaluator import GaussianSimilarityEvaluator
-from .decision_controller import DecisionController
-from .gaussian_merger import GaussianMerger
-from .profiler import SAESProfiler
-from .tile_processor import TileProcessor
+from .progressive_saes import ProgressiveSAES, apply_progressive_saes
 
 __version__ = "0.1.0"
 
 __all__ = [
-    "TileConfig",
-    "GaussianSimilarityMetrics",
-    "TileProcessingResult",
-    "SAESProfilingResult",
-    "Gaussian",
-    "GaussianSimilarityEvaluator",
-    "DecisionController",
-    "GaussianMerger",
-    "SAESProfiler",
-    "TileProcessor",
+    # Progressive SAES v3 (Multi-Level ASIC model)
+    "ProgressiveSAES",
+    "apply_progressive_saes",
 ]
