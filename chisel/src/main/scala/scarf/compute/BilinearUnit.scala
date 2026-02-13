@@ -91,7 +91,6 @@ class BilinearUnit(
   val numSamplers: Int = ScarfConfig.BilinearChannels,
 ) extends Module {
   val io = IO(new Bundle {
-    val start    = Input(Bool())
     val done     = Output(Bool())
     val busy     = Output(Bool())
 

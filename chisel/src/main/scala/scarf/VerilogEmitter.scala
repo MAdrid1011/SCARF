@@ -17,11 +17,13 @@ object VerilogEmitter extends App {
   println(s"Generating SCARF Verilog to $outputDir/...")
 
   // Generate top-level (includes all sub-modules)
+  // --split-verilog requires -o=<dir> for firtool output directory
   ChiselStage.emitSystemVerilogFile(
     new ScarfTop,
     Array("--target-dir", outputDir),
     Array(
-      "--split-verilog",        // One .sv per module
+      "--split-verilog",
+      s"-o=$outputDir",
       "--lowering-options=disallowLocalVariables",
     ),
   )
