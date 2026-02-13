@@ -54,33 +54,34 @@ class VectorALU(val width: Int = ScarfConfig.VectorALUWidth) extends Module {
     ))
   }
 
-  // Tree reduction for SUM (log2(width) = 6 levels)
-  val sumTree = Wire(Vec(width, UInt(ScarfConfig.AccWidth.W)))
-  for (i <- 0 until width) {
-    sumTree(i) := io.a(i)  // Extend to AccWidth
+  // Generic tree reduction (works for any power-of-2 width)
+  private def treeReduce[T <: Data](
+    elems: Seq[T],
+    op: (T, T) => T,
+  ): T = {
+    require(elems.nonEmpty, "Cannot reduce empty sequence")
+    if (elems.length == 1) elems.head
+    else {
+      val pairs = elems.grouped(2).map {
+        case Seq(a, b) => op(a, b)
+        case Seq(a)    => a  // Odd element passes through
+      }.toSeq
+      treeReduce(pairs, op)
+    }
   }
-  // 6-level binary tree reduction
-  val level1 = VecInit((0 until width / 2).map(i => sumTree(2 * i) + sumTree(2 * i + 1)))
-  val level2 = VecInit((0 until width / 4).map(i => level1(2 * i) + level1(2 * i + 1)))
-  val level3 = VecInit((0 until width / 8).map(i => level2(2 * i) + level2(2 * i + 1)))
-  val level4 = VecInit((0 until width / 16).map(i => level3(2 * i) + level3(2 * i + 1)))
-  val level5 = VecInit((0 until width / 32).map(i => level4(2 * i) + level4(2 * i + 1)))
-  val level6 = level5(0) + level5(1)
+
+  // Tree reduction for SUM
+  val sumElems = (0 until width).map(i => io.a(i).pad(ScarfConfig.AccWidth))
+  val sumResult = treeReduce(sumElems, (a: UInt, b: UInt) => a + b)
 
   // Tree reduction for MAX
-  val maxTree = Wire(Vec(width, UInt(ScarfConfig.DataWidth.W)))
-  for (i <- 0 until width) { maxTree(i) := io.a(i) }
-  val mLev1 = VecInit((0 until width / 2).map(i => Mux(maxTree(2*i) > maxTree(2*i+1), maxTree(2*i), maxTree(2*i+1))))
-  val mLev2 = VecInit((0 until width / 4).map(i => Mux(mLev1(2*i) > mLev1(2*i+1), mLev1(2*i), mLev1(2*i+1))))
-  val mLev3 = VecInit((0 until width / 8).map(i => Mux(mLev2(2*i) > mLev2(2*i+1), mLev2(2*i), mLev2(2*i+1))))
-  val mLev4 = VecInit((0 until width / 16).map(i => Mux(mLev3(2*i) > mLev3(2*i+1), mLev3(2*i), mLev3(2*i+1))))
-  val mLev5 = VecInit((0 until width / 32).map(i => Mux(mLev4(2*i) > mLev4(2*i+1), mLev4(2*i), mLev4(2*i+1))))
-  val maxResult = Mux(mLev5(0) > mLev5(1), mLev5(0), mLev5(1))
+  val maxElems = (0 until width).map(i => io.a(i))
+  val maxResult = treeReduce(maxElems, (a: UInt, b: UInt) => Mux(a > b, a, b))
 
   // Reduction output mux
   val redResult = Wire(UInt(ScarfConfig.AccWidth.W))
   redResult := MuxLookup(io.op, 0.U)(Seq(
-    VectorOp.RED_SUM -> level6,
+    VectorOp.RED_SUM -> sumResult,
     VectorOp.RED_MAX -> maxResult,
   ))
 
