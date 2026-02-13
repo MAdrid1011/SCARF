@@ -174,4 +174,24 @@ class VerilogEmitTest extends AnyFlatSpec with ChiselScalatestTester {
       dut.clock.step(1)
     }
   }
+
+  // ---- FSGR Modules ----
+
+  it should "elaborate LSHHashUnit" in {
+    test(new scarf.compute.LSHHashUnit(lshDim = 4, featureDim = 16)) { dut =>
+      dut.clock.step(1)
+    }
+  }
+
+  it should "elaborate FSGRCache (16 entries)" in {
+    test(new scarf.memory.FSGRCache(numEntries = 16, sigWidth = 4)) { dut =>
+      dut.clock.step(1)
+    }
+  }
+
+  it should "elaborate FSGRController" in {
+    test(new scarf.control.FSGRController) { dut =>
+      dut.clock.step(1)
+    }
+  }
 }

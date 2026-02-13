@@ -79,6 +79,11 @@ class ScarfTop extends Module {
   val configRegs = Module(new ConfigRegs)
   val pipeline   = Module(new PipelineController)
   val saesCtrl   = Module(new SAESController)
+  val fsgrCtrl   = Module(new FSGRController)
+
+  // FSGR hardware (LSH hashing + semantic cache)
+  val lshHash    = Module(new scarf.compute.LSHHashUnit(lshDim = 16, featureDim = 128))
+  val fsgrCache  = Module(new scarf.memory.FSGRCache(numEntries = 512, sigWidth = 16))
 
   // Compute units (shared, time-multiplexed)
   val convEngine = Module(new ConvEngine(ScarfConfig.PEArraySize))
@@ -141,6 +146,39 @@ class ScarfTop extends Module {
   saesCtrl.io.probeFeatureVar := 0.U
   saesCtrl.io.probeDepthStd   := 0.U
   saesCtrl.io.crossCheckError := 0.U
+
+  // ════════════════════════════════════════════════════════
+  // FSGR Controller + LSH Hash + Cache wiring
+  // ════════════════════════════════════════════════════════
+  fsgrCtrl.io.start       := pipeline.io.fsgrStart
+  fsgrCtrl.io.config      := configRegs.io.config
+  pipeline.io.fsgrDone    := fsgrCtrl.io.done
+  pipeline.io.fsgrUseNarrow := fsgrCtrl.io.useNarrowSearch
+  pipeline.io.fsgrNarrowCands := fsgrCtrl.io.narrowCandidates
+
+  // FSGRController ↔ LSH Hash Unit
+  lshHash.io.start := fsgrCtrl.io.hashStart
+  fsgrCtrl.io.hashDone   := lshHash.io.done
+  fsgrCtrl.io.hashResult := lshHash.io.signature
+  // LSH input features (placeholder — connected to FeatureBuffer in real design)
+  for (i <- 0 until 128) { lshHash.io.featureIn(i) := 0.U }
+
+  // FSGRController ↔ FSGR Cache
+  fsgrCache.io.lookupEn      := fsgrCtrl.io.cacheLookupEn
+  fsgrCache.io.lookupSig     := fsgrCtrl.io.cacheLookupSig
+  fsgrCache.io.hammingThresh := configRegs.io.config.fsgrHammingThresh
+  fsgrCtrl.io.cacheHit       := fsgrCache.io.hit
+  fsgrCtrl.io.cacheHitDepth  := fsgrCache.io.hitDepth
+
+  fsgrCache.io.insertEn      := fsgrCtrl.io.cacheInsertEn
+  fsgrCache.io.insertSig     := fsgrCtrl.io.cacheInsertSig
+  fsgrCache.io.insertDepth   := fsgrCtrl.io.cacheInsertDepth
+  fsgrCache.io.insertPixelX  := 0.U  // Connected to pixel counter in real design
+  fsgrCache.io.insertPixelY  := 0.U
+
+  // FSGR computed depth input (from S2 regression output)
+  fsgrCtrl.io.computedDepth  := 0.U  // Connected to TileSPM depth output in real design
+  fsgrCtrl.io.totalPixels    := configRegs.io.config.tileSize * configRegs.io.config.tileSize
 
   // ════════════════════════════════════════════════════════
   // Compute unit parameter wiring (from ConfigRegs)

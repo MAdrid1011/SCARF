@@ -23,7 +23,8 @@ chisel/
 │   │   │   ├── VectorALU.scala      # ← encoder/softmax_unit.py (部分)
 │   │   │   ├── SoftmaxUnit.scala    # ← encoder/softmax_unit.py
 │   │   │   ├── PoolingUnit.scala    # ← encoder/pooling_unit.py
-│   │   │   └── PadUnit.scala        # ← encoder/pad_unit.py
+│   │   │   ├── PadUnit.scala        # ← encoder/pad_unit.py
+│   │   │   └── LSHHashUnit.scala    # ← fsgr/lsh_hasher.py
 │   │   ├── ggu/                     # 高斯生成单元 (对应 ggu/)
 │   │   │   ├── GGUArray.scala       # ← ggu/ggu_processor.py
 │   │   │   ├── PositionCalc.scala   # ← ggu/position_calculator.py
@@ -33,12 +34,12 @@ chisel/
 │   │   │   ├── WeightBuffer.scala   # 128 KB 权重 SRAM
 │   │   │   ├── FeatureBuffer.scala  # 256 KB 特征双端口 SRAM
 │   │   │   ├── TileSPM.scala        # 64 KB scratchpad
-│   │   │   └── DRAMInterface.scala  # AXI4 接口
+│   │   │   ├── DRAMInterface.scala  # AXI4 接口
+│   │   │   └── FSGRCache.scala      # ← fsgr/cache_table.py (512 条目 CAM)
 │   │   └── control/                 # 控制器 (对应 depth_predictor/hw_depth_predictor.py)
-│   │       ├── PipelineController.scala  # 顶层 FSM
-│   │       ├── S1Controller.scala        # S1 阶段控制
-│   │       ├── S2S3Controller.scala      # 融合 S2+S3 tile 控制
+│   │       ├── PipelineController.scala  # 顶层 FSM (18 状态)
 │   │       ├── SAESController.scala      # SAES 早退 FSM
+│   │       ├── FSGRController.scala      # ← fsgr/narrowed_search_simulator.py
 │   │       └── ConfigRegs.scala          # MMIO 配置寄存器
 │   └── test/scala/scarf/           # 测试
 │       ├── TestUtils.scala          # 公共测试工具

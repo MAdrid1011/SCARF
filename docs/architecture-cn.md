@@ -342,15 +342,49 @@ SAESController 在每个 tile 进入 S2S3_TILE_LOOP 前执行分类：
 
 FSGR (Feature-Similarity Gaussian Reuse) 利用相邻像素间的特征相似性，对 Cost Volume 计算进行窄化搜索优化。
 
-### 6.2 LSH Cache
+### 6.2 硬件实现
 
-FSGR 在硬件中维护一个 512 条目的 LSH (Locality-Sensitive Hashing) cache，存储已计算像素的特征哈希与对应深度值。新像素计算 Cost Volume 前，先查询 cache：
-- **命中 (Tier 1)**：直接复用缓存深度，跳过 100% 的 Cost Volume
-- **部分命中 (Tier 2)**：窄化深度搜索范围 (从 128 候选缩减到 8-32)
+FSGR 硬件由三个专用模块组成：
 
-### 6.3 与 SAES 的协同
+**LSHHashUnit** (对应 `fsgr/lsh_hasher.py`)：
+- K=16 个随机超平面投影（存储在片上 ROM 中，16 × 128 × 16bit = 4 KB）
+- 并行点积计算，利用 VectorALU 的 64-wide SIMD（128 维特征需 2 cycle）
+- 符号位提取 + 打包为 16-bit 签名（组合逻辑，0 cycle）
+- 总延迟：3 cycles/签名
 
-FSGR 作用于 SAES 分类为"Full"的 tile（即未命中任何早退级别的 tile），进一步减少这些 tile 的 Cost Volume 计算量。两者组合可实现最高 67% 的 S2+S3 融合块节省。
+**FSGRCache** (对应 `fsgr/cache_table.py`)：
+- 512 条目的语义索引缓存（每条目：valid[1] + signature[16] + depth[16] + pixel[20] + LRU[8] = 61 bits）
+- **并行 Hamming 距离计算**：512 个 XOR + popcount 单元同时比较（组合逻辑）
+- **最小值选择树**：log₂(512) = 9 级比较器树，1 cycle 选出最佳匹配
+- **LRU 替换策略**：树形归约找到最老条目，避免组合环路
+- 查找延迟：1 cycle，插入延迟：1 cycle
+- 面积：~300 LUTs + 4 KB SRAM
+
+**FSGRController** (对应 `fsgr/narrowed_search_simulator.py`)：
+- 9 状态 FSM：IDLE → HASH → LOOKUP → DECIDE → NARROW/FULL → INSERT → NEXT_PIXEL → DONE
+- 逐像素处理：对 tile 中每个像素，先查缓存再决定搜索范围
+- 命中时窄化 Cost Volume 从 D 个候选缩减到 D/4（如 128 → 32）
+- 未命中时执行完整搜索，并将结果插入缓存
+
+### 6.3 流水线集成
+
+FSGR 在 PipelineController 的 `S2_FSGRLookup` 状态中执行，位于 SAES 分类之后、CostVol 之前：
+
+```
+S2S3_SAESClassify
+  │
+  ├─ [L0/L1/L2] → ProbeOnly (跳过 S2+S3)
+  │
+  └─ [Full] → S2_FSGRLookup (FSGR 查缓存)
+                │
+                ├─ [命中] → CostVol (D/4 候选, 窄化搜索)
+                │
+                └─ [未命中] → CostVol (D 候选, 完整搜索) → 插入缓存
+```
+
+### 6.4 与 SAES 的协同
+
+FSGR 仅作用于 SAES 分类为"Full"的 tile（即未命中任何早退级别的 tile），进一步减少这些 tile 的 Cost Volume 计算量。两者组合可实现最高 67% 的 S2+S3 融合块节省。
 
 ---
 
@@ -495,7 +529,11 @@ GGU 处理与 S3 ConvEngine 工作完全并行——当 ConvEngine 生成当前 
 | `ggu/position_calculator.py` | `scarf.ggu.PositionCalc` | Depth→3D |
 | `ggu/covariance_builder.py` | `scarf.ggu.CovBuilder` | Quat→Cov |
 | `ggu/sh_rotator.py` | `scarf.ggu.SHRotator` | SH rotation |
-| `depth_predictor/hw_depth_predictor.py` | `scarf.control.PipelineController` | 顶层 FSM |
+| `depth_predictor/hw_depth_predictor.py` | `scarf.control.PipelineController` | 顶层 FSM (18 状态) |
+| `fsgr/lsh_hasher.py` | `scarf.compute.LSHHashUnit` | LSH 哈希签名生成 |
+| `fsgr/cache_table.py` | `scarf.memory.FSGRCache` | 512 条目语义缓存 (CAM) |
+| `fsgr/narrowed_search_simulator.py` | `scarf.control.FSGRController` | 窄化搜索 FSM |
+| `encoder/deformable_attention_unit.py` | BilinearUnit + VectorALU (组合) | 可变形注意力 = 采样 + 加权求和 |
 | — | `scarf.control.ConfigRegs` | MMIO 寄存器 (新增) |
 | — | `scarf.ScarfTop` | 顶层集成 (新增) |
 

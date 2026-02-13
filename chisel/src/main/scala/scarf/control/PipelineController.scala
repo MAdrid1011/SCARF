@@ -43,6 +43,15 @@ class PipelineController extends Module {
     val saesClassifyDone = Input(Bool())
     val saesClassifyStart = Output(Bool())
 
+    // FSGR control (from FSGRController)
+    val fsgrStart         = Output(Bool())
+    val fsgrDone          = Input(Bool())
+    val fsgrUseNarrow     = Input(Bool())        // True = narrowed CostVol search
+    val fsgrNarrowCands   = Input(UInt(8.W))     // D/4 candidates
+
+    // Depth candidate count for CostVol (full or narrowed)
+    val costVolCandidates = Output(UInt(8.W))    // Effective candidate count
+
     // Tile tracking
     val currentTileRow  = Output(UInt(8.W))
     val currentTileCol  = Output(UInt(8.W))
@@ -93,6 +102,11 @@ class PipelineController extends Module {
   io.bilinearStart     := false.B
   io.gguStart          := false.B
   io.saesClassifyStart := false.B
+  io.fsgrStart         := false.B
+  // CostVol candidate count: full or narrowed depending on FSGR result
+  io.costVolCandidates := Mux(io.fsgrUseNarrow,
+    io.fsgrNarrowCands,
+    io.config.numDepthCandidates)
 
   switch(state) {
     // ──── IDLE: Wait for start signal ────
@@ -165,9 +179,22 @@ class PipelineController extends Module {
         saesResult := io.saesLevel
         state := Mux(
           io.saesLevel === SAESLevel.sFull,
-          PipeState.sS2_CostVol,
+          // Full tiles go through FSGR (if enabled) before CostVol
+          Mux(io.config.fsgrEnabled, PipeState.sS2_FSGRLookup, PipeState.sS2_CostVol),
           PipeState.sS2S3_ProbeOnly,
         )
+      }
+    }
+
+    // ──── FSGR: Hash + cache lookup before CostVol ────
+    // For each pixel in the tile: compute LSH hash → query cache
+    // Hit → narrow CostVol to D/4 candidates, Miss → full D candidates
+    // FSGRController handles the per-pixel loop internally
+    is(PipeState.sS2_FSGRLookup) {
+      io.fsgrStart := stateEntry
+      when(io.fsgrDone) {
+        state := PipeState.sS2_CostVol
+        // io.costVolCandidates is already set by fsgrUseNarrow mux
       }
     }
 

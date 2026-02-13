@@ -12,6 +12,7 @@ object PipeState extends ChiselEnum {
   val sIdle, sLoadConfig,
       sS1_CNN, sS1_Transformer, sS1_DINOv2,
       sS2S3_TileLoad, sS2S3_SAESClassify,
+      sS2_FSGRLookup,   // FSGR: hash + cache lookup before CostVol
       sS2_CostVol, sS2_UNet, sS2_DepthHead, sS2_Regression,
       sS3_Refine, sS3_GaussHead,
       sS2S3_ProbeOnly,  // Lightweight probe path for SAES-skipped tiles
