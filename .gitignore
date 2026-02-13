@@ -216,5 +216,10 @@ chisel/generated/
 
 # Vendored / cached model weights (torch.hub downloads)
 hub/
+
+# Scala/Chisel build tools
 .metals/
+.bloop/
+project/metals.sbt
+project/.bloop/
 .vscode/
