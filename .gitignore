@@ -210,6 +210,10 @@ __marimo__/
 outputs/
 .milestones/
 
+# Generated Verilog files (Chisel output)
+generated/
+chisel/generated/
+
 # Vendored / cached model weights (torch.hub downloads)
 hub/
 .metals/
