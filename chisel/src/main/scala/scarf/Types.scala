@@ -66,7 +66,7 @@ class DataPacket(val dataWidth: Int = ScarfConfig.DataWidth) extends Bundle {
 /** Feature map metadata (accompanies feature data in FeatureBuffer). */
 class FeatureMapMeta extends Bundle {
   val height   = UInt(10.W)
-  val width    = UInt(10.W)
+  val fmWidth  = UInt(10.W)   // "width" is reserved in Chisel Bundle
   val channels = UInt(8.W)
   val baseAddr = UInt(ScarfConfig.AddrWidth.W)
 }
