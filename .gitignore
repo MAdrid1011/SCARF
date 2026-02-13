@@ -212,3 +212,5 @@ outputs/
 
 # Vendored / cached model weights (torch.hub downloads)
 hub/
+.metals/
+.vscode/
