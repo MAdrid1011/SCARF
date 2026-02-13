@@ -81,10 +81,17 @@ class PipelineController extends Module {
   io.totalTileRows  := numTileRows
   io.totalTileCols  := numTileCols
 
-  io.convEngineStart  := false.B
-  io.gemmStart        := false.B
-  io.bilinearStart    := false.B
-  io.gguStart         := false.B
+  // ── Edge-sensitive start pulse logic ──
+  // Each compute unit receives a 1-cycle start pulse when entering
+  // its state, preventing spurious re-triggering when the unit
+  // returns to idle while the controller is still in the same state.
+  val prevState = RegNext(state, PipeState.sIdle)
+  val stateEntry = state =/= prevState  // True on first cycle of new state
+
+  io.convEngineStart   := false.B
+  io.gemmStart         := false.B
+  io.bilinearStart     := false.B
+  io.gguStart          := false.B
   io.saesClassifyStart := false.B
 
   switch(state) {
@@ -107,26 +114,29 @@ class PipelineController extends Module {
     // ──── S1: Feature Extraction — CNN backbone ────
     // ConvEngine processes all CNN layers sequentially
     is(PipeState.sS1_CNN) {
-      io.convEngineStart := true.B
+      io.convEngineStart := stateEntry  // 1-cycle pulse on state entry
       when(io.convEngineDone) {
         cnnLayer := cnnLayer + 1.U
         when(cnnLayer >= io.config.cnnLayers - 1.U) {
           state  := PipeState.sS1_Transformer
           txLayer := 0.U
+        }.otherwise {
+          // Re-trigger for next layer: transition to self forces stateEntry
+          state := PipeState.sS1_CNN
         }
-        // else: stay in sS1_CNN for next layer
       }
     }
 
     // ──── S1: Feature Extraction — Transformer encoder ────
     // GEMM Unit processes QKV projections + attention
     is(PipeState.sS1_Transformer) {
-      io.gemmStart := true.B
+      io.gemmStart := stateEntry  // 1-cycle pulse
       when(io.gemmDone) {
         txLayer := txLayer + 1.U
         when(txLayer >= io.config.transformerLayers - 1.U) {
-          // Check if DINOv2 branch needed (DepthSplat only)
           state := Mux(io.config.hasDINOv2, PipeState.sS1_DINOv2, PipeState.sS2S3_TileLoad)
+        }.otherwise {
+          state := PipeState.sS1_Transformer  // Re-trigger for next layer
         }
       }
     }
@@ -135,7 +145,7 @@ class PipelineController extends Module {
     // Uses GEMM Unit for ViT self-attention layers
     // Controlled by hasDINOv2 config — NOT a model-specific branch
     is(PipeState.sS1_DINOv2) {
-      io.gemmStart := true.B
+      io.gemmStart := stateEntry
       when(io.gemmDone) {
         state := PipeState.sS2S3_TileLoad
       }
@@ -150,22 +160,21 @@ class PipelineController extends Module {
 
     // ──── SAES: Classify tile (L0/L1/L2/Full) ────
     is(PipeState.sS2S3_SAESClassify) {
-      io.saesClassifyStart := true.B
+      io.saesClassifyStart := stateEntry
       when(io.saesClassifyDone) {
         saesResult := io.saesLevel
-        // Route based on classification
         state := Mux(
           io.saesLevel === SAESLevel.sFull,
-          PipeState.sS2_CostVol,       // Full: run complete S2+S3
-          PipeState.sS2S3_ProbeOnly,   // L0/L1/L2: lightweight probe path
+          PipeState.sS2_CostVol,
+          PipeState.sS2S3_ProbeOnly,
         )
       }
     }
 
     // ──── S2: Cost Volume (BilinearUnit + ConvEngine) ────
     is(PipeState.sS2_CostVol) {
-      io.bilinearStart := true.B
-      io.convEngineStart := true.B  // Correlation computation
+      io.bilinearStart   := stateEntry
+      io.convEngineStart := stateEntry
       when(io.bilinearDone && io.convEngineDone) {
         state := PipeState.sS2_UNet
       }
@@ -173,7 +182,7 @@ class PipelineController extends Module {
 
     // ──── S2: U-Net refinement (ConvEngine) ────
     is(PipeState.sS2_UNet) {
-      io.convEngineStart := true.B
+      io.convEngineStart := stateEntry
       when(io.convEngineDone) {
         state := PipeState.sS2_DepthHead
       }
@@ -181,7 +190,7 @@ class PipelineController extends Module {
 
     // ──── S2: Depth Head (ConvEngine 1×1 conv) ────
     is(PipeState.sS2_DepthHead) {
-      io.convEngineStart := true.B
+      io.convEngineStart := stateEntry
       when(io.convEngineDone) {
         state := PipeState.sS2_Regression
       }
@@ -189,7 +198,7 @@ class PipelineController extends Module {
 
     // ──── S2: Depth Regression (GEMM + VectorALU softmax) ────
     is(PipeState.sS2_Regression) {
-      io.gemmStart := true.B
+      io.gemmStart := stateEntry
       when(io.gemmDone) {
         state := PipeState.sS3_Refine
       }
@@ -197,7 +206,7 @@ class PipelineController extends Module {
 
     // ──── S3: Refine U-Net (ConvEngine) ────
     is(PipeState.sS3_Refine) {
-      io.convEngineStart := true.B
+      io.convEngineStart := stateEntry
       when(io.convEngineDone) {
         state := PipeState.sS3_GaussHead
       }
@@ -205,16 +214,15 @@ class PipelineController extends Module {
 
     // ──── S3: Gaussian Head (ConvEngine 1×1 conv) ────
     is(PipeState.sS3_GaussHead) {
-      io.convEngineStart := true.B
+      io.convEngineStart := stateEntry
       when(io.convEngineDone) {
         state := PipeState.sGGU
       }
     }
 
     // ──── Lightweight Probe Path (SAES L0/L1/L2) ────
-    // Only 4 corner probes run CostVol+SoftArgmax, skip UNet
     is(PipeState.sS2S3_ProbeOnly) {
-      io.bilinearStart := true.B  // CostVol for 4 probes only
+      io.bilinearStart := stateEntry
       when(io.bilinearDone) {
         state := PipeState.sGGU
       }
@@ -222,7 +230,7 @@ class PipelineController extends Module {
 
     // ──── GGU: Gaussian post-processing (32 PEs) ────
     is(PipeState.sGGU) {
-      io.gguStart := true.B
+      io.gguStart := stateEntry
       when(io.gguDone) {
         state := PipeState.sS2S3_NextTile
       }

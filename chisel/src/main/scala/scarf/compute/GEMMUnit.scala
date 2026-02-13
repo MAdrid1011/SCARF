@@ -87,7 +87,7 @@ class OutputStationaryArray(val size: Int = ScarfConfig.PEArraySize) extends Mod
 // ============================================================
 
 object GEMMState extends ChiselEnum {
-  val sIdle, sLoadTile, sCompute, sWriteBack, sDone = Value
+  val sIdle, sCompute, sWriteBack, sDone = Value
 }
 
 /**

@@ -42,15 +42,9 @@ chisel/
 │   │       └── ConfigRegs.scala          # MMIO 配置寄存器
 │   └── test/scala/scarf/           # 测试
 │       ├── TestUtils.scala          # 公共测试工具
-│       ├── ConvEngineTest.scala
-│       ├── GEMMUnitTest.scala
-│       ├── BilinearUnitTest.scala
-│       ├── ActivationUnitTest.scala
-│       ├── NormUnitTest.scala
-│       ├── VectorALUTest.scala
-│       ├── GGUArrayTest.scala
-│       ├── PipelineControllerTest.scala
-│       └── VerilogEmitTest.scala
+│       ├── ConvEngineTest.scala     # PE, SystolicArray, ConvEngine FSM
+│       ├── GEMMUnitTest.scala       # OSPE, OutputStationaryArray, GEMMUnit FSM
+│       └── VerilogEmitTest.scala    # 全模块 elaboration 烟雾测试 (26 modules)
 ├── generated/                       # 生成的 Verilog 文件
 └── README.md                        # 本文件
 ```

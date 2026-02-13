@@ -33,7 +33,7 @@ class WeightBuffer(
 
   val mem = SyncReadMem(numWords, UInt(wordWidth.W))
 
-  io.rdData := DontCare
+  io.rdData := 0.U
   when(io.wrEn) {
     mem.write(io.wrAddr, io.wrData)
   }

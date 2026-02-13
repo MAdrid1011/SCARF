@@ -43,29 +43,31 @@ class FeatureBuffer(
   val bank1 = SyncReadMem(bankSize, UInt(wordWidth.W))
 
   // Address mapping with bank swap
-  val addrA_bank = Mux(io.bankSwap, io.addrA % bankSize.U, io.addrA % bankSize.U)
-  val addrB_bank = Mux(io.bankSwap, io.addrB % bankSize.U, io.addrB % bankSize.U)
-  val selA = Mux(io.bankSwap, io.addrA >= bankSize.U, io.addrA < bankSize.U)
-  val selB = Mux(io.bankSwap, io.addrB >= bankSize.U, io.addrB < bankSize.U)
+  // Normal mode:  Port A → bank0, Port B → bank1
+  // Swapped mode: Port A → bank1, Port B → bank0
+  val addrA_bank = io.addrA % bankSize.U
+  val addrB_bank = io.addrB % bankSize.U
+  val selA_bank0 = !io.bankSwap  // Port A uses bank0 when NOT swapped
+  val selB_bank0 = io.bankSwap   // Port B uses bank0 when swapped
 
-  io.doutA := DontCare
-  io.doutB := DontCare
+  io.doutA := 0.U
+  io.doutB := 0.U
 
   // Port A
   when(io.wenA) {
-    when(selA) { bank0.write(addrA_bank, io.dinA) }
-      .otherwise { bank1.write(addrA_bank, io.dinA) }
+    when(selA_bank0) { bank0.write(addrA_bank, io.dinA) }
+      .otherwise     { bank1.write(addrA_bank, io.dinA) }
   }
   when(io.renA) {
-    io.doutA := Mux(selA, bank0.read(addrA_bank), bank1.read(addrA_bank))
+    io.doutA := Mux(selA_bank0, bank0.read(addrA_bank), bank1.read(addrA_bank))
   }
 
   // Port B
   when(io.wenB) {
-    when(selB) { bank0.write(addrB_bank, io.dinB) }
-      .otherwise { bank1.write(addrB_bank, io.dinB) }
+    when(selB_bank0) { bank0.write(addrB_bank, io.dinB) }
+      .otherwise     { bank1.write(addrB_bank, io.dinB) }
   }
   when(io.renB) {
-    io.doutB := Mux(selB, bank0.read(addrB_bank), bank1.read(addrB_bank))
+    io.doutB := Mux(selB_bank0, bank0.read(addrB_bank), bank1.read(addrB_bank))
   }
 }

@@ -34,6 +34,8 @@ class CovBuilder extends Module {
 
     // Output: upper triangle of 3×3 symmetric covariance (FP32)
     val cov = Output(Vec(6, UInt(ScarfConfig.AccWidth.W)))
+    // Output: rotation matrix R (3×3, row-major FP32) for SHRotator
+    val rotMatrix = Output(Vec(9, UInt(ScarfConfig.AccWidth.W)))
   })
 
   val sIdle :: sNormQuat :: sQuatToRot :: sBuildCov :: sDone :: Nil = Enum(5)
@@ -46,8 +48,9 @@ class CovBuilder extends Module {
   // Covariance output
   val covReg = RegInit(VecInit(Seq.fill(6)(0.U(ScarfConfig.AccWidth.W))))
 
-  io.done := state === sDone
-  io.cov  := covReg
+  io.done      := state === sDone
+  io.cov       := covReg
+  io.rotMatrix := R
 
   switch(state) {
     is(sIdle) {

@@ -79,11 +79,8 @@ class GGUPE extends Module {
   covBld.io.scaleZ := io.scaleZ
   covBld.io.start  := state === sCovariance
 
-  shRot.io.rotMatrix := covBld.io.cov.take(9).padTo(9, 0.U(ScarfConfig.AccWidth.W))
-  // Use identity rotation placeholder for SH (real rotation matrix comes from CovBuilder)
-  for (i <- 0 until 9) {
-    shRot.io.rotMatrix(i) := Mux(i.U < 9.U, covBld.io.cov(i % 6), 0.U)
-  }
+  // Wire CovBuilder's rotation matrix directly to SHRotator
+  shRot.io.rotMatrix := covBld.io.rotMatrix
   shRot.io.shIn     := io.shIn
   shRot.io.shDegree := io.shDegree
   shRot.io.start    := state === sSHRotation

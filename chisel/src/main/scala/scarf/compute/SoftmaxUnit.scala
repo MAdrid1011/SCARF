@@ -16,7 +16,7 @@ import scarf.ScarfConfig
  * Uses VectorALU for exp computation and reduction.
  */
 object SoftmaxState extends ChiselEnum {
-  val sIdle, sExpSum, sNormalize, sRegress, sDone = Value
+  val sIdle, sExpSum, sRegress, sDone = Value
 }
 
 class SoftmaxUnit extends Module {
