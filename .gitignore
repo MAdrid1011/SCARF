@@ -216,6 +216,7 @@ chisel/generated/
 
 # Vendored / cached model weights (torch.hub downloads)
 hub/
+DesignPicture/
 
 # Scala/Chisel build tools
 .metals/

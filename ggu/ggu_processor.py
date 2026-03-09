@@ -96,11 +96,32 @@ class GGUProcessor:
         self.gemm_unit.reset_cycles()
         self.sigmoid_unit.reset_cycles()
     
-    def get_hardware_cycles(self) -> dict:
-        """Get breakdown of hardware cycles from base units."""
+    def get_hardware_cycles(self, sh_degree: int = None) -> dict:
+        """
+        Get breakdown of hardware cycles from base units.
+
+        Includes compact_writeback_cycles modelling the bandwidth savings from
+        Stage 4's compact output format (Dataflow spec §Stage 4):
+          - Covariance: only 6 upper-triangle elements written (vs. 9 full).
+          - SH: only (sh_degree+1)² × 3 effective coefficients written.
+        Compact writeback is a 1 cycle per saved float model (write-bus limited).
+        """
+        if sh_degree is None:
+            sh_degree = self.config.sh_degree
+
+        cov_floats_saved = 3                               # 9→6 upper-triangle
+        sh_full = 25 * 3                                   # degree-4 full (75 floats)
+        sh_eff  = (sh_degree + 1) ** 2 * 3                # effective SH floats
+        sh_floats_saved = max(0, sh_full - sh_eff)
+        # compact_writeback_cycles: saved cycles per gaussian × number computed
+        # (number of gaussians estimated from GEMM cycles / cycles per gaussian)
+        est_gaussians = max(1, self._gemm_cycles // max(1, sum(GGU_CYCLE_CONSTANTS.values())))
+        compact_writeback_cycles = (cov_floats_saved + sh_floats_saved) * est_gaussians
+
         return {
             'gemm_cycles': self._gemm_cycles,
             'activation_cycles': self._activation_cycles,
+            'compact_writeback_cycles': compact_writeback_cycles,
             'total_cycles': self._gemm_cycles + self._activation_cycles,
         }
     
