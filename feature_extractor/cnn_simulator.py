@@ -252,34 +252,48 @@ class CNNEncoderSimulator:
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, int]:
         """
         Forward pass matching CNNEncoder exactly.
-        
+
         Returns:
             features: Output features
-            total_cycles: Hardware cycle count
+            total_cycles: Hardware cycle count (includes tile-layout writeback)
         """
         total_cycles = 0
-        
+
         # Conv1 + Norm + ReLU
         x, cycles = self.conv1_sim.forward(x)
         total_cycles += cycles
-        
+
         # Layer 1
         for block in self.layer1:
             x, cycles = block.forward(x)
             total_cycles += cycles
-        
+
         # Layer 2
         for block in self.layer2:
             x, cycles = block.forward(x)
             total_cycles += cycles
-        
+
         # Layer 3
         for block in self.layer3:
             x, cycles = block.forward(x)
             total_cycles += cycles
-        
+
         # Final 1x1 conv (with bias) — ConvEngine
         out, conv_cycles = self.conv_engine.forward(x, self.conv2_weight, self.conv2_bias)
         total_cycles += conv_cycles.total_cycles
-        
+
+        # --- S1 Tile-Layout Writeback (Dataflow spec §Stage 1) ---
+        # After feature extraction, the feature map is reorganised in SRAM so that
+        # cross-view features belonging to the same spatial tile are laid out
+        # contiguously (tile-aligned writeback).  This removes the need for S2 to
+        # scatter-gather across views and is the key Stage 1 innovation.
+        #
+        # Cost model: each element in the output [B, C, H_out, W_out] is read once
+        # and written once to the rearranged SRAM layout.  Two accesses per element,
+        # one element per cycle (simple DMA-like rearrangement, no compute).
+        #   writeback_cycles ≈ 2 × H_out × W_out × C
+        _, C_out, H_out, W_out = out.shape
+        tile_layout_writeback_cycles = 2 * H_out * W_out * C_out
+        total_cycles += tile_layout_writeback_cycles
+
         return out, total_cycles

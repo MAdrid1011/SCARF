@@ -132,6 +132,12 @@ class GGUPE extends Module {
  *   131,072 / 32 = 4,096 batches × ~187 cycles = ~766K cycles.
  *
  * The array runs in parallel with S3 ConvEngine work (hidden behind pipeline).
+ *
+ * SH data path: each PE receives its own 75-coefficient SH input (up to 25
+ * coefficients × 3 colour channels for degree-4 SH) and produces a rotated
+ * SH output via the GGUPE → SHRotator sub-pipeline.  The SH coefficients are
+ * provided per-PE because each Gaussian has independent raw SH values from
+ * the S3 neural-network head.
  */
 class GGUArray(val numPEs: Int = ScarfConfig.GGUPECount) extends Module {
   val io = IO(new Bundle {
@@ -147,6 +153,8 @@ class GGUArray(val numPEs: Int = ScarfConfig.GGUPECount) extends Module {
     val quatY     = Input(Vec(numPEs, UInt(ScarfConfig.DataWidth.W)))
     val quatZ     = Input(Vec(numPEs, UInt(ScarfConfig.DataWidth.W)))
     val opacityIn = Input(Vec(numPEs, UInt(ScarfConfig.DataWidth.W)))
+    // Per-PE SH input: 75 FP16 coefficients (25 coeffs × 3 channels, degree 4)
+    val shIn      = Input(Vec(numPEs, Vec(75, UInt(ScarfConfig.DataWidth.W))))
     val shDegree  = Input(UInt(3.W))
 
     // Shared camera parameters
@@ -162,11 +170,13 @@ class GGUArray(val numPEs: Int = ScarfConfig.GGUPECount) extends Module {
     val busy  = Output(Bool())
 
     // Per-PE outputs
-    val posX = Output(Vec(numPEs, UInt(ScarfConfig.AccWidth.W)))
-    val posY = Output(Vec(numPEs, UInt(ScarfConfig.AccWidth.W)))
-    val posZ = Output(Vec(numPEs, UInt(ScarfConfig.AccWidth.W)))
-    val cov  = Output(Vec(numPEs, Vec(6, UInt(ScarfConfig.AccWidth.W))))
+    val posX       = Output(Vec(numPEs, UInt(ScarfConfig.AccWidth.W)))
+    val posY       = Output(Vec(numPEs, UInt(ScarfConfig.AccWidth.W)))
+    val posZ       = Output(Vec(numPEs, UInt(ScarfConfig.AccWidth.W)))
+    val cov        = Output(Vec(numPEs, Vec(6, UInt(ScarfConfig.AccWidth.W))))
     val opacityOut = Output(Vec(numPEs, UInt(ScarfConfig.DataWidth.W)))
+    // Per-PE rotated SH output (world-space coefficients from SHRotator)
+    val shOut      = Output(Vec(numPEs, Vec(75, UInt(ScarfConfig.DataWidth.W))))
   })
 
   val pes = Seq.fill(numPEs)(Module(new GGUPE))
@@ -185,7 +195,7 @@ class GGUArray(val numPEs: Int = ScarfConfig.GGUPECount) extends Module {
     pes(i).io.quatZ     := io.quatZ(i)
     pes(i).io.opacityIn := io.opacityIn(i)
     pes(i).io.shDegree  := io.shDegree
-    pes(i).io.shIn      := VecInit(Seq.fill(75)(0.U(ScarfConfig.DataWidth.W)))  // SH placeholder
+    pes(i).io.shIn      := io.shIn(i)
     pes(i).io.fx := io.fx
     pes(i).io.fy := io.fy
     pes(i).io.cx := io.cx
@@ -193,11 +203,12 @@ class GGUArray(val numPEs: Int = ScarfConfig.GGUPECount) extends Module {
     pes(i).io.extrinsics := io.extrinsics
     pes(i).io.start := io.start
 
-    io.posX(i) := pes(i).io.posX
-    io.posY(i) := pes(i).io.posY
-    io.posZ(i) := pes(i).io.posZ
-    io.cov(i)  := pes(i).io.cov
+    io.posX(i)       := pes(i).io.posX
+    io.posY(i)       := pes(i).io.posY
+    io.posZ(i)       := pes(i).io.posZ
+    io.cov(i)        := pes(i).io.cov
     io.opacityOut(i) := pes(i).io.opacityOut
+    io.shOut(i)      := pes(i).io.shOut
   }
 
   // Array is done when ALL PEs are done
