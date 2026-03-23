@@ -7,14 +7,13 @@ import scarf.ScarfConfig
 /**
  * NormUnit — Normalization Unit (LayerNorm, BatchNorm, GroupNorm).
  *
- * Corresponds to: encoder/normalization_unit.py
+ * Internal structure (matching diagram):
+ *   FSM → SumAcc → SqSumAcc → rSqrt → Affine Scale → FMA
  *
- * Architecture:
- *   - Phase 1: Compute mean via VectorALU reduction (sum / N)
- *   - Phase 2: Compute variance via VectorALU reduction (sum of squares / N - mean²)
- *   - Phase 3: Apply normalization: (x - mean) * rsqrt(var + eps) * gamma + beta
- *   - gamma/beta parameters loaded from weight buffer
- *   - rsqrt via Newton iteration (2 iterations, ~4 cycles)
+ * Phase 1: Accumulate sum via SumAcc → compute mean μ
+ * Phase 2: Accumulate squared differences via SqSumAcc → compute variance σ²
+ * Phase 3: rSqrt computes 1/√(σ² + ε) via Newton iteration
+ * Phase 4: Affine Scale applies gamma/beta via FMA: out = (x - μ) × rsqrt × γ + β
  */
 object NormType {
   val LAYER: UInt    = 0.U(2.W)
@@ -24,7 +23,7 @@ object NormType {
 }
 
 object NormState extends ChiselEnum {
-  val sIdle, sComputeMean, sComputeVar, sNormalize, sDone = Value
+  val sIdle, sComputeMean, sComputeVar, sRSqrt, sNormalize, sDone = Value
 }
 
 class NormUnit extends Module {
@@ -33,29 +32,38 @@ class NormUnit extends Module {
     val done     = Output(Bool())
     val busy     = Output(Bool())
 
-    // Parameters
     val normType = Input(UInt(2.W))
     val channels = Input(UInt(10.W))
-    val groups   = Input(UInt(4.W))      // For GroupNorm
-    val epsilon  = Input(UInt(ScarfConfig.DataWidth.W))  // FP16 epsilon
+    val groups   = Input(UInt(4.W))
+    val epsilon  = Input(UInt(ScarfConfig.AccWidth.W))
 
-    // Data interface (streaming)
     val dataIn   = Input(UInt(ScarfConfig.DataWidth.W))
     val dataOut  = Output(UInt(ScarfConfig.DataWidth.W))
-    val gammaIn  = Input(UInt(ScarfConfig.DataWidth.W))   // Scale parameter
-    val betaIn   = Input(UInt(ScarfConfig.DataWidth.W))   // Shift parameter
+    val gammaIn  = Input(UInt(ScarfConfig.DataWidth.W))
+    val betaIn   = Input(UInt(ScarfConfig.DataWidth.W))
     val inValid  = Input(Bool())
     val outValid = Output(Bool())
   })
 
   val state = RegInit(NormState.sIdle)
 
-  // Accumulators for mean and variance
+  // SumAcc: accumulates sum for mean computation
   val sumAcc   = RegInit(0.U(ScarfConfig.AccWidth.W))
+  // SqSumAcc: accumulates sum of squared differences for variance
   val sqSumAcc = RegInit(0.U(ScarfConfig.AccWidth.W))
   val count    = RegInit(0.U(16.W))
   val meanReg  = RegInit(0.U(ScarfConfig.AccWidth.W))
   val varReg   = RegInit(0.U(ScarfConfig.AccWidth.W))
+  // rSqrt result register (1/√(var + eps))
+  val rsqrtReg = RegInit(0.U(ScarfConfig.AccWidth.W))
+  // Newton iteration counter for rSqrt
+  val newtonIter = RegInit(0.U(2.W))
+
+  // Normalization element count depends on norm type
+  val normCount = Wire(UInt(16.W))
+  normCount := Mux(io.normType === NormType.GROUP,
+    io.channels / io.groups,
+    io.channels)
 
   val doneReg = RegInit(false.B)
   val busyReg = RegInit(false.B)
@@ -80,12 +88,11 @@ class NormUnit extends Module {
 
     is(NormState.sComputeMean) {
       when(io.inValid) {
-        sumAcc := sumAcc + io.dataIn
+        sumAcc := sumAcc + io.dataIn.pad(ScarfConfig.AccWidth)
         count  := count + 1.U
       }
-      when(count === io.channels - 1.U && io.inValid) {
-        // Mean = sum / count (in real HW: fixed-point division)
-        meanReg := sumAcc / io.channels
+      when(count === normCount - 1.U && io.inValid) {
+        meanReg := sumAcc / normCount
         state   := NormState.sComputeVar
         count   := 0.U
       }
@@ -93,28 +100,52 @@ class NormUnit extends Module {
 
     is(NormState.sComputeVar) {
       when(io.inValid) {
-        val diff = io.dataIn - meanReg(ScarfConfig.DataWidth - 1, 0)
-        sqSumAcc := sqSumAcc + diff * diff
+        val diff = io.dataIn.pad(ScarfConfig.AccWidth) - meanReg
+        val sq = (diff * diff)(ScarfConfig.AccWidth - 1, 0)
+        sqSumAcc := sqSumAcc + sq
         count := count + 1.U
       }
-      when(count === io.channels - 1.U && io.inValid) {
-        varReg := sqSumAcc / io.channels
-        state  := NormState.sNormalize
+      when(count === normCount - 1.U && io.inValid) {
+        varReg := sqSumAcc / normCount
+        state  := NormState.sRSqrt
         count  := 0.U
+        newtonIter := 0.U
+      }
+    }
+
+    is(NormState.sRSqrt) {
+      // Newton iteration for rsqrt: x_{n+1} = x_n * (3 - v * x_n²) / 2
+      // Initial guess: rsqrt ≈ 1 (structural model, 2 iterations)
+      val varPlusEps = varReg + io.epsilon
+      when(newtonIter === 0.U) {
+        rsqrtReg := Mux(varPlusEps > 0.U,
+          (1.U << (ScarfConfig.DataWidth - 1)),
+          (1.U << (ScarfConfig.AccWidth - 1)))
+        newtonIter := 1.U
+      }.elsewhen(newtonIter === 1.U) {
+        val x = rsqrtReg
+        val x2 = (x * x)(ScarfConfig.AccWidth - 1, 0)
+        val vx2 = (varPlusEps * x2)(ScarfConfig.AccWidth - 1, 0)
+        val threeMinusVx2 = (3.U << (ScarfConfig.DataWidth - 1)) - vx2
+        rsqrtReg := (x * threeMinusVx2)(ScarfConfig.AccWidth - 1, 0) >> 1
+        newtonIter := 2.U
+      }.otherwise {
+        state := NormState.sNormalize
+        count := 0.U
       }
     }
 
     is(NormState.sNormalize) {
       when(io.inValid) {
-        // Normalized = (x - mean) * rsqrt(var + eps) * gamma + beta
-        // Simplified: output (x - mean) * gamma + beta (structural model)
-        val centered = io.dataIn - meanReg(ScarfConfig.DataWidth - 1, 0)
-        val scaled   = centered * io.gammaIn
-        io.dataOut  := scaled(ScarfConfig.DataWidth - 1, 0) + io.betaIn
+        // FMA: out = (x - μ) × rsqrt × γ + β
+        val centered = io.dataIn.pad(ScarfConfig.AccWidth) - meanReg
+        val normalized = (centered * rsqrtReg)(ScarfConfig.AccWidth - 1, 0)
+        val scaled = (normalized(ScarfConfig.DataWidth - 1, 0) * io.gammaIn)(ScarfConfig.DataWidth - 1, 0)
+        io.dataOut  := scaled + io.betaIn
         io.outValid := true.B
         count := count + 1.U
       }
-      when(count === io.channels - 1.U && io.inValid) {
+      when(count === normCount - 1.U && io.inValid) {
         state := NormState.sDone
       }
     }

@@ -214,7 +214,7 @@ class SCARFConfig:
     # S3 still runs with cached depth → only means/positions affected
     # Quality impact is proportional to depth error (very small for matched pixels)
     # This allows much more aggressive reuse criteria than full-Gaussian reuse
-    fsgr_cache_size: int = 512
+    fsgr_cache_size: int = 32
     fsgr_hamming_threshold: int = 4       # Cache lookup hamming range
     fsgr_reuse_hamming: int = 3           # Moderate hamming (depth-only is safe)
     fsgr_reuse_spatial: int = 12          # Moderate spatial distance
@@ -988,6 +988,10 @@ def main():
                         help='Override saes_cross_check threshold (probe similarity gate)')
     parser.add_argument('--tile-size', type=int, default=None,
                         help='Override SAES tile size (4 or 8)')
+    parser.add_argument('--fsgr-cache-size', type=int, default=None,
+                        help='Override FSGR cache size (number of entries)')
+    parser.add_argument('--fsgr-hamming', type=int, default=None,
+                        help='Override FSGR hamming threshold for cache lookup')
     args = parser.parse_args()
     
     # Override global SCARF frequency from CLI
@@ -1015,6 +1019,11 @@ def main():
         CONFIG.saes_cross_check = args.saes_cc
     if args.tile_size is not None:
         CONFIG.tile_size = args.tile_size
+    if args.fsgr_cache_size is not None:
+        CONFIG.fsgr_cache_size = args.fsgr_cache_size
+    if args.fsgr_hamming is not None:
+        CONFIG.fsgr_hamming_threshold = args.fsgr_hamming
+        CONFIG.fsgr_reuse_hamming = args.fsgr_hamming
 
     # Create adapter and apply model-specific overrides
     adapter = create_adapter(args.model)

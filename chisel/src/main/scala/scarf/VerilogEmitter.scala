@@ -22,8 +22,16 @@ object VerilogEmitter extends App {
     new ScarfTop,
     Array("--target-dir", outputDir),
     Array(
+      "--lowering-options=disallowLocalVariables",
+    ),
+  )
+
+  ChiselStage.emitSystemVerilogFile(
+    new ScarfTop,
+    Array("--target-dir", s"$outputDir/split"),
+    Array(
       "--split-verilog",
-      s"-o=$outputDir",
+      s"-o=$outputDir/split",
       "--lowering-options=disallowLocalVariables",
     ),
   )

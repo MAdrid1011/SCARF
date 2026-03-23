@@ -5,93 +5,170 @@ import chisel3.util._
 import scarf.ScarfConfig
 
 /**
- * PositionCalc — Compute 3D world position from pixel coordinate + depth.
+ * PositionCalc — Compute 3D world position from pixel + depth.
  *
- * Corresponds to: ggu/position_calculator.py
+ * Contains two sub-units (matching diagram):
+ *   UnprojUnit: ray_dir = K_inv × [u, v, 1], pos_cam = ray_dir × depth
+ *   TransformUnit: pos_world = R × pos_cam + t  (3×3 FMA array)
  *
- * Algorithm:
- *   1. ray_dir = K_inv × [u, v, 1]  (unproject to camera space)
- *   2. pos_cam = ray_dir * depth     (scale by depth)
- *   3. pos_world = R × pos_cam + t   (transform to world)
- *
- * Fixed-point arithmetic for ASIC efficiency.
- * Latency: 10 cycles per Gaussian.
+ * CovBuilder's R is NOT the same as extrinsic R here;
+ * extrinsics = camera-to-world transform [R_ext | t_ext].
  */
-class PositionCalc extends Module {
+
+class UnprojUnit extends Module {
   val io = IO(new Bundle {
-    // Inputs
-    val pixelX    = Input(UInt(10.W))     // Pixel x coordinate
-    val pixelY    = Input(UInt(10.W))     // Pixel y coordinate
-    val depth     = Input(UInt(ScarfConfig.DataWidth.W))  // FP16 depth value
-    val fx        = Input(UInt(ScarfConfig.AccWidth.W))   // Focal length x (FP32)
-    val fy        = Input(UInt(ScarfConfig.AccWidth.W))   // Focal length y (FP32)
-    val cx        = Input(UInt(ScarfConfig.AccWidth.W))   // Principal point x (FP32)
-    val cy        = Input(UInt(ScarfConfig.AccWidth.W))   // Principal point y (FP32)
-    val extrinsics = Input(Vec(12, UInt(ScarfConfig.AccWidth.W))) // 3×4 [R|t] (FP32)
+    val pixelX = Input(UInt(10.W))
+    val pixelY = Input(UInt(10.W))
+    val depth  = Input(UInt(ScarfConfig.DataWidth.W))
+    val fx     = Input(UInt(ScarfConfig.AccWidth.W))
+    val fy     = Input(UInt(ScarfConfig.AccWidth.W))
+    val cx     = Input(UInt(ScarfConfig.AccWidth.W))
+    val cy     = Input(UInt(ScarfConfig.AccWidth.W))
 
-    // Control
-    val start     = Input(Bool())
-    val done      = Output(Bool())
-
-    // Output: world position [x, y, z] (FP32)
-    val posX      = Output(UInt(ScarfConfig.AccWidth.W))
-    val posY      = Output(UInt(ScarfConfig.AccWidth.W))
-    val posZ      = Output(UInt(ScarfConfig.AccWidth.W))
+    val start  = Input(Bool())
+    val done   = Output(Bool())
+    val camX   = Output(UInt(ScarfConfig.AccWidth.W))
+    val camY   = Output(UInt(ScarfConfig.AccWidth.W))
+    val camZ   = Output(UInt(ScarfConfig.AccWidth.W))
   })
 
-  val sIdle :: sUnproject :: sScale :: sTransform :: sDone :: Nil = Enum(5)
+  val sIdle :: sUnproject :: sScale :: sDone :: Nil = Enum(4)
   val state = RegInit(sIdle)
-  val cycle = RegInit(0.U(4.W))
 
-  // Intermediate registers
   val rayX = RegInit(0.U(ScarfConfig.AccWidth.W))
   val rayY = RegInit(0.U(ScarfConfig.AccWidth.W))
   val rayZ = RegInit(0.U(ScarfConfig.AccWidth.W))
-  val camX = RegInit(0.U(ScarfConfig.AccWidth.W))
-  val camY = RegInit(0.U(ScarfConfig.AccWidth.W))
-  val camZ = RegInit(0.U(ScarfConfig.AccWidth.W))
-  val worldX = RegInit(0.U(ScarfConfig.AccWidth.W))
-  val worldY = RegInit(0.U(ScarfConfig.AccWidth.W))
-  val worldZ = RegInit(0.U(ScarfConfig.AccWidth.W))
+  val camXR = RegInit(0.U(ScarfConfig.AccWidth.W))
+  val camYR = RegInit(0.U(ScarfConfig.AccWidth.W))
+  val camZR = RegInit(0.U(ScarfConfig.AccWidth.W))
 
   io.done := state === sDone
-  io.posX := worldX
-  io.posY := worldY
-  io.posZ := worldZ
+  io.camX := camXR
+  io.camY := camYR
+  io.camZ := camZR
 
   switch(state) {
     is(sIdle) {
-      when(io.start) {
-        state := sUnproject
-        cycle := 0.U
-      }
+      when(io.start) { state := sUnproject }
     }
     is(sUnproject) {
-      // ray_dir = [(u - cx) / fx, (v - cy) / fy, 1.0]
-      // Structural model: integer subtraction + division
-      rayX := io.pixelX - io.cx(ScarfConfig.AccWidth - 1, 0)
-      rayY := io.pixelY - io.cy(ScarfConfig.AccWidth - 1, 0)
-      rayZ := 1.U << (ScarfConfig.DataWidth - 1)  // 1.0 in FP16 approx
+      // ray = [(u - cx)/fx, (v - cy)/fy, 1.0]
+      rayX := io.pixelX.pad(ScarfConfig.AccWidth) - io.cx
+      rayY := io.pixelY.pad(ScarfConfig.AccWidth) - io.cy
+      rayZ := 1.U << (ScarfConfig.DataWidth - 1)
       state := sScale
     }
     is(sScale) {
-      // pos_cam = ray_dir * depth
-      camX := (rayX * io.depth)(ScarfConfig.AccWidth - 1, 0)
-      camY := (rayY * io.depth)(ScarfConfig.AccWidth - 1, 0)
-      camZ := (rayZ * io.depth)(ScarfConfig.AccWidth - 1, 0)
-      state := sTransform
-      cycle := 0.U
+      // pos_cam = ray × depth
+      camXR := (rayX * io.depth)(ScarfConfig.AccWidth - 1, 0)
+      camYR := (rayY * io.depth)(ScarfConfig.AccWidth - 1, 0)
+      camZR := (rayZ * io.depth)(ScarfConfig.AccWidth - 1, 0)
+      state := sDone
+    }
+    is(sDone) {
+      state := sIdle
+    }
+  }
+}
+
+/**
+ * TransformUnit — 3×3 FMA array for extrinsic transform.
+ * pos_world = R_ext × pos_cam + t_ext
+ */
+class TransformUnit extends Module {
+  val io = IO(new Bundle {
+    val camPos     = Input(Vec(3, UInt(ScarfConfig.AccWidth.W)))
+    val extrinsics = Input(Vec(12, UInt(ScarfConfig.AccWidth.W))) // [R(9) | t(3)]
+    val start      = Input(Bool())
+    val done       = Output(Bool())
+    val worldPos   = Output(Vec(3, UInt(ScarfConfig.AccWidth.W)))
+  })
+
+  val sIdle :: sCompute :: sDone :: Nil = Enum(3)
+  val state = RegInit(sIdle)
+  val result = RegInit(VecInit(Seq.fill(3)(0.U(ScarfConfig.AccWidth.W))))
+
+  io.done := state === sDone
+  io.worldPos := result
+
+  switch(state) {
+    is(sIdle) {
+      when(io.start) { state := sCompute }
+    }
+    is(sCompute) {
+      // 3×3 FMA: world[i] = R[i,0]*cam[0] + R[i,1]*cam[1] + R[i,2]*cam[2] + t[i]
+      for (i <- 0 until 3) {
+        val mac0 = (io.extrinsics(i * 3)     * io.camPos(0))(ScarfConfig.AccWidth - 1, 0)
+        val mac1 = (io.extrinsics(i * 3 + 1) * io.camPos(1))(ScarfConfig.AccWidth - 1, 0)
+        val mac2 = (io.extrinsics(i * 3 + 2) * io.camPos(2))(ScarfConfig.AccWidth - 1, 0)
+        result(i) := mac0 + mac1 + mac2 + io.extrinsics(9 + i)
+      }
+      state := sDone
+    }
+    is(sDone) {
+      state := sIdle
+    }
+  }
+}
+
+/**
+ * PositionCalc — top-level combining UnprojUnit + TransformUnit.
+ */
+class PositionCalc extends Module {
+  val io = IO(new Bundle {
+    val pixelX     = Input(UInt(10.W))
+    val pixelY     = Input(UInt(10.W))
+    val depth      = Input(UInt(ScarfConfig.DataWidth.W))
+    val fx         = Input(UInt(ScarfConfig.AccWidth.W))
+    val fy         = Input(UInt(ScarfConfig.AccWidth.W))
+    val cx         = Input(UInt(ScarfConfig.AccWidth.W))
+    val cy         = Input(UInt(ScarfConfig.AccWidth.W))
+    val extrinsics = Input(Vec(12, UInt(ScarfConfig.AccWidth.W)))
+    val start      = Input(Bool())
+    val done       = Output(Bool())
+    val posX       = Output(UInt(ScarfConfig.AccWidth.W))
+    val posY       = Output(UInt(ScarfConfig.AccWidth.W))
+    val posZ       = Output(UInt(ScarfConfig.AccWidth.W))
+  })
+
+  val unproj    = Module(new UnprojUnit)
+  val transform = Module(new TransformUnit)
+
+  val sIdle :: sUnproj :: sTransform :: sDone :: Nil = Enum(4)
+  val state = RegInit(sIdle)
+
+  unproj.io.pixelX := io.pixelX
+  unproj.io.pixelY := io.pixelY
+  unproj.io.depth  := io.depth
+  unproj.io.fx     := io.fx
+  unproj.io.fy     := io.fy
+  unproj.io.cx     := io.cx
+  unproj.io.cy     := io.cy
+  unproj.io.start  := state === sUnproj
+
+  val camPos = Wire(Vec(3, UInt(ScarfConfig.AccWidth.W)))
+  camPos(0) := unproj.io.camX
+  camPos(1) := unproj.io.camY
+  camPos(2) := unproj.io.camZ
+
+  transform.io.camPos     := camPos
+  transform.io.extrinsics := io.extrinsics
+  transform.io.start      := state === sTransform
+
+  io.done := state === sDone
+  io.posX := transform.io.worldPos(0)
+  io.posY := transform.io.worldPos(1)
+  io.posZ := transform.io.worldPos(2)
+
+  switch(state) {
+    is(sIdle) {
+      when(io.start) { state := sUnproj }
+    }
+    is(sUnproj) {
+      when(unproj.io.done) { state := sTransform }
     }
     is(sTransform) {
-      // pos_world = R × pos_cam + t
-      // R is extrinsics[0..8] (3×3), t is extrinsics[9..11]
-      worldX := (io.extrinsics(0) * camX + io.extrinsics(1) * camY +
-                 io.extrinsics(2) * camZ)(ScarfConfig.AccWidth - 1, 0) + io.extrinsics(9)
-      worldY := (io.extrinsics(3) * camX + io.extrinsics(4) * camY +
-                 io.extrinsics(5) * camZ)(ScarfConfig.AccWidth - 1, 0) + io.extrinsics(10)
-      worldZ := (io.extrinsics(6) * camX + io.extrinsics(7) * camY +
-                 io.extrinsics(8) * camZ)(ScarfConfig.AccWidth - 1, 0) + io.extrinsics(11)
-      state := sDone
+      when(transform.io.done) { state := sDone }
     }
     is(sDone) {
       state := sIdle

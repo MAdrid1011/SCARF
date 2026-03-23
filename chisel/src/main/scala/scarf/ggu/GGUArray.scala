@@ -5,19 +5,18 @@ import chisel3.util._
 import scarf.ScarfConfig
 
 /**
- * GGU PE — Single Gaussian Generation Processing Element.
+ * GGUPE — Single Gaussian Generation Processing Element.
  *
- * Composes: PositionCalc → CovBuilder → SHRotator → Opacity sigmoid
- * Total latency: ~187 cycles per Gaussian (matching ggu/ggu_processor.py)
+ * 4-stage pipeline: PositionCalc → CovBuilder → SH_OPGenerator → Done
+ * R matrix bypass: CovBuilder.rotMatrix → SH_OPGenerator.rotMatrix (combinational)
+ * Mixed precision: geometry path FP32, SH coefficients FP16.
  */
 class GGUPE extends Module {
   val io = IO(new Bundle {
-    // Pixel coordinate + depth
     val pixelX    = Input(UInt(10.W))
     val pixelY    = Input(UInt(10.W))
     val depth     = Input(UInt(ScarfConfig.DataWidth.W))
 
-    // Raw Gaussian parameters from S3 neural network
     val scaleX    = Input(UInt(ScarfConfig.DataWidth.W))
     val scaleY    = Input(UInt(ScarfConfig.DataWidth.W))
     val scaleZ    = Input(UInt(ScarfConfig.DataWidth.W))
@@ -29,47 +28,43 @@ class GGUPE extends Module {
     val opacityIn = Input(UInt(ScarfConfig.DataWidth.W))
     val shDegree  = Input(UInt(3.W))
 
-    // Camera parameters
     val fx = Input(UInt(ScarfConfig.AccWidth.W))
     val fy = Input(UInt(ScarfConfig.AccWidth.W))
     val cx = Input(UInt(ScarfConfig.AccWidth.W))
     val cy = Input(UInt(ScarfConfig.AccWidth.W))
     val extrinsics = Input(Vec(12, UInt(ScarfConfig.AccWidth.W)))
 
-    // Control
     val start = Input(Bool())
     val done  = Output(Bool())
     val busy  = Output(Bool())
 
-    // Outputs
-    val posX   = Output(UInt(ScarfConfig.AccWidth.W))
-    val posY   = Output(UInt(ScarfConfig.AccWidth.W))
-    val posZ   = Output(UInt(ScarfConfig.AccWidth.W))
-    val cov    = Output(Vec(6, UInt(ScarfConfig.AccWidth.W)))
-    val shOut  = Output(Vec(75, UInt(ScarfConfig.DataWidth.W)))
+    val posX       = Output(UInt(ScarfConfig.AccWidth.W))
+    val posY       = Output(UInt(ScarfConfig.AccWidth.W))
+    val posZ       = Output(UInt(ScarfConfig.AccWidth.W))
+    val cov        = Output(Vec(6, UInt(ScarfConfig.AccWidth.W)))
+    val shOut      = Output(Vec(75, UInt(ScarfConfig.DataWidth.W)))
     val opacityOut = Output(UInt(ScarfConfig.DataWidth.W))
   })
 
-  // Sub-modules
   val posCalc = Module(new PositionCalc)
   val covBld  = Module(new CovBuilder)
-  val shRot   = Module(new SHRotator)
+  val shOpGen = Module(new SHOPGenerator)
 
-  // 4-state sequential pipeline: Position → Covariance → SH Rotation → Done
-  val sIdle :: sPosition :: sCovariance :: sSHRotation :: sOpacity :: sDone :: Nil = Enum(6)
+  val sIdle :: sPosition :: sCovariance :: sSHRotation :: sDone :: Nil = Enum(5)
   val state = RegInit(sIdle)
 
-  // Wire up sub-modules
-  posCalc.io.pixelX := io.pixelX
-  posCalc.io.pixelY := io.pixelY
-  posCalc.io.depth  := io.depth
-  posCalc.io.fx := io.fx
-  posCalc.io.fy := io.fy
-  posCalc.io.cx := io.cx
-  posCalc.io.cy := io.cy
+  // PositionCalc wiring
+  posCalc.io.pixelX     := io.pixelX
+  posCalc.io.pixelY     := io.pixelY
+  posCalc.io.depth      := io.depth
+  posCalc.io.fx         := io.fx
+  posCalc.io.fy         := io.fy
+  posCalc.io.cx         := io.cx
+  posCalc.io.cy         := io.cy
   posCalc.io.extrinsics := io.extrinsics
-  posCalc.io.start := state === sPosition
+  posCalc.io.start      := state === sPosition
 
+  // CovBuilder wiring
   covBld.io.quatW  := io.quatW
   covBld.io.quatX  := io.quatX
   covBld.io.quatY  := io.quatY
@@ -79,24 +74,22 @@ class GGUPE extends Module {
   covBld.io.scaleZ := io.scaleZ
   covBld.io.start  := state === sCovariance
 
-  // Wire CovBuilder's rotation matrix directly to SHRotator
-  shRot.io.rotMatrix := covBld.io.rotMatrix
-  shRot.io.shIn     := io.shIn
-  shRot.io.shDegree := io.shDegree
-  shRot.io.start    := state === sSHRotation
-
-  // Opacity: sigmoid LUT (simplified: passthrough for structural model)
-  val opacityReg = RegInit(0.U(ScarfConfig.DataWidth.W))
+  // SH_OPGenerator wiring — R bypass is combinational wire from CovBuilder
+  shOpGen.io.rotMatrix := covBld.io.rotMatrix
+  shOpGen.io.shIn      := io.shIn
+  shOpGen.io.shDegree  := io.shDegree
+  shOpGen.io.opacityIn := io.opacityIn
+  shOpGen.io.start     := state === sSHRotation
 
   // Outputs
-  io.posX := posCalc.io.posX
-  io.posY := posCalc.io.posY
-  io.posZ := posCalc.io.posZ
-  io.cov  := covBld.io.cov
-  io.shOut := shRot.io.shOut
-  io.opacityOut := opacityReg
-  io.done := state === sDone
-  io.busy := state =/= sIdle
+  io.posX       := posCalc.io.posX
+  io.posY       := posCalc.io.posY
+  io.posZ       := posCalc.io.posZ
+  io.cov        := covBld.io.cov
+  io.shOut      := shOpGen.io.shOut
+  io.opacityOut := shOpGen.io.opacityOut
+  io.done       := state === sDone
+  io.busy       := state =/= sIdle
 
   switch(state) {
     is(sIdle) {
@@ -109,13 +102,7 @@ class GGUPE extends Module {
       when(covBld.io.done) { state := sSHRotation }
     }
     is(sSHRotation) {
-      when(shRot.io.done) { state := sOpacity }
-    }
-    is(sOpacity) {
-      // Sigmoid activation on opacity (LUT-based, 2 cycles)
-      // Simplified: passthrough
-      opacityReg := io.opacityIn
-      state := sDone
+      when(shOpGen.io.done) { state := sDone }
     }
     is(sDone) {
       state := sIdle
@@ -126,22 +113,10 @@ class GGUPE extends Module {
 /**
  * GGUArray — 32 Parallel Gaussian Generation PEs.
  *
- * Corresponds to: ggu/ggu_processor.py
- *
- * Processes 32 Gaussians simultaneously. For 131,072 total Gaussians:
- *   131,072 / 32 = 4,096 batches × ~187 cycles = ~766K cycles.
- *
- * The array runs in parallel with S3 ConvEngine work (hidden behind pipeline).
- *
- * SH data path: each PE receives its own 75-coefficient SH input (up to 25
- * coefficients × 3 colour channels for degree-4 SH) and produces a rotated
- * SH output via the GGUPE → SHRotator sub-pipeline.  The SH coefficients are
- * provided per-PE because each Gaussian has independent raw SH values from
- * the S3 neural-network head.
+ * Processes 32 Gaussians simultaneously. Runs in parallel with S3 MMCU work.
  */
 class GGUArray(val numPEs: Int = ScarfConfig.GGUPECount) extends Module {
   val io = IO(new Bundle {
-    // Per-PE inputs (batched)
     val pixelX    = Input(Vec(numPEs, UInt(10.W)))
     val pixelY    = Input(Vec(numPEs, UInt(10.W)))
     val depth     = Input(Vec(numPEs, UInt(ScarfConfig.DataWidth.W)))
@@ -153,35 +128,29 @@ class GGUArray(val numPEs: Int = ScarfConfig.GGUPECount) extends Module {
     val quatY     = Input(Vec(numPEs, UInt(ScarfConfig.DataWidth.W)))
     val quatZ     = Input(Vec(numPEs, UInt(ScarfConfig.DataWidth.W)))
     val opacityIn = Input(Vec(numPEs, UInt(ScarfConfig.DataWidth.W)))
-    // Per-PE SH input: 75 FP16 coefficients (25 coeffs × 3 channels, degree 4)
     val shIn      = Input(Vec(numPEs, Vec(75, UInt(ScarfConfig.DataWidth.W))))
     val shDegree  = Input(UInt(3.W))
 
-    // Shared camera parameters
     val fx = Input(UInt(ScarfConfig.AccWidth.W))
     val fy = Input(UInt(ScarfConfig.AccWidth.W))
     val cx = Input(UInt(ScarfConfig.AccWidth.W))
     val cy = Input(UInt(ScarfConfig.AccWidth.W))
     val extrinsics = Input(Vec(12, UInt(ScarfConfig.AccWidth.W)))
 
-    // Control
     val start = Input(Bool())
     val done  = Output(Bool())
     val busy  = Output(Bool())
 
-    // Per-PE outputs
     val posX       = Output(Vec(numPEs, UInt(ScarfConfig.AccWidth.W)))
     val posY       = Output(Vec(numPEs, UInt(ScarfConfig.AccWidth.W)))
     val posZ       = Output(Vec(numPEs, UInt(ScarfConfig.AccWidth.W)))
     val cov        = Output(Vec(numPEs, Vec(6, UInt(ScarfConfig.AccWidth.W))))
     val opacityOut = Output(Vec(numPEs, UInt(ScarfConfig.DataWidth.W)))
-    // Per-PE rotated SH output (world-space coefficients from SHRotator)
     val shOut      = Output(Vec(numPEs, Vec(75, UInt(ScarfConfig.DataWidth.W))))
   })
 
   val pes = Seq.fill(numPEs)(Module(new GGUPE))
 
-  // Wire up all PEs with shared camera params and per-PE data
   for (i <- 0 until numPEs) {
     pes(i).io.pixelX    := io.pixelX(i)
     pes(i).io.pixelY    := io.pixelY(i)
@@ -194,14 +163,14 @@ class GGUArray(val numPEs: Int = ScarfConfig.GGUPECount) extends Module {
     pes(i).io.quatY     := io.quatY(i)
     pes(i).io.quatZ     := io.quatZ(i)
     pes(i).io.opacityIn := io.opacityIn(i)
-    pes(i).io.shDegree  := io.shDegree
     pes(i).io.shIn      := io.shIn(i)
-    pes(i).io.fx := io.fx
-    pes(i).io.fy := io.fy
-    pes(i).io.cx := io.cx
-    pes(i).io.cy := io.cy
+    pes(i).io.shDegree  := io.shDegree
+    pes(i).io.fx         := io.fx
+    pes(i).io.fy         := io.fy
+    pes(i).io.cx         := io.cx
+    pes(i).io.cy         := io.cy
     pes(i).io.extrinsics := io.extrinsics
-    pes(i).io.start := io.start
+    pes(i).io.start      := io.start
 
     io.posX(i)       := pes(i).io.posX
     io.posY(i)       := pes(i).io.posY
@@ -211,7 +180,6 @@ class GGUArray(val numPEs: Int = ScarfConfig.GGUPECount) extends Module {
     io.shOut(i)      := pes(i).io.shOut
   }
 
-  // Array is done when ALL PEs are done
   io.done := pes.map(_.io.done).reduce(_ && _)
   io.busy := pes.map(_.io.busy).reduce(_ || _)
 }

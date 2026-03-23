@@ -5,67 +5,54 @@ import chisel3.util._
 import scarf.{ScarfConfig, ModelConfig, PipeState, SAESLevel}
 
 /**
- * PipelineController — Top-level FSM for SCARF pipeline orchestration.
+ * PipelineController — Top-level FSM for SCARF pipeline.
  *
- * Corresponds to: depth_predictor/hw_depth_predictor.py (HWDepthPredictor)
+ * Manages: IDLE → LOAD_CONFIG → S1_CNN → S1_TRANSFORMER [→ S1_DINOV2]
+ *          → S2S3_TILE_LOOP (per tile: SAES → S2/S3 or PROBE_ONLY)
+ *          → GGU → DONE
  *
- * Manages the full inference pipeline:
- *   IDLE → LOAD_CONFIG → S1_CNN → S1_TRANSFORMER [→ S1_DINOV2]
- *        → S2S3_TILE_LOOP (per tile: SAES_CLASSIFY → S2/S3 or PROBE_ONLY)
- *        → GGU → DONE
- *
- * Key design: single FSM controls all compute unit allocation.
- * No model-specific paths — all branching is based on numeric config values.
+ * MMCU is the single compute unit for Conv/GEMM/Attention (replaces
+ * separate ConvEngine + GEMMUnit).
  */
 class PipelineController extends Module {
   val io = IO(new Bundle {
-    // External control
     val start     = Input(Bool())
     val done      = Output(Bool())
     val busy      = Output(Bool())
-
-    // Configuration input (from ConfigRegs)
     val config    = Input(new ModelConfig)
     val configValid = Input(Bool())
 
-    // Compute unit control signals (active-high enable for each unit)
-    val convEngineStart = Output(Bool())
-    val convEngineDone  = Input(Bool())
-    val gemmStart       = Output(Bool())
-    val gemmDone        = Input(Bool())
+    // MMCU control (unified)
+    val mmcuStart       = Output(Bool())
+    val mmcuDone        = Input(Bool())
     val bilinearStart   = Output(Bool())
     val bilinearDone    = Input(Bool())
     val gguStart        = Output(Bool())
     val gguDone         = Input(Bool())
 
-    // SAES classification result (from SAESController)
-    val saesLevel       = Input(SAESLevel())
-    val saesClassifyDone = Input(Bool())
+    // SAES
+    val saesLevel         = Input(SAESLevel())
+    val saesClassifyDone  = Input(Bool())
     val saesClassifyStart = Output(Bool())
 
-    // FSGR control (from FSGRController)
-    val fsgrStart         = Output(Bool())
-    val fsgrDone          = Input(Bool())
-    val fsgrUseNarrow     = Input(Bool())        // True = narrowed CostVol search
-    val fsgrNarrowCands   = Input(UInt(8.W))     // D/4 candidates
+    // FSDR
+    val fsdrStart         = Output(Bool())
+    val fsdrDone          = Input(Bool())
+    val fsdrUseNarrow     = Input(Bool())
+    val fsdrNarrowCands   = Input(UInt(8.W))
 
-    // Depth candidate count for CostVol (full or narrowed)
-    val costVolCandidates = Output(UInt(8.W))    // Effective candidate count
+    val costVolCandidates = Output(UInt(8.W))
 
-    // Tile tracking
     val currentTileRow  = Output(UInt(8.W))
     val currentTileCol  = Output(UInt(8.W))
     val totalTileRows   = Output(UInt(8.W))
     val totalTileCols   = Output(UInt(8.W))
 
-    // Current FSM state (for debug/monitoring)
-    val state           = Output(PipeState())
+    val state = Output(PipeState())
   })
 
-  // FSM state register
   val state = RegInit(PipeState.sIdle)
 
-  // Tile counters
   val tileRow = RegInit(0.U(8.W))
   val tileCol = RegInit(0.U(8.W))
   val numTileRows = Wire(UInt(8.W))
@@ -73,15 +60,10 @@ class PipelineController extends Module {
   numTileRows := io.config.imageH / io.config.tileSize
   numTileCols := io.config.imageW / io.config.tileSize
 
-  // CNN layer counter (for S1)
   val cnnLayer = RegInit(0.U(8.W))
-  // Transformer layer counter
-  val txLayer = RegInit(0.U(4.W))
-
-  // SAES classification result latch
+  val txLayer  = RegInit(0.U(4.W))
   val saesResult = RegInit(SAESLevel.sFull)
 
-  // Default outputs
   io.done := state === PipeState.sDone
   io.busy := state =/= PipeState.sIdle
   io.state := state
@@ -90,33 +72,24 @@ class PipelineController extends Module {
   io.totalTileRows  := numTileRows
   io.totalTileCols  := numTileCols
 
-  // ── Edge-sensitive start pulse logic ──
-  // Each compute unit receives a 1-cycle start pulse when entering
-  // its state, preventing spurious re-triggering when the unit
-  // returns to idle while the controller is still in the same state.
   val prevState = RegNext(state, PipeState.sIdle)
-  val stateEntry = state =/= prevState  // True on first cycle of new state
+  val stateEntry = state =/= prevState
 
-  io.convEngineStart   := false.B
-  io.gemmStart         := false.B
+  io.mmcuStart         := false.B
   io.bilinearStart     := false.B
   io.gguStart          := false.B
   io.saesClassifyStart := false.B
-  io.fsgrStart         := false.B
-  // CostVol candidate count: full or narrowed depending on FSGR result
-  io.costVolCandidates := Mux(io.fsgrUseNarrow,
-    io.fsgrNarrowCands,
+  io.fsdrStart         := false.B
+  io.costVolCandidates := Mux(io.fsdrUseNarrow,
+    io.fsdrNarrowCands,
     io.config.numDepthCandidates)
 
   switch(state) {
-    // ──── IDLE: Wait for start signal ────
     is(PipeState.sIdle) {
       when(io.start && io.configValid) {
         state := PipeState.sLoadConfig
       }
     }
-
-    // ──── LOAD_CONFIG: Latch configuration ────
     is(PipeState.sLoadConfig) {
       cnnLayer := 0.U
       txLayer  := 0.U
@@ -125,165 +98,124 @@ class PipelineController extends Module {
       state    := PipeState.sS1_CNN
     }
 
-    // ──── S1: Feature Extraction — CNN backbone ────
-    // ConvEngine processes all CNN layers sequentially
+    // S1: CNN backbone (MMCU Conv mode)
     is(PipeState.sS1_CNN) {
-      io.convEngineStart := stateEntry  // 1-cycle pulse on state entry
-      when(io.convEngineDone) {
+      io.mmcuStart := stateEntry
+      when(io.mmcuDone) {
         cnnLayer := cnnLayer + 1.U
         when(cnnLayer >= io.config.cnnLayers - 1.U) {
-          state  := PipeState.sS1_Transformer
+          state   := PipeState.sS1_Transformer
           txLayer := 0.U
         }.otherwise {
-          // Re-trigger for next layer: transition to self forces stateEntry
           state := PipeState.sS1_CNN
         }
       }
     }
 
-    // ──── S1: Feature Extraction — Transformer encoder ────
-    // GEMM Unit processes QKV projections + attention
+    // S1: Transformer encoder (MMCU GEMM/Attention mode)
     is(PipeState.sS1_Transformer) {
-      io.gemmStart := stateEntry  // 1-cycle pulse
-      when(io.gemmDone) {
+      io.mmcuStart := stateEntry
+      when(io.mmcuDone) {
         txLayer := txLayer + 1.U
         when(txLayer >= io.config.transformerLayers - 1.U) {
           state := Mux(io.config.hasDINOv2, PipeState.sS1_DINOv2, PipeState.sS2S3_TileLoad)
         }.otherwise {
-          state := PipeState.sS1_Transformer  // Re-trigger for next layer
+          state := PipeState.sS1_Transformer
         }
       }
     }
 
-    // ──── S1: DINOv2 ViT (DepthSplat only) ────
-    // Uses GEMM Unit for ViT self-attention layers
-    // Controlled by hasDINOv2 config — NOT a model-specific branch
+    // S1: DINOv2 ViT (DepthSplat only, MMCU Attention mode)
     is(PipeState.sS1_DINOv2) {
-      io.gemmStart := stateEntry
-      when(io.gemmDone) {
+      io.mmcuStart := stateEntry
+      when(io.mmcuDone) {
         state := PipeState.sS2S3_TileLoad
       }
     }
 
-    // ──── S2+S3 Fused Tile Loop: Load tile ────
+    // S2+S3 Tile Loop
     is(PipeState.sS2S3_TileLoad) {
-      // Load tile features from FeatureBuffer into TileSPM
-      // (1-2 cycles, handled by memory controller)
       state := Mux(io.config.saesEnabled, PipeState.sS2S3_SAESClassify, PipeState.sS2_CostVol)
     }
-
-    // ──── SAES: Classify tile (L0/L1/L2/Full) ────
     is(PipeState.sS2S3_SAESClassify) {
       io.saesClassifyStart := stateEntry
       when(io.saesClassifyDone) {
         saesResult := io.saesLevel
         state := Mux(
           io.saesLevel === SAESLevel.sFull,
-          // Full tiles go through FSGR (if enabled) before CostVol
-          Mux(io.config.fsgrEnabled, PipeState.sS2_FSGRLookup, PipeState.sS2_CostVol),
+          Mux(io.config.fsdrEnabled, PipeState.sS2_FSDRLookup, PipeState.sS2_CostVol),
           PipeState.sS2S3_ProbeOnly,
         )
       }
     }
-
-    // ──── FSGR: Hash + cache lookup before CostVol ────
-    // For each pixel in the tile: compute LSH hash → query cache
-    // Hit → narrow CostVol to D/4 candidates, Miss → full D candidates
-    // FSGRController handles the per-pixel loop internally
-    is(PipeState.sS2_FSGRLookup) {
-      io.fsgrStart := stateEntry
-      when(io.fsgrDone) {
+    is(PipeState.sS2_FSDRLookup) {
+      io.fsdrStart := stateEntry
+      when(io.fsdrDone) {
         state := PipeState.sS2_CostVol
-        // io.costVolCandidates is already set by fsgrUseNarrow mux
       }
     }
 
-    // ──── S2: Cost Volume (BilinearUnit + ConvEngine) ────
+    // S2: Cost Volume (BilinearUnit + MMCU)
     is(PipeState.sS2_CostVol) {
-      io.bilinearStart   := stateEntry
-      io.convEngineStart := stateEntry
-      when(io.bilinearDone && io.convEngineDone) {
+      io.bilinearStart := stateEntry
+      io.mmcuStart     := stateEntry
+      when(io.bilinearDone && io.mmcuDone) {
         state := PipeState.sS2_UNet
       }
     }
-
-    // ──── S2: U-Net refinement (ConvEngine) ────
     is(PipeState.sS2_UNet) {
-      io.convEngineStart := stateEntry
-      when(io.convEngineDone) {
-        state := PipeState.sS2_DepthHead
-      }
+      io.mmcuStart := stateEntry
+      when(io.mmcuDone) { state := PipeState.sS2_DepthHead }
     }
-
-    // ──── S2: Depth Head (ConvEngine 1×1 conv) ────
     is(PipeState.sS2_DepthHead) {
-      io.convEngineStart := stateEntry
-      when(io.convEngineDone) {
-        state := PipeState.sS2_Regression
-      }
+      io.mmcuStart := stateEntry
+      when(io.mmcuDone) { state := PipeState.sS2_Regression }
     }
-
-    // ──── S2: Depth Regression (GEMM + VectorALU softmax) ────
     is(PipeState.sS2_Regression) {
-      io.gemmStart := stateEntry
-      when(io.gemmDone) {
-        state := PipeState.sS3_Refine
-      }
+      io.mmcuStart := stateEntry
+      when(io.mmcuDone) { state := PipeState.sS3_Refine }
     }
 
-    // ──── S3: Refine U-Net (ConvEngine) ────
+    // S3
     is(PipeState.sS3_Refine) {
-      io.convEngineStart := stateEntry
-      when(io.convEngineDone) {
-        state := PipeState.sS3_GaussHead
-      }
+      io.mmcuStart := stateEntry
+      when(io.mmcuDone) { state := PipeState.sS3_GaussHead }
     }
-
-    // ──── S3: Gaussian Head (ConvEngine 1×1 conv) ────
     is(PipeState.sS3_GaussHead) {
-      io.convEngineStart := stateEntry
-      when(io.convEngineDone) {
-        state := PipeState.sGGU
-      }
+      io.mmcuStart := stateEntry
+      when(io.mmcuDone) { state := PipeState.sGGU }
     }
 
-    // ──── Lightweight Probe Path (SAES L0/L1/L2) ────
+    // Probe-only path
     is(PipeState.sS2S3_ProbeOnly) {
       io.bilinearStart := stateEntry
-      when(io.bilinearDone) {
-        state := PipeState.sGGU
-      }
+      when(io.bilinearDone) { state := PipeState.sGGU }
     }
 
-    // ──── GGU: Gaussian post-processing (32 PEs) ────
+    // GGU
     is(PipeState.sGGU) {
       io.gguStart := stateEntry
-      when(io.gguDone) {
-        state := PipeState.sS2S3_NextTile
-      }
+      when(io.gguDone) { state := PipeState.sS2S3_NextTile }
     }
 
-    // ──── Next Tile: advance tile counters ────
+    // Next tile
     is(PipeState.sS2S3_NextTile) {
       tileCol := tileCol + 1.U
       when(tileCol >= numTileCols - 1.U) {
         tileCol := 0.U
         tileRow := tileRow + 1.U
         when(tileRow >= numTileRows - 1.U) {
-          state := PipeState.sDone  // All tiles processed
+          state := PipeState.sDone
         }.otherwise {
-          state := PipeState.sS2S3_TileLoad  // Next row
+          state := PipeState.sS2S3_TileLoad
         }
       }.otherwise {
-        state := PipeState.sS2S3_TileLoad  // Next column
+        state := PipeState.sS2S3_TileLoad
       }
     }
 
-    // ──── DONE: Inference complete ────
     is(PipeState.sDone) {
-      when(!io.start) {
-        state := PipeState.sIdle  // Return to idle when start deasserted
-      }
+      when(!io.start) { state := PipeState.sIdle }
     }
   }
 }
