@@ -2,7 +2,7 @@
 Deformable Attention Unit
 
 Hardware simulator for Multi-Scale Deformable Attention operation.
-This is a key component for Transplat's UVTransformer.
+This is a key component for TranSplat's UVTransformer.
 
 Reference: Deformable DETR (https://arxiv.org/pdf/2010.04159.pdf)
 """

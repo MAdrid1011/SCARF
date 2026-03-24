@@ -63,7 +63,7 @@ class FeatureExtractorSimulator:
             self.cnn_sim.load_from_pytorch(backbone.backbone)
         
         # Load Transformer (if applicable and compatible)
-        # Note: Transplat uses custom transformer layers, not standard PyTorch TransformerEncoderLayer
+        # Note: TranSplat uses custom transformer layers, not standard PyTorch TransformerEncoderLayer
         # We only simulate CNN cycles and estimate transformer cycles based on layer count
         if hasattr(backbone, 'transformer') and self.config.num_transformer_layers > 0:
             try:
@@ -163,7 +163,7 @@ class FeatureExtractorSimulator:
                         _, transformer_cycles = self.transformer_sim.forward(cur_features_list)
                         cycle_breakdown['transformer'] = transformer_cycles
                     else:
-                        # Estimate cycles for custom transformer (Transplat uses non-standard layers)
+                        # Estimate cycles for custom transformer (TranSplat uses non-standard layers)
                         # Based on: 6 layers × (attention + FFN) × sequence_length × d_model
                         if len(cur_features_list) > 0:
                             feat = cur_features_list[0]

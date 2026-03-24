@@ -6,7 +6,7 @@ Replaces PyTorch depth predictor inference with cycle-accurate
 hardware compositions.
 
 Supports:
-- Transplat: Transformer-based cost volume matching
+- TranSplat: Transformer-based cost volume matching
 - MVSplat: Direct correlation cost volume
 - DepthSplat: Multi-scale correlation with DPT head
 

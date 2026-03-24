@@ -6,13 +6,13 @@ Semantic-indexed cache with Hamming distance lookup.
 import torch
 from typing import Optional, Tuple, List
 
-from .types import FSGRConfig, CacheEntry
+from .types import FSDRConfig, CacheEntry
 from .lsh_hasher import hamming_distance
 
 
 class CacheTable:
     """
-    Semantic-indexed cache table for FSGR.
+    Semantic-indexed cache table for FSDR.
     
     Features:
         - Parallel Hamming distance calculation for all entries
@@ -34,12 +34,12 @@ class CacheTable:
             table.insert(new_entry)
     """
     
-    def __init__(self, config: FSGRConfig):
+    def __init__(self, config: FSDRConfig):
         """
         Initialize cache table.
         
         Args:
-            config: FSGR configuration
+            config: FSDR configuration
         """
         self.config = config
         self.size = config.cache_size

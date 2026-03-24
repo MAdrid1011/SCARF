@@ -1,7 +1,7 @@
 """
-Transplat Feature Extractor
+TranSplat Feature Extractor
 
-Complete feature extraction for Transplat model using SCARF hardware simulation.
+Complete feature extraction for TranSplat model using SCARF hardware simulation.
 Uses hardware simulators for actual feature computation.
 
 Components:
@@ -28,7 +28,7 @@ from .types import CNNConfig, TransformerConfig
 
 @dataclass
 class TransplatFeatureOutput:
-    """Output from Transplat feature extraction."""
+    """Output from TranSplat feature extraction."""
     # Main transformer features [B, V, C, H/8, W/8]
     trans_features: torch.Tensor
     # CNN features [BV, C, H/8, W/8]
@@ -42,7 +42,7 @@ class TransplatFeatureOutput:
 
 class TransplatFeatureExtractor:
     """
-    Feature extractor for Transplat model using SCARF hardware simulators.
+    Feature extractor for TranSplat model using SCARF hardware simulators.
     
     Uses CNNEncoderSimulator and TransformerSimulator for actual computation.
     """
@@ -63,7 +63,7 @@ class TransplatFeatureExtractor:
     
     @classmethod
     def from_encoder(cls, encoder: nn.Module) -> 'TransplatFeatureExtractor':
-        """Create extractor from Transplat encoder."""
+        """Create extractor from TranSplat encoder."""
         device = next(encoder.parameters()).device
         extractor = cls(device=device)
         
@@ -76,7 +76,7 @@ class TransplatFeatureExtractor:
             raise ValueError("Encoder does not have backbone attribute")
         
         # Initialize CNN simulator
-        # Transplat: encoder.backbone.backbone is CNNEncoder
+        # TranSplat: encoder.backbone.backbone is CNNEncoder
         cnn_module = None
         if hasattr(encoder.backbone, 'backbone'):
             cnn_module = encoder.backbone.backbone
@@ -84,7 +84,7 @@ class TransplatFeatureExtractor:
             cnn_module = encoder.backbone.cnet
         
         if cnn_module is not None:
-            # Transplat uses downscale_factor=4, so num_output_scales=0
+            # TranSplat uses downscale_factor=4, so num_output_scales=0
             # (no extra stride in layer3)
             cnn_config = CNNConfig(
                 input_channels=3,
@@ -264,7 +264,7 @@ class TransplatFeatureExtractor:
         """
         Count CNN cycles using hardware model.
         
-        Based on Transplat's CNNEncoder:
+        Based on TranSplat's CNNEncoder:
         - Conv7x7 stride=2 + InstanceNorm + ReLU
         - 2x ResidualBlock (64ch)
         - 2x ResidualBlock (96ch, stride=2)
@@ -305,7 +305,7 @@ class TransplatFeatureExtractor:
         """
         Count Transformer cycles using hardware model.
         
-        Based on Transplat's MultiViewFeatureTransformer:
+        Based on TranSplat's MultiViewFeatureTransformer:
         - 6 layers
         - Self-attention + Cross-view attention + FFN
         """

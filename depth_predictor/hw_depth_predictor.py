@@ -414,7 +414,7 @@ class HWUNetUnit:
             out, conv_cycles = self.conv.forward(out, w, b, padding=padding)
             total_cycles += conv_cycles.total_cycles
             
-            # Use GELU instead of ReLU (Transplat uses GELU) - ActivationUnit
+            # Use GELU instead of ReLU (TranSplat uses GELU) - ActivationUnit
             if i < len(conv_weights) - 1:
                 out, gelu_c = self.gelu.forward(out)
                 total_cycles += gelu_c.total_cycles
@@ -868,7 +868,7 @@ class HWCostVolumeUnit:
     
     Supports two modes for different model architectures:
     1. WARPING mode (MVSplat/DepthSplat): Plane-sweep stereo with feature warping
-    2. TRANSFORMER mode (Transplat): Cross-view attention matching
+    2. TRANSFORMER mode (TranSplat): Cross-view attention matching
     
     Computes cost volume using:
     - BilinearUnit for feature warping (WARPING mode)
@@ -1168,9 +1168,9 @@ class HWCostVolumeUnit:
         depth_candidates: torch.Tensor,  # [D]
     ) -> Tuple[torch.Tensor, int]:
         """
-        Build matching features using transformer-style cross-attention (Transplat style).
+        Build matching features using transformer-style cross-attention (TranSplat style).
         
-        Transplat's UVTransformer produces D-channel MATCHING FEATURES (like a cost volume),
+        TranSplat's UVTransformer produces D-channel MATCHING FEATURES (like a cost volume),
         which will be concatenated with original C-channel features to form [B, D+C, H, W]
         input for corr_refine_net.
         
@@ -1224,7 +1224,7 @@ class HWCostVolumeUnit:
         matching_features = torch.stack(all_matching_features, dim=0).mean(dim=0)  # [B, H*W, C]
         
         # ========== Output Projection: C -> D ==========
-        # Transplat's UVTransformer outputs D channels (num_depth_candidates)
+        # TranSplat's UVTransformer outputs D channels (num_depth_candidates)
         # Project from feature channels C to depth candidates D
         # This simulates the final projection in UVTransformer
         if not hasattr(self, '_out_proj_weight') or self._out_proj_weight.shape != (D, C):
@@ -1425,7 +1425,7 @@ class HWDepthPredictor:
     Hardware Depth Predictor using ONLY hardware compute units.
     
     Supports three model architectures through configurable scheduling:
-    - Transplat: Transformer-based matching + U-Net refinement
+    - TranSplat: Transformer-based matching + U-Net refinement
     - MVSplat: Plane-sweep stereo + U-Net refinement  
     - DepthSplat: Multi-scale plane-sweep + DPT upsampling
     
@@ -1454,7 +1454,7 @@ class HWDepthPredictor:
         self.model_type = model_type
         
         # Select cost volume mode based on model type
-        # Transplat uses transformer attention, MVSplat/DepthSplat use plane-sweep
+        # TranSplat uses transformer attention, MVSplat/DepthSplat use plane-sweep
         cv_mode = 'transformer' if model_type == self.MODEL_TRANSPLAT else 'warping'
         
         # Hardware units (shared across all models)
@@ -1499,14 +1499,14 @@ class HWDepthPredictor:
         self._original_to_gaussians = None  # to_gaussians network
         self._original_refine_unet = None   # refine_unet network
         
-        # Transformer weights cache for Transplat
+        # Transformer weights cache for TranSplat
         self._transformer_weights = {}
         
         # Hardware U-Net unit for refinement
         self._hw_unet = HWUNetUnit(device, base_channels=64)
         self._hw_unet._parent_predictor = self  # Allow access to HW helper methods
         
-        # GroupNorm units for MVSplat/Transplat refinement networks (mid_ch=128, 8 groups)
+        # GroupNorm units for MVSplat/TranSplat refinement networks (mid_ch=128, 8 groups)
         self.group_norm_128 = NormalizationUnit(NormType.GROUP, dim=128, num_groups=8)
         
         # GEMM unit for attention and linear projections in UNet
@@ -1711,7 +1711,7 @@ class HWDepthPredictor:
         depth_predictor = self._original_depth_predictor
         
         # ===== Update num_depth_candidates from actual model =====
-        # This is critical because models may use different values (e.g., Transplat re10k uses 128)
+        # This is critical because models may use different values (e.g., TranSplat re10k uses 128)
         if hasattr(depth_predictor, 'num_depth_candidates'):
             actual_D = depth_predictor.num_depth_candidates
             if actual_D != self.config.num_depth_candidates:
@@ -1720,7 +1720,7 @@ class HWDepthPredictor:
                 # Reinitialize depth regression unit with correct D
                 self.depth_regression = HWDepthRegressionUnit(actual_D, self.device)
         
-        # Try to extract depth_head weights (depth_head_lowres for Transplat)
+        # Try to extract depth_head weights (depth_head_lowres for TranSplat)
         if hasattr(depth_predictor, 'depth_head_lowres'):
             for i, layer in enumerate(depth_predictor.depth_head_lowres):
                 if hasattr(layer, 'weight'):
@@ -1772,8 +1772,8 @@ class HWDepthPredictor:
         if hasattr(depth_predictor, 'refine_unet'):
             self._original_refine_unet = depth_predictor.refine_unet
         
-        # ===== Transplat-specific: Load Transformer weights =====
-        # Transplat uses coarse_transformer and fine_transformer for depth matching
+        # ===== TranSplat-specific: Load Transformer weights =====
+        # TranSplat uses coarse_transformer and fine_transformer for depth matching
         # These are Deformable Attention modules with: value_proj, attention_weights, sampling_offsets, output_proj
         if hasattr(depth_predictor, 'coarse_transformer'):
             self._transplat_coarse_transformer = depth_predictor.coarse_transformer
@@ -1819,9 +1819,9 @@ class HWDepthPredictor:
     
     def _extract_transformer_weights(self, transformer: nn.Module, prefix: str) -> None:
         """
-        Extract weights from Transplat's UVTransformer for hardware simulation.
+        Extract weights from TranSplat's UVTransformer for hardware simulation.
         
-        Transplat uses Deformable Attention with:
+        TranSplat uses Deformable Attention with:
         - value_proj: Linear projection for values
         - attention_weights: Compute attention weights
         - sampling_offsets: Compute sampling positions (deformable)
@@ -1969,7 +1969,7 @@ class HWDepthPredictor:
         Forward using hardware simulation with ACTUAL hardware compute units.
         
         Supports three model architectures:
-        - Transplat: Process all views together (cross-view attention in U-Net)
+        - TranSplat: Process all views together (cross-view attention in U-Net)
         - MVSplat/DepthSplat: Process per-view (standard stereo matching)
         
         Pipeline:
@@ -2010,7 +2010,7 @@ class HWDepthPredictor:
         regression_cycles = 0
         gaussian_head_cycles = 0
         
-        # Generate depth candidates (disparity format) - per-view like original Transplat
+        # Generate depth candidates (disparity format) - per-view like original TranSplat
         # Original: disp_candi_curr = min_depth + linspace(0,1,D) * (max_depth - min_depth)
         # where min_depth = 1/far, max_depth = 1/near per view
         # Shape: [VB, D, 1, 1]
@@ -2050,7 +2050,7 @@ class HWDepthPredictor:
         kwargs_clean = {k: v for k, v in kwargs.items() if k != 'images'}
         
         if self.model_type == self.MODEL_TRANSPLAT:
-            # Transplat: Process all views together due to cross-view attention
+            # TranSplat: Process all views together due to cross-view attention
             return self._forward_transplat_hw(
                 features, intrinsics, extrinsics, near, far,
                 H_out, W_out, D, device, disp_candidates, depth_candidates, images,
@@ -2082,9 +2082,9 @@ class HWDepthPredictor:
         **kwargs,
     ) -> DepthPredictorOutput:
         """
-        Forward for Transplat using transformer-based matching.
+        Forward for TranSplat using transformer-based matching.
         
-        Transplat's architecture is complex:
+        TranSplat's architecture is complex:
         1. Transformer-based cost volume matching (coarse + fine)
         2. U-Net refinement of cost volume
         3. Depth head for coarse depth
@@ -2114,8 +2114,8 @@ class HWDepthPredictor:
         # Convert features to VB format: [B, V, C, H, W] -> [VB, C, H, W]
         features_vb = rearrange(features, 'b v c h w -> (v b) c h w')
         
-        # Check if we have original Transplat transformers (coarse_transformer, fine_transformer)
-        # These are critical for Transplat's matching quality
+        # Check if we have original TranSplat transformers (coarse_transformer, fine_transformer)
+        # These are critical for TranSplat's matching quality
         has_transformers = (dp is not None and 
                           hasattr(dp, 'coarse_transformer') and 
                           hasattr(dp, 'fine_transformer'))
@@ -2123,7 +2123,7 @@ class HWDepthPredictor:
         if has_transformers:
             # ============================================================
             # HARDWARE TRANSFORMER EXECUTION
-            # Using HWDeformableAttentionUnit to execute Transplat's UVTransformer
+            # Using HWDeformableAttentionUnit to execute TranSplat's UVTransformer
             # Each operation is broken down into hardware unit calls
             # ============================================================
             da_depth = kwargs.get('da_depth')
@@ -2150,7 +2150,7 @@ class HWDepthPredictor:
                 
                 # ============================================================
                 # HARDWARE TRANSFORMER EXECUTION
-                # Using _hw_uv_transformer to execute Transplat's UVTransformer
+                # Using _hw_uv_transformer to execute TranSplat's UVTransformer
                 # All operations are broken down into hardware unit calls
                 # ============================================================
                 use_hardware_transformers = True  # Use hardware simulation instead of original modules
@@ -2223,7 +2223,7 @@ class HWDepthPredictor:
                     
                     grid = torch.stack([x_grid, y_grid], dim=-1)  # [VB, D, H*W, 2]
                     
-                    # IMPORTANT: In original Transplat, bev_queries (query) starts as zeros
+                    # IMPORTANT: In original TranSplat, bev_queries (query) starts as zeros
                     # features (feat01) are used as key/value
                     # Initialize zero query tensor
                     embed_dims = dp.embed_dims  # 128
@@ -2362,7 +2362,7 @@ class HWDepthPredictor:
             matching_features_vb = rearrange(matching_features_vb, 'v b d h w -> (v b) d h w')
         
         # Concatenate with original features: [VB, D+C, H, W]
-        # This matches Transplat's expectation: input_channels = num_depth_candidates + feature_channels
+        # This matches TranSplat's expectation: input_channels = num_depth_candidates + feature_channels
         unet_input = torch.cat([matching_features_vb, features_vb], dim=1)  # [VB, D+C, H, W]
         
         # ===== Stage 2: U-Net Refinement (Hardware Implementation) =====
@@ -2447,7 +2447,7 @@ class HWDepthPredictor:
         pdf, softmax_cyc = self.softmax_unit.forward(logits, dim=1)  # [VB, D, H, W]
         regression_cycles += softmax_cyc.total_cycles
         
-        # Use per-view disparity candidates [VB, D, 1, 1] matching original Transplat
+        # Use per-view disparity candidates [VB, D, 1, 1] matching original TranSplat
         disp_candidates_vb = kwargs.get('disp_candidates_vb')
         if disp_candidates_vb is not None:
             disp_candi = disp_candidates_vb  # [VB, D, 1, 1] from caller
@@ -2475,12 +2475,12 @@ class HWDepthPredictor:
             density_vb, _ = self.bilinear.interpolate(density_vb, size=(H_out, W_out))
         
         # ===== Stage 5: Refine U-Net + Gaussian Head (raw_gaussians) =====
-        # Transplat pipeline: upsampler -> proj_feature -> refine_unet -> to_gaussians
+        # TranSplat pipeline: upsampler -> proj_feature -> refine_unet -> to_gaussians
         # 
         # Input to refine_unet: [images(3), da_depth(1), proj_feature(depth_unet_feat_dim), fullres_disps(1), pdf_max(1)]
         # Input to to_gaussians: [refine_out(depth_unet_feat_dim), images(3), proj_feat_in_fullres(feature_channels)]
         
-        depth_unet_feat_dim = 32  # Default for Transplat
+        depth_unet_feat_dim = 32  # Default for TranSplat
         
         # Get required inputs for refine_unet
         extra_info = kwargs.get('extra_info', {})
@@ -3055,7 +3055,7 @@ class HWDepthPredictor:
     
     # ============================================================
     # TRANSPLAT HARDWARE IMPLEMENTATION METHODS
-    # These implement Transplat's depth prediction using hardware units
+    # These implement TranSplat's depth prediction using hardware units
     # ============================================================
     
     
@@ -3470,7 +3470,7 @@ class HWDepthPredictor:
         
         This implementation uses complete deformable attention with proper sampling.
         
-        IMPORTANT: In Transplat, the query starts as zeros (bev_queries), and 
+        IMPORTANT: In TranSplat, the query starts as zeros (bev_queries), and 
         features are used as key/value. This is different from standard self-attention.
         
         Args:
@@ -3490,7 +3490,7 @@ class HWDepthPredictor:
         total_cycles = 0
         device = feat.device
         
-        # Transplat uses V=2 views
+        # TranSplat uses V=2 views
         V = 2  # Number of views
         B = VB // V  # Batch size
         
@@ -6809,7 +6809,7 @@ class HWDepthPredictor:
         - Apply to_gaussians convolutions
         
         Different models have different raw_gaussians formats:
-        - Transplat/MVSplat: offset_xy(2) + scales(3) + rotations(4) + sh(75) = 84
+        - TranSplat/MVSplat: offset_xy(2) + scales(3) + rotations(4) + sh(75) = 84
         - DepthSplat: scales(3) + rotations(4) + sh(3 * d_sh) where d_sh = 9 for sh_degree=2 = 34
         """
         B, C, H, W = features.shape
@@ -6818,12 +6818,12 @@ class HWDepthPredictor:
         # Determine raw_gaussians format based on model type
         if self.model_type == self.MODEL_DEPTHSPLAT:
             # DepthSplat format: opacity(1) + offset_xy(2) + scales(3) + rotations(4) + sh(27) = 37
-            # DepthSplat has explicit opacity channel, different from Transplat
+            # DepthSplat has explicit opacity channel, different from TranSplat
             sh_degree = 2  # DepthSplat default
             d_sh = (sh_degree + 1) ** 2  # 9
             raw_channels = 1 + 2 + 3 + 4 + 3 * d_sh  # 1 + 2 + 3 + 4 + 27 = 37
         else:
-            # Transplat/MVSplat format: offset_xy(2) + scales(3) + rotations(4) + sh(75) = 84
+            # TranSplat/MVSplat format: offset_xy(2) + scales(3) + rotations(4) + sh(75) = 84
             raw_channels = 84
         
         # Upsample features to output resolution
@@ -6916,7 +6916,7 @@ class HWDepthPredictor:
                 # sh: small values
                 out_bias[10:] = 0.0
             else:
-                # Transplat/MVSplat format: offset_xy(2) + scales(3) + rotations(4) + sh(75)
+                # TranSplat/MVSplat format: offset_xy(2) + scales(3) + rotations(4) + sh(75)
                 # offset_xy: 0.5 (center) - will be sigmoided
                 out_bias[0:2] = 0.0  # Will be sigmoided to 0.5
                 # scales: -4 to -1 range
@@ -6937,7 +6937,7 @@ class HWDepthPredictor:
     def _estimate_cost_volume_cycles(self, B, V, C, H, W, D):
         """Estimate cycles for cost volume construction.
         
-        Transplat uses UVTransformer with deformable attention (NOT full attention).
+        TranSplat uses UVTransformer with deformable attention (NOT full attention).
         Deformable attention samples K=8 reference points per query, making it
         O(H*W*K) instead of O(H*W*H*W).
         

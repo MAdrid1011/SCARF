@@ -24,7 +24,7 @@ chisel/
 │   │   │   ├── SoftmaxUnit.scala    # ← encoder/softmax_unit.py
 │   │   │   ├── PoolingUnit.scala    # ← encoder/pooling_unit.py
 │   │   │   ├── PadUnit.scala        # ← encoder/pad_unit.py
-│   │   │   └── LSHHashUnit.scala    # ← fsgr/lsh_hasher.py
+│   │   │   └── LSHHashUnit.scala    # ← fsdr/lsh_hasher.py
 │   │   ├── ggu/                     # 高斯生成单元 (对应 ggu/)
 │   │   │   ├── GGUArray.scala       # ← ggu/ggu_processor.py
 │   │   │   ├── PositionCalc.scala   # ← ggu/position_calculator.py
@@ -35,11 +35,11 @@ chisel/
 │   │   │   ├── FeatureBuffer.scala  # 256 KB 特征双端口 SRAM
 │   │   │   ├── TileSPM.scala        # 64 KB scratchpad
 │   │   │   ├── DRAMInterface.scala  # AXI4 接口
-│   │   │   └── FSGRCache.scala      # ← fsgr/cache_table.py (512 条目 CAM)
+│   │   │   └── FSDRCache.scala      # ← fsdr/cache_table.py (512 条目 CAM)
 │   │   └── control/                 # 控制器 (对应 depth_predictor/hw_depth_predictor.py)
 │   │       ├── PipelineController.scala  # 顶层 FSM (18 状态)
 │   │       ├── SAESController.scala      # SAES 早退 FSM
-│   │       ├── FSGRController.scala      # ← fsgr/narrowed_search_simulator.py
+│   │       ├── FSDRController.scala      # ← fsdr/narrowed_search_simulator.py
 │   │       └── ConfigRegs.scala          # MMIO 配置寄存器
 │   └── test/scala/scarf/           # 测试
 │       ├── TestUtils.scala          # 公共测试工具
@@ -79,7 +79,7 @@ cd generated/ && verilator --lint-only ScarfTop.v
 
 ## 设计原则
 
-1. **模型无关**：Transplat / MVSplat / DepthSplat 通过 `ConfigRegs` 参数化，数据路径无模型分支
+1. **模型无关**：TranSplat / MVSplat / DepthSplat 通过 `ConfigRegs` 参数化，数据路径无模型分支
 2. **单实例复用**：每种计算单元仅一份实例，FSM 时分复用
 3. **Python 严格对应**：每个 `.scala` 文件对应一个 Python 仿真器，接口行为一致
 4. **分文件 Verilog**：`VerilogEmitter` 逐模块生成，便于综合工具分析

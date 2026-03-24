@@ -2,9 +2,9 @@
 GGU Processor - Standalone Implementation
 
 Main processing engine for Gaussian Generation Unit.
-Matches Transplat's GaussianAdapter exactly with no dependencies.
+Matches TranSplat's GaussianAdapter exactly with no dependencies.
 
-Verified: PSNR diff < 0.05 dB vs Transplat GaussianAdapter
+Verified: PSNR diff < 0.05 dB vs TranSplat GaussianAdapter
 
 Hardware Unit Reuse:
 - GEMMUnit for matrix multiplications (covariance building, world transform)
@@ -42,7 +42,7 @@ class GGUProcessor:
     """
     Main GGU processing engine - Standalone Implementation.
     
-    Matches Transplat's GaussianAdapter.forward() exactly:
+    Matches TranSplat's GaussianAdapter.forward() exactly:
     1. Map raw_scales -> scales via sigmoid + depth * scale_multiplier
     2. Normalize raw_rotation -> rotation
     3. Build local covariance from scales, rotation
@@ -143,7 +143,7 @@ class GGUProcessor:
         """
         Convert quaternion [i, j, k, r] to rotation matrix.
         
-        Matches Transplat's quaternion_to_matrix exactly.
+        Matches TranSplat's quaternion_to_matrix exactly.
         
         Hardware: ~50 multiplications, ~20 additions
         """
@@ -161,7 +161,7 @@ class GGUProcessor:
         """
         Build covariance: R @ S @ S^T @ R^T
         
-        Matches Transplat's build_covariance exactly.
+        Matches TranSplat's build_covariance exactly.
         
         Hardware: ~100 multiplications (uses GEMMUnit internally)
         """
@@ -177,7 +177,7 @@ class GGUProcessor:
         """
         Build covariance using GEMMUnit for cycle counting.
         
-        Matches Transplat's build_covariance exactly.
+        Matches TranSplat's build_covariance exactly.
         Uses GEMMUnit for hardware-accurate cycle estimation.
         
         Returns:
@@ -224,13 +224,13 @@ class GGUProcessor:
         coordinates: torch.Tensor,
         extrinsics: torch.Tensor,
         intrinsics: torch.Tensor,
-        direction_normalize: str = 'norm',  # 'norm' (Transplat) or 'z' (DepthSplat)
+        direction_normalize: str = 'norm',  # 'norm' (TranSplat) or 'z' (DepthSplat)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Get world rays from normalized coordinates.
         
         Args:
-            direction_normalize: 'norm' for Transplat (unit vector), 'z' for DepthSplat (divide by z)
+            direction_normalize: 'norm' for TranSplat (unit vector), 'z' for DepthSplat (divide by z)
         
         Hardware: ~60 multiplications + matrix inverse
         """
@@ -244,7 +244,7 @@ class GGUProcessor:
         
         # Normalize directions - configurable for different models
         if direction_normalize == 'norm':
-            # Transplat/MVSplat: normalize to unit vector
+            # TranSplat/MVSplat: normalize to unit vector
             directions = directions / (directions.norm(dim=-1, keepdim=True) + 1e-8)
         else:
             # DepthSplat: divide by z component
@@ -270,7 +270,7 @@ class GGUProcessor:
         """
         Compute scale multiplier based on intrinsics.
         
-        Matches Transplat's GaussianAdapter.get_scale_multiplier.
+        Matches TranSplat's GaussianAdapter.get_scale_multiplier.
         
         Hardware: matrix inverse + ~10 multiplications
         """
@@ -294,7 +294,7 @@ class GGUProcessor:
         """
         Generate complete Gaussian from network output.
         
-        Matches Transplat's GaussianAdapter.forward() exactly.
+        Matches TranSplat's GaussianAdapter.forward() exactly.
         """
         if image_shape is None:
             image_shape = self.config.image_shape
@@ -374,13 +374,13 @@ class GGUProcessor:
         opacities: torch.Tensor,       # [B, V, R, srf, gpp]
         raw_gaussians: torch.Tensor,   # [B, V, R, srf, d_in]
         image_shape: Tuple[int, int],
-        rotate_sh_func: Optional[callable] = None,  # Transplat's rotate_sh function
+        rotate_sh_func: Optional[callable] = None,  # TranSplat's rotate_sh function
         input_images: Optional[torch.Tensor] = None,  # [B, V, 3, H, W] for SH init (DepthSplat)
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Batch forward pass for SCARF GGU.
         
-        Matches Transplat's GaussianAdapter.forward() exactly.
+        Matches TranSplat's GaussianAdapter.forward() exactly.
         
         Args:
             extrinsics: Camera extrinsics [B, V, 4, 4]
@@ -390,7 +390,7 @@ class GGUProcessor:
             opacities: Opacity values [B, V, R, srf, gpp]
             raw_gaussians: Raw gaussian features [B, V, R, srf, d_in]
             image_shape: (height, width)
-            rotate_sh_func: Optional SH rotation function (use Transplat's for exact match)
+            rotate_sh_func: Optional SH rotation function (use TranSplat's for exact match)
         
         Returns:
             means: [B, V, R, srf, gpp, 3]
@@ -415,7 +415,7 @@ class GGUProcessor:
         # 1. Map scales - configurable activation and depth scaling
         # Uses ActivationUnit for sigmoid (hardware reuse)
         if self.config.scale_activation == 'sigmoid':
-            # Transplat/MVSplat: sigmoid + depth * multiplier
+            # TranSplat/MVSplat: sigmoid + depth * multiplier
             # Use ActivationUnit for sigmoid with cycle counting
             sigmoid_out, act_cycles = self.sigmoid_unit.forward(raw_scales)
             self._activation_cycles += act_cycles.total_cycles
@@ -489,9 +489,9 @@ class GGUProcessor:
         
         sh = sh[:, :, :, :, None, :, :].expand(-1, -1, -1, -1, gpp, -1, -1)  # [B, V, R, srf, gpp, 3, num_sh]
         
-        # 7. Rotate SH to world space (matches Transplat's rotate_sh call)
+        # 7. Rotate SH to world space (matches TranSplat's rotate_sh call)
         if rotate_sh_func is not None:
-            # Use Transplat's rotate_sh for exact match
+            # Use TranSplat's rotate_sh for exact match
             # sh: [B, V, R, srf, gpp, 3, num_sh]
             # R_c2w: [B, V, 3, 3]
             # Need to reshape for proper broadcasting

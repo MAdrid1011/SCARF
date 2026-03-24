@@ -24,9 +24,9 @@ class DepthSplatAdapter(MVSplatAdapter):
     def __init__(self, feature_dim: int = 384):
         super().__init__(feature_dim)
     
-    def get_fsgr_config_overrides(self) -> Dict:
+    def get_fsdr_config_overrides(self) -> Dict:
         """
-        DepthSplat-specific FSGR configuration.
+        DepthSplat-specific FSDR configuration.
         
         DINOv2 features are more semantically consistent,
         so we can use tighter thresholds for better cache hit rate.

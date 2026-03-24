@@ -1,6 +1,6 @@
-# SCARF: Hardware Simulator for 3D Gaussian Splatting Encoders
+# SCARF: A Scene-Adaptive Depth-Guided G-3DGS Encoder Accelerator with Semantic Reuse and Fused Dataflow
 
-SCARF (Scene-Adaptive Cost-volume Accelerator with Reuse Framework) is a hardware-realizable accelerator for 3D Gaussian Splatting (3DGS) encoders.
+SCARF is a hardware-realizable accelerator for depth-guided generalizable 3D Gaussian Splatting (G-3DGS) encoders, co-designed with a scene-adaptive dataflow that exploits semantic similarity in 2D feature space (FSDR) and geometric continuity in 3D space (SAES).
 
 ## Key Features
 
@@ -23,12 +23,12 @@ SCARF (Scene-Adaptive Cost-volume Accelerator with Reuse Framework) is a hardwar
 | **PadUnit** | Constant / reflect / replicate / circular padding |
 | **DeformableAttentionUnit** | Multi-scale deformable attention |
 
-### SAES (Scene-Adaptive Early-Stopping)
+### SAES (Scene-Adaptive Early Sparsification)
 - Analyzes feature similarity within tiles
 - Skips depth search for homogeneous regions
 - Reduces Gaussian count by ~30%
 
-### FSGR (Feature-Similarity Gaussian Reuse)
+### FSDR (Feature Similarity Depth Reuse)
 - Caches depth results using LSH-based feature signatures
 - Reuses cached depths for similar pixels
 - Reduces memory access by ~87%
@@ -37,7 +37,7 @@ SCARF (Scene-Adaptive Cost-volume Accelerator with Reuse Framework) is a hardwar
 
 | Model | Status | Description |
 |-------|--------|-------------|
-| **Transplat** | ✅ Full | Transformer-based with depth priors |
+| **TranSplat** | ✅ Full | Transformer-based with depth priors |
 | **MVSplat** | ✅ Full | Multi-view stereo with cost volume |
 | **DepthSplat** | ✅ Full | DINOv2 features with 3-view support |
 
@@ -74,8 +74,8 @@ SCARF/
 │   └── depthsplat_predictor.py
 ├── ggu/                   # Gaussian Generation Unit simulator
 ├── dsu/                   # Depth Search Unit simulator
-├── fsgr/                  # Feature-Similarity Gaussian Reuse
-├── saes/                  # Scene-Adaptive Early-Stopping
+├── fsdr/                  # Feature Similarity Depth Reuse
+├── saes/                  # Scene-Adaptive Early Sparsification
 ├── adapters/              # Model-specific adapters
 ├── integration/           # Model loader & bundle utilities
 ├── scripts/
@@ -83,7 +83,7 @@ SCARF/
 ├── tests/                 # Unit & integration tests
 ├── docs/                  # Documentation
 ├── hub/                   # (local, git-ignored) torch.hub cache & checkpoints
-├── transplat/             # Transplat submodule
+├── transplat/             # TranSplat submodule
 ├── mvsplat/               # MVSplat submodule
 └── depthsplat/            # DepthSplat submodule
 ```
@@ -121,7 +121,7 @@ pip install -r depthsplat/requirements.txt
 Copy (or symlink) checkpoints and datasets into each submodule directory:
 
 ```bash
-# --- Transplat ---
+# --- TranSplat ---
 cp -r /path/to/checkpoints/re10k.ckpt          transplat/checkpoints/
 cp -r /path/to/checkpoints/depth_anything_v2_vitb.pth transplat/checkpoints/
 cp -r /path/to/datasets/re10k                   transplat/datasets/
@@ -145,14 +145,14 @@ Required files per model:
 
 | Model | Checkpoints | Dataset |
 |-------|------------|---------|
-| Transplat | `re10k.ckpt`, `depth_anything_v2_vitb.pth` | `re10k/` |
+| TranSplat | `re10k.ckpt`, `depth_anything_v2_vitb.pth` | `re10k/` |
 | MVSplat | `re10k.ckpt` | `re10k/` |
 | DepthSplat | `depthsplat_re10k.ckpt` | `re10k/` |
 
 ### 4. Run Demo
 
 ```bash
-# Run with Transplat (default) — full HW simulation pipeline
+# Run with TranSplat (default) — full HW simulation pipeline
 python scripts/demo.py --model transplat
 
 # Run with MVSplat
@@ -161,8 +161,8 @@ python scripts/demo.py --model mvsplat
 # Run with DepthSplat
 python scripts/demo.py --model depthsplat
 
-# Disable FSGR and/or SAES optimizations (pure HW sim only)
-python scripts/demo.py --model transplat --no-fsgr --no-saes
+# Disable FSDR and/or SAES optimizations (pure HW sim only)
+python scripts/demo.py --model transplat --no-fsdr --no-saes
 ```
 
 ## Architecture
@@ -189,12 +189,12 @@ Input Images + Camera Params
 │  (Activation, Sigmoid, Conv…)    │  all routed through hardware units
 └──────────────┬───────────────────┘
                ↓ Gaussians + Cycle Counts
-        [Optional SAES / FSGR]
+        [Optional SAES / FSDR]
                ↓
         Model Decoder → Rendered Image
 ```
 
-When SAES and FSGR are enabled (default), they sit between Depth Predictor and GGU:
+When SAES and FSDR are enabled (default), they sit between Depth Predictor and GGU:
 
 ```
 ┌──────────────────────────────────┐
@@ -203,7 +203,7 @@ When SAES and FSGR are enabled (default), they sit between Depth Predictor and G
 └──────────────┬───────────────────┘
                ↓
 ┌──────────────────────────────────┐
-│  SCARF FSGR                      │  LSH-based depth cache
+│  SCARF FSDR                      │  LSH-based depth cache
 │  → Reuse cached depth results    │
 └──────────────┬───────────────────┘
 ```
@@ -211,17 +211,14 @@ When SAES and FSGR are enabled (default), they sit between Depth Predictor and G
 ## Documentation
 
 - [Multi-Model Demo Guide](docs/multi-model-demo-guide.md)
-- [SAES Architecture](docs/saes-architecture.md)
-- [FSGR Architecture](docs/fsgr-architecture.md)
-- [DSU Architecture](docs/dsu-architecture.md)
+- [FSDR + SAES Mechanisms](docs/fsdr-saes-mechanisms.md)
 - [GGU Architecture](docs/ggu-architecture.md)
-- [Hardware Dataflow Mapping](docs/hardware-dataflow-mapping.md)
+- [Pipeline Architecture](docs/pipeline-architecture.md)
+- [Architecture (中文)](docs/architecture-cn.md)
 
 Module-level documentation:
-- [encoder/README.md](encoder/README.md) — Hardware unit simulators
 - [feature_extractor/README.md](feature_extractor/README.md) — Feature extraction
 - [depth_predictor/README.md](depth_predictor/README.md) — Depth prediction
-- [ggu/README.md](ggu/README.md) — Gaussian generation
 
 ## License
 
@@ -229,7 +226,7 @@ MIT License
 
 ## Related Projects
 
-- [Transplat](https://github.com/xingyoujun/transplat) - Original TranSplat implementation (AAAI 2025)
+- [TranSplat](https://github.com/xingyoujun/transplat) - Original TranSplat implementation (AAAI 2025)
 
 ## Citation
 
@@ -237,7 +234,7 @@ If you use SCARF in your research, please cite:
 
 ```bibtex
 @misc{scarf2025,
-  title={SCARF: Hardware Simulator for 3D Gaussian Splatting Encoders},
+  title={SCARF: A Scene-Adaptive Depth-Guided G-3DGS Encoder Accelerator with Semantic Reuse and Fused Dataflow},
   author={...},
   year={2025}
 }

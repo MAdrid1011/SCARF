@@ -23,7 +23,7 @@ PyTorch functional calls (`F.*`, `torch.*`) with cycle-counted hardware equivale
 | `types.py` | `DepthPredictorConfig`, `DepthPredictorOutput`, `CycleBreakdown` |
 | `base_predictor.py` | `BaseDepthPredictorSim` ABC + `PassThroughDepthPredictorSim` |
 | `hw_depth_predictor.py` | Core HW simulator: `HWDepthPredictor`, `HWUNetUnit` |
-| `transplat_predictor.py` | `TransplatDepthPredictorSim` — Transplat depth pipeline |
+| `transplat_predictor.py` | `TransplatDepthPredictorSim` — TranSplat depth pipeline |
 | `mvsplat_predictor.py` | `MVSplatDepthPredictorSim` — MVSplat depth pipeline |
 | `depthsplat_predictor.py` | `DepthSplatDepthPredictorSim` — DepthSplat depth pipeline |
 | `cost_volume_sim.py` | `CostVolumeSimulator` — plane-sweep cost volume |
@@ -51,7 +51,7 @@ Features (from Feature Extractor)
          │
          ▼
 ┌─────────────────────────────┐
-│   Model-Specific Predictor  │  (Transplat / MVSplat / DepthSplat)
+│   Model-Specific Predictor  │  (TranSplat / MVSplat / DepthSplat)
 │   ┌─────────────────────┐   │
 │   │  HWDepthPredictor   │   │
 │   │  ┌───────────────┐  │   │

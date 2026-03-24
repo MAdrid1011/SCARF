@@ -6,8 +6,8 @@ SCARF (Scene-Adaptive Cost-volume Accelerator with Reuse Framework) is a
 hardware-realizable accelerator for 3D Gaussian Splatting encoders.
 
 This demo shows SCARF's two key optimizations:
-1. SAES (Scene-Adaptive Early-Stopping): Skip depth search for homogeneous tiles
-2. FSGR (Feature-Similarity Depth Reuse): Cache and reuse depth for similar pixels
+1. SAES (Scene-Adaptive Early Sparsification): Skip depth search for homogeneous tiles
+2. FSDR (Feature-Similarity Depth Reuse): Cache and reuse depth for similar pixels
 
 Data Flow:
     [Neural Network Backbone] → features
@@ -18,7 +18,7 @@ Data Flow:
     ↓             ↓
 Early-Stop     Continue
     ↓             ↓
-Skip S2     [S2 Depth + FSGR] → depths
+Skip S2     [S2 Depth + FSDR] → depths
     ↓             ↓
 [SCARF GGU]  [SCARF GGU]
 (representative) (full)
@@ -33,7 +33,7 @@ Output Metrics:
 - Quality: PSNR, SSIM (vs baseline without SCARF)
 - Performance: Hardware cycle counts (S1, S2, S3, GGU, total)
 - SAES: Early-stop ratio, Gaussian reduction
-- FSGR: Cache hit rate, Memory access reduction
+- FSDR: Cache hit rate, Memory access reduction
 
 Usage:
     python demo.py [--model MODEL_TYPE] [OPTIONS]
@@ -48,7 +48,7 @@ Fallback Options (for debugging):
     --no-depth        Disable SCARF depth prediction HW simulator, use original GPU
     --no-gaussian     Disable SCARF gaussian generation HW simulator (GGU), use original GPU
     --no-saes         Disable SAES early-stopping
-    --no-fsgr         Disable FSGR depth reuse
+    --no-fsdr         Disable FSDR depth reuse
     --baseline-only   Only run baseline, skip SCARF pipeline
 """
 
@@ -77,7 +77,7 @@ import argparse
 from adapters import create_adapter, BaseAdapter
 from integration import create_model_loader, ModelBundle, DataBundle
 from ggu import GGUProcessor, GGUConfig
-from fsgr import FSGRSimulator
+from fsdr import FSDRSimulator
 from saes import ProgressiveSAES, apply_progressive_saes
 
 # SCARF hardware clock frequency (MHz) — default 1 GHz, overridable via --freq
@@ -209,23 +209,23 @@ class SCARFConfig:
     depth_std_threshold: float = 0.003    # Level 1: ~3% of remaining tiles (depth-flat, geometrically planar)
     saes_cross_check: float = 0.015       # Probe cross-check error threshold (conservative, ≤2% quality across all models)
     
-    # ---- FSGR config — Depth-Only Reuse (Realistic ASIC) ----
+    # ---- FSDR config — Depth-Only Reuse (Realistic ASIC) ----
     # In real ASIC: cache hit → reuse cached DEPTH (skip S2 only)
     # S3 still runs with cached depth → only means/positions affected
     # Quality impact is proportional to depth error (very small for matched pixels)
     # This allows much more aggressive reuse criteria than full-Gaussian reuse
-    fsgr_cache_size: int = 32
-    fsgr_hamming_threshold: int = 4       # Cache lookup hamming range
-    fsgr_reuse_hamming: int = 3           # Moderate hamming (depth-only is safe)
-    fsgr_reuse_spatial: int = 12          # Moderate spatial distance
-    fsgr_reuse_confidence: float = 0.80   # Min peak_prob for reuse decision
-    # All FSGR-guided pixels use single-tier narrowed depth search (no S3 bypass).
-    # fsgr_tier1_ratio removed: Tier 1 (HD ≤ 1 full Gaussian reuse) is not
+    fsdr_cache_size: int = 32
+    fsdr_hamming_threshold: int = 4       # Cache lookup hamming range
+    fsdr_reuse_hamming: int = 3           # Moderate hamming (depth-only is safe)
+    fsdr_reuse_spatial: int = 12          # Moderate spatial distance
+    fsdr_reuse_confidence: float = 0.80   # Min peak_prob for reuse decision
+    # All FSDR-guided pixels use single-tier narrowed depth search (no S3 bypass).
+    # fsdr_tier1_ratio removed: Tier 1 (HD ≤ 1 full Gaussian reuse) is not
     # implemented in the simulation; claiming it would overstate speedup.
     
     # Depth prediction config (will be overridden based on model type)
-    num_depth_candidates: int = 32  # Default for MVSplat; Transplat/DepthSplat use 128
-    fsgr_narrowed_candidates: int = 8  # FSGR narrowed search target (D/4)
+    num_depth_candidates: int = 32  # Default for MVSplat; TranSplat/DepthSplat use 128
+    fsdr_narrowed_candidates: int = 8  # FSDR narrowed search target (D/4)
     feature_dim: int = 128
     
     # GGU config (defaults, overridden by adapter)
@@ -238,17 +238,17 @@ class SCARFConfig:
     
     def apply_adapter_overrides(self, adapter: BaseAdapter):
         """Apply model-specific configuration from adapter."""
-        fsgr_overrides = adapter.get_fsgr_config_overrides()
+        fsdr_overrides = adapter.get_fsdr_config_overrides()
         saes_overrides = adapter.get_saes_config_overrides()
         scale_min, scale_max = adapter.get_scale_range()
         
         # Apply overrides
-        if 'hamming_threshold' in fsgr_overrides:
-            self.fsgr_hamming_threshold = fsgr_overrides['hamming_threshold']
-        if 'reuse_hamming' in fsgr_overrides:
-            self.fsgr_reuse_hamming = fsgr_overrides['reuse_hamming']
-        if 'reuse_spatial' in fsgr_overrides:
-            self.fsgr_reuse_spatial = fsgr_overrides['reuse_spatial']
+        if 'hamming_threshold' in fsdr_overrides:
+            self.fsdr_hamming_threshold = fsdr_overrides['hamming_threshold']
+        if 'reuse_hamming' in fsdr_overrides:
+            self.fsdr_reuse_hamming = fsdr_overrides['reuse_hamming']
+        if 'reuse_spatial' in fsdr_overrides:
+            self.fsdr_reuse_spatial = fsdr_overrides['reuse_spatial']
         if 'early_stop_threshold' in saes_overrides:
             pass  # L2 Gaussian-similarity threshold removed; saes_overrides ignored
         
@@ -368,18 +368,18 @@ class HWCycleCounter:
 
 
 # ============================================================
-# Savings Tracker (SAES + FSGR cycle savings model)
+# Savings Tracker (SAES + FSDR cycle savings model)
 # ============================================================
 class SavingsTracker:
     """
-    Track cycle savings from SAES v4 (multi-level, dataflow-aligned) and FSGR optimizations.
+    Track cycle savings from SAES v4 (multi-level, dataflow-aligned) and FSDR optimizations.
 
     v4 changes (vs v3):
     - K(T) adaptive probe count: K(T) = 4 + ceil(2·log2(T/4))
     - L0/L1: weighted moment matching (space+feature / space+feature+depth weights)
              + covariance spread term (law of total variance) for coverage.
     - Non-probe opacities zeroed → effective Gaussian count ≤ K(T) per early-stopped tile.
-    - FSGR: Feature-Similarity Depth Reuse. Cache hits skip S2 cost_volume for guided pixels.
+    - FSDR: Feature-Similarity Depth Reuse. Cache hits skip S2 cost_volume for guided pixels.
     """
     
     LIGHT_VERIFY_COST_RATIO = 0.04
@@ -390,13 +390,13 @@ class SavingsTracker:
         self.level0_pixels = 0   # Feature-uniform tiles: K(T) probes, 12 non-probe opacity→0
         self.level1_pixels = 0   # Depth-uniform tiles:   K(T) probes, 12 non-probe opacity→0
         self.saes_interpolated_pixels = 0  # Total modified (backward compat)
-        # FSGR
-        self.fsgr_direct_reuse = 0
-        self.fsgr_interpolation = 0
-        self.fsgr_light_verify = 0
-        self.fsgr_full_search = 0
-        self.fsgr_validated = 0
-        self.fsgr_rejected = 0
+        # FSDR
+        self.fsdr_direct_reuse = 0
+        self.fsdr_interpolation = 0
+        self.fsdr_light_verify = 0
+        self.fsdr_full_search = 0
+        self.fsdr_validated = 0
+        self.fsdr_rejected = 0
     
     def record_saes(self, total_pixels: int, saes_stats: Dict):
         """Record SAES v4 (L0+L1) statistics."""
@@ -413,8 +413,8 @@ class SavingsTracker:
             self.level1_pixels = saes_stats.get('level1_pixels', 0)
         self.saes_interpolated_pixels = self.level0_pixels + self.level1_pixels
     
-    def record_fsgr_pixel(self, path: str, reused: bool = False, validated: bool = False):
-        """Record one pixel's FSGR path with reuse status.
+    def record_fsdr_pixel(self, path: str, reused: bool = False, validated: bool = False):
+        """Record one pixel's FSDR path with reuse status.
         
         Args:
             path: Decision path ('reuse', 'hit_no_reuse', 'full_compute', etc.)
@@ -422,19 +422,19 @@ class SavingsTracker:
             validated: Deprecated alias for reused (backward compat)
         """
         if path in ('reuse', 'guided'):
-            self.fsgr_direct_reuse += 1
+            self.fsdr_direct_reuse += 1
         elif path in ('hit_no_reuse', 'hit_no_guide', 'full_compute', 'full_search'):
-            self.fsgr_full_search += 1
+            self.fsdr_full_search += 1
         else:
-            self.fsgr_full_search += 1
+            self.fsdr_full_search += 1
         if reused or validated:
-            self.fsgr_validated += 1
+            self.fsdr_validated += 1
     
     @property
-    def fsgr_total(self) -> int:
-        """Total pixels processed by FSGR."""
-        return (self.fsgr_direct_reuse + self.fsgr_interpolation +
-                self.fsgr_light_verify + self.fsgr_full_search)
+    def fsdr_total(self) -> int:
+        """Total pixels processed by FSDR."""
+        return (self.fsdr_direct_reuse + self.fsdr_interpolation +
+                self.fsdr_light_verify + self.fsdr_full_search)
     
     # --- Per-level saving ratios ---
     def level0_ratio(self) -> float:
@@ -449,9 +449,9 @@ class SavingsTracker:
         """Total fraction of pixels modified by SAES (all levels)."""
         return self.saes_interpolated_pixels / self.total_pixels if self.total_pixels > 0 else 0.0
     
-    def fsgr_validated_saving_ratio(self) -> float:
-        """Fraction of ALL pixels validated as fully skippable by FSGR (S2+S3)."""
-        return self.fsgr_validated / self.total_pixels if self.total_pixels > 0 else 0.0
+    def fsdr_validated_saving_ratio(self) -> float:
+        """Fraction of ALL pixels validated as fully skippable by FSDR (S2+S3)."""
+        return self.fsdr_validated / self.total_pixels if self.total_pixels > 0 else 0.0
     
     
     def compute_ablation(self, feature_cycles: int, depth_cycles: int,
@@ -461,7 +461,7 @@ class SavingsTracker:
                          cost_volume_cycles: int = 0,
                          s1_cnn_cycles: int = 0,
                          ablation_quality: Dict = None,
-                         fsgr_narrowing_ratio: float = 0.75) -> Dict[str, Dict]:
+                         fsdr_narrowing_ratio: float = 0.75) -> Dict[str, Dict]:
         """
         Compute cycle counts for all ablation configurations.
         
@@ -480,7 +480,7 @@ class SavingsTracker:
                         Saves 75% of S2+S3 per tile. Decision: S1 feature variance + cross-check.
           SAES Level 1: Depth-uniform tiles → K(T) probes, rest opacity→0
                         Saves 75% of S2+S3 per tile. Decision: probe depth uniformity + cross-check.
-          FSGR (Narrowed Search): Guided pixels search D/4 depth candidates.
+          FSDR (Narrowed Search): Guided pixels search D/4 depth candidates.
                 Saves cost_volume computation only (memory-bound, per-pixel per-candidate).
                 U-Net/depth_head/regression unchanged (process full spatial resolution).
                 Decision: LSH hamming + confidence + depth consistency check.
@@ -503,8 +503,8 @@ class SavingsTracker:
         l1_ratio = self.level1_ratio()   # Depth-uniform:   saves S2+S3 for non-probe px
         total_saes = l0_ratio + l1_ratio
         
-        # FSGR: fraction of remaining (non-SAES) pixels that get guided search
-        fsgr_ratio = self.fsgr_validated_saving_ratio()
+        # FSDR: fraction of remaining (non-SAES) pixels that get guided search
+        fsdr_ratio = self.fsdr_validated_saving_ratio()
         
         if dp_core_cycles == 0 and gauss_gen_cycles == 0:
             dp_core_cycles = depth_cycles
@@ -583,9 +583,9 @@ class SavingsTracker:
         saes_s3_saving = total_saes   # L0+L1 both skip S3 for non-probe px
         
         # ================================================================
-        # FSGR savings: Narrowed Depth Search only
+        # FSDR savings: Narrowed Depth Search only
         # ================================================================
-        # The FSGR simulation implements a single-tier narrowed search:
+        # The FSDR simulation implements a single-tier narrowed search:
         #   All guided pixels run S2 with D/4 candidates (75% S2 savings).
         #   S3 (Gaussian generation) still runs for every pixel — there is no
         #   Tier-1 S3 bypass in the current simulation.  Claiming S3 savings
@@ -597,15 +597,15 @@ class SavingsTracker:
         #
         # Per-pixel S2 saving for guided pixels (D-dependent ops only):
         #   depth_dep_frac ≈ cv_frac + 0.04  (cost-volume + depth head + regression)
-        #   tier_saving    = depth_dep_frac × fsgr_narrowing_ratio
+        #   tier_saving    = depth_dep_frac × fsdr_narrowing_ratio
         # S3 saving: 0 (not implemented; narrowed search still produces depth
         #   that feeds S3 normally).
-        FSGR_TIER2_RATIO = 1.0  # All guided pixels use narrowed search
+        FSDR_TIER2_RATIO = 1.0  # All guided pixels use narrowed search
 
         if dp_core_cycles > 0 and dp_cv_scaled > 0:
             cv_frac_scaled = dp_cv_scaled / dp_core_cycles
         else:
-            cv_frac_scaled = 0.69  # Typical for Transplat (fallback)
+            cv_frac_scaled = 0.69  # Typical for TranSplat (fallback)
 
         # depth_dep_frac: fraction of S2 that depends on D (depth candidates).
         # Components:
@@ -614,19 +614,19 @@ class SavingsTracker:
         #                    + depth head (softmax over D planes)
         #                    + regression (weighted sum over D candidates)
         # For models where UNet is not D-dependent, this is a slight over-estimate;
-        # for all DepthSplat/MVSplat/Transplat architectures the UNet takes the
+        # for all DepthSplat/MVSplat/TranSplat architectures the UNet takes the
         # D-plane cost volume as input, so D-dependent modeling is accurate.
         depth_dep_frac = min(cv_frac_scaled + 0.75, 1.0)
-        tier2_per_pixel = depth_dep_frac * fsgr_narrowing_ratio
+        tier2_per_pixel = depth_dep_frac * fsdr_narrowing_ratio
 
         # S2 saving: all guided pixels get D/4 narrowed search on ALL D-dependent ops
-        # S3 saving: 0 — simulation does not skip S3 for any FSGR-guided pixel
-        FSGR_S2_SAVE_PER_PIXEL = FSGR_TIER2_RATIO * tier2_per_pixel
-        FSGR_S3_SAVE_PER_PIXEL = 0.0
+        # S3 saving: 0 — simulation does not skip S3 for any FSDR-guided pixel
+        FSDR_S2_SAVE_PER_PIXEL = FSDR_TIER2_RATIO * tier2_per_pixel
+        FSDR_S3_SAVE_PER_PIXEL = 0.0
 
-        remaining_for_fsgr = 1.0 - total_saes
-        fsgr_s2_saving = fsgr_ratio * remaining_for_fsgr * FSGR_S2_SAVE_PER_PIXEL
-        fsgr_s3_saving = fsgr_ratio * remaining_for_fsgr * FSGR_S3_SAVE_PER_PIXEL
+        remaining_for_fsdr = 1.0 - total_saes
+        fsdr_s2_saving = fsdr_ratio * remaining_for_fsdr * FSDR_S2_SAVE_PER_PIXEL
+        fsdr_s3_saving = fsdr_ratio * remaining_for_fsdr * FSDR_S3_SAVE_PER_PIXEL
         
         # ================================================================
         # Build ablation configs
@@ -671,15 +671,15 @@ class SavingsTracker:
             feature_cycles, dp_core_cycles, gauss_gen_cycles, ggu_cycles,
             0.0, 0.0, cfg_key='asic')
         
-        # 2. ASIC + FSGR only (two-tier: Tier1 full Gaussian reuse, Tier2 narrowed search)
-        fsgr_alone_s2 = fsgr_ratio * FSGR_S2_SAVE_PER_PIXEL
-        fsgr_alone_s3 = fsgr_ratio * FSGR_S3_SAVE_PER_PIXEL
-        dp_fsgr = int(dp_core_cycles * (1.0 - fsgr_alone_s2))
-        gh_fsgr = int(gauss_gen_cycles * (1.0 - fsgr_alone_s3))
-        ggu_fsgr = int(ggu_cycles * (1.0 - fsgr_alone_s3))
-        configs['asic_fsgr'] = _make_cfg(
-            feature_cycles, dp_fsgr, gh_fsgr, ggu_fsgr,
-            fsgr_alone_s2, fsgr_alone_s3, cfg_key='asic_fsgr')
+        # 2. ASIC + FSDR only (two-tier: Tier1 full Gaussian reuse, Tier2 narrowed search)
+        fsdr_alone_s2 = fsdr_ratio * FSDR_S2_SAVE_PER_PIXEL
+        fsdr_alone_s3 = fsdr_ratio * FSDR_S3_SAVE_PER_PIXEL
+        dp_fsdr = int(dp_core_cycles * (1.0 - fsdr_alone_s2))
+        gh_fsdr = int(gauss_gen_cycles * (1.0 - fsdr_alone_s3))
+        ggu_fsdr = int(ggu_cycles * (1.0 - fsdr_alone_s3))
+        configs['asic_fsdr'] = _make_cfg(
+            feature_cycles, dp_fsdr, gh_fsdr, ggu_fsdr,
+            fsdr_alone_s2, fsdr_alone_s3, cfg_key='asic_fsdr')
         
         # 3. ASIC + SAES only (multi-level)
         dp_saes = int(dp_core_cycles * (1.0 - saes_s2_saving))
@@ -689,19 +689,19 @@ class SavingsTracker:
             feature_cycles, dp_saes, gh_saes, ggu_saes,
             saes_s2_saving, saes_s3_saving, cfg_key='asic_saes')
         
-        # 4. ASIC + SAES + FSGR (full optimization)
-        combined_s2_saving = saes_s2_saving + fsgr_s2_saving
-        combined_s3_saving = saes_s3_saving + fsgr_s3_saving  # fsgr_s3_saving=0
+        # 4. ASIC + SAES + FSDR (full optimization)
+        combined_s2_saving = saes_s2_saving + fsdr_s2_saving
+        combined_s3_saving = saes_s3_saving + fsdr_s3_saving  # fsdr_s3_saving=0
         dp_both = int(dp_core_cycles * (1.0 - combined_s2_saving))
         dp_both = max(0, dp_both)
         gh_both = int(gauss_gen_cycles * (1.0 - combined_s3_saving))
         gh_both = max(0, gh_both)
         ggu_both = int(ggu_cycles * (1.0 - combined_s3_saving))
         ggu_both = max(0, ggu_both)
-        configs['asic_fsgr_saes'] = _make_cfg(
+        configs['asic_fsdr_saes'] = _make_cfg(
             feature_cycles, dp_both, gh_both, ggu_both,
             combined_s2_saving, combined_s3_saving,
-            cfg_key='asic_fsgr_saes')
+            cfg_key='asic_fsdr_saes')
         
         # Store pipeline factors and multi-level info
         configs['_pipeline'] = {
@@ -714,15 +714,15 @@ class SavingsTracker:
             'S1_CNN_BOOST': S1_CNN_BOOST,
             'S1_VIT_BOOST': S1_VIT_BOOST,
             'cv_frac_scaled': cv_frac_scaled,
-            'fsgr_s2_save_per_pixel': FSGR_S2_SAVE_PER_PIXEL,
+            'fsdr_s2_save_per_pixel': FSDR_S2_SAVE_PER_PIXEL,
             'saes_l0_ratio': l0_ratio,
             'saes_l1_ratio': l1_ratio,
             'saes_total_ratio': total_saes,
             'saes_s2_saving': saes_s2_saving,
             'saes_s3_saving': saes_s3_saving,
-            'fsgr_reuse_ratio': fsgr_ratio,
-            'fsgr_s2_saving': fsgr_s2_saving,
-            'fsgr_s3_saving': fsgr_s3_saving,
+            'fsdr_reuse_ratio': fsdr_ratio,
+            'fsdr_s2_saving': fsdr_s2_saving,
+            'fsdr_s3_saving': fsdr_s3_saving,
             'combined_s2_saving': combined_s2_saving,
             'combined_s3_saving': combined_s3_saving,
         }
@@ -788,13 +788,13 @@ def tune_thresholds(
     settings within the quality budget.
 
     Sweeps: feature_var_threshold (L0), depth_std_threshold (L1).
-    FSGR uses fixed hardware criteria.
+    FSDR uses fixed hardware criteria.
 
     Args:
         quality_budget_pct: Max allowed relative PSNR loss in %
 
     Returns:
-        (best_feat_var_threshold, best_fsgr_tolerance, saes_results, fsgr_results)
+        (best_feat_var_threshold, best_fsdr_tolerance, saes_results, fsdr_results)
     """
     from src.model.types import Gaussians
 
@@ -872,15 +872,15 @@ def tune_thresholds(
         best_ds = 0.005
         print(f"\n  ** No combo within budget, using defaults")
     
-    # ---- Phase 2: FSGR reuse rate (realistic model) ----
-    # In the realistic model, FSGR reuse criteria are hardware-fixed (hamming, spatial, confidence).
-    # We report the reuse rate for reference — FSGR now has quality impact.
-    print(f"\n### FSGR Reuse Rate (Realistic ASIC Model)")
-    print(f"  (FSGR uses cached Gaussians → has quality impact)")
-    print(f"  Reuse criteria: hamming≤{CONFIG.fsgr_reuse_hamming}, "
-          f"spatial≤{CONFIG.fsgr_reuse_spatial}, conf>{CONFIG.fsgr_reuse_confidence}")
+    # ---- Phase 2: FSDR reuse rate (realistic model) ----
+    # In the realistic model, FSDR reuse criteria are hardware-fixed (hamming, spatial, confidence).
+    # We report the reuse rate for reference — FSDR now has quality impact.
+    print(f"\n### FSDR Reuse Rate (Realistic ASIC Model)")
+    print(f"  (FSDR uses cached Gaussians → has quality impact)")
+    print(f"  Reuse criteria: hamming≤{CONFIG.fsdr_reuse_hamming}, "
+          f"spatial≤{CONFIG.fsdr_reuse_spatial}, conf>{CONFIG.fsdr_reuse_confidence}")
     
-    fsgr_results = []
+    fsdr_results = []
     N = gaussians_full.means.shape[1]
     
     has_features = (features is not None and
@@ -893,13 +893,13 @@ def tune_thresholds(
             features[0], size=(h, w), mode='bilinear', align_corners=False
         ).mean(dim=0)
     
-    trial_fsgr = FSGRSimulator(
+    trial_fsdr = FSDRSimulator(
         feature_dim=CONFIG.feature_dim,
-        cache_size=CONFIG.fsgr_cache_size,
-        hamming_threshold=CONFIG.fsgr_hamming_threshold,
-        reuse_hamming=CONFIG.fsgr_reuse_hamming,
-        reuse_spatial=CONFIG.fsgr_reuse_spatial,
-        reuse_confidence=CONFIG.fsgr_reuse_confidence,
+        cache_size=CONFIG.fsdr_cache_size,
+        hamming_threshold=CONFIG.fsdr_hamming_threshold,
+        reuse_hamming=CONFIG.fsdr_reuse_hamming,
+        reuse_spatial=CONFIG.fsdr_reuse_spatial,
+        reuse_confidence=CONFIG.fsdr_reuse_confidence,
         num_depth_candidates=CONFIG.num_depth_candidates,
     )
     
@@ -917,21 +917,21 @@ def tune_thresholds(
                         ad = 1.0
                 else:
                     ad = 1.0
-                trial_fsgr.process_pixel(
+                trial_fsdr.process_pixel(
                     feat, ad, (y, x), pixel_idx,
                     actual_gaussians=gaussians_full, gauss_idx=pixel_idx,
                 )
     
-    reuse_rate = trial_fsgr.get_reuse_ratio()
+    reuse_rate = trial_fsdr.get_reuse_ratio()
     print(f"  Reuse rate (skip S2+S3): {reuse_rate*100:.1f}%")
-    print(f"  Cache hit rate: {trial_fsgr.stats['cache_hits']/max(1,trial_fsgr.stats['total_pixels'])*100:.1f}%")
+    print(f"  Cache hit rate: {trial_fsdr.stats['cache_hits']/max(1,trial_fsdr.stats['total_pixels'])*100:.1f}%")
     
-    fsgr_results.append({
+    fsdr_results.append({
         'reuse_rate': reuse_rate,
-        'hit_rate': trial_fsgr.stats['cache_hits'] / max(1, trial_fsgr.stats['total_pixels']),
+        'hit_rate': trial_fsdr.stats['cache_hits'] / max(1, trial_fsdr.stats['total_pixels']),
     })
     
-    best_fsgr_tol = 0.0  # Not applicable in realistic model
+    best_fsdr_tol = 0.0  # Not applicable in realistic model
     
     print(f"\n  Best SAES v4: feat_var={best_fv}, depth_std={best_ds}")
     
@@ -939,7 +939,7 @@ def tune_thresholds(
     CONFIG.feature_var_threshold = best_fv
     CONFIG.depth_std_threshold = best_ds
 
-    return best_fv, best_fsgr_tol, saes_results, fsgr_results
+    return best_fv, best_fsdr_tol, saes_results, fsdr_results
 
 
 # ============================================================
@@ -964,15 +964,15 @@ def main():
     # Performance optimization options
     parser.add_argument('--no-saes', action='store_true',
                         help='Disable SAES early-stopping optimization')
-    parser.add_argument('--no-fsgr', action='store_true',
-                        help='Disable FSGR depth reuse optimization')
+    parser.add_argument('--no-fsdr', action='store_true',
+                        help='Disable FSDR depth reuse optimization')
     
     # Ablation experiment
     parser.add_argument('--ablation', action='store_true',
-                        help='Run full ablation: GPU / ASIC / ASIC+FSGR / ASIC+SAES / ASIC+FSGR+SAES. '
-                             'Forces both SAES and FSGR to run regardless of --no-saes/--no-fsgr.')
+                        help='Run full ablation: GPU / ASIC / ASIC+FSDR / ASIC+SAES / ASIC+FSDR+SAES. '
+                             'Forces both SAES and FSDR to run regardless of --no-saes/--no-fsdr.')
     parser.add_argument('--tune-thresholds', action='store_true',
-                        help='Sweep SAES/FSGR thresholds to find optimal settings '
+                        help='Sweep SAES/FSDR thresholds to find optimal settings '
                              'within 1.0%% relative PSNR quality budget.')
     
     # Other options
@@ -988,24 +988,24 @@ def main():
                         help='Override saes_cross_check threshold (probe similarity gate)')
     parser.add_argument('--tile-size', type=int, default=None,
                         help='Override SAES tile size (4 or 8)')
-    parser.add_argument('--fsgr-cache-size', type=int, default=None,
-                        help='Override FSGR cache size (number of entries)')
-    parser.add_argument('--fsgr-hamming', type=int, default=None,
-                        help='Override FSGR hamming threshold for cache lookup')
+    parser.add_argument('--fsdr-cache-size', type=int, default=None,
+                        help='Override FSDR cache size (number of entries)')
+    parser.add_argument('--fsdr-hamming', type=int, default=None,
+                        help='Override FSDR hamming threshold for cache lookup')
     args = parser.parse_args()
     
     # Override global SCARF frequency from CLI
     global SCARF_FREQ_MHZ
     SCARF_FREQ_MHZ = args.freq
 
-    # --ablation implies both SAES and FSGR must run
+    # --ablation implies both SAES and FSDR must run
     if args.ablation:
         if args.no_saes:
             print("[ablation] Overriding --no-saes: SAES will run for ablation data")
             args.no_saes = False
-        if args.no_fsgr:
-            print("[ablation] Overriding --no-fsgr: FSGR will run for ablation data")
-            args.no_fsgr = False
+        if args.no_fsdr:
+            print("[ablation] Overriding --no-fsdr: FSDR will run for ablation data")
+            args.no_fsdr = False
     
     # Initialize config
     CONFIG = SCARFConfig(model_type=args.model)
@@ -1019,27 +1019,27 @@ def main():
         CONFIG.saes_cross_check = args.saes_cc
     if args.tile_size is not None:
         CONFIG.tile_size = args.tile_size
-    if args.fsgr_cache_size is not None:
-        CONFIG.fsgr_cache_size = args.fsgr_cache_size
-    if args.fsgr_hamming is not None:
-        CONFIG.fsgr_hamming_threshold = args.fsgr_hamming
-        CONFIG.fsgr_reuse_hamming = args.fsgr_hamming
+    if args.fsdr_cache_size is not None:
+        CONFIG.fsdr_cache_size = args.fsdr_cache_size
+    if args.fsdr_hamming is not None:
+        CONFIG.fsdr_hamming_threshold = args.fsdr_hamming
+        CONFIG.fsdr_reuse_hamming = args.fsdr_hamming
 
     # Create adapter and apply model-specific overrides
     adapter = create_adapter(args.model)
     CONFIG.apply_adapter_overrides(adapter)
     
     # Set model-specific num_depth_candidates
-    # Transplat and DepthSplat use 128 depth candidates; MVSplat uses 32
+    # TranSplat and DepthSplat use 128 depth candidates; MVSplat uses 32
     if args.model in ['transplat', 'depthsplat']:
         CONFIG.num_depth_candidates = 128
-        CONFIG.fsgr_narrowed_candidates = 32  # 128/4 = 32
+        CONFIG.fsdr_narrowed_candidates = 32  # 128/4 = 32
     else:
         CONFIG.num_depth_candidates = 32
-        CONFIG.fsgr_narrowed_candidates = 8   # 32/4 = 8
+        CONFIG.fsdr_narrowed_candidates = 8   # 32/4 = 8
     
-    # All models use the same universal SAES/FSGR configuration.
-    # DINOv2 (DepthSplat) vs CNN (Transplat/MVSplat) features naturally have different
+    # All models use the same universal SAES/FSDR configuration.
+    # DINOv2 (DepthSplat) vs CNN (TranSplat/MVSplat) features naturally have different
     # variance distributions, but the threshold is set to work well across all models.
     
     print("=" * 70)
@@ -1050,10 +1050,10 @@ def main():
     print(f"[Config] SAES v2:")
     print(f"  tile={CONFIG.tile_size}, feat_var={CONFIG.feature_var_threshold}, depth_std={CONFIG.depth_std_threshold}")
     print(f"  L0+L1 two-level progressive early-stopping (opacity-zero model)")
-    print(f"[Config] FSGR (realistic ASIC):")
-    print(f"  cache_size={CONFIG.fsgr_cache_size}, hamming_threshold={CONFIG.fsgr_hamming_threshold}")
-    print(f"  reuse_hamming={CONFIG.fsgr_reuse_hamming}, reuse_spatial={CONFIG.fsgr_reuse_spatial}")
-    print(f"  reuse_confidence={CONFIG.fsgr_reuse_confidence} (cache hit → use cached Gaussians)")
+    print(f"[Config] FSDR (realistic ASIC):")
+    print(f"  cache_size={CONFIG.fsdr_cache_size}, hamming_threshold={CONFIG.fsdr_hamming_threshold}")
+    print(f"  reuse_hamming={CONFIG.fsdr_reuse_hamming}, reuse_spatial={CONFIG.fsdr_reuse_spatial}")
+    print(f"  reuse_confidence={CONFIG.fsdr_reuse_confidence} (cache hit → use cached Gaussians)")
     print(f"[Config] Depth Prediction (S2):")
     print(f"  num_depth_candidates={CONFIG.num_depth_candidates}")
     print(f"[Config] GGU:")
@@ -1088,10 +1088,10 @@ def main():
     target = {k: v[:, :V_tgt].to(device) if torch.is_tensor(v) and v.dim() > 1 else (v.to(device) if torch.is_tensor(v) else v) for k, v in batch['target'].items()}
     
     # --------------------------------------------------------
-    # Step 3: Run BASELINE (full Transplat encoder)
+    # Step 3: Run BASELINE (full TranSplat encoder)
     # --------------------------------------------------------
     print()
-    print("[3/6] Running BASELINE (original Transplat)...")
+    print("[3/6] Running BASELINE (original TranSplat)...")
     
     # Query GPU info for cycle conversion
     gpu_info = get_gpu_info()
@@ -1192,14 +1192,14 @@ def main():
     cost_volume_cycles = 0  # cost_volume portion of dp_core (for bandwidth modeling)
     gauss_gen_cycles = 0  # Gaussian Gen: refine_unet + to_gaussians (full-res)
     
-    # Initialize FSGR (Feature-Similarity Gaussian Reuse) — realistic ASIC model
-    fsgr = FSGRSimulator(
+    # Initialize FSDR (Feature-Similarity Gaussian Reuse) — realistic ASIC model
+    fsdr = FSDRSimulator(
         feature_dim=CONFIG.feature_dim,
-        cache_size=CONFIG.fsgr_cache_size,
-        hamming_threshold=CONFIG.fsgr_hamming_threshold,
-        reuse_hamming=CONFIG.fsgr_reuse_hamming,
-        reuse_spatial=CONFIG.fsgr_reuse_spatial,
-        reuse_confidence=CONFIG.fsgr_reuse_confidence,
+        cache_size=CONFIG.fsdr_cache_size,
+        hamming_threshold=CONFIG.fsdr_hamming_threshold,
+        reuse_hamming=CONFIG.fsdr_reuse_hamming,
+        reuse_spatial=CONFIG.fsdr_reuse_spatial,
+        reuse_confidence=CONFIG.fsdr_reuse_confidence,
         num_depth_candidates=CONFIG.num_depth_candidates,
     )
     
@@ -1253,7 +1253,7 @@ def main():
                 feature_sim_cycles = fe_output.total_cycles
                 
                 # Extract CNN cycle count for per-component ASIC scaling.
-                # Note: fe_output is one of {Transplat,MVSplat,DepthSplat}FeatureOutput
+                # Note: fe_output is one of {TranSplat,MVSplat,DepthSplat}FeatureOutput
                 # — different dataclasses with slightly different fields (e.g. only
                 # DepthSplat has dinov2_cycles). getattr() handles this polymorphism.
                 s1_cnn_cycles = getattr(fe_output, 'cnn_cycles', 0)
@@ -1308,7 +1308,7 @@ def main():
                     max_depth=1.0 / near_bv,
                     extrinsics=context['extrinsics'],
                 )
-                # Extract real feature tensor for FSGR/SAES
+                # Extract real feature tensor for FSDR/SAES
                 pipeline_features = rearrange(
                     depthsplat_results['features_mv'][0],
                     '(b v) c h w -> b v c h w', b=b_ds, v=v_ds
@@ -1352,7 +1352,7 @@ def main():
     
     # near/far already computed before Stage 1 (used by DepthSplat GPU fallback)
     
-    # For Transplat: compute da_depth and dino_feature (needed for both HW and GPU modes)
+    # For TranSplat: compute da_depth and dino_feature (needed for both HW and GPU modes)
     dp_da_depth = None
     dp_dino_feature = None
     
@@ -1773,7 +1773,7 @@ def main():
                 if depths_for_ggu.dim() == 4:
                     depths_for_ggu = rearrange(depths_for_ggu, "b v h w -> b v (h w) () ()")
             else:
-                # Transplat/MVSplat
+                # TranSplat/MVSplat
                 raw_gaussians_parsed = rearrange(pipeline_raw_gaussians, "b v r (srf c) -> b v r srf c", srf=num_surfaces)
                 offset_xy = raw_gaussians_parsed[..., :2].sigmoid()
                 xy_ray = xy_ray + (offset_xy - 0.5) * pixel_size
@@ -1867,7 +1867,7 @@ def main():
                     offset_xy = raw_gaussians_parsed[..., 1:3].sigmoid()
                     raw_gaussians_for_ga = raw_gaussians_parsed[..., 3:]  # scales + rotations + sh = 34
                 else:
-                    # Transplat/MVSplat format: [B, V, H*W, C]
+                    # TranSplat/MVSplat format: [B, V, H*W, C]
                     raw_gaussians_parsed = rearrange(pipeline_raw_gaussians, "b v r (srf c) -> b v r srf c", srf=num_surfaces)
                     
                     if args.model == 'depthsplat':
@@ -1877,7 +1877,7 @@ def main():
                         offset_xy = raw_gaussians_parsed[..., 1:3].sigmoid()
                         raw_gaussians_for_ga = raw_gaussians_parsed[..., 3:]
                     else:
-                        # Transplat/MVSplat format: offset_xy(2) + scales(3) + rotations(4) + sh(75) = 84
+                        # TranSplat/MVSplat format: offset_xy(2) + scales(3) + rotations(4) + sh(75) = 84
                         offset_xy = raw_gaussians_parsed[..., :2].sigmoid()
                         raw_gaussians_for_ga = raw_gaussians_parsed[..., 2:]
                         # Compute opacities from densities
@@ -1911,7 +1911,7 @@ def main():
                         input_images=context['image'],
                     )
                 else:
-                    # Transplat/MVSplat - no input_images
+                    # TranSplat/MVSplat - no input_images
                     ga_output = model.encoder.gaussian_adapter.forward(
                         ctx_extrinsics,
                         ctx_intrinsics,
@@ -1949,7 +1949,7 @@ def main():
             print(f"    ⚠ Using baseline gaussians (no pipeline inputs)")
             scarf_gaussians_full = baseline_gaussians
     
-    # Store pipeline features for FSGR
+    # Store pipeline features for FSDR
     features = pipeline_features
     depths = pipeline_depths
     densities = pipeline_densities
@@ -1966,7 +1966,7 @@ def main():
         gt_image_tune = target['image'][0, 0]
         baseline_psnr_tune = -10 * torch.log10(F.mse_loss(baseline_image, gt_image_tune)).item()
         
-        best_saes_th, best_fsgr_tol, _, _ = tune_thresholds(
+        best_saes_th, best_fsdr_tol, _, _ = tune_thresholds(
             scarf_gaussians_full, model, tgt_ext, tgt_int, target, h, w, device,
             gt_image_tune, baseline_psnr_tune,
             features=pipeline_features, depths=pipeline_depths,
@@ -1976,14 +1976,14 @@ def main():
         print(f"\n  Applying tuned thresholds: feat_var={CONFIG.feature_var_threshold}, "
               f"depth_std={CONFIG.depth_std_threshold}")
         
-        # Re-create FSGR with tuned config
-        fsgr = FSGRSimulator(
+        # Re-create FSDR with tuned config
+        fsdr = FSDRSimulator(
             feature_dim=CONFIG.feature_dim,
-            cache_size=CONFIG.fsgr_cache_size,
-            hamming_threshold=CONFIG.fsgr_hamming_threshold,
-            reuse_hamming=CONFIG.fsgr_reuse_hamming,
-            reuse_spatial=CONFIG.fsgr_reuse_spatial,
-            reuse_confidence=CONFIG.fsgr_reuse_confidence,
+            cache_size=CONFIG.fsdr_cache_size,
+            hamming_threshold=CONFIG.fsdr_hamming_threshold,
+            reuse_hamming=CONFIG.fsdr_reuse_hamming,
+            reuse_spatial=CONFIG.fsdr_reuse_spatial,
+            reuse_confidence=CONFIG.fsdr_reuse_confidence,
             num_depth_candidates=CONFIG.num_depth_candidates,
         )
         # Reset savings tracker
@@ -1991,7 +1991,7 @@ def main():
         print("=" * 70)
     
     # --------------------------------------------------------
-    # Step 4b-4d: Real Ablation (SAES v4 L0+L1 + FSGR + 4-config render)
+    # Step 4b-4d: Real Ablation (SAES v4 L0+L1 + FSDR + 4-config render)
     # --------------------------------------------------------
     from src.model.types import Gaussians
     N = scarf_gaussians_full.means.shape[1]
@@ -2056,7 +2056,7 @@ def main():
         # probe Gaussians). The interpolation quality depends on how conservative
         # the classification thresholds are.
         
-        # All pixels for FSGR (runs on ALL pixels for its own ablation config)
+        # All pixels for FSDR (runs on ALL pixels for its own ablation config)
         all_pixels = [(y, x, y * w + x) for y in range(h) for x in range(w)]
         
         modified_pixels = int(modified_mask.sum().item())
@@ -2076,11 +2076,11 @@ def main():
     # because ASIC processes per pixel position - skipping a position skips all surfaces
     savings.record_saes(total_pixels=h*w, saes_stats=saes_stats)
     
-    # ---- Step 4c: FSGR (Feature-Similarity Gaussian Reuse) — Realistic ASIC ----
-    if args.no_fsgr:
-        print("  [4c] FSGR: SKIPPED (--no-fsgr)")
+    # ---- Step 4c: FSDR (Feature-Similarity Gaussian Reuse) — Realistic ASIC ----
+    if args.no_fsdr:
+        print("  [4c] FSDR: SKIPPED (--no-fsdr)")
     else:
-        print("  [4c] FSGR (Realistic ASIC: cache hit → use cached Gaussians)...")
+        print("  [4c] FSDR (Realistic ASIC: cache hit → use cached Gaussians)...")
         
         has_features = (features is not None and
                        not isinstance(features, str) and
@@ -2106,26 +2106,26 @@ def main():
                 else:
                     actual_depth = 1.0
                 
-                # FSGR processing (realistic: reuse decision before compute)
-                path, num_searches, output_depth = fsgr.process_pixel(
+                # FSDR processing (realistic: reuse decision before compute)
+                path, num_searches, output_depth = fsdr.process_pixel(
                     feat, actual_depth, (y, x), pixel_idx,
                     actual_gaussians=scarf_gaussians_full,
                     gauss_idx=pixel_idx,
                 )
                 
                 # Record path for savings tracking
-                savings.record_fsgr_pixel(path, reused=(pixel_idx in fsgr.reuse_data))
+                savings.record_fsdr_pixel(path, reused=(pixel_idx in fsdr.reuse_data))
         
-        fsgr_stats = fsgr.get_summary()
-        if fsgr_stats['total_pixels'] > 0:
-            print(f"    Pixels processed: {fsgr_stats['total_pixels']:,}")
-            print(f"    Cache hit rate: {fsgr_stats['hit_rate']*100:.1f}%")
-            print(f"    Guided (narrowed): {fsgr_stats.get('guided', 0):,} "
-                  f"({fsgr_stats.get('guided_rate', 0)*100:.1f}%)")
-            print(f"    Depth inconsistent: {fsgr_stats.get('depth_inconsistent', 0):,}")
-            print(f"    Not guided: {fsgr_stats.get('hit_no_guide', 0):,}")
-            print(f"    Full compute (miss): {fsgr_stats['full_compute']:,}")
-            print(f"    Criteria: hamming≤{fsgr.reuse_hamming}, conf>{fsgr.reuse_confidence:.2f}")
+        fsdr_stats = fsdr.get_summary()
+        if fsdr_stats['total_pixels'] > 0:
+            print(f"    Pixels processed: {fsdr_stats['total_pixels']:,}")
+            print(f"    Cache hit rate: {fsdr_stats['hit_rate']*100:.1f}%")
+            print(f"    Guided (narrowed): {fsdr_stats.get('guided', 0):,} "
+                  f"({fsdr_stats.get('guided_rate', 0)*100:.1f}%)")
+            print(f"    Depth inconsistent: {fsdr_stats.get('depth_inconsistent', 0):,}")
+            print(f"    Not guided: {fsdr_stats.get('hit_no_guide', 0):,}")
+            print(f"    Full compute (miss): {fsdr_stats['full_compute']:,}")
+            print(f"    Criteria: hamming≤{fsdr.reuse_hamming}, conf>{fsdr.reuse_confidence:.2f}")
     
     # Record GGU cycles (with compact writeback savings modelled for Stage 4)
     cycle_counter.add_ggu(N, sh_degree=CONFIG.sh_degree)
@@ -2151,30 +2151,30 @@ def main():
                         harmonics=orig_harmo, opacities=orig_opacs)
     ablation_renders['asic'] = _render(g_noopt)
     
-    # Config 2: +FSGR only (narrowed search: most pixels zero quality impact)
-    if not args.no_fsgr and len(fsgr.reuse_data) > 0:
-        out_window_count = sum(1 for v in fsgr.reuse_data.values() if not v.get('in_window', True))
-        print(f"  [2/4] Rendering: +FSGR only ({len(fsgr.reuse_data):,} guided, "
+    # Config 2: +FSDR only (narrowed search: most pixels zero quality impact)
+    if not args.no_fsdr and len(fsdr.reuse_data) > 0:
+        out_window_count = sum(1 for v in fsdr.reuse_data.values() if not v.get('in_window', True))
+        print(f"  [2/4] Rendering: +FSDR only ({len(fsdr.reuse_data):,} guided, "
               f"{out_window_count} outside window)...")
-        fsgr_means = orig_means.clone()
-        for pixel_idx, reuse_info in fsgr.reuse_data.items():
+        fsdr_means = orig_means.clone()
+        for pixel_idx, reuse_info in fsdr.reuse_data.items():
             # Narrowed search: only modify means for pixels where actual depth
             # was outside the narrowed window (rare, depth consistency prevents most)
             depth_ratio = reuse_info['depth_ratio']
             if abs(depth_ratio - 1.0) > 1e-6:  # Only modify if ratio != 1.0
-                fsgr_means[0, pixel_idx] = orig_means[0, pixel_idx] * depth_ratio
-        g_fsgr = Gaussians(means=fsgr_means, covariances=orig_covs.clone(),
+                fsdr_means[0, pixel_idx] = orig_means[0, pixel_idx] * depth_ratio
+        g_fsdr = Gaussians(means=fsdr_means, covariances=orig_covs.clone(),
                            harmonics=orig_harmo.clone(), opacities=orig_opacs.clone())
-        ablation_renders['asic_fsgr'] = _render(g_fsgr)
-        depth_err = fsgr.get_depth_error_stats()
+        ablation_renders['asic_fsdr'] = _render(g_fsdr)
+        depth_err = fsdr.get_depth_error_stats()
         if depth_err['count'] > 0:
             print(f"    Out-of-window depth error: mean={depth_err['mean']:.4f}, "
                   f"p95={depth_err['p95']:.4f}, max={depth_err['max']:.4f}")
         else:
             print(f"    All guided pixels had actual depth within window → zero quality impact")
     else:
-        print("  [2/4] Rendering: +FSGR only (no guided / disabled)...")
-        ablation_renders['asic_fsgr'] = ablation_renders['asic']
+        print("  [2/4] Rendering: +FSDR only (no guided / disabled)...")
+        ablation_renders['asic_fsdr'] = ablation_renders['asic']
     
     # Config 3: +SAES only (SAES-interpolated appearance, no post-hoc validation)
     if not args.no_saes:
@@ -2183,9 +2183,9 @@ def main():
     else:
         ablation_renders['asic_saes'] = ablation_renders['asic']
     
-    # Config 4: +FSGR + SAES (SAES interpolation + FSGR depth-only reuse on non-SAES pixels)
-    if not args.no_saes or (not args.no_fsgr and len(fsgr.reuse_data) > 0):
-        print("  [4/4] Rendering: +FSGR+SAES (combined realistic)...")
+    # Config 4: +FSDR + SAES (SAES interpolation + FSDR depth-only reuse on non-SAES pixels)
+    if not args.no_saes or (not args.no_fsdr and len(fsdr.reuse_data) > 0):
+        print("  [4/4] Rendering: +FSDR+SAES (combined realistic)...")
         # Start with SAES-modified Gaussians (or originals if SAES disabled)
         if not args.no_saes:
             combo_means = saes_gaussians.means.clone()
@@ -2198,42 +2198,42 @@ def main():
             combo_harmo = orig_harmo.clone()
             combo_opacs = orig_opacs.clone()
         
-        # Apply FSGR narrowed search means modification on non-SAES pixels only
-        if not args.no_fsgr:
-            fsgr_on_non_saes = 0
-            fsgr_modified = 0
-            for pixel_idx, reuse_info in fsgr.reuse_data.items():
+        # Apply FSDR narrowed search means modification on non-SAES pixels only
+        if not args.no_fsdr:
+            fsdr_on_non_saes = 0
+            fsdr_modified = 0
+            for pixel_idx, reuse_info in fsdr.reuse_data.items():
                 if not modified_mask[pixel_idx]:  # Not modified by SAES
-                    fsgr_on_non_saes += 1
+                    fsdr_on_non_saes += 1
                     depth_ratio = reuse_info['depth_ratio']
                     if abs(depth_ratio - 1.0) > 1e-6:
                         combo_means[0, pixel_idx] = orig_means[0, pixel_idx] * depth_ratio
-                        fsgr_modified += 1
-            print(f"    FSGR guided {fsgr_on_non_saes:,} non-SAES pixels "
-                  f"({fsgr_modified} means-modified)")
+                        fsdr_modified += 1
+            print(f"    FSDR guided {fsdr_on_non_saes:,} non-SAES pixels "
+                  f"({fsdr_modified} means-modified)")
         
         g_combo = Gaussians(means=combo_means, covariances=combo_covs,
                             harmonics=combo_harmo, opacities=combo_opacs)
-        ablation_renders['asic_fsgr_saes'] = _render(g_combo)
+        ablation_renders['asic_fsdr_saes'] = _render(g_combo)
     else:
-        ablation_renders['asic_fsgr_saes'] = ablation_renders['asic']
+        ablation_renders['asic_fsdr_saes'] = ablation_renders['asic']
     
-    # Use the best config (FSGR+SAES) as the "SCARF image" for backward compatibility
-    scarf_image = ablation_renders['asic_fsgr_saes']
+    # Use the best config (FSDR+SAES) as the "SCARF image" for backward compatibility
+    scarf_image = ablation_renders['asic_fsdr_saes']
     scarf_time = time.time() - t0
     
     # Gaussian stats
-    fsgr_reused = fsgr.stats['total_reuse'] if not args.no_fsgr else 0
+    fsdr_reused = fsdr.stats['total_reuse'] if not args.no_fsdr else 0
     gaussian_stats = {
         'gaussians_baseline': N,
         'gaussians_output': N,
         'pixels_modified': saes_stats.get('total_modified_pixels', 0),
-        'fsgr_reused': fsgr_reused,
+        'fsdr_reused': fsdr_reused,
     }
     
     print(f"  ✓ 4-config rendering complete ({scarf_time:.2f}s total)")
     print(f"  ✓ SAES modified {gaussian_stats['pixels_modified']:,} pixels (interpolation)")
-    print(f"  ✓ FSGR guided {fsgr_reused:,} pixels (narrowed search, {CONFIG.fsgr_narrowed_candidates}/{CONFIG.num_depth_candidates} candidates)")
+    print(f"  ✓ FSDR guided {fsdr_reused:,} pixels (narrowed search, {CONFIG.fsdr_narrowed_candidates}/{CONFIG.num_depth_candidates} candidates)")
     
     # --------------------------------------------------------
     # Step 6: Evaluate per-config quality and Save
@@ -2279,9 +2279,9 @@ def main():
         ref_label = "(reference)" if cfg_key == 'asic' else f"loss={loss_db:+.4f} dB ({loss_pct:.4f}%)"
         print(f"  {cfg_key:<20s}: PSNR={psnr:.4f} dB, SSIM={ssim:.6f}, {ref_label}")
     
-    # Use FSGR+SAES as the "SCARF" result
-    scarf_psnr = ablation_quality['asic_fsgr_saes']['psnr']
-    scarf_ssim = ablation_quality['asic_fsgr_saes']['ssim']
+    # Use FSDR+SAES as the "SCARF" result
+    scarf_psnr = ablation_quality['asic_fsdr_saes']['psnr']
+    scarf_ssim = ablation_quality['asic_fsdr_saes']['ssim']
     
     # Check quality budget (compare optimized configs vs no-opt, excluding no-opt itself)
     opt_configs = {k: v for k, v in ablation_quality.items() if k != 'asic'}
@@ -2304,9 +2304,9 @@ def main():
     
     # Get statistics
     ggu_stats = cycle_counter.get_summary()
-    fsgr_summary = fsgr.get_summary()
+    fsdr_summary = fsdr.get_summary()
     
-    # Base cycle counts (no SAES/FSGR savings)
+    # Base cycle counts (no SAES/FSDR savings)
     base_ggu_cycles = ggu_stats['ggu_cycles']
     
     # ================================================================
@@ -2323,7 +2323,7 @@ def main():
             # MVSplat S1: CNN backbone + 6-layer MV Transformer (no DINOv2)
             feature_sim_cycles = 90_000_000
         else:
-            # Transplat S1: CNN backbone + ViT transformer layers
+            # TranSplat S1: CNN backbone + ViT transformer layers
             feature_sim_cycles = 155_273_000
         print(f"    [Fallback] Using reference S1 feature cycles: {feature_sim_cycles:,}")
     
@@ -2337,7 +2337,7 @@ def main():
             dp_core_cycles = 80_000_000
             cost_volume_cycles = 25_000_000
         else:
-            # Transplat S2: UVTransformer (deformable attn) + UNet + depth_head + regression
+            # TranSplat S2: UVTransformer (deformable attn) + UNet + depth_head + regression
             dp_core_cycles = 200_000_000
             cost_volume_cycles = 95_000_000
         depth_sim_cycles = dp_core_cycles  # total S2 for legacy compatibility
@@ -2351,13 +2351,13 @@ def main():
             # MVSplat S3: depth refinement UNet + gaussian head (SH degree 4)
             gauss_gen_cycles = 130_000_000
         else:
-            # Transplat S3: refine_unet + to_gaussians (full-res spatial processing)
+            # TranSplat S3: refine_unet + to_gaussians (full-res spatial processing)
             gauss_gen_cycles = 180_000_000
         print(f"    [Fallback] Using reference S3 gauss gen cycles: {gauss_gen_cycles:,}")
     
-    # Compute ablation table (with real savings from SAES/FSGR)
-    # FSGR narrowing ratio: 1 - narrowed/original
-    fsgr_narrow_ratio = 1.0 - (CONFIG.fsgr_narrowed_candidates / CONFIG.num_depth_candidates
+    # Compute ablation table (with real savings from SAES/FSDR)
+    # FSDR narrowing ratio: 1 - narrowed/original
+    fsdr_narrow_ratio = 1.0 - (CONFIG.fsdr_narrowed_candidates / CONFIG.num_depth_candidates
                                 if CONFIG.num_depth_candidates > 0 else 0.25)
     
     ablation = savings.compute_ablation(
@@ -2369,7 +2369,7 @@ def main():
         cost_volume_cycles=cost_volume_cycles,
         s1_cnn_cycles=s1_cnn_cycles,
         ablation_quality=ablation_quality,
-        fsgr_narrowing_ratio=fsgr_narrow_ratio,
+        fsdr_narrowing_ratio=fsdr_narrow_ratio,
     )
     pipe_info = ablation.get('_pipeline', {})
     
@@ -2385,11 +2385,11 @@ def main():
     print(f"  BASELINE (GPU):        PSNR={baseline_psnr:.4f} dB, SSIM={baseline_ssim:.6f}")
     cfg_labels = {
         'asic': 'ASIC (no opt)',
-        'asic_fsgr': 'ASIC + FSGR',
+        'asic_fsdr': 'ASIC + FSDR',
         'asic_saes': 'ASIC + SAES v4',
-        'asic_fsgr_saes': 'ASIC + SAES+FSGR',
+        'asic_fsdr_saes': 'ASIC + SAES+FSDR',
     }
-    for cfg_key in ['asic', 'asic_fsgr', 'asic_saes', 'asic_fsgr_saes']:
+    for cfg_key in ['asic', 'asic_fsdr', 'asic_saes', 'asic_fsdr_saes']:
         q = ablation_quality.get(cfg_key, {})
         label = cfg_labels.get(cfg_key, cfg_key)
         print(f"  {label:<24s}: PSNR={q.get('psnr', 0):.4f} dB, SSIM={q.get('ssim', 0):.6f}, "
@@ -2414,34 +2414,34 @@ def main():
           f"Zeroed (opacity=0): {_zer:,}  "
           f"({_zer / max(1, _tot) * 100:.1f}% of tile px suppressed)")
     print()
-    print("### FSGR Statistics (Narrowed Depth Search ASIC Model)")
-    fsgr_summary = fsgr.get_summary()
-    if fsgr_summary['total_pixels'] > 0:
-        print(f"  Pixels processed:     {fsgr_summary['total_pixels']:,}")
-        print(f"  Cache hit rate:       {fsgr_summary['hit_rate']*100:.1f}%")
-        print(f"  Guided (32 cand.):    {fsgr_summary.get('guided', 0):,} "
-              f"({fsgr_summary['guided_rate']*100:.1f}%)")
-        print(f"    In window:          {fsgr_summary.get('guided_in_window', 0):,} "
-              f"({fsgr_summary.get('in_window_rate', 0)*100:.1f}% → zero quality impact)")
-        print(f"    Out of window:      {fsgr_summary.get('guided_out_window', 0):,} "
+    print("### FSDR Statistics (Narrowed Depth Search ASIC Model)")
+    fsdr_summary = fsdr.get_summary()
+    if fsdr_summary['total_pixels'] > 0:
+        print(f"  Pixels processed:     {fsdr_summary['total_pixels']:,}")
+        print(f"  Cache hit rate:       {fsdr_summary['hit_rate']*100:.1f}%")
+        print(f"  Guided (32 cand.):    {fsdr_summary.get('guided', 0):,} "
+              f"({fsdr_summary['guided_rate']*100:.1f}%)")
+        print(f"    In window:          {fsdr_summary.get('guided_in_window', 0):,} "
+              f"({fsdr_summary.get('in_window_rate', 0)*100:.1f}% → zero quality impact)")
+        print(f"    Out of window:      {fsdr_summary.get('guided_out_window', 0):,} "
               f"(means modified)")
-        print(f"  Depth inconsistent:   {fsgr_summary.get('depth_inconsistent', 0):,} "
+        print(f"  Depth inconsistent:   {fsdr_summary.get('depth_inconsistent', 0):,} "
               f"(→ full 128-candidate search)")
-        print(f"  Not guided (criteria):{fsgr_summary.get('hit_no_guide', 0):,} "
-              f"({fsgr_summary.get('hit_no_guide_rate', 0)*100:.1f}%)")
-        print(f"  Full compute (miss):  {fsgr_summary['full_compute']:,} "
-              f"({fsgr_summary['full_compute_rate']*100:.1f}%)")
-        fsgr_save_pct = pipe_info.get('fsgr_s2_save_per_pixel', 0.42) * 100
-        print(f"  S2 saving per guided: {fsgr_save_pct:.1f}% "
+        print(f"  Not guided (criteria):{fsdr_summary.get('hit_no_guide', 0):,} "
+              f"({fsdr_summary.get('hit_no_guide_rate', 0)*100:.1f}%)")
+        print(f"  Full compute (miss):  {fsdr_summary['full_compute']:,} "
+              f"({fsdr_summary['full_compute_rate']*100:.1f}%)")
+        fsdr_save_pct = pipe_info.get('fsdr_s2_save_per_pixel', 0.42) * 100
+        print(f"  S2 saving per guided: {fsdr_save_pct:.1f}% "
               f"(cost_vol+UNet+DepthHead, 32/{CONFIG.num_depth_candidates} candidates)")
-        depth_err = fsgr_summary.get('depth_error', {})
+        depth_err = fsdr_summary.get('depth_error', {})
         if depth_err.get('count', 0) > 0:
             print(f"  Out-window depth err: mean={depth_err['mean']:.4f}, max={depth_err['max']:.4f}")
-        print(f"  Criteria:             hamming≤{fsgr.reuse_hamming}, "
-              f"conf>{fsgr.reuse_confidence:.2f}, "
-              f"depth_consist≤{fsgr.depth_consistency_threshold:.0%}")
+        print(f"  Criteria:             hamming≤{fsdr.reuse_hamming}, "
+              f"conf>{fsdr.reuse_confidence:.2f}, "
+              f"depth_consist≤{fsdr.depth_consistency_threshold:.0%}")
     else:
-        print(f"  (No FSGR pixels processed)")
+        print(f"  (No FSDR pixels processed)")
     
     # --------------------------------------------------------
     # Hardware Configuration
@@ -2503,10 +2503,10 @@ def main():
     print(f"  SAES v4 multi-level (K(T) adaptive probes):")
     print(f"    Combined S2 save: {pipe_info.get('saes_s2_saving', 0)*100:.1f}%")
     print(f"    Combined S3 save: {pipe_info.get('saes_s3_saving', 0)*100:.1f}%")
-    fsgr_save_pp = pipe_info.get('fsgr_s2_save_per_pixel', 0.42)
-    print(f"  FSGR guided:        {pipe_info.get('fsgr_reuse_ratio', 0)*100:.1f}% "
-          f"(narrowed S2: {CONFIG.fsgr_narrowed_candidates}/{CONFIG.num_depth_candidates} candidates, "
-          f"saves {fsgr_save_pp*100:.1f}%/pixel, cost_vol+UNet+DepthHead)")
+    fsdr_save_pp = pipe_info.get('fsdr_s2_save_per_pixel', 0.42)
+    print(f"  FSDR guided:        {pipe_info.get('fsdr_reuse_ratio', 0)*100:.1f}% "
+          f"(narrowed S2: {CONFIG.fsdr_narrowed_candidates}/{CONFIG.num_depth_candidates} candidates, "
+          f"saves {fsdr_save_pp*100:.1f}%/pixel, cost_vol+UNet+DepthHead)")
     print(f"  Total S2 saving:    {pipe_info.get('combined_s2_saving', 0)*100:.1f}%")
     print(f"  Total S3 saving:    {pipe_info.get('combined_s3_saving', 0)*100:.1f}%")
     
@@ -2663,16 +2663,16 @@ def main():
     _print_asic_config(f"[{idx}] SCARF ASIC @ {SCARF_FREQ_MHZ} MHz (no optimizations)", ablation['asic'], ggu_pe)
     idx += 1
     
-    # [5] ASIC + FSGR
-    _print_asic_config(f"[{idx}] SCARF ASIC + FSGR", ablation['asic_fsgr'], ggu_pe)
+    # [5] ASIC + FSDR
+    _print_asic_config(f"[{idx}] SCARF ASIC + FSDR", ablation['asic_fsdr'], ggu_pe)
     idx += 1
     
     # [6] ASIC + SAES v4
     _print_asic_config(f"[{idx}] SCARF ASIC + SAES v4", ablation['asic_saes'], ggu_pe)
     idx += 1
 
-    # [7] ASIC + SAES v4 + FSGR
-    asic_best_ms = _print_asic_config(f"[{idx}] SCARF ASIC + SAES v4 + FSGR", ablation['asic_fsgr_saes'], ggu_pe)
+    # [7] ASIC + SAES v4 + FSDR
+    asic_best_ms = _print_asic_config(f"[{idx}] SCARF ASIC + SAES v4 + FSDR", ablation['asic_fsdr_saes'], ggu_pe)
     
     # --------------------------------------------------------
     # Summary Table (with per-config quality)
@@ -2686,7 +2686,7 @@ def main():
         return c.get('eff_total', c['total']) / (SCARF_FREQ_MHZ * 1e3)
     
     # Best ASIC config
-    asic_best_time = _eff_ms('asic_fsgr_saes')
+    asic_best_time = _eff_ms('asic_fsdr_saes')
     
     # Reference GPU platforms
     gpu_rows = [
@@ -2711,9 +2711,9 @@ def main():
     # SCARF ASIC configurations with quality
     asic_configs = [
         ('asic',           f"SCARF @ {SCARF_FREQ_MHZ}MHz (no opt)"),
-        ('asic_fsgr',      f"  + FSGR"),
+        ('asic_fsdr',      f"  + FSDR"),
         ('asic_saes',      f"  + SAES v4"),
-        ('asic_fsgr_saes', f"  + SAES v4+FSGR << best"),
+        ('asic_fsdr_saes', f"  + SAES v4+FSDR << best"),
     ]
     for cfg_key, label in asic_configs:
         t_ms = _eff_ms(cfg_key)
@@ -2735,13 +2735,13 @@ def main():
     
     print()
     print("### Quality & Savings Summary")
-    best_q = ablation_quality.get('asic_fsgr_saes', {})
+    best_q = ablation_quality.get('asic_fsdr_saes', {})
     print(f"  Best config quality:  PSNR={best_q.get('psnr', 0):.4f} dB, "
           f"loss={best_q.get('loss_db', 0):+.4f} dB ({best_q.get('loss_pct', 0):.4f}%)")
     print(f"  SAES v4 total:        {savings.saes_interpolation_ratio()*100:.1f}% pixels modified "
           f"(L0={savings.level0_ratio()*100:.1f}%, L1={savings.level1_ratio()*100:.1f}%)")
-    print(f"  FSGR guided:          {savings.fsgr_validated_saving_ratio()*100:.1f}% "
-          f"({savings.fsgr_validated:,} pixels narrowed S2 search)")
+    print(f"  FSDR guided:          {savings.fsdr_validated_saving_ratio()*100:.1f}% "
+          f"({savings.fsdr_validated:,} pixels narrowed S2 search)")
     if baseline_gpu_time_ms > 0:
         print(f"  Best ASIC time:       {asic_best_ms:.2f} ms (pipeline-adjusted)")
         for tname, tdata in [('A6000', ge_a6000), ('AGX Orin', ge_agx),
@@ -2797,10 +2797,10 @@ def main():
     
     # ---- Stage utilization (fraction of total inference time each unit is active) ----
     # Derived from cycle breakdown: S1(FE) + S2(DP) + S3(GaussGen)
-    total_eff = ablation['asic_fsgr_saes'].get('eff_total', 0)
-    eff_fe = ablation['asic_fsgr_saes'].get('eff_feature', 0)
-    eff_dp = ablation['asic_fsgr_saes'].get('eff_dp_core', 0)
-    eff_gg = ablation['asic_fsgr_saes'].get('eff_gauss_gen', 0)
+    total_eff = ablation['asic_fsdr_saes'].get('eff_total', 0)
+    eff_fe = ablation['asic_fsdr_saes'].get('eff_feature', 0)
+    eff_dp = ablation['asic_fsdr_saes'].get('eff_dp_core', 0)
+    eff_gg = ablation['asic_fsdr_saes'].get('eff_gauss_gen', 0)
     
     # ConvEngine: active during CNN(S1), UNet/DepthHead(S2), refine_unet/to_gauss(S3)
     util_conv = 0.80   # ~80% of inference time
@@ -2870,7 +2870,7 @@ def main():
     a_valu = valu_width * 0.001
     a_bilinear = bilinear_samplers * 0.02
     a_ggu = ggu_pes * 0.04
-    a_misc_logic = 0.3 + 0.15  # activation/norm + FSGR/SAES
+    a_misc_logic = 0.3 + 0.15  # activation/norm + FSDR/SAES
     a_sram = sram_total_kb * 8 / 1024 * 0.127  # KB → Mbit → mm²
     a_control = 0.5
     a_io = 2.5  # DDR PHY + pads

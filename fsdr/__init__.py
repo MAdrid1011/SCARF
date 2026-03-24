@@ -1,41 +1,41 @@
 """
-FSGR (Feature-Similarity Gaussian Reuse) Module
+FSDR (Feature Similarity Depth Reuse) Module
 
 Hardware simulator for narrowed depth search based on 2D feature space similarity.
 
 Key Components:
 - LSHHasher: Locality-Sensitive Hashing for feature signatures
 - CacheTable: Semantic-indexed cache with Hamming distance lookup
-- FSGRSimulator: Narrowed Depth Search ASIC model
+- FSDRSimulator: Narrowed Depth Search ASIC model
 
 Example:
-    from fsgr import FSGRSimulator
+    from fsdr import FSDRSimulator
 
-    simulator = FSGRSimulator()
+    simulator = FSDRSimulator()
     result = simulator.process_frame(gaussians, features, depths, ...)
 """
 
 from .types import (
-    FSGRConfig,
+    FSDRConfig,
     CacheEntry,
-    FSGRResult,
+    FSDRResult,
 )
 from .lsh_hasher import LSHHasher
 from .cache_table import CacheTable
-from .narrowed_search_simulator import FSGRSimulator
+from .narrowed_search_simulator import FSDRSimulator
 
 __all__ = [
     # Configuration
-    'FSGRConfig',
+    'FSDRConfig',
 
     # Data structures
     'CacheEntry',
-    'FSGRResult',
+    'FSDRResult',
 
     # Components
     'LSHHasher',
     'CacheTable',
 
     # Narrowed Depth Search Simulator (ASIC model)
-    'FSGRSimulator',
+    'FSDRSimulator',
 ]

@@ -7,7 +7,7 @@ Type definitions for depth prediction hardware simulators.
 ### `CostVolumeType` (Enum)
 Cost volume construction method.
 - `CORRELATION`: Direct correlation (MVSplat, DepthSplat)
-- `TRANSFORMER`: Transformer matching (Transplat)
+- `TRANSFORMER`: Transformer matching (TranSplat)
 
 ### `DepthRegressionType` (Enum)
 Depth regression method.
@@ -26,7 +26,7 @@ Configuration for depth predictor simulator.
 - `softmax_temperature: float = 1.0` — Softmax temperature
 
 **Presets:**
-- `transplat_preset()` — Transplat defaults (32 candidates, transformer matching)
+- `transplat_preset()` — TranSplat defaults (32 candidates, transformer matching)
 - `mvsplat_preset()` — MVSplat defaults (32 candidates, correlation)
 - `depthsplat_preset()` — DepthSplat defaults (32 candidates, multi-scale)
 

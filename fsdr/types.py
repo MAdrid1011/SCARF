@@ -1,7 +1,7 @@
 """
-FSGR Data Types
+FSDR Data Types
 
-Core data structures for the FSGR module.
+Core data structures for the FSDR module.
 """
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, Dict
@@ -9,9 +9,9 @@ import torch
 
 
 @dataclass
-class FSGRConfig:
+class FSDRConfig:
     """
-    FSGR configuration parameters.
+    FSDR configuration parameters.
     
     Attributes:
         cache_size: Number of cache entries (default: 128)
@@ -172,9 +172,9 @@ class CacheEntry:
 
 
 @dataclass
-class FSGRResult:
+class FSDRResult:
     """
-    Result of FSGR processing for a single pixel.
+    Result of FSDR processing for a single pixel.
     
     Attributes:
         depth: Estimated depth value
@@ -203,9 +203,9 @@ class FSGRResult:
 
 
 @dataclass
-class FSGRProfilingResult:
+class FSDRProfilingResult:
     """
-    Aggregated profiling results for FSGR processing.
+    Aggregated profiling results for FSDR processing.
     
     Attributes:
         total_pixels: Total pixels processed
@@ -213,7 +213,7 @@ class FSGRProfilingResult:
         cache_misses: Number of cache misses
         path_counts: Count per processing path
         total_searches: Total depth candidate accesses
-        baseline_searches: Searches without FSGR (all full search)
+        baseline_searches: Searches without FSDR (all full search)
         total_time_ns: Total processing time
         path_time_ns: Time per processing path
     """

@@ -10,7 +10,7 @@ Pipeline:
 4. Depth refinement (refinement U-Net)
 5. Gaussian head (output projection)
 
-Simpler than Transplat: no transformer matching.
+Simpler than TranSplat: no transformer matching.
 """
 
 import torch
@@ -210,7 +210,7 @@ class MVSplatDepthPredictorSim(BaseDepthPredictorSim):
         """
         Estimate cycles for MVSplat depth prediction pipeline.
         
-        Simpler than Transplat: direct correlation instead of transformer.
+        Simpler than TranSplat: direct correlation instead of transformer.
         """
         B, V, C, H, W = features.shape
         D = self.config.num_depth_candidates

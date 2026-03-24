@@ -6,7 +6,7 @@ This guide explains how to run SCARF demos with different 3D Gaussian Splatting 
 
 | Model | Description | Default Dataset |
 |-------|-------------|-----------------|
-| **Transplat** | Transformer-based with depth priors | RE10K |
+| **TranSplat** | Transformer-based with depth priors | RE10K |
 | **MVSplat** | Multi-view stereo with cost volume | RE10K |
 | **DepthSplat** | DINOv2 features with 3-view support | RE10K, DL3DV |
 
@@ -15,7 +15,7 @@ This guide explains how to run SCARF demos with different 3D Gaussian Splatting 
 ### Running with Different Models
 
 ```bash
-# Transplat (default)
+# TranSplat (default)
 python scripts/demo.py --model transplat
 
 # MVSplat
@@ -27,7 +27,7 @@ python scripts/demo.py --model depthsplat
 
 ## Checkpoint Requirements
 
-### Transplat
+### TranSplat
 
 ```
 SCARF/transplat/checkpoints/
@@ -92,13 +92,13 @@ ln -s /path/to/dl3dv SCARF/depthsplat/datasets/dl3dv
 
 | Model | Baseline | With SCARF | Quality Loss |
 |-------|----------|------------|--------------|
-| Transplat | ~29 dB | ~27 dB | < 3 dB |
+| TranSplat | ~29 dB | ~27 dB | < 3 dB |
 | MVSplat | ~27 dB | ~25 dB | < 3 dB |
 | DepthSplat | ~28 dB | ~26 dB | < 3 dB |
 
 ### Performance Improvements
 
-| Metric | Transplat | MVSplat | DepthSplat |
+| Metric | TranSplat | MVSplat | DepthSplat |
 |--------|-----------|---------|------------|
 | Gaussian Reduction | ~25% | ~20-30% | ~20-30% |
 | Cycle Reduction | ~40% | ~35-45% | ~35-45% |
@@ -114,15 +114,15 @@ Each model has optimized SAES thresholds via adapters:
 
 | Model | Early-Stop Threshold | Cov Enlarge Factor |
 |-------|---------------------|-------------------|
-| Transplat | 0.85 | 6.0 |
+| TranSplat | 0.85 | 6.0 |
 | MVSplat | 0.85 | 6.0 |
 | DepthSplat | 0.92 | 6.0 |
 
-### FSGR Configurations
+### FSDR Configurations
 
 | Model | Hamming Threshold | High Confidence |
 |-------|------------------|-----------------|
-| Transplat | 4 | 0.80 |
+| TranSplat | 4 | 0.80 |
 | MVSplat | 4 | 0.80 |
 | DepthSplat | 3 | 0.85 |
 
@@ -183,7 +183,7 @@ SCARF Demo Pipeline:
 [Input Images]
       │
       ▼
-[Model Backbone]  ← Transplat/MVSplat/DepthSplat encoder
+[Model Backbone]  ← TranSplat/MVSplat/DepthSplat encoder
       │
       ▼
 [SCARF SAES]      ← Progressive early-stopping
@@ -194,7 +194,7 @@ Early   Continue
 Stop    Tiles
   │       │
   │       ▼
-  │   [FSGR]     ← Depth reuse optimization
+  │   [FSDR]     ← Depth reuse optimization
   │       │
   └───┬───┘
       ▼
@@ -210,5 +210,5 @@ Stop    Tiles
 ## See Also
 
 - [SAES Architecture](saes-architecture.md)
-- [FSGR Architecture](fsgr-architecture.md)
+- [FSDR Architecture](fsdr-architecture.md)
 - [Benchmark Guide](benchmark-guide.md)

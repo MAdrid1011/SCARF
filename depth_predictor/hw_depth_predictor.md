@@ -22,7 +22,7 @@ HWDepthPredictor(device: torch.device, mode: str = 'warping')
 - `PoolingUnit` — Average/max pooling
 - `PadUnit` — Padding operations
 - `SoftmaxUnit` — Depth regression softmax
-- `DeformableAttentionUnit` — Multi-scale deformable attention (Transplat)
+- `DeformableAttentionUnit` — Multi-scale deformable attention (TranSplat)
 
 **Key methods:**
 - `load_from_model(model: nn.Module) -> None` — Extract all weights from trained model.
@@ -61,7 +61,7 @@ Each wraps a hardware unit call and returns `(output, cycles)`:
 - `_hw_ffn(x, fc1_weight, fc1_bias, fc2_weight, fc2_bias, act_type)` — FFN via GEMMUnit + ActivationUnit
 
 ### Model-specific forward paths
-- `_forward_transplat_hw(...)` — Transplat: transformer matching → cost volume → U-Net → depth head
+- `_forward_transplat_hw(...)` — TranSplat: transformer matching → cost volume → U-Net → depth head
 - `_forward_stereo_batched_hw(...)` — MVSplat: batched correlation cost volume → U-Net → depth head
 - `_forward_depthsplat_hw(...)` — DepthSplat: DINOv2 + CNN + MV Transformer → multi-scale cost volume → DPT head → depth head
 
@@ -74,7 +74,7 @@ Each wraps a hardware unit call and returns `(output, cycles)`:
 - `_hw_ds_dpt_head(...)` — DPT learned upsampler
 - `_hw_ds_cnn_backbone(...)` — CNN feature extraction
 
-### Transplat sub-components
+### TranSplat sub-components
 - `_hw_uv_transformer(...)` — UV Transformer with deformable attention
 - `_hw_uv_coarse_attention(...)` — Coarse-level attention
 - `_hw_uv_self_attention(...)` — Self-attention block

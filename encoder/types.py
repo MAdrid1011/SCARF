@@ -140,7 +140,7 @@ class EncoderConfig:
     
     @classmethod
     def transplat_preset(cls) -> 'EncoderConfig':
-        """Transplat model preset."""
+        """TranSplat model preset."""
         return cls(
             norm_groups=8,
         )

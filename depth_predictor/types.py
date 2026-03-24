@@ -13,7 +13,7 @@ import torch
 class CostVolumeType(Enum):
     """Cost volume construction method."""
     CORRELATION = "correlation"      # Direct correlation (MVSplat, DepthSplat)
-    TRANSFORMER = "transformer"      # Transformer matching (Transplat)
+    TRANSFORMER = "transformer"      # Transformer matching (TranSplat)
 
 
 class DepthRegressionType(Enum):
@@ -48,7 +48,7 @@ class DepthPredictorConfig:
     
     @classmethod
     def transplat_preset(cls) -> 'DepthPredictorConfig':
-        """Transplat model preset."""
+        """TranSplat model preset."""
         return cls(
             num_depth_candidates=32,
             use_inverse_depth=True,

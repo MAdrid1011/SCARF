@@ -3,7 +3,7 @@ DepthSplat Depth Predictor Simulator
 
 Hardware simulator for DepthSplat's MultiViewUniMatch depth predictor.
 
-Pipeline (more complex than Transplat/MVSplat):
+Pipeline (more complex than TranSplat/MVSplat):
 1. Multi-scale feature extraction (CNN + Transformer + ViT)
 2. Multi-scale cost volume construction
 3. Per-scale cost volume regression (U-Net)
@@ -42,7 +42,7 @@ class DepthSplatDepthPredictorSim(BaseDepthPredictorSim):
     - CNN + Transformer + ViT feature extraction
     - DPTHead for learned upsampling
     
-    More complex than Transplat/MVSplat but achieves higher accuracy.
+    More complex than TranSplat/MVSplat but achieves higher accuracy.
     
     Hardware Mapping:
         - Multi-scale features: ConvEngine + GEMMUnit

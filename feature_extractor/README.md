@@ -14,14 +14,14 @@ This module simulates the feature extraction stage using existing SCARF encoder 
 
 - **Zero quality loss**: Bit-accurate output matching original PyTorch backbone
 - **Cycle counting**: Track hardware cycles for all operations
-- **Multi-model support**: Transplat, MVSplat, DepthSplat
+- **Multi-model support**: TranSplat, MVSplat, DepthSplat
 - **Feature replacement**: Simulator outputs used for actual depth prediction
 
 ## Model-Specific Extractors
 
 | Extractor | Model | Components |
 |-----------|-------|------------|
-| `TransplatFeatureExtractor` | Transplat | CNN + Transformer + DepthAnythingV2 |
+| `TransplatFeatureExtractor` | TranSplat | CNN + Transformer + DepthAnythingV2 |
 | `MVSplatFeatureExtractor` | MVSplat | CNN + Transformer |
 | `DepthSplatFeatureExtractor` | DepthSplat | CNN + DINOv2 + Transformer |
 

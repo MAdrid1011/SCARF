@@ -1,7 +1,7 @@
 """
-SAES: Scene-Adaptive Early-Stopping Dataflow
+SAES: Scene-Adaptive Early Sparsification Dataflow
 
-Multi-level early-stopping for tile-based feedback processing
+Multi-level early sparsification for tile-based feedback processing
 in generalizable 3DGS encoders.
 
 Key Component:
