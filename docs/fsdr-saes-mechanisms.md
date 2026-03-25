@@ -1,4 +1,4 @@
-# FSGR 与 SAES 优化机制详解
+# FSDR 与 SAES 优化机制详解
 
 ## 1. 概述
 
@@ -6,13 +6,13 @@ SCARF 加速器采用两项关键优化技术，分别从不同维度减少推�
 
 | 技术 | 利用的冗余 | 优化阶段 | 核心思想 |
 |------|-----------|---------|---------|
-| **FSGR** (Feature-Similarity Gaussian Reuse) | 2D 特征空间的语义相似性 | S2 (深度预测) | 缓存特征→深度映射，窄化搜索空间 |
-| **SAES** (Scene-Adaptive Early-Stopping) | 3D 高斯基元的空间连续性 | S2 + S3 | 多级 tile 分类，跳过冗余计算 |
+| **FSDR** (Feature Similarity Depth Reuse) | 2D 特征空间的语义相似性 | S2 (深度预测) | 缓存特征→深度映射，窄化搜索空间 |
+| **SAES** (Scene-Adaptive Early Sparsification) | 3D 高斯基元的空间连续性 | S2 + S3 | 多级 tile 分类，跳过冗余计算 |
 
 两者协同工作的方式：
 1. SAES 首先在 tile 级别判断哪些 tile 可以跳过（L0/L1 跳过 S2+S3，L2 跳过 S3）
-2. FSGR 对 SAES 未跳过的剩余像素进行逐像素处理，窄化 S2 搜索空间
-3. 两者的节省**不重叠**（FSGR 只处理 non-SAES 像素），可以直接相加
+2. FSDR 对 SAES 未跳过的剩余像素进行逐像素处理，窄化 S2 搜索空间
+3. 两者的节省**不重叠**（FSDR 只处理 non-SAES 像素），可以直接相加
 
 ```
 所有像素 (65,536)
@@ -22,13 +22,13 @@ SCARF 加速器采用两项关键优化技术，分别从不同维度减少推�
   ├── SAES L2 tiles (gaussian-similar): ~3% → 跳过 S3
   └── 剩余像素 (~77%)
        │
-       ├── FSGR guided (~73%): 窄化 S2 搜索 (32 候选代替 128)
-       └── FSGR not guided (~27%): 完整 S2 搜索
+       ├── FSDR guided (~73%): 窄化 S2 搜索 (32 候选代替 128)
+       └── FSDR not guided (~27%): 完整 S2 搜索
 ```
 
 ---
 
-## 2. FSGR: Feature-Similarity Gaussian Reuse
+## 2. FSDR: Feature Similarity Depth Reuse
 
 ### 2.1 设计动机
 
@@ -38,11 +38,11 @@ SCARF 加速器采用两项关键优化技术，分别从不同维度减少推�
 
 ### 2.2 窄化深度搜索 (Narrowed Depth Search)
 
-FSGR 的核心操作：
+FSDR 的核心操作：
 
 ```
 传统搜索: 评估 128 个深度候选 → 选最优
-FSGR 搜索: 从缓存获取 depth_cached → 只评估 32 个候选 (centered on depth_cached)
+FSDR 搜索: 从缓存获取 depth_cached → 只评估 32 个候选 (centered on depth_cached)
 ```
 
 **对比其他方案**：
@@ -51,7 +51,7 @@ FSGR 搜索: 从缓存获取 depth_cached → 只评估 32 个候选 (centered o
 |------|---------|---------|---------|------|
 | 完全跳过 S2 (reuse depth) | 100% | 0% | ~1.4% | 深度不准导致位置偏移 |
 | 完全跳过 S2+S3 (reuse gaussian) | 100% | 100% | ~2% | 高斯参数不匹配 |
-| **窄化搜索 (FSGR)** | **~57%** | **0%** | **≈0%** | **几乎无损** |
+| **窄化搜索 (FSDR)** | **~57%** | **0%** | **≈0%** | **几乎无损** |
 
 窄化搜索的优势：32 个候选仍然执行完整的 cost volume + regression，只是搜索范围更小。只要真实最优深度在 ±25% 窗口内（这对相似特征的像素几乎总是成立的），就能找到完全相同的最优深度。
 
@@ -92,7 +92,7 @@ sign(P @ feature) → 16-bit signature
 
 #### 2.3.3 引导判决逻辑
 
-匹配到缓存条目后，FSGR 根据以下 **ASIC 可实现的标准** 决定是否引导：
+匹配到缓存条目后，FSDR 根据以下 **ASIC 可实现的标准** 决定是否引导：
 
 ```python
 can_guide = (
@@ -124,7 +124,7 @@ can_guide = (
 
 ### 2.4 节省模型
 
-FSGR 的节省**仅来自 cost_volume**（保守、可防御的模型）：
+FSDR 的节省**仅来自 cost_volume**（保守、可防御的模型）：
 
 ```
 每个 guided 像素的 S2 节省:
@@ -139,7 +139,7 @@ FSGR 的节省**仅来自 cost_volume**（保守、可防御的模型）：
   - 不额外计算 "带宽奖励"——cost volume 减少已包含更少的内存读取
 ```
 
-S3 不受影响（FSGR 不修改 S3 计算）。
+S3 不受影响（FSDR 不修改 S3 计算）。
 
 ### 2.5 质量影响
 
@@ -150,11 +150,11 @@ S3 不受影响（FSGR 不修改 S3 计算）。
 | Depth inconsistent → fallback | ~17% | **零损失**（使用完整搜索） |
 | Not guided → full search | ~10% | **零损失** |
 
-FSGR 对渲染质量的影响在实验中测量为 **0.0000% PSNR 损失**。
+FSDR 对渲染质量的影响在实验中测量为 **0.0000% PSNR 损失**。
 
 ---
 
-## 3. SAES: Scene-Adaptive Early-Stopping
+## 3. SAES: Scene-Adaptive Early Sparsification
 
 ### 3.1 设计动机
 
@@ -336,7 +336,7 @@ SAES 的质量损失主要来自插值近似：
   │  识别 L2 tiles
   │
   ▼
-  FSGR: process_pixel()  ← 对 non-SAES 的 S2 像素逐个处理
+  FSDR: process_pixel()  ← 对 non-SAES 的 S2 像素逐个处理
   │  缓存 + 窄化搜索
   │
   ▼
@@ -348,23 +348,23 @@ SAES 的质量损失主要来自插值近似：
 
 ### 4.2 节省叠加
 
-FSGR 仅作用于 SAES 未覆盖的剩余像素。设：
+FSDR 仅作用于 SAES 未覆盖的剩余像素。设：
 - `saes_total` = L0 + L1 比例（这些像素 S2 被完全跳过）
-- `fsgr_ratio` = FSGR 在非 SAES 像素中的引导比例
-- `fsgr_per_pixel` = 每个 guided 像素的 S2 节省率
+- `fsdr_ratio` = FSDR 在非 SAES 像素中的引导比例
+- `fsdr_per_pixel` = 每个 guided 像素的 S2 节省率
 
 则：
 
 ```
-combined_S2_saving = saes_s2_saving + fsgr_ratio × (1 - saes_total) × fsgr_per_pixel
+combined_S2_saving = saes_s2_saving + fsdr_ratio × (1 - saes_total) × fsdr_per_pixel
 
 例如:
   saes_s2_saving = 20.0%
-  fsgr_ratio = 73.4%
-  fsgr_per_pixel = 56.3%
+  fsdr_ratio = 73.4%
+  fsdr_per_pixel = 56.3%
   remaining = 1 - 20.0% = 80.0%
 
-  fsgr_s2_saving = 73.4% × 80.0% × 56.3% = 33.1%
+  fsdr_s2_saving = 73.4% × 80.0% × 56.3% = 33.1%
   combined_S2 = 20.0% + 33.1% = 53.1%
 ```
 
@@ -375,9 +375,9 @@ combined_S2_saving = saes_s2_saving + fsgr_ratio × (1 - saes_total) × fsgr_per
 | 配置 | S2 节省 | S3 节省 | 总时间 (ms) | vs 无优化 |
 |------|---------|---------|-----------|----------|
 | Base ASIC (无优化) | — | — | 417.0 | 1.00× |
-| +FSGR only | 41.3% | — | 339.8 | 1.23× |
+| +FSDR only | 41.3% | — | 339.8 | 1.23× |
 | +SAES only | 20.0% | 23.4% | 344.0 | 1.21× |
-| **+FSGR+SAES** | **51.7%** | **23.4%** | **284.8** | **1.46×** |
+| **+FSDR+SAES** | **51.7%** | **23.4%** | **284.8** | **1.46×** |
 
 ---
 
@@ -385,10 +385,10 @@ combined_S2_saving = saes_s2_saving + fsgr_ratio × (1 - saes_total) × fsgr_per
 
 | 模块 | 文件路径 | 主要类/函数 |
 |------|---------|------------|
-| FSGR 模拟器 | `fsgr/narrowed_search_simulator.py` | `FSGRSimulator` |
-| FSGR 类型定义 | `fsgr/types.py` | `FSGRConfig`, `CacheEntry` |
-| FSGR LSH 哈希 | `fsgr/lsh_hasher.py` | `LSHHasher` |
-| FSGR 缓存表 | `fsgr/cache_table.py` | `CacheTable` |
+| FSDR 模拟器 | `fsdr/narrowed_search_simulator.py` | `FSDRSimulator` |
+| FSDR 类型定义 | `fsdr/types.py` | `FSDRConfig`, `CacheEntry` |
+| FSDR LSH 哈希 | `fsdr/lsh_hasher.py` | `LSHHasher` |
+| FSDR 缓存表 | `fsdr/cache_table.py` | `CacheTable` |
 | SAES 模拟器 | `saes/progressive_saes.py` | `ProgressiveSAES`, `apply_progressive_saes` |
 | 消融实验 + 性能模型 | `scripts/demo.py` | `SavingsTracker.compute_ablation` |
 
@@ -398,11 +398,11 @@ combined_S2_saving = saes_s2_saving + fsgr_ratio × (1 - saes_total) × fsgr_per
 
 本文档中描述的所有机制均在 `scripts/demo.py` 中通过**真实推理模拟**验证：
 
-1. **真实消融实验**：分别运行 4 种配置（base, +FSGR, +SAES, +FSGR+SAES），每种配置独立渲染输出图像
+1. **真实消融实验**：分别运行 4 种配置（base, +FSDR, +SAES, +FSDR+SAES），每种配置独立渲染输出图像
 2. **质量指标真实测量**：PSNR/SSIM 基于实际渲染图像与 ground truth 对比
-3. **ASIC 可实现的判决**：FSGR 的引导判决和 SAES 的 tile 分类均基于 ASIC 可用的信息（特征哈希、深度值、高斯参数），不使用 oracle 数据
+3. **ASIC 可实现的判决**：FSDR 的引导判决和 SAES 的 tile 分类均基于 ASIC 可用的信息（特征哈希、深度值、高斯参数），不使用 oracle 数据
 4. **保守的节省模型**：
-   - FSGR 仅计入 cost_volume 节省（不含 U-Net 假设）
+   - FSDR 仅计入 cost_volume 节省（不含 U-Net 假设）
    - 不额外计算带宽奖励（cost volume 减少已包含更少的内存读取）
    - 硬件加速分阶段建模（计算受限 2.0× vs 内存受限 1.5×）
 5. **probe cross-check 验证**：SAES 的质量保障不依赖后验验证，而是使用 ASIC 可实现的留一交叉检查
@@ -414,7 +414,5 @@ combined_S2_saving = saes_s2_saving + fsgr_ratio × (1 - saes_total) × fsgr_per
 | 文档 | 内容 |
 |------|------|
 | [pipeline-architecture.md](pipeline-architecture.md) | SCARF 流水线各阶段详细描述 |
-| [dsu-architecture.md](dsu-architecture.md) | 深度搜索单元硬件架构 |
 | [ggu-architecture.md](ggu-architecture.md) | 高斯生成单元硬件架构 |
-| [encoder-units-architecture.md](encoder-units-architecture.md) | 计算单元 (ConvEngine, GEMM 等) 架构 |
-| [hardware-resource-summary.md](hardware-resource-summary.md) | 28nm ASIC 功耗与面积估算 |
+| [architecture-cn.md](architecture-cn.md) | SCARF 整体架构（中文）|

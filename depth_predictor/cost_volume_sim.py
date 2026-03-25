@@ -3,7 +3,7 @@ Cost Volume Hardware Simulator
 
 Simulates cost volume construction for depth prediction.
 Supports both correlation-based (MVSplat, DepthSplat) and 
-transformer-based (Transplat) methods.
+transformer-based (TranSplat) methods.
 
 Hardware Units Used:
 - BilinearUnit: Feature warping via grid_sample
@@ -32,7 +32,7 @@ class CostVolumeSimulator:
        - Warp target features to reference view
        - Compute normalized dot product
        
-    2. Transformer-based (Transplat):
+    2. Transformer-based (TranSplat):
        - Use GEMMUnit for attention computation
        - Cross-view feature matching
     
@@ -94,7 +94,7 @@ class CostVolumeSimulator:
                 intrinsics, ref_extrinsics, src_extrinsics
             )
         else:
-            # Transformer-based (Transplat) - use correlation as fallback
+            # Transformer-based (TranSplat) - use correlation as fallback
             # Full transformer simulation would require attention matrices
             return self._correlation_cost_volume(
                 ref_features, src_features, depth_candidates,

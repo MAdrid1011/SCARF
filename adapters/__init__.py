@@ -4,7 +4,7 @@ Model Adapters Module
 Adapters for different generalizable 3DGS models.
 
 Supported Models:
-- Transplat: Cost volume with negative softmax, inverse depth
+- TranSplat: Cost volume with negative softmax, inverse depth
 - MVSplat: Correlation volume with direct softmax, linear depth
 - DepthSplat: DINOv2 features, 3-view support
 

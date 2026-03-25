@@ -102,16 +102,16 @@ class BaseAdapter(ABC):
         """Return cost type: 'correlation' or 'cost'."""
         return 'correlation'
     
-    def supports_fsgr(self) -> bool:
-        """Whether this model supports FSGR optimization."""
+    def supports_fsdr(self) -> bool:
+        """Whether this model supports FSDR optimization."""
         return True
     
     def supports_saes(self) -> bool:
         """Whether this model supports SAES optimization."""
         return True
     
-    def get_fsgr_config_overrides(self) -> Dict:
-        """Get model-specific FSGR configuration overrides."""
+    def get_fsdr_config_overrides(self) -> Dict:
+        """Get model-specific FSDR configuration overrides."""
         return {}
     
     def get_saes_config_overrides(self) -> Dict:
@@ -126,7 +126,7 @@ class BaseAdapter(ABC):
         """
         Parse raw Gaussian parameters from network output.
         
-        Default implementation assumes Transplat format:
+        Default implementation assumes TranSplat format:
         [scales(3), rotation(4), sh(3*num_sh)]
         
         Override for models with different formats.
@@ -165,4 +165,4 @@ class BaseAdapter(ABC):
     
     def get_scale_range(self) -> Tuple[float, float]:
         """Get (scale_min, scale_max) for this model."""
-        return (0.5, 15.0)  # Default Transplat values
+        return (0.5, 15.0)  # Default TranSplat values

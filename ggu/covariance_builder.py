@@ -1,8 +1,8 @@
 """
 Covariance Builder - Standalone Implementation
 
-Covariance matrix construction matching Transplat's GaussianAdapter exactly.
-No dependency on Transplat modules.
+Covariance matrix construction matching TranSplat's GaussianAdapter exactly.
+No dependency on TranSplat modules.
 """
 import torch
 from typing import Tuple
@@ -16,7 +16,7 @@ class CovarianceBuilder:
     """
     Build covariance matrix from scale and rotation parameters.
     
-    Matches Transplat's GaussianAdapter covariance computation exactly:
+    Matches TranSplat's GaussianAdapter covariance computation exactly:
     1. scales = scale_min + (scale_max - scale_min) * sigmoid(raw_scales)
     2. scales = scales * depth * scale_multiplier(intrinsics)
     3. rotations = normalize(raw_rotations)
@@ -45,7 +45,7 @@ class CovarianceBuilder:
         """
         Compute scale multiplier based on intrinsics.
         
-        Matches Transplat's GaussianAdapter.get_scale_multiplier():
+        Matches TranSplat's GaussianAdapter.get_scale_multiplier():
         xy_multipliers = multiplier * (K_inv[:2,:2] @ pixel_size)
         return xy_multipliers.sum()
         
@@ -78,7 +78,7 @@ class CovarianceBuilder:
         """
         Map raw scales to valid range with depth and intrinsics adaptation.
         
-        Matches Transplat's GaussianAdapter.forward():
+        Matches TranSplat's GaussianAdapter.forward():
         scales = scale_min + (scale_max - scale_min) * sigmoid(raw_scales)
         scales = scales * depth * scale_multiplier
         
@@ -118,7 +118,7 @@ class CovarianceBuilder:
         """
         Convert quaternion to 3x3 rotation matrix.
         
-        Matches Transplat's quaternion_to_matrix() in gaussians.py:
+        Matches TranSplat's quaternion_to_matrix() in gaussians.py:
         Order: (i, j, k, r) = (x, y, z, w)
         
         Args:
@@ -131,11 +131,11 @@ class CovarianceBuilder:
         # Normalize first
         q = quaternion / (torch.norm(quaternion) + eps)
         
-        # Unpack in Transplat's order: i, j, k, r
+        # Unpack in TranSplat's order: i, j, k, r
         i, j, k, r = q[0], q[1], q[2], q[3]
         
         # Compute rotation matrix
-        # Matches Transplat's quaternion_to_matrix exactly
+        # Matches TranSplat's quaternion_to_matrix exactly
         two_s = 2.0 / ((q * q).sum() + eps)
         
         R = torch.stack([
@@ -160,7 +160,7 @@ class CovarianceBuilder:
         """
         Build 3x3 covariance matrix from scales and rotation.
         
-        Matches Transplat's build_covariance():
+        Matches TranSplat's build_covariance():
         S = diag(scales)
         R = quaternion_to_matrix(rotation)
         cov = R @ S @ S^T @ R^T
@@ -194,7 +194,7 @@ class CovarianceBuilder:
         """
         Transform covariance to world space.
         
-        Matches Transplat's:
+        Matches TranSplat's:
         covariances = c2w_rotations @ covariances @ c2w_rotations.transpose(-1, -2)
         
         Args:

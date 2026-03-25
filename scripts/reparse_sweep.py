@@ -7,36 +7,36 @@ SWEEP_DIR = "/home/madrid/Desktop/SCARF/scripts/sweep_out"
 def parse_output(text: str) -> dict:
     d = {}
 
-    # FSGR stats (from the detailed stats section)
+    # FSDR stats (from the detailed stats section)
     m = re.search(r"Cache hit rate:\s+([\d.]+)%", text)
-    if m: d["fsgr_hit_rate"] = float(m.group(1))
+    if m: d["fsdr_hit_rate"] = float(m.group(1))
 
     m = re.search(r"Guided \(\d+ cand\.\):\s+([\d,]+)\s+\(([\d.]+)%\)", text)
     if m:
-        d["fsgr_guided"] = int(m.group(1).replace(",", ""))
-        d["fsgr_guided_pct"] = float(m.group(2))
+        d["fsdr_guided"] = int(m.group(1).replace(",", ""))
+        d["fsdr_guided_pct"] = float(m.group(2))
 
     m = re.search(r"Full compute \(miss\):\s+([\d,]+)\s+\(([\d.]+)%\)", text)
     if m:
-        d["fsgr_full_compute"] = int(m.group(1).replace(",", ""))
-        d["fsgr_full_compute_pct"] = float(m.group(2))
+        d["fsdr_full_compute"] = int(m.group(1).replace(",", ""))
+        d["fsdr_full_compute_pct"] = float(m.group(2))
 
     m = re.search(r"S2 saving per guided:\s+([\d.]+)%", text)
-    if m: d["fsgr_s2_saving_per_guided"] = float(m.group(1))
+    if m: d["fsdr_s2_saving_per_guided"] = float(m.group(1))
 
     m = re.search(r"In window:\s+([\d,]+)\s+\(([\d.]+)%", text)
     if m:
-        d["fsgr_in_window"] = int(m.group(1).replace(",", ""))
-        d["fsgr_in_window_pct"] = float(m.group(2))
+        d["fsdr_in_window"] = int(m.group(1).replace(",", ""))
+        d["fsdr_in_window_pct"] = float(m.group(2))
 
     m = re.search(r"Out of window:\s+(\d+)", text)
-    if m: d["fsgr_out_window"] = int(m.group(1))
+    if m: d["fsdr_out_window"] = int(m.group(1))
 
     m = re.search(r"Depth inconsistent:\s+([\d,]+)", text)
-    if m: d["fsgr_depth_inconsistent"] = int(m.group(1).replace(",", ""))
+    if m: d["fsdr_depth_inconsistent"] = int(m.group(1).replace(",", ""))
 
     m = re.search(r"Pixels processed:\s+([\d,]+)", text)
-    if m: d["fsgr_total_pixels"] = int(m.group(1).replace(",", ""))
+    if m: d["fsdr_total_pixels"] = int(m.group(1).replace(",", ""))
 
     # SAES stats
     m = re.search(r"Level 0 \(feat\):\s+(\d+)\s+tiles\s+\(([\d.]+)%\)", text)
@@ -63,8 +63,8 @@ def parse_output(text: str) -> dict:
         d["saes_effective_gaussians"] = int(m.group(1).replace(",", ""))
         d["saes_zeroed_gaussians"] = int(m.group(2).replace(",", ""))
 
-    # Quality — FSGR+SAES combined
-    m = re.search(r"ASIC \+ SAES\+FSGR\s*:\s*PSNR=([\d.]+)\s*dB,\s*SSIM=([\d.]+),\s*loss=([-+]?[\d.]+)\s*dB\s+\(([\d.]+)%\)", text)
+    # Quality — FSDR+SAES combined
+    m = re.search(r"ASIC \+ SAES\+FSDR\s*:\s*PSNR=([\d.]+)\s*dB,\s*SSIM=([\d.]+),\s*loss=([-+]?[\d.]+)\s*dB\s+\(([\d.]+)%\)", text)
     if m:
         d["psnr_combined"] = float(m.group(1))
         d["ssim_combined"] = float(m.group(2))
@@ -83,16 +83,16 @@ def parse_output(text: str) -> dict:
         d["ssim_saes_only"] = float(m.group(2))
         d["psnr_loss_saes_db"] = float(m.group(3))
 
-    # FSGR-only quality
-    m = re.search(r"ASIC \+ FSGR\s*:\s*PSNR=([\d.]+)\s*dB,\s*SSIM=([\d.]+),\s*loss=([-+]?[\d.]+)\s*dB", text)
+    # FSDR-only quality
+    m = re.search(r"ASIC \+ FSDR\s*:\s*PSNR=([\d.]+)\s*dB,\s*SSIM=([\d.]+),\s*loss=([-+]?[\d.]+)\s*dB", text)
     if m:
-        d["psnr_fsgr_only"] = float(m.group(1))
-        d["ssim_fsgr_only"] = float(m.group(2))
-        d["psnr_loss_fsgr_db"] = float(m.group(3))
+        d["psnr_fsdr_only"] = float(m.group(1))
+        d["ssim_fsdr_only"] = float(m.group(2))
+        d["psnr_loss_fsdr_db"] = float(m.group(3))
 
     # S2/S3 savings from ablation
-    m = re.search(r"FSGR S2 saving \(alone\):\s*([\d.]+)%", text)
-    if m: d["fsgr_s2_saving_alone"] = float(m.group(1))
+    m = re.search(r"FSDR S2 saving \(alone\):\s*([\d.]+)%", text)
+    if m: d["fsdr_s2_saving_alone"] = float(m.group(1))
     m = re.search(r"SAES S2 saving \(alone\):\s*([\d.]+)%", text)
     if m: d["saes_s2_saving_alone"] = float(m.group(1))
     m = re.search(r"SAES S3 saving \(alone\):\s*([\d.]+)%", text)
@@ -147,21 +147,21 @@ print("SENSITIVITY SWEEP RESULTS (re-parsed)")
 print("="*90)
 
 print("\n### Study 1: FSDR Cache Size (TranSplat, 256×256)")
-print(f"{'Entries':>8} | {'HitRate':>8} | {'Guided%':>8} | {'S2/px':>7} | {'InWin%':>7} | {'OutWin':>6} | {'PSNR_fsgr':>10} | {'PSNR_loss':>10}")
+print(f"{'Entries':>8} | {'HitRate':>8} | {'Guided%':>8} | {'S2/px':>7} | {'InWin%':>7} | {'OutWin':>6} | {'PSNR_fsdr':>10} | {'PSNR_loss':>10}")
 print("-"*90)
 for r in all_results["study1_cache_size"]:
-    print(f"{r['value']:>8} | {r.get('fsgr_hit_rate',0):>7.1f}% | {r.get('fsgr_guided_pct',0):>7.1f}% | "
-          f"{r.get('fsgr_s2_saving_per_guided',0):>6.1f}% | {r.get('fsgr_in_window_pct',0):>6.1f}% | "
-          f"{r.get('fsgr_out_window',0):>6} | {r.get('psnr_fsgr_only',0):>9.4f} | "
-          f"{r.get('psnr_loss_fsgr_db',0):>+9.4f} dB")
+    print(f"{r['value']:>8} | {r.get('fsdr_hit_rate',0):>7.1f}% | {r.get('fsdr_guided_pct',0):>7.1f}% | "
+          f"{r.get('fsdr_s2_saving_per_guided',0):>6.1f}% | {r.get('fsdr_in_window_pct',0):>6.1f}% | "
+          f"{r.get('fsdr_out_window',0):>6} | {r.get('psnr_fsdr_only',0):>9.4f} | "
+          f"{r.get('psnr_loss_fsdr_db',0):>+9.4f} dB")
 
 print(f"\n### Study 2: FSDR Hamming Threshold τ_h (TranSplat)")
-print(f"{'τ_h':>5} | {'HitRate':>8} | {'Guided%':>8} | {'InWin%':>7} | {'OutWin':>6} | {'PSNR_fsgr':>10} | {'PSNR_loss':>10}")
+print(f"{'τ_h':>5} | {'HitRate':>8} | {'Guided%':>8} | {'InWin%':>7} | {'OutWin':>6} | {'PSNR_fsdr':>10} | {'PSNR_loss':>10}")
 print("-"*80)
 for r in all_results["study2_hamming"]:
-    print(f"{r['value']:>5} | {r.get('fsgr_hit_rate',0):>7.1f}% | {r.get('fsgr_guided_pct',0):>7.1f}% | "
-          f"{r.get('fsgr_in_window_pct',0):>6.1f}% | {r.get('fsgr_out_window',0):>6} | "
-          f"{r.get('psnr_fsgr_only',0):>9.4f} | {r.get('psnr_loss_fsgr_db',0):>+9.4f} dB")
+    print(f"{r['value']:>5} | {r.get('fsdr_hit_rate',0):>7.1f}% | {r.get('fsdr_guided_pct',0):>7.1f}% | "
+          f"{r.get('fsdr_in_window_pct',0):>6.1f}% | {r.get('fsdr_out_window',0):>6} | "
+          f"{r.get('psnr_fsdr_only',0):>9.4f} | {r.get('psnr_loss_fsdr_db',0):>+9.4f} dB")
 
 print(f"\n### Study 3: SAES Feature Variance Threshold τ_f (TranSplat)")
 print(f"{'τ_f':>6} | {'L0Tiles':>8} | {'L0%':>6} | {'ModPx':>8} | {'ModPx%':>7} | {'Zeroed':>7} | {'PSNR_saes':>10} | {'Loss':>10}")

@@ -1,7 +1,7 @@
 """
-SAES: Scene-Adaptive Early-Stopping — Multi-Level v4 Simulator
+SAES: Scene-Adaptive Early Sparsification — Multi-Level v4 Simulator
 
-Progressive Adaptive Early-Stopping for SCARF with 2-level tile classification
+Progressive Adaptive Early Sparsification for SCARF with 2-level tile classification
 aligned with the SCARF Dataflow specification (L0 + L1 only):
 
   Level 0 (Feature Pre-Filter): Tiles with low feature variance after S1.
@@ -36,7 +36,7 @@ from typing import Dict, List, Tuple
 
 class ProgressiveSAES:
     """
-    Progressive Adaptive Early-Stopping for SCARF (v4: Dataflow-aligned).
+    Progressive Adaptive Early Sparsification for SCARF (v4: Dataflow-aligned).
 
     Key changes vs v3:
       - K(T) adaptive probe count replaces fixed 4-corner probes.
@@ -750,7 +750,7 @@ def apply_progressive_saes(
         feat_norm=_feat_norm,
     )
 
-    # Collect unmodified pixels (for FSGR)
+    # Collect unmodified pixels (for FSDR)
     continue_pixels = []
     for idx in range(modified_mask.shape[0]):
         if not modified_mask[idx]:

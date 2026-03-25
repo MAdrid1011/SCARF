@@ -7,7 +7,7 @@ import torch
 import numpy as np
 from typing import Optional
 
-from .types import FSGRConfig
+from .types import FSDRConfig
 
 
 class LSHHasher:
@@ -41,12 +41,12 @@ class LSHHasher:
         signatures = hasher.hash_batch(features)  # [N] integers
     """
     
-    def __init__(self, config: FSGRConfig):
+    def __init__(self, config: FSDRConfig):
         """
         Initialize LSH hasher with random projection matrix.
         
         Args:
-            config: FSGR configuration with lsh_dim and feature_dim
+            config: FSDR configuration with lsh_dim and feature_dim
         """
         self.config = config
         self.lsh_dim = config.lsh_dim

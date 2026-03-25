@@ -1,7 +1,7 @@
 """
-Transplat Depth Predictor Simulator
+TranSplat Depth Predictor Simulator
 
-Hardware simulator for Transplat's DepthPredictorTrans.
+Hardware simulator for TranSplat's DepthPredictorTrans.
 
 Pipeline:
 1. Transformer-based cost volume matching (UVTransformer)
@@ -31,9 +31,9 @@ from encoder.types import CycleStats, ActivationType
 
 class TransplatDepthPredictorSim(BaseDepthPredictorSim):
     """
-    Hardware simulator for Transplat's depth predictor.
+    Hardware simulator for TranSplat's depth predictor.
     
-    Transplat uses transformer-based cost volume matching:
+    TranSplat uses transformer-based cost volume matching:
     - UVTransformer for coarse + fine matching
     - 2D U-Net for cost volume refinement
     - Depth head with softmax regression
@@ -54,7 +54,7 @@ class TransplatDepthPredictorSim(BaseDepthPredictorSim):
         use_hw_computation: bool = True,
     ):
         """
-        Initialize Transplat depth predictor simulator.
+        Initialize TranSplat depth predictor simulator.
         
         Args:
             config: Depth predictor configuration (uses transplat preset if None)
@@ -71,7 +71,7 @@ class TransplatDepthPredictorSim(BaseDepthPredictorSim):
         self._depth_predictor = None
         
         # Hardware depth predictor for actual computation
-        # Transplat uses transformer-based matching
+        # TranSplat uses transformer-based matching
         self._hw_predictor = HWDepthPredictor(config, device, model_type='transplat')
         
         # Control whether hw_predictor uses original model internally
@@ -87,10 +87,10 @@ class TransplatDepthPredictorSim(BaseDepthPredictorSim):
     
     def load_from_model(self, model: nn.Module) -> None:
         """
-        Load weights from Transplat encoder model.
+        Load weights from TranSplat encoder model.
         
         Args:
-            model: Transplat encoder with depth_predictor attribute
+            model: TranSplat encoder with depth_predictor attribute
         """
         if hasattr(model, 'depth_predictor'):
             self._depth_predictor = model.depth_predictor
@@ -136,7 +136,7 @@ class TransplatDepthPredictorSim(BaseDepthPredictorSim):
         **kwargs,
     ) -> DepthPredictorOutput:
         """
-        Forward pass through Transplat depth predictor with cycle tracking.
+        Forward pass through TranSplat depth predictor with cycle tracking.
         
         IMPORTANT: When use_hw_computation=True, this uses ACTUAL hardware compute units
         (ConvEngine, GEMMUnit, BilinearUnit, etc.) for computation. Results may differ
@@ -149,8 +149,8 @@ class TransplatDepthPredictorSim(BaseDepthPredictorSim):
             near: Near plane [B, V]
             far: Far plane [B, V]
             images: Input images [B, V, 3, H_full, W_full] (for refinement)
-            da_depth: DepthAnything depth [B, V, 1, H, W] (REQUIRED for Transplat)
-            dino_feature: DINO features [B, V, C, H, W] (REQUIRED for Transplat)
+            da_depth: DepthAnything depth [B, V, 1, H, W] (REQUIRED for TranSplat)
+            dino_feature: DINO features [B, V, C, H, W] (REQUIRED for TranSplat)
             cnn_features: CNN features (optional)
             extra_info: Additional info dict (contains images for depth predictor)
             
@@ -223,7 +223,7 @@ class TransplatDepthPredictorSim(BaseDepthPredictorSim):
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Run original Transplat depth predictor - ACTUAL COMPUTATION.
+        Run original TranSplat depth predictor - ACTUAL COMPUTATION.
         
         This executes the real PyTorch model to get correct outputs.
         The outputs are then used in the real pipeline.
@@ -232,7 +232,7 @@ class TransplatDepthPredictorSim(BaseDepthPredictorSim):
         # Build kwargs for original model
         model_kwargs = {}
         
-        # Required for Transplat
+        # Required for TranSplat
         if da_depth is not None:
             model_kwargs['da_depth'] = da_depth
         if dino_feature is not None:
@@ -278,7 +278,7 @@ class TransplatDepthPredictorSim(BaseDepthPredictorSim):
         images: Optional[torch.Tensor] = None,
     ):
         """
-        Estimate cycles for Transplat depth prediction pipeline.
+        Estimate cycles for TranSplat depth prediction pipeline.
         
         Pipeline stages:
         1. encoder_4b: Cost volume matching (UVTransformer)
@@ -389,10 +389,10 @@ def create_transplat_predictor(
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
 ) -> TransplatDepthPredictorSim:
     """
-    Factory function to create Transplat depth predictor simulator.
+    Factory function to create TranSplat depth predictor simulator.
     
     Args:
-        model: Transplat encoder model
+        model: TranSplat encoder model
         config: Optional configuration
         device: Computation device
         

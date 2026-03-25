@@ -11,11 +11,11 @@ MODEL  = "transplat"
 
 STUDIES = {
     "study1_cache_size": {
-        "param": "--fsgr-cache-size",
+        "param": "--fsdr-cache-size",
         "values": [64, 128, 256, 512, 1024],
     },
     "study2_hamming": {
-        "param": "--fsgr-hamming",
+        "param": "--fsdr-hamming",
         "values": [1, 2, 3, 4, 5],
     },
     "study3_saes_fv": {
@@ -46,19 +46,19 @@ def parse_output(text: str) -> dict:
     """Extract key metrics from demo.py stdout."""
     d = {}
 
-    # FSGR stats
+    # FSDR stats
     m = re.search(r"Cache hit rate:\s+([\d.]+)%", text)
-    if m: d["fsgr_hit_rate"] = float(m.group(1))
+    if m: d["fsdr_hit_rate"] = float(m.group(1))
     m = re.search(r"Guided.*?:\s+[\d,]+\s+\(([\d.]+)%\)", text)
-    if m: d["fsgr_guided_pct"] = float(m.group(1))
+    if m: d["fsdr_guided_pct"] = float(m.group(1))
     m = re.search(r"Full compute \(miss\):\s+[\d,]+\s+\(([\d.]+)%\)", text)
-    if m: d["fsgr_full_compute_pct"] = float(m.group(1))
+    if m: d["fsdr_full_compute_pct"] = float(m.group(1))
     m = re.search(r"S2 saving per guided:\s+([\d.]+)%", text)
-    if m: d["fsgr_s2_saving_per_guided"] = float(m.group(1))
+    if m: d["fsdr_s2_saving_per_guided"] = float(m.group(1))
     m = re.search(r"In window:\s+[\d,]+\s+\(([\d.]+)%", text)
-    if m: d["fsgr_in_window_pct"] = float(m.group(1))
+    if m: d["fsdr_in_window_pct"] = float(m.group(1))
     m = re.search(r"Out of window:\s+(\d+)", text)
-    if m: d["fsgr_out_window"] = int(m.group(1))
+    if m: d["fsdr_out_window"] = int(m.group(1))
 
     # SAES stats
     m = re.search(r"Level 0 \(feat\):\s+(\d+)\s+tiles\s+\(([\d.]+)%\)", text)
@@ -81,8 +81,8 @@ def parse_output(text: str) -> dict:
     m = re.search(r"Total tiles:\s+(\d+)", text)
     if m: d["saes_total_tiles"] = int(m.group(1))
 
-    # Quality — look for the ablation table's ASIC + SAES+FSGR line
-    m = re.search(r"ASIC \+ SAES\+FSGR\s*:\s*PSNR=([\d.]+)\s*dB,\s*SSIM=([\d.]+),\s*loss=([-+\d.]+)\s*dB\s+\(([\d.]+)%\)", text)
+    # Quality — look for the ablation table's ASIC + SAES+FSDR line
+    m = re.search(r"ASIC \+ SAES\+FSDR\s*:\s*PSNR=([\d.]+)\s*dB,\s*SSIM=([\d.]+),\s*loss=([-+\d.]+)\s*dB\s+\(([\d.]+)%\)", text)
     if m:
         d["psnr"] = float(m.group(1))
         d["ssim"] = float(m.group(2))
@@ -99,18 +99,18 @@ def parse_output(text: str) -> dict:
         d["psnr_saes_only"] = float(m.group(1))
         d["psnr_loss_saes_db"] = float(m.group(3))
 
-    # FSGR-only quality
-    m = re.search(r"ASIC \+ FSGR\s*:\s*PSNR=([\d.]+)\s*dB,\s*SSIM=([\d.]+),\s*loss=([-+\d.]+)\s*dB", text)
+    # FSDR-only quality
+    m = re.search(r"ASIC \+ FSDR\s*:\s*PSNR=([\d.]+)\s*dB,\s*SSIM=([\d.]+),\s*loss=([-+\d.]+)\s*dB", text)
     if m:
-        d["psnr_fsgr_only"] = float(m.group(1))
-        d["psnr_loss_fsgr_db"] = float(m.group(3))
+        d["psnr_fsdr_only"] = float(m.group(1))
+        d["psnr_loss_fsdr_db"] = float(m.group(3))
 
     # Combined S2 saving from ablation
-    m = re.search(r"FSGR S2.*?saving.*?:\s*([\d.]+)%", text)
-    if m: d["fsgr_s2_saving_total"] = float(m.group(1))
+    m = re.search(r"FSDR S2.*?saving.*?:\s*([\d.]+)%", text)
+    if m: d["fsdr_s2_saving_total"] = float(m.group(1))
 
     # Speedup from ablation
-    m = re.search(r"\+FSGR\+SAES.*?speedup.*?([\d.]+)×", text, re.IGNORECASE)
+    m = re.search(r"\+FSDR\+SAES.*?speedup.*?([\d.]+)×", text, re.IGNORECASE)
     if m: d["speedup_combined"] = float(m.group(1))
 
     return d
@@ -150,14 +150,14 @@ def main():
     print("\n### Study 1: FSDR Cache Size")
     print(f"{'Entries':>8} {'HitRate':>8} {'Guided%':>8} {'S2Save':>8} {'PSNRloss':>10}")
     for r in all_results.get("study1_cache_size", []):
-        print(f"{r['value']:>8} {r.get('fsgr_hit_rate',0):>7.1f}% {r.get('fsgr_guided_pct',0):>7.1f}% "
-              f"{r.get('fsgr_s2_saving_per_guided',0):>7.1f}% {r.get('psnr_loss_fsgr_db',0):>+9.3f} dB")
+        print(f"{r['value']:>8} {r.get('fsdr_hit_rate',0):>7.1f}% {r.get('fsdr_guided_pct',0):>7.1f}% "
+              f"{r.get('fsdr_s2_saving_per_guided',0):>7.1f}% {r.get('psnr_loss_fsdr_db',0):>+9.3f} dB")
 
     print("\n### Study 2: FSDR Hamming Threshold")
     print(f"{'τ_h':>8} {'HitRate':>8} {'Guided%':>8} {'PSNRloss':>10}")
     for r in all_results.get("study2_hamming", []):
-        print(f"{r['value']:>8} {r.get('fsgr_hit_rate',0):>7.1f}% {r.get('fsgr_guided_pct',0):>7.1f}% "
-              f"{r.get('psnr_loss_fsgr_db',0):>+9.3f} dB")
+        print(f"{r['value']:>8} {r.get('fsdr_hit_rate',0):>7.1f}% {r.get('fsdr_guided_pct',0):>7.1f}% "
+              f"{r.get('psnr_loss_fsdr_db',0):>+9.3f} dB")
 
     print("\n### Study 3: SAES Feature Variance Threshold")
     print(f"{'τ_f':>8} {'L0Tiles%':>9} {'ModPx%':>8} {'PSNRloss':>10}")

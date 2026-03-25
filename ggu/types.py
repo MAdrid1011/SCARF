@@ -11,20 +11,20 @@ import torch
 @dataclass
 class GGUConfig:
     """
-    GGU configuration parameters matching Transplat's GaussianAdapterCfg.
+    GGU configuration parameters matching TranSplat's GaussianAdapterCfg.
     
-    Default values match common Transplat configurations.
+    Default values match common TranSplat configurations.
     For specific models, override with actual values from GaussianAdapterCfg:
-    - Transplat/MVSplat: scale_activation='sigmoid', use_depth_scaling=True
+    - TranSplat/MVSplat: scale_activation='sigmoid', use_depth_scaling=True
     - DepthSplat: scale_activation='softplus', use_depth_scaling=False
     
     Attributes:
-        scale_min: Minimum scale value (Transplat: gaussian_scale_min)
-        scale_max: Maximum scale value (Transplat: gaussian_scale_max)
-        sh_degree: Spherical harmonics degree (Transplat: sh_degree)
+        scale_min: Minimum scale value (TranSplat: gaussian_scale_min)
+        scale_max: Maximum scale value (TranSplat: gaussian_scale_max)
+        sh_degree: Spherical harmonics degree (TranSplat: sh_degree)
         depth_scale_multiplier: Fallback multiplier if intrinsics not provided
         image_shape: Default image shape for coordinate normalization
-        scale_activation: 'sigmoid' (Transplat/MVSplat) or 'softplus' (DepthSplat)
+        scale_activation: 'sigmoid' (TranSplat/MVSplat) or 'softplus' (DepthSplat)
         use_depth_scaling: Whether to multiply scales by depth (False for DepthSplat)
         softplus_shift: Shift for softplus activation (DepthSplat uses -4.0)
     """
@@ -35,9 +35,9 @@ class GGUConfig:
     image_shape: Tuple[int, int] = (256, 256)
     # Model-specific configurations
     scale_activation: str = 'sigmoid'  # 'sigmoid' or 'softplus'
-    use_depth_scaling: bool = True     # True for Transplat/MVSplat, False for DepthSplat
+    use_depth_scaling: bool = True     # True for TranSplat/MVSplat, False for DepthSplat
     softplus_shift: float = -4.0       # Only used when scale_activation='softplus'
-    direction_normalize: str = 'norm'  # 'norm' (Transplat) or 'z' (DepthSplat)
+    direction_normalize: str = 'norm'  # 'norm' (TranSplat) or 'z' (DepthSplat)
     
     def __post_init__(self):
         if self.scale_min < 0:
@@ -66,10 +66,10 @@ class GGUConfig:
     @classmethod
     def from_transplat_config(cls, gaussian_adapter_cfg) -> 'GGUConfig':
         """
-        Create GGUConfig from Transplat's GaussianAdapterCfg.
+        Create GGUConfig from TranSplat's GaussianAdapterCfg.
         
         Args:
-            gaussian_adapter_cfg: GaussianAdapterCfg from Transplat
+            gaussian_adapter_cfg: GaussianAdapterCfg from TranSplat
         
         Returns:
             GGUConfig with matching parameters
@@ -86,7 +86,7 @@ class GaussianOutput:
     """
     Output of GGU Gaussian generation.
     
-    Matches the structure needed by Transplat's decoder.
+    Matches the structure needed by TranSplat's decoder.
     
     Attributes:
         mean: [3] 3D position in world space

@@ -31,7 +31,7 @@ class BaseModelLoader(ABC):
     """
     Abstract base class for model loaders.
     
-    Each 3DGS model (Transplat, MVSplat, DepthSplat) needs
+    Each 3DGS model (TranSplat, MVSplat, DepthSplat) needs
     a specific loader due to different:
     - Config systems (Hydra, YAML, etc.)
     - Model architectures
@@ -85,11 +85,11 @@ class BaseModelLoader(ABC):
 
 
 class TransplatLoader(BaseModelLoader):
-    """Loader for Transplat model."""
+    """Loader for TranSplat model."""
     
     def __init__(self, transplat_root: Optional[Path] = None):
         """
-        Initialize Transplat loader.
+        Initialize TranSplat loader.
         
         Args:
             transplat_root: Path to transplat repository root.
@@ -104,7 +104,7 @@ class TransplatLoader(BaseModelLoader):
         self._original_cwd = None
     
     def _setup_imports(self):
-        """Setup sys.path for Transplat imports."""
+        """Setup sys.path for TranSplat imports."""
         import sys
         import os
         
@@ -126,7 +126,7 @@ class TransplatLoader(BaseModelLoader):
         config_path: Optional[str] = None,
         device: Optional[torch.device] = None,
     ) -> ModelBundle:
-        """Load Transplat model."""
+        """Load TranSplat model."""
         self._setup_imports()
         
         try:
@@ -196,7 +196,7 @@ class TransplatLoader(BaseModelLoader):
         dataset_name: str = 're10k',
         num_samples: int = 1,
     ) -> DataBundle:
-        """Load Transplat test data."""
+        """Load TranSplat test data."""
         self._setup_imports()
         
         try:

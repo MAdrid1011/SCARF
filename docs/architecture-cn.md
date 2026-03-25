@@ -18,7 +18,7 @@
 
 ### 1.1 可泛化 3DGS 编码器的计算特征
 
-可泛化 3DGS 模型（如 Transplat、MVSplat、DepthSplat）的编码器推理包含三种截然不同的计算模式：
+可泛化 3DGS 模型（如 TranSplat、MVSplat、DepthSplat）的编码器推理包含三种截然不同的计算模式：
 
 | 计算阶段 | 主要操作 | 计算特征 | 主要瓶颈 |
 |---------|---------|---------|---------|
@@ -86,7 +86,7 @@
                         │  ┌──────────────────────────────────────────────┐   │
                         │  │              ConfigRegs (MMIO)                │   │
                         │  │  numDepthCandidates | featureDim | imageSize │   │
-                        │  │  saesThresholds     | fsgrParams | tileSize  │   │
+                        │  │  saesThresholds     | fsdrParams | tileSize  │   │
                         │  └──────────────────────────────────────────────┘   │
                         └─────────────────────────────────────────────────────┘
 ```
@@ -95,7 +95,7 @@
 
 **单实例时分复用 (Single-Instance Time-Multiplexing)**：每种计算单元仅实例化一份（ConvEngine ×1, GEMM ×1, BilinearUnit ×1 等），通过顶层 FSM 控制器在不同流水线阶段之间切换。这一设计避免了为三个模型或三个流水线阶段分别实例化计算单元所带来的面积膨胀，同时也简化了物理设计的布局布线。
 
-**配置驱动的模型无关性**：Transplat、MVSplat、DepthSplat 三种模型的差异（深度候选数 32/64/128、CNN 层结构、Transformer 层数、GroupNorm 分组数等）完全通过 ConfigRegs 中的寄存器字段参数化。数据路径中**不存在任何 if-else 模型分支**，所有操作通过相同的硬件路径执行。
+**配置驱动的模型无关性**：TranSplat、MVSplat、DepthSplat 三种模型的差异（深度候选数 32/64/128、CNN 层结构、Transformer 层数、GroupNorm 分组数等）完全通过 ConfigRegs 中的寄存器字段参数化。数据路径中**不存在任何 if-else 模型分支**，所有操作通过相同的硬件路径执行。
 
 ---
 
@@ -432,7 +432,7 @@ PipelineController 是 SCARF 的全局调度中枢，采用单层 FSM 架构（C
                     ┌────────────┼────────────┐
                     │            │            │
             ┌───────▼──────┐  ┌─▼───────┐  ┌▼─────────────┐
-            │SAESController│  │FSGRCtrl │  │ConfigRegs    │
+            │SAESController│  │FSDRCtrl │  │ConfigRegs    │
             │(tile classify)│  │(cache)  │  │(MMIO config) │
             └──────────────┘  └─────────┘  └──────────────┘
 ```
@@ -455,7 +455,7 @@ PipelineController 是 SCARF 的全局调度中枢，采用单层 FSM 架构（C
                         │              │                 │
                     [L0/L1/L2]       [Full]             │
                         │              │                 │
-                        │         S2_FSGR_LOOKUP         │
+                        │         S2_FSDR_LOOKUP         │
                         │              │                 │
                         │         S2_COSTVOL             │
                         │              │                 │
@@ -510,8 +510,8 @@ io.bilinearStart   := stateEntry && (state === PipeState.sS2_CostVol)
 | `sS1_CNN` | ✓ 分配 | — | — | ✓ (BN/ReLU) | CNN backbone, 循环 `cnnLayers` 次 |
 | `sS1_Transformer` | — | ✓ QKV | — | ✓ (Softmax/LN) | Transformer encoder, 循环 `transformerLayers` 次 |
 | `sS1_DINOv2` | — | ✓ ViT | — | ✓ | DepthSplat only (if `hasDINOv2`) |
-| `sS2_FSGRLookup` | — | — | — | ✓ (LSH hash) | FSGR: 哈希 + 缓存查询 (逐像素) |
-| `sS2_CostVol` | ✓ 相关性 | — | ✓ warping | — | 深度候选数由 FSGR 决定 (D 或 D/4) |
+| `sS2_FSDRLookup` | — | — | — | ✓ (LSH hash) | FSDR: 哈希 + 缓存查询 (逐像素) |
+| `sS2_CostVol` | ✓ 相关性 | — | ✓ warping | — | 深度候选数由 FSDR 决定 (D 或 D/4) |
 | `sS2_UNet` | ✓ conv | — | — | ✓ (BN/ReLU) | U-Net refinement |
 | `sS2_DepthHead` | ✓ 1×1 conv | — | — | — | 深度预测头 |
 | `sS2_Regression` | — | ✓ 加权和 | — | ✓ softmax | Soft argmax 回归 |
@@ -634,10 +634,10 @@ bilinear.io.coordY := tileSPM.io.rdData(31, 16).asSInt
   2. S2S3_SAES_CLASSIFY (if saesEnabled):
      - SAESController 执行 L0/L1/L2 检测 (4 角点 probe)
      - 结果存入 saesResult 寄存器
-     - 分支: L0/L1/L2 → S2S3_PROBE_ONLY, Full → S2_FSGR_LOOKUP
+     - 分支: L0/L1/L2 → S2S3_PROBE_ONLY, Full → S2_FSDR_LOOKUP
   
-  3. S2_FSGR_LOOKUP (if fsgrEnabled && saesResult == Full):
-     - FSGRController 逐像素处理:
+  3. S2_FSDR_LOOKUP (if fsdrEnabled && saesResult == Full):
+     - FSDRController 逐像素处理:
        * Hash → Cache Lookup → Hit/Miss
        * Hit: useNarrowSearch = true, narrowCandidates = D/4
        * Miss: useNarrowSearch = false (full D candidates)
@@ -645,7 +645,7 @@ bilinear.io.coordY := tileSPM.io.rdData(31, 16).asSInt
   
   4. S2 Pipeline (Full tiles only):
      - S2_CostVol: BilinearUnit (warping) + ConvEngine (correlation)
-       * 深度候选数 = costVolCandidates (FSGR 输出)
+       * 深度候选数 = costVolCandidates (FSDR 输出)
        * 生成 cost volume → TileSPM
      - S2_UNet: ConvEngine (refinement)
      - S2_DepthHead: ConvEngine (1×1 conv)
@@ -692,7 +692,7 @@ val numTileCols = io.config.imageW / io.config.tileSize  // 256/4 = 64
 
 ### 5.1 概述
 
-SAES (Scene-Adaptive Early-Stopping) 是 SCARF 的核心优化技术，利用 tile 级特征/深度/高斯的空间均匀性，跳过冗余的深度预测与高斯生成计算。
+SAES (Scene-Adaptive Early Sparsification) 是 SCARF 的核心优化技术，利用 tile 级特征/深度/高斯的空间均匀性，跳过冗余的深度预测与高斯生成计算。
 
 ### 5.2 三级分类 FSM
 
@@ -753,7 +753,7 @@ is(PipeState.sS2S3_SAESClassify) {
   when(io.saesClassifyDone) {
     saesResult := io.saesLevel  // Latch 分类结果
     when(io.saesLevel === SAESLevel.sFull) {
-      state := PipeState.sS2_FSGRLookup  // 完整路径
+      state := PipeState.sS2_FSDRLookup  // 完整路径
     }.otherwise {
       state := PipeState.sS2S3_ProbeOnly  // 简化 probe 路径
     }
@@ -767,15 +767,15 @@ is(PipeState.sS2S3_SAESClassify) {
 
 ---
 
-## 6. FSGR 硬件集成
+## 6. FSDR 硬件集成
 
 ### 6.1 概述
 
-FSGR (Feature-Similarity Gaussian Reuse) 利用相邻像素间的特征相似性，对 Cost Volume 计算进行窄化搜索优化。
+FSDR (Feature Similarity Depth Reuse) 利用相邻像素间的特征相似性，对 Cost Volume 计算进行窄化搜索优化。
 
 ### 6.2 硬件实现
 
-FSGR 硬件由三个专用模块组成：
+FSDR 硬件由三个专用模块组成：
 
 **LSHHashUnit** (`compute/LSHHashUnit.scala`, 96 行):
 
@@ -804,13 +804,13 @@ class LSHHashUnit(lshDim: Int = 16, featureDim: Int = 128) extends Module {
 - 总延迟：3 cycles (点积计算 2 cycles + 符号提取 1 cycle)
 - **ScarfTop 连接** (`ScarfTop.scala:159-167`): 特征从 FeatureBuffer.doutA 序列化输入
 
-**FSGRCache** (`memory/FSGRCache.scala`, 166 行):
+**FSDRCache** (`memory/FSDRCache.scala`, 166 行):
 
 ```scala
 // 512 条目 CAM 缓存，每条目 61 bits:
 //   valid[1] + signature[16] + depth[16] + pixelX[10] + pixelY[10] + LRU[8]
-class FSGRCache(numEntries: Int = 512, sigWidth: Int = 16) extends Module {
-  val entries = Reg(Vec(512, new FSGRCacheEntry))
+class FSDRCache(numEntries: Int = 512, sigWidth: Int = 16) extends Module {
+  val entries = Reg(Vec(512, new FSDRCacheEntry))
   
   // 并行 Hamming 距离计算（512 路并行）
   val hammingDists = Wire(Vec(512, UInt(6.W)))
@@ -832,24 +832,24 @@ class FSGRCache(numEntries: Int = 512, sigWidth: Int = 16) extends Module {
 - 插入延迟：1 cycle（LRU 替换）
 - 生成的 SystemVerilog：21,699 行（最大模块，包含 512 个比较器）
 
-**FSGRController** (`control/FSGRController.scala`, 169 行):
+**FSDRController** (`control/FSDRController.scala`, 169 行):
 
 ```scala
 // 9 状态 FSM：IDLE → HASH_START → HASH_WAIT → LOOKUP → DECIDE →
 //            NARROW/FULL → INSERT → NEXT_PIXEL → DONE
-object FSGRState extends ChiselEnum {
+object FSDRState extends ChiselEnum {
   val sIdle, sHashStart, sHashWait, sLookup, sDecide,
       sNarrow, sFull, sInsert, sNextPixel, sDone = Value
 }
 
 // 逐像素处理 tile 中的 16 个像素
 val pixelIdx = RegInit(0.U(5.W))  // 0-15
-when(state === FSGRState.sNextPixel) {
+when(state === FSDRState.sNextPixel) {
   pixelIdx := pixelIdx + 1.U
   when(pixelIdx === io.totalPixels - 1.U) {
-    state := FSGRState.sDone
+    state := FSDRState.sDone
   }.otherwise {
-    state := FSGRState.sHashStart  // 下一像素
+    state := FSDRState.sHashStart  // 下一像素
   }
 }
 ```
@@ -860,14 +860,14 @@ when(state === FSGRState.sNextPixel) {
 
 ### 6.3 流水线集成
 
-FSGR 在 PipelineController 的 `S2_FSGRLookup` 状态中执行，位于 SAES 分类之后、CostVol 之前：
+FSDR 在 PipelineController 的 `S2_FSDRLookup` 状态中执行，位于 SAES 分类之后、CostVol 之前：
 
 ```
 S2S3_SAESClassify
   │
   ├─ [L0/L1/L2] → ProbeOnly (跳过 S2+S3)
   │
-  └─ [Full] → S2_FSGRLookup (FSGR 查缓存)
+  └─ [Full] → S2_FSDRLookup (FSDR 查缓存)
                 │
                 ├─ [命中] → CostVol (D/4 候选, 窄化搜索)
                 │
@@ -876,7 +876,7 @@ S2S3_SAESClassify
 
 ### 6.4 与 SAES 的协同
 
-FSGR 仅作用于 SAES 分类为"Full"的 tile（即未命中任何早退级别的 tile），进一步减少这些 tile 的 Cost Volume 计算量。两者组合可实现最高 67% 的 S2+S3 融合块节省。
+FSDR 仅作用于 SAES 分类为"Full"的 tile（即未命中任何早退级别的 tile），进一步减少这些 tile 的 Cost Volume 计算量。两者组合可实现最高 67% 的 S2+S3 融合块节省。
 
 ---
 
@@ -1047,7 +1047,7 @@ when((pipeline.io.state === PipeState.sS2_Regression ||
 
 所有模型差异通过 ConfigRegs (MMIO 映射, Chisel: `scarf.control.ConfigRegs`) 参数化。寄存器通过 AXI4-Lite 接口写入，地址按 4 字节对齐：
 
-| 寄存器字段 | MMIO 地址 | 宽度 | Transplat | MVSplat | DepthSplat | 说明 |
+| 寄存器字段 | MMIO 地址 | 宽度 | TranSplat | MVSplat | DepthSplat | 说明 |
 |-----------|----------|------|-----------|---------|------------|------|
 | `numDepthCandidates` | `0x00` | 8-bit | 128 | 32 | 128 | Cost Volume 深度候选数 |
 | `featureDim` | `0x04` | 8-bit | 128 | 128 | 128 | 特征维度 (通道数) |
@@ -1063,9 +1063,9 @@ when((pipeline.io.state === PipeState.sS2_Regression ||
 | `saesCrossCheckThresh` | `0x2C` | 16-bit | 0x3000 | 0x3000 | 0x3000 | L2 交叉验证阈值 (FP16) |
 | `saesDepthStdThresh` | `0x30` | 16-bit | 0x3800 | 0x3800 | 0x3800 | L1 深度标准差阈值 (FP16) |
 | `saesEnabled` | `0x34` | 1-bit | 1 | 1 | 1 | SAES 使能位 |
-| `fsgrEnabled` | `0x38` | 1-bit | 1 | 1 | 1 | FSGR 使能位 |
-| `fsgrCacheSize` | `0x3C` | 10-bit | 512 | 512 | 512 | FSGR 缓存条目数 |
-| `fsgrHammingThresh` | `0x40` | 4-bit | 4 | 4 | 4 | FSGR Hamming 距离阈值 |
+| `fsdrEnabled` | `0x38` | 1-bit | 1 | 1 | 1 | FSDR 使能位 |
+| `fsdrCacheSize` | `0x3C` | 10-bit | 512 | 512 | 512 | FSDR 缓存条目数 |
+| `fsdrHammingThresh` | `0x40` | 4-bit | 4 | 4 | 4 | FSDR Hamming 距离阈值 |
 | `configValid` | `0x44` | 1-bit | 1 | 1 | 1 | 配置完成位 (写 1 启动) |
 
 **写入协议**：
@@ -1213,7 +1213,7 @@ scarf/
 ├── control/
 │   ├── PipelineController.scala   — 主 FSM (18 状态)
 │   ├── SAESController.scala       — SAES 分类 FSM (5 状态)
-│   ├── FSGRController.scala       — FSGR 查询 FSM (9 状态)
+│   ├── FSDRController.scala       — FSDR 查询 FSM (9 状态)
 │   └── ConfigRegs.scala           — MMIO 配置寄存器
 │
 ├── compute/
@@ -1226,7 +1226,7 @@ scarf/
 │   ├── SoftmaxUnit.scala      — Softmax + 回归
 │   ├── PoolingUnit.scala      — 池化单元
 │   ├── PadUnit.scala          — 填充单元
-│   └── LSHHashUnit.scala      — FSGR LSH 哈希
+│   └── LSHHashUnit.scala      — FSDR LSH 哈希
 │
 ├── ggu/
 │   ├── GGUArray.scala        — 32 PE 阵列
@@ -1238,7 +1238,7 @@ scarf/
     ├── WeightBuffer.scala    — 128 KB 权重缓冲
     ├── FeatureBuffer.scala   — 256 KB 特征缓冲 (双端口)
     ├── TileSPM.scala         — 64 KB Tile 暂存
-    ├── FSGRCache.scala       — FSGR 语义缓存 (512 条目)
+    ├── FSDRCache.scala       — FSDR 语义缓存 (512 条目)
     └── DRAMInterface.scala   — AXI4 DRAM 接口
 ```
 
@@ -1261,9 +1261,9 @@ scarf/
 | `ggu/sh_rotator.py` | `scarf.ggu.SHRotator` | 114 | SH 系数旋转 (degree 2-4), 80 cycles |
 | `depth_predictor/hw_depth_predictor.py` | `scarf.control.PipelineController` | 290 | 主 FSM (18 状态), 层级循环控制, tile 迭代 |
 | `saes/progressive_saes.py` | `scarf.control.SAESController` | 105 | 3 级分类 FSM (L0/L1/L2/Full), 4-角点 probe |
-| `fsgr/lsh_hasher.py` | `scarf.compute.LSHHashUnit` | 96 | K=16 LSH 投影, VectorALU 加速, 3 cycles/hash |
-| `fsgr/cache_table.py` | `scarf.memory.FSGRCache` | 166 | 512 条目 CAM, 并行 Hamming 距离, 1 cycle 查找 |
-| `fsgr/narrowed_search_simulator.py` | `scarf.control.FSGRController` | 169 | 9 状态 FSM, 逐像素 hash→query→决策 |
+| `fsdr/lsh_hasher.py` | `scarf.compute.LSHHashUnit` | 96 | K=16 LSH 投影, VectorALU 加速, 3 cycles/hash |
+| `fsdr/cache_table.py` | `scarf.memory.FSDRCache` | 166 | 512 条目 CAM, 并行 Hamming 距离, 1 cycle 查找 |
+| `fsdr/narrowed_search_simulator.py` | `scarf.control.FSDRController` | 169 | 9 状态 FSM, 逐像素 hash→query→决策 |
 | — | `scarf.control.ConfigRegs` | 116 | MMIO 寄存器 (17 个配置字段), AXI4-Lite 接口 |
 | — | `scarf.ScarfTop` | 489 | 顶层集成, 单实例化计算单元, 完整数据通路连接 |
 | — | `scarf.Config` | 135 | 全局参数定义 (48×48, 128KB, 256KB, etc.) |
@@ -1295,7 +1295,7 @@ io.gemmStart         := false.B
 io.bilinearStart     := false.B
 io.gguStart          := false.B
 io.saesClassifyStart := false.B
-io.fsgrStart         := false.B
+io.fsdrStart         := false.B
 
 switch(state) {
   is(PipeState.sS1_CNN)         { io.convEngineStart   := stateEntry }
@@ -1424,7 +1424,7 @@ sbt "runMain scarf.VerilogEmitter"
 
 | 模块 | 行数 | 说明 |
 |------|------|------|
-| `FSGRCache.sv` | 21,699 | 512 条目 CAM 缓存 (最大模块) |
+| `FSDRCache.sv` | 21,699 | 512 条目 CAM 缓存 (最大模块) |
 | `GGUArray.sv` | 1,496 | 32 PE 高斯生成阵列 |
 | `SystolicArray.sv` | 741 | 48×48 卷积脉动阵列 |
 | `OutputStationaryArray.sv` | 595 | 48×48 GEMM 输出驻留阵列 |
@@ -1435,7 +1435,7 @@ sbt "runMain scarf.VerilogEmitter"
 | `PipelineController.sv` | 275 | 主 FSM 控制器 |
 | `DRAMInterface.sv` | 176 | AXI4 DRAM 接口 |
 | `PositionCalc.sv` | 174 | GGU 位置计算 |
-| `FSGRController.sv` | 157 | FSGR 控制 FSM |
+| `FSDRController.sv` | 157 | FSDR 控制 FSM |
 | `SAESController.sv` | 132 | SAES 分类 FSM |
 | 其他 SRAM/辅助模块 | ~2,500 | 存储器生成模块 + 其他 |
 
@@ -1493,7 +1493,7 @@ object ModelPresets {
 
 | 分类 | 文件 | 行数 | 说明 |
 |------|------|------|------|
-| **存储器** | `FSGRCache.sv` | 21,699 | 512 条目 CAM + 并行 Hamming 比较器 |
+| **存储器** | `FSDRCache.sv` | 21,699 | 512 条目 CAM + 并行 Hamming 比较器 |
 | | `bank_65536x16.sv` | 118 | FeatureBuffer 单 bank (65536×16-bit) |
 | | `mem_1365x768.sv` | 106 | WeightBuffer SRAM (1365×768-bit) |
 | | `mem_16384x32.sv` | 104 | TileSPM SRAM (16384×32-bit) |
@@ -1517,7 +1517,7 @@ object ModelPresets {
 | **控制器** | `ConfigRegs.sv` | 301 | MMIO 配置寄存器 |
 | | `PipelineController.sv` | 275 | 主 FSM (18 状态) |
 | | `DRAMInterface.sv` | 176 | AXI4 DRAM 接口 |
-| | `FSGRController.sv` | 157 | FSGR 控制 FSM (9 状态) |
+| | `FSDRController.sv` | 157 | FSDR 控制 FSM (9 状态) |
 | | `SAESController.sv` | 132 | SAES 分类 FSM (5 状态) |
 | | `ScarfTop.sv` | 1,214 | 顶层模块（完整数据通路连接） |
 

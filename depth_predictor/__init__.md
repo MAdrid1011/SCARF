@@ -13,7 +13,7 @@ Package initialization for depth predictor hardware simulators.
 **Core engine:** `HWDepthPredictor`
 
 **Model-specific predictors:**
-- `TransplatDepthPredictorSim` — Transplat depth pipeline
+- `TransplatDepthPredictorSim` — TranSplat depth pipeline
 - `MVSplatDepthPredictorSim` — MVSplat depth pipeline
 - `DepthSplatDepthPredictorSim` — DepthSplat depth pipeline
 

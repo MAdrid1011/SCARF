@@ -177,7 +177,7 @@ S2 是**混合受限**阶段——cost_volume 是内存受限操作，其余是�
 | regression | GEMM + VectorALU | 计算受限 | 2.0× | 7,537K | 3,768K |
 | **S2 总计** | | | | **345,075K** | **212,359K** |
 
-**cost_volume 占加速后 S2 的 ~75%**，这是 FSGR 窄化搜索能带来显著节省的原因。
+**cost_volume 占加速后 S2 的 ~75%**，这是 FSDR 窄化搜索能带来显著节省的原因。
 
 ### 3.4 流水线重叠
 
@@ -315,7 +315,7 @@ GGU 周期被**完全隐藏**在 S3 ConvEngine 工作之后：
          └─────────────┘└─ ─ ─ ─ ─ ─┘
 ```
 
-### 6.2 性能数据 (Transplat, 256×256, 无优化)
+### 6.2 性能数据 (TranSplat, 256×256, 无优化)
 
 | 阶段 | 加速后周期 | 流水化周期 | 时间 (ms) |
 |------|-----------|-----------|-----------|
@@ -325,12 +325,12 @@ GGU 周期被**完全隐藏**在 S3 ConvEngine 工作之后：
 | GGU Post | 391K | 0 (hidden) | 0 |
 | **总计** | **451,645K** | **416,970K** | **417.0** |
 
-### 6.3 优化后性能 (FSGR + SAES v3)
+### 6.3 优化后性能 (FSDR + SAES v3)
 
 | 阶段 | 优化项 | 节省 | 流水化周期 | 时间 (ms) |
 |------|-------|------|-----------|-----------|
 | S1 | — | — | 77,636K | 77.64 |
-| S2 | SAES L0+L1 跳过 + FSGR 窄化搜索 | -51.7% | ~90,336K | ~90.34 |
+| S2 | SAES L0+L1 跳过 + FSDR 窄化搜索 | -51.7% | ~90,336K | ~90.34 |
 | S3 | SAES L0+L1+L2 跳过 | -23.4% | ~116,837K | ~116.84 |
 | GGU | — | hidden | 0 | 0 |
 | **总计** | | | **~284,809K** | **~284.8** |
@@ -357,9 +357,6 @@ SCARF 在边缘部署场景下（对标 Jetson Orin）实现了 **21% 的性能�
 
 | 文档 | 内容 |
 |------|------|
-| [encoder-units-architecture.md](encoder-units-architecture.md) | ConvEngine, GEMM, BilinearUnit 等计算单元详细架构 |
-| [dsu-architecture.md](dsu-architecture.md) | DSU (深度搜索单元) 架构 |
 | [ggu-architecture.md](ggu-architecture.md) | GGU (高斯生成单元) 架构 |
-| [feature-extractor-architecture.md](feature-extractor-architecture.md) | 特征提取器硬件架构 |
-| [fsgr-saes-mechanisms.md](fsgr-saes-mechanisms.md) | FSGR + SAES 优化机制详解 |
-| [hardware-resource-summary.md](hardware-resource-summary.md) | 28nm 功耗与面积估算 |
+| [fsdr-saes-mechanisms.md](fsdr-saes-mechanisms.md) | FSDR + SAES 优化机制详解 |
+| [architecture-cn.md](architecture-cn.md) | SCARF 整体架构（中文）|

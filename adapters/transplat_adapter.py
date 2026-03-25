@@ -1,7 +1,7 @@
 """
-Transplat Adapter
+TranSplat Adapter
 
-Adapter for Transplat model.
+Adapter for TranSplat model.
 """
 import torch
 import torch.nn.functional as F
@@ -12,7 +12,7 @@ from .base_adapter import BaseAdapter, GaussianParams
 
 class TransplatAdapter(BaseAdapter):
     """
-    Adapter for Transplat model.
+    Adapter for TranSplat model.
     
     Key differences:
     - Cost volume uses negative values (lower = better)
@@ -117,14 +117,14 @@ class TransplatAdapter(BaseAdapter):
     def get_cost_type(self) -> str:
         return 'cost'
     
-    def get_fsgr_config_overrides(self) -> Dict:
+    def get_fsdr_config_overrides(self) -> Dict:
         return {
             'hamming_threshold': 4,
             'high_confidence_threshold': 0.8,
         }
     
     def get_scale_range(self) -> Tuple[float, float]:
-        """Transplat uses (0.5, 15.0) scale range."""
+        """TranSplat uses (0.5, 15.0) scale range."""
         return (0.5, 15.0)
     
     def parse_raw_gaussian(
@@ -133,7 +133,7 @@ class TransplatAdapter(BaseAdapter):
         sh_degree: int = 4,
     ) -> GaussianParams:
         """
-        Parse Transplat's raw Gaussian format.
+        Parse TranSplat's raw Gaussian format.
         
         Format: [scales(3), rotation(4), sh(3*num_sh)]
         """

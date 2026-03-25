@@ -184,7 +184,7 @@ class CNNEncoderSimulator:
     """
     Full CNN Encoder hardware simulator.
     
-    Matches Transplat's CNNEncoder exactly while counting hardware cycles.
+    Matches TranSplat's CNNEncoder exactly while counting hardware cycles.
     """
     
     def __init__(self, config: CNNConfig, device: torch.device = None):

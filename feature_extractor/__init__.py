@@ -5,7 +5,7 @@ Simulates CNN backbone and Transformer feature extraction using
 SCARF encoder compute units with cycle-accurate modeling.
 
 Supports:
-- CNN + Transformer (Transplat, MVSplat)
+- CNN + Transformer (TranSplat, MVSplat)
 - ViT/DINOv2 (DepthSplat)
 
 Model-Specific Extractors:

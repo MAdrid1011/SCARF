@@ -1,8 +1,8 @@
 """
 Position Calculator - Standalone Implementation
 
-3D position calculation matching Transplat's GaussianAdapter exactly.
-No dependency on Transplat modules.
+3D position calculation matching TranSplat's GaussianAdapter exactly.
+No dependency on TranSplat modules.
 """
 import torch
 from typing import Tuple
@@ -14,7 +14,7 @@ class PositionCalculator:
     """
     Calculate 3D world position from pixel coordinates and depth.
     
-    Matches Transplat's get_world_rays() + mean = origin + direction * depth
+    Matches TranSplat's get_world_rays() + mean = origin + direction * depth
     
     Hardware Mapping:
         - Matrix inverse: ~100 LUTs (or precomputed)
@@ -35,7 +35,7 @@ class PositionCalculator:
         """
         Compute normalized ray direction in camera space.
         
-        Matches Transplat's unproject() function.
+        Matches TranSplat's unproject() function.
         
         Args:
             coordinates: [2] normalized (x, y) in [0, 1]
@@ -69,7 +69,7 @@ class PositionCalculator:
         """
         Get world-space ray origin and direction.
         
-        Matches Transplat's get_world_rays() exactly.
+        Matches TranSplat's get_world_rays() exactly.
         
         Args:
             coordinates: [2] normalized (x, y) in [0, 1]
@@ -112,7 +112,7 @@ class PositionCalculator:
         """
         Compute 3D world position from pixel and depth.
         
-        Matches Transplat: mean = origin + direction * depth
+        Matches TranSplat: mean = origin + direction * depth
         
         Args:
             pixel_coord: [2] (y, x) pixel coordinates
@@ -127,7 +127,7 @@ class PositionCalculator:
         h, w = image_shape
         
         # Convert pixel (y, x) to normalized (x, y) in [0, 1]
-        # Transplat uses: coordinates = (index + 0.5) / length
+        # TranSplat uses: coordinates = (index + 0.5) / length
         normalized_coords = torch.tensor([
             (float(pixel_coord[1]) + 0.5) / w,  # x
             (float(pixel_coord[0]) + 0.5) / h,  # y

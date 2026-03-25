@@ -14,7 +14,7 @@ class MVSplatAdapter(BaseAdapter):
     """
     Adapter for MVSplat model.
     
-    Key differences from Transplat:
+    Key differences from TranSplat:
     - Correlation volume uses positive values (higher = better)
     - Uses linear depth candidates
     - Direct softmax
@@ -65,7 +65,7 @@ class MVSplatAdapter(BaseAdapter):
         tgt_intrinsics: torch.Tensor,
         tgt_extrinsics: torch.Tensor,
     ) -> torch.Tensor:
-        """Same projection as Transplat (standard pinhole model)."""
+        """Same projection as TranSplat (standard pinhole model)."""
         N = ref_coords.shape[0]
         device = ref_coords.device
         dtype = ref_coords.dtype

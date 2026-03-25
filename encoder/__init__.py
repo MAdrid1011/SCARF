@@ -10,7 +10,7 @@ Hardware simulators for 3DGS encoder computation units:
 - PoolingUnit: Average / max / adaptive pooling
 - PadUnit: Constant, replicate, reflect, circular padding
 - SoftmaxUnit: Softmax for depth regression
-- DeformableAttentionUnit: Multi-scale deformable attention (for Transplat)
+- DeformableAttentionUnit: Multi-scale deformable attention (for TranSplat)
 """
 
 from .types import (

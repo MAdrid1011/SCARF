@@ -1,8 +1,8 @@
 """
-FSGR Narrowed Depth Search Simulator — ASIC Hardware Model
+FSDR Narrowed Depth Search Simulator — ASIC Hardware Model
 
 Instead of skipping S2 entirely (which causes large quality loss),
-FSGR uses cached depth to NARROW the cost_volume search in S2:
+FSDR uses cached depth to NARROW the cost_volume search in S2:
 - Full S2: 128 depth candidates (cost_volume + U-Net + depth_head)
 - Guided S2: 32 depth candidates centered on cached depth
   → 75% cost_volume reduction + ~25% U-Net reduction = ~42% S2 per pixel
@@ -17,7 +17,7 @@ Savings model (per guided pixel, cost_volume-only):
 - cost_volume: 75% reduction (32 vs 128 candidates, per-pixel per-candidate)
 - U-Net, depth_head, regression: unchanged (process full spatial resolution)
 - Overall S2 saving: cv_fraction × 75% per guided pixel
-  (e.g., Transplat cv ~76% of scaled S2 → ~57% S2 saving per pixel)
+  (e.g., TranSplat cv ~76% of scaled S2 → ~57% S2 saving per pixel)
 - S3: unchanged (0% saving)
 """
 
@@ -25,17 +25,17 @@ import torch
 import numpy as np
 from typing import Dict, List, Tuple
 
-from .types import FSGRConfig, CacheEntry
+from .types import FSDRConfig, CacheEntry
 from .lsh_hasher import LSHHasher
 from .cache_table import CacheTable
 
 
-class FSGRSimulator:
+class FSDRSimulator:
     """
-    FSGR (Feature-Similarity Gaussian Reuse) — Narrowed Depth Search ASIC Model.
+    FSDR (Feature Similarity Depth Reuse) — Narrowed Depth Search ASIC Model.
 
     Design: instead of skipping S2 entirely (which causes large quality loss),
-    FSGR uses cached depth to NARROW the cost_volume search in S2:
+    FSDR uses cached depth to NARROW the cost_volume search in S2:
     - Full S2: D depth candidates (cost_volume + U-Net + depth_head)
     - Guided S2: D/4 depth candidates centered on cached depth
       → 75% cost_volume reduction + ~25% U-Net reduction = ~42% S2 per pixel
@@ -54,7 +54,7 @@ class FSGRSimulator:
     - cost_volume: 75% reduction (D/4 vs D candidates, per-pixel per-candidate)
     - U-Net, depth_head, regression: unchanged (process full spatial resolution)
     - Overall S2 saving: cv_fraction × 75% per guided pixel
-      (e.g., Transplat cv ~76% of S2 after scaling → ~57% S2 saving per pixel)
+      (e.g., TranSplat cv ~76% of S2 after scaling → ~57% S2 saving per pixel)
     - S3: unchanged (0% saving)
 
     For rendering quality simulation:
@@ -66,8 +66,8 @@ class FSGRSimulator:
     # Approximate fraction of S2 reducible by narrowing (cost_volume only).
     # Actual value is computed dynamically in SavingsTracker.compute_ablation()
     # based on real cost_volume / dp_core cycle ratio. This constant is a
-    # typical reference value for Transplat (cv_frac ~75% × 75% reduction).
-    FSGR_S2_REDUCIBLE_FRAC = 0.56  # ~56% for Transplat (cost_volume-only model)
+    # typical reference value for TranSplat (cv_frac ~75% × 75% reduction).
+    FSDR_S2_REDUCIBLE_FRAC = 0.56  # ~56% for TranSplat (cost_volume-only model)
     # Candidate reduction ratio
     NARROW_RATIO = 32 / 128  # 32 candidates instead of 128
     # Depth window: ±25% of cached depth (in inverse depth space, this covers wide range)
@@ -78,7 +78,7 @@ class FSGRSimulator:
                  reuse_hamming: int = 3, reuse_spatial: int = 12,
                  reuse_confidence: float = 0.80,
                  num_depth_candidates: int = 128):
-        self.config = FSGRConfig(
+        self.config = FSDRConfig(
             cache_size=cache_size,
             feature_dim=feature_dim,
             hamming_threshold=hamming_threshold,
@@ -158,7 +158,7 @@ class FSGRSimulator:
                       actual_gaussians=None, gauss_idx: int = None,
                       ) -> Tuple[str, int, float]:
         """
-        Process pixel through FSGR narrowed depth search.
+        Process pixel through FSDR narrowed depth search.
 
         Returns:
             (path, num_searches, output_depth)
