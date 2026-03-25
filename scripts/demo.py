@@ -47,7 +47,7 @@ Fallback Options (for debugging):
     --no-feature      Disable SCARF feature extraction HW simulator, use original GPU
     --no-depth        Disable SCARF depth prediction HW simulator, use original GPU
     --no-gaussian     Disable SCARF gaussian generation HW simulator (GGU), use original GPU
-    --no-saes         Disable SAES early-stopping
+    --no-saes         Disable SAES early sparsification
     --no-fsdr         Disable FSDR depth reuse
     --baseline-only   Only run baseline, skip SCARF pipeline
 """

@@ -73,16 +73,13 @@ SCARF/
 │   ├── mvsplat_predictor.py
 │   └── depthsplat_predictor.py
 ├── ggu/                   # Gaussian Generation Unit simulator
-├── dsu/                   # Depth Search Unit simulator
 ├── fsdr/                  # Feature Similarity Depth Reuse
 ├── saes/                  # Scene-Adaptive Early Sparsification
 ├── adapters/              # Model-specific adapters
 ├── integration/           # Model loader & bundle utilities
 ├── scripts/
 │   └── demo.py            # Complete end-to-end demo
-├── tests/                 # Unit & integration tests
 ├── docs/                  # Documentation
-├── hub/                   # (local, git-ignored) torch.hub cache & checkpoints
 ├── transplat/             # TranSplat submodule
 ├── mvsplat/               # MVSplat submodule
 └── depthsplat/            # DepthSplat submodule
@@ -123,7 +120,7 @@ Copy (or symlink) checkpoints and datasets into each submodule directory:
 ```bash
 # --- TranSplat ---
 cp -r /path/to/checkpoints/re10k.ckpt          transplat/checkpoints/
-cp -r /path/to/checkpoints/depth_anything_v2_vitb.pth transplat/checkpoints/
+cp -r /path/to/checkpoints/depth_anything_v2_vits.pth transplat/checkpoints/
 cp -r /path/to/datasets/re10k                   transplat/datasets/
 
 # --- MVSplat ---
@@ -145,7 +142,7 @@ Required files per model:
 
 | Model | Checkpoints | Dataset |
 |-------|------------|---------|
-| TranSplat | `re10k.ckpt`, `depth_anything_v2_vitb.pth` | `re10k/` |
+| TranSplat | `re10k.ckpt`, `depth_anything_v2_vits.pth` | `re10k/` |
 | MVSplat | `re10k.ckpt` | `re10k/` |
 | DepthSplat | `depthsplat_re10k.ckpt` | `re10k/` |
 
@@ -198,7 +195,7 @@ When SAES and FSDR are enabled (default), they sit between Depth Predictor and G
 
 ```
 ┌──────────────────────────────────┐
-│  SCARF SAES                      │  Tile-level early-stop decisions
+│  SCARF SAES                      │  Tile-level sparsification decisions
 │  → Skip DSU for homogeneous tiles│
 └──────────────┬───────────────────┘
                ↓

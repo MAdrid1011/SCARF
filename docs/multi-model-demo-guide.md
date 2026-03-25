@@ -32,7 +32,7 @@ python scripts/demo.py --model depthsplat
 ```
 SCARF/transplat/checkpoints/
 ├── re10k.ckpt          # Main checkpoint
-└── depth_anything_v2_vitb.pth  # Depth prior model
+└── depth_anything_v2_vits.pth  # Depth prior model
 ```
 
 **Download:**
@@ -186,7 +186,7 @@ SCARF Demo Pipeline:
 [Model Backbone]  ← TranSplat/MVSplat/DepthSplat encoder
       │
       ▼
-[SCARF SAES]      ← Progressive early-stopping
+[SCARF SAES]      ← Progressive early sparsification
       │
   ┌───┴───┐
   ▼       ▼
@@ -209,6 +209,5 @@ Stop    Tiles
 
 ## See Also
 
-- [SAES Architecture](saes-architecture.md)
-- [FSDR Architecture](fsdr-architecture.md)
-- [Benchmark Guide](benchmark-guide.md)
+- [FSDR + SAES Mechanisms](fsdr-saes-mechanisms.md)
+- [Pipeline Architecture](pipeline-architecture.md)

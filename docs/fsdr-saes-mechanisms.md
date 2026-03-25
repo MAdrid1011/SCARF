@@ -414,7 +414,5 @@ combined_S2_saving = saes_s2_saving + fsdr_ratio × (1 - saes_total) × fsdr_per
 | 文档 | 内容 |
 |------|------|
 | [pipeline-architecture.md](pipeline-architecture.md) | SCARF 流水线各阶段详细描述 |
-| [dsu-architecture.md](dsu-architecture.md) | 深度搜索单元硬件架构 |
 | [ggu-architecture.md](ggu-architecture.md) | 高斯生成单元硬件架构 |
-| [encoder-units-architecture.md](encoder-units-architecture.md) | 计算单元 (ConvEngine, GEMM 等) 架构 |
-| [hardware-resource-summary.md](hardware-resource-summary.md) | 28nm ASIC 功耗与面积估算 |
+| [architecture-cn.md](architecture-cn.md) | SCARF 整体架构（中文）|

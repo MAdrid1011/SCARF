@@ -357,9 +357,6 @@ SCARF 在边缘部署场景下（对标 Jetson Orin）实现了 **21% 的性能�
 
 | 文档 | 内容 |
 |------|------|
-| [encoder-units-architecture.md](encoder-units-architecture.md) | ConvEngine, GEMM, BilinearUnit 等计算单元详细架构 |
-| [dsu-architecture.md](dsu-architecture.md) | DSU (深度搜索单元) 架构 |
 | [ggu-architecture.md](ggu-architecture.md) | GGU (高斯生成单元) 架构 |
-| [feature-extractor-architecture.md](feature-extractor-architecture.md) | 特征提取器硬件架构 |
 | [fsdr-saes-mechanisms.md](fsdr-saes-mechanisms.md) | FSDR + SAES 优化机制详解 |
-| [hardware-resource-summary.md](hardware-resource-summary.md) | 28nm 功耗与面积估算 |
+| [architecture-cn.md](architecture-cn.md) | SCARF 整体架构（中文）|
