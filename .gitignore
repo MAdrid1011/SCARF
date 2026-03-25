@@ -210,6 +210,17 @@ __marimo__/
 outputs/
 .milestones/
 
+# Paper draft (do not distribute)
+main.pdf
+
+# AI agent workspace files (local only, not part of the project)
+AGENTS.md
+IDENTITY.md
+SOUL.md
+HEARTBEAT.md
+USER.md
+TOOLS.md
+
 # Generated Verilog files (Chisel output)
 generated/
 chisel/generated/
