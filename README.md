@@ -211,7 +211,7 @@ When SAES and FSDR are enabled (default), they sit between Depth Predictor and G
 - [FSDR + SAES Mechanisms](docs/fsdr-saes-mechanisms.md)
 - [GGU Architecture](docs/ggu-architecture.md)
 - [Pipeline Architecture](docs/pipeline-architecture.md)
-- [Architecture (中文)](docs/architecture-cn.md)
+- [Architecture Overview](docs/architecture.md)
 
 Module-level documentation:
 - [feature_extractor/README.md](feature_extractor/README.md) — Feature extraction
