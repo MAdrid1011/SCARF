@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Download ACID test split.
-# Size: ~3 GB
+# Download ACID test split in MVSplat/TranSplat format.
+#
+# Source: https://drive.google.com/drive/folders/1joiezNCyQK2BvWMnfwHJpm2V77c7iYGe
+# (same Google Drive folder as Re10K, contains both datasets)
 #
 # Usage:
 #   bash data/download_acid.sh [OUTPUT_DIR]
+#   default OUTPUT_DIR: datasets/acid
 
 set -euo pipefail
 
@@ -12,13 +15,14 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUT_DIR="${1:-$ROOT/datasets/acid}"
 mkdir -p "$OUT_DIR"
 
+if ! command -v gdown &>/dev/null; then
+    echo "Installing gdown ..."
+    pip install -q gdown
+fi
+
 echo "Downloading ACID test split to $OUT_DIR ..."
-
-ACID_URL="https://huggingface.co/MAdrid1011/SCARF-checkpoints/resolve/main/datasets/acid_test.tar.gz"
-
-TMP="$OUT_DIR/acid_test.tar.gz"
-wget -q --show-progress -O "$TMP" "$ACID_URL"
-tar -xzf "$TMP" -C "$OUT_DIR" --strip-components=1
-rm "$TMP"
+gdown --fuzzy \
+    "https://drive.google.com/drive/folders/1joiezNCyQK2BvWMnfwHJpm2V77c7iYGe" \
+    --folder -O "$OUT_DIR" -q
 
 echo "ACID test split ready at: $OUT_DIR"
