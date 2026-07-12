@@ -237,3 +237,15 @@ project/.bloop/
 .vscode/
 .openclaw/
 svg
+
+micro59-latex-template/
+rebuttal-micro/
+g3dgs/
+.codex-openai-docs-cache/
+micro59-submit/
+skills/
+memory/
+obj_dir/
+challenge-metrics/
+openai-node-test.sh
+scripts/reparse_sweep.py

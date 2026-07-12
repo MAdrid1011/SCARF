@@ -69,6 +69,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 import time
+import json
 from dataclasses import dataclass
 from typing import Dict, Tuple, Optional, List
 import argparse
@@ -733,12 +734,18 @@ class SavingsTracker:
 # ============================================================
 # Model and Data Loading (using integration module)
 # ============================================================
-def load_model_and_data(model_type: str = 'transplat'):
+def load_model_and_data(
+    model_type: str = 'transplat',
+    num_samples: int = 1,
+    sample_index: int = 0,
+):
     """
     Load model and data using the model loader abstraction.
     
     Args:
         model_type: Type of model ('transplat', 'mvsplat', 'depthsplat')
+        num_samples: Number of test samples exposed by the dataloader
+        sample_index: Zero-based sample index to select from the test dataloader
     
     Returns:
         (model, batch, cfg, device)
@@ -771,7 +778,11 @@ def load_model_and_data(model_type: str = 'transplat'):
     model_bundle = loader.load_model(checkpoint_path)
     
     # Load data
-    data_bundle = loader.load_data(model_bundle, num_samples=1)
+    data_bundle = loader.load_data(
+        model_bundle,
+        num_samples=max(num_samples, sample_index + 1),
+        sample_index=sample_index,
+    )
     
     return model_bundle.model, data_bundle.batch, model_bundle.config, model_bundle.device
 
@@ -942,6 +953,106 @@ def tune_thresholds(
     return best_fv, best_fsdr_tol, saes_results, fsdr_results
 
 
+def compute_saes_low_var_agreement(
+    gaussians_full,
+    modified_mask: torch.Tensor,
+    h: int,
+    w: int,
+    tile_size: int,
+    threshold: float = 0.90,
+) -> Dict[str, float]:
+    """
+    Check whether SAES early materialization is applied to tiles whose full
+    per-pixel Gaussian outputs are already low-variation.
+
+    The statistic is computed after a normal SAES run. A tile is considered an
+    SAES L0/L1 tile if at least one non-probe pixel was modified by SAES. For
+    each such tile, we measure the similarity of full per-pixel Gaussian
+    attributes before SAES modification. High agreement means SAES selected
+    tiles where the pretrained adaptor already produced locally similar outputs.
+    """
+    if modified_mask is None or modified_mask.numel() == 0:
+        return {
+            'early_tiles': 0,
+            'low_var_tiles': 0,
+            'low_var_agree': 0.0,
+            'mean_similarity': 0.0,
+            'threshold': threshold,
+        }
+
+    means = gaussians_full.means[0]
+    covs = gaussians_full.covariances[0]
+    harmo = gaussians_full.harmonics[0]
+    opacs = gaussians_full.opacities[0].reshape(-1)
+    n_gauss = means.shape[0]
+
+    def _mean_pair_cos(x: torch.Tensor) -> float:
+        x = x.reshape(x.shape[0], -1).float()
+        x = x / (x.norm(dim=1, keepdim=True) + 1e-8)
+        sim = x @ x.t()
+        n = sim.shape[0]
+        if n < 2:
+            return 1.0
+        mask = torch.triu(torch.ones((n, n), dtype=torch.bool, device=sim.device), diagonal=1)
+        return float(((sim[mask] + 1.0) * 0.5).mean().item())
+
+    def _tile_similarity(indices: torch.Tensor) -> float:
+        if indices.numel() < 2:
+            return 1.0
+        m = means[indices].float()
+        pos_std = m.std(dim=0).mean()
+        pos_range = m.abs().max() + 1e-8
+        pos_sim = 1.0 - torch.clamp(pos_std / pos_range, 0.0, 1.0)
+
+        cov_sim = _mean_pair_cos(covs[indices])
+        sh_sim = _mean_pair_cos(harmo[indices])
+
+        op = opacs[indices].float()
+        n = op.shape[0]
+        op_diff = torch.abs(op[:, None] - op[None, :])
+        mask = torch.triu(torch.ones((n, n), dtype=torch.bool, device=op.device), diagonal=1)
+        op_sim = 1.0 - torch.clamp(op_diff[mask].mean(), 0.0, 1.0)
+
+        sim = 0.25 * float(pos_sim.item()) + 0.30 * cov_sim + 0.30 * sh_sim + 0.15 * float(op_sim.item())
+        return float(sim)
+
+    early_tiles = 0
+    low_var_tiles = 0
+    sims: List[float] = []
+
+    tiles_h = h // tile_size
+    tiles_w = w // tile_size
+    for th in range(tiles_h):
+        for tw in range(tiles_w):
+            tile_indices = []
+            for ly in range(tile_size):
+                for lx in range(tile_size):
+                    idx = (th * tile_size + ly) * w + (tw * tile_size + lx)
+                    if idx < n_gauss:
+                        tile_indices.append(idx)
+            if not tile_indices:
+                continue
+            idx_tensor = torch.tensor(tile_indices, dtype=torch.long, device=modified_mask.device)
+            if not bool(modified_mask[idx_tensor].any().item()):
+                continue
+
+            early_tiles += 1
+            sim = _tile_similarity(idx_tensor)
+            sims.append(sim)
+            if sim >= threshold:
+                low_var_tiles += 1
+
+    mean_similarity = float(sum(sims) / len(sims)) if sims else 0.0
+    low_var_agree = low_var_tiles / early_tiles if early_tiles > 0 else 0.0
+    return {
+        'early_tiles': early_tiles,
+        'low_var_tiles': low_var_tiles,
+        'low_var_agree': low_var_agree,
+        'mean_similarity': mean_similarity,
+        'threshold': threshold,
+    }
+
+
 # ============================================================
 # Main Pipeline
 # ============================================================
@@ -978,6 +1089,12 @@ def main():
     # Other options
     parser.add_argument('--baseline-only', action='store_true',
                         help='Only run baseline, skip SCARF pipeline')
+    parser.add_argument('--num-samples', type=int, default=1,
+                        help='Number of test samples exposed by the dataloader')
+    parser.add_argument('--sample-index', type=int, default=0,
+                        help='Zero-based sample index to run from the test dataloader')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Directory for saved demo images')
     parser.add_argument('--freq', type=int, default=1000,
                         help='SCARF ASIC clock frequency in MHz (default: 1000 = 1 GHz)')
     parser.add_argument('--saes-fv', type=float, default=None,
@@ -1028,6 +1145,21 @@ def main():
     # Create adapter and apply model-specific overrides
     adapter = create_adapter(args.model)
     CONFIG.apply_adapter_overrides(adapter)
+
+    # Keep explicit experiment overrides highest priority.
+    if args.saes_fv is not None:
+        CONFIG.feature_var_threshold = args.saes_fv
+    if args.saes_ds is not None:
+        CONFIG.depth_std_threshold = args.saes_ds
+    if args.saes_cc is not None:
+        CONFIG.saes_cross_check = args.saes_cc
+    if args.tile_size is not None:
+        CONFIG.tile_size = args.tile_size
+    if args.fsdr_cache_size is not None:
+        CONFIG.fsdr_cache_size = args.fsdr_cache_size
+    if args.fsdr_hamming is not None:
+        CONFIG.fsdr_hamming_threshold = args.fsdr_hamming
+        CONFIG.fsdr_reuse_hamming = args.fsdr_hamming
     
     # Set model-specific num_depth_candidates
     # TranSplat and DepthSplat use 128 depth candidates; MVSplat uses 32
@@ -1068,7 +1200,11 @@ def main():
     # Step 1: Load Model and Data
     # --------------------------------------------------------
     print("[1/6] Loading model and data...")
-    model, batch, cfg, device = load_model_and_data(args.model)
+    model, batch, cfg, device = load_model_and_data(
+        args.model,
+        num_samples=args.num_samples,
+        sample_index=args.sample_index,
+    )
     print("  ✓ Model and data loaded")
     
     # --------------------------------------------------------
@@ -1995,6 +2131,13 @@ def main():
     # --------------------------------------------------------
     from src.model.types import Gaussians
     N = scarf_gaussians_full.means.shape[1]
+    saes_low_var_stats = {
+        'early_tiles': 0,
+        'low_var_tiles': 0,
+        'low_var_agree': 0.0,
+        'mean_similarity': 0.0,
+        'threshold': 0.90,
+    }
     
     # Clone original Gaussians BEFORE any modifications (needed for ablation configs)
     orig_means = scarf_gaussians_full.means.clone()
@@ -2070,6 +2213,12 @@ def main():
         print(f"  ✓ Modified pixels (opacity→0): {modified_pixels:,}/{h*w:,} "
               f"({modified_pixels/(h*w)*100:.1f}%)")
         print(f"    (Realistic: no post-hoc validation, thresholds ensure quality)")
+
+        saes_low_var_stats = compute_saes_low_var_agreement(
+            scarf_gaussians_full, modified_mask, h, w, CONFIG.tile_size)
+        print(f"    Low-Var. Agree.: {saes_low_var_stats['low_var_agree']*100:.1f}% "
+              f"({saes_low_var_stats['low_var_tiles']}/{saes_low_var_stats['early_tiles']} early tiles, "
+              f"mean sim={saes_low_var_stats['mean_similarity']:.3f})")
 
     # Record SAES v4 savings for cycle model
     # Use h*w (pixel positions) as base, not N (total Gaussians incl. surfaces)
@@ -2292,7 +2441,7 @@ def main():
         print(f"  ⚠ Quality budget exceeded: worst config {worst_loss:.4f}% > 1.0%")
     
     # Save outputs
-    output_dir = SCARF_ROOT / 'outputs' / 'demo'
+    output_dir = Path(args.output_dir) if args.output_dir else SCARF_ROOT / 'outputs' / 'demo'
     output_dir.mkdir(parents=True, exist_ok=True)
     
     from torchvision.utils import save_image
@@ -2305,6 +2454,22 @@ def main():
     # Get statistics
     ggu_stats = cycle_counter.get_summary()
     fsdr_summary = fsdr.get_summary()
+    preservation_metrics = {
+        'model': args.model,
+        'sample_index': args.sample_index,
+        'image_size': [h, w],
+        'fsdr_top1_cov': fsdr_summary.get('in_window_rate', 0.0),
+        'fsdr_guided_pixels': fsdr_summary.get('guided', 0),
+        'fsdr_guided_in_window': fsdr_summary.get('guided_in_window', 0),
+        'fsdr_guided_out_window': fsdr_summary.get('guided_out_window', 0),
+        'saes_low_var_agree': saes_low_var_stats.get('low_var_agree', 0.0),
+        'saes_low_var_tiles': saes_low_var_stats.get('low_var_tiles', 0),
+        'saes_early_tiles': saes_low_var_stats.get('early_tiles', 0),
+        'saes_low_var_mean_similarity': saes_low_var_stats.get('mean_similarity', 0.0),
+        'saes_low_var_threshold': saes_low_var_stats.get('threshold', 0.90),
+    }
+    with open(output_dir / 'preservation_metrics.json', 'w') as f:
+        json.dump(preservation_metrics, f, indent=2)
     
     # Base cycle counts (no SAES/FSDR savings)
     base_ggu_cycles = ggu_stats['ggu_cycles']

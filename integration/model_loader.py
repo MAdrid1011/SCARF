@@ -64,6 +64,7 @@ class BaseModelLoader(ABC):
         model_bundle: ModelBundle,
         dataset_name: str = 're10k',
         num_samples: int = 1,
+        sample_index: int = 0,
     ) -> DataBundle:
         """
         Load test data for the model.
@@ -72,6 +73,7 @@ class BaseModelLoader(ABC):
             model_bundle: Loaded model bundle
             dataset_name: Dataset to load ('re10k', 'acid', 'dtu')
             num_samples: Number of test samples to load
+            sample_index: Zero-based sample index to select from the test dataloader
         
         Returns:
             DataBundle with batch and data_shim
@@ -195,6 +197,7 @@ class TransplatLoader(BaseModelLoader):
         model_bundle: ModelBundle,
         dataset_name: str = 're10k',
         num_samples: int = 1,
+        sample_index: int = 0,
     ) -> DataBundle:
         """Load TranSplat test data."""
         self._setup_imports()
@@ -203,14 +206,19 @@ class TransplatLoader(BaseModelLoader):
             from src.dataset.data_module import DataModule, get_data_shim
             
             cfg = model_bundle.config
-            cfg.dataset.test_len = num_samples
+            cfg.dataset.test_len = max(num_samples, sample_index + 1)
             
             data_module = DataModule(cfg.dataset, cfg.data_loader)
             data_module.setup("test")
             test_loader = data_module.test_dataloader()
             
-            # Get first batch
-            batch = next(iter(test_loader))
+            batch = None
+            for idx, candidate in enumerate(test_loader):
+                if idx == sample_index:
+                    batch = candidate
+                    break
+            if batch is None:
+                raise IndexError(f"sample_index={sample_index} is out of range")
             
             # Apply data shim
             data_shim = get_data_shim(model_bundle.encoder)
@@ -334,6 +342,7 @@ class MVSplatLoader(BaseModelLoader):
         model_bundle: ModelBundle,
         dataset_name: str = 're10k',
         num_samples: int = 1,
+        sample_index: int = 0,
     ) -> DataBundle:
         """Load MVSplat test data."""
         self._setup_imports()
@@ -342,14 +351,19 @@ class MVSplatLoader(BaseModelLoader):
             from src.dataset.data_module import DataModule, get_data_shim
             
             cfg = model_bundle.config
-            cfg.dataset.test_len = num_samples
+            cfg.dataset.test_len = max(num_samples, sample_index + 1)
             
             data_module = DataModule(cfg.dataset, cfg.data_loader)
             data_module.setup("test")
             test_loader = data_module.test_dataloader()
             
-            # Get first batch
-            batch = next(iter(test_loader))
+            batch = None
+            for idx, candidate in enumerate(test_loader):
+                if idx == sample_index:
+                    batch = candidate
+                    break
+            if batch is None:
+                raise IndexError(f"sample_index={sample_index} is out of range")
             
             # Apply data shim
             data_shim = get_data_shim(model_bundle.encoder)
@@ -473,6 +487,7 @@ class DepthSplatLoader(BaseModelLoader):
         model_bundle: ModelBundle,
         dataset_name: str = 're10k',
         num_samples: int = 1,
+        sample_index: int = 0,
     ) -> DataBundle:
         """Load DepthSplat test data."""
         self._setup_imports()
@@ -481,14 +496,19 @@ class DepthSplatLoader(BaseModelLoader):
             from src.dataset.data_module import DataModule, get_data_shim
             
             cfg = model_bundle.config
-            cfg.dataset.test_len = num_samples
+            cfg.dataset.test_len = max(num_samples, sample_index + 1)
             
             data_module = DataModule(cfg.dataset, cfg.data_loader)
             data_module.setup("test")
             test_loader = data_module.test_dataloader()
             
-            # Get first batch
-            batch = next(iter(test_loader))
+            batch = None
+            for idx, candidate in enumerate(test_loader):
+                if idx == sample_index:
+                    batch = candidate
+                    break
+            if batch is None:
+                raise IndexError(f"sample_index={sample_index} is out of range")
             
             # Apply data shim
             data_shim = get_data_shim(model_bundle.encoder)
