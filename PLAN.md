@@ -320,6 +320,7 @@
 |---|---|---|---|---|
 | C1-D4 | `candidate-coordinate-depth` | Is the fixed L1 threshold intended for the model's dimensionless depth-candidate coordinate rather than metric depth? | Map each predicted depth through the exact upstream inverse-depth near/far parameterization and report aligned first-hit rates without changing SAES output | The paper-fixed thresholds produce a non-degenerate L0/L1 split and identify a falsifiable routing correction |
 | C2-D3 | `all-context-frames` | Did the FSDR pilot measure only context view zero even though the paper metric covers frames and resets the cache per frame? | Process every authentic probability/candidate view, clear frame-local cache state at each frame boundary, and aggregate integer counts | All context pixels are covered and the corrected bounded pilots pass the unchanged Table 2 tolerance |
+| C2-D3b | `canonical-prefix-stability` | Are the one-sample FSDR failures representative or merely sample variance relative to dataset aggregates? | Aggregate the first 32 canonical samples for all six accessible pairs with the corrected all-frame contract | The Guided Rate and Top-1 deltas move consistently toward the paper targets; otherwise diagnose projection/feature semantics before a full protocol |
 | C1-D5 | `paper-routing-replay` | Does the candidate-coordinate result support a paper-defined L0/L1 router without the unpublished cross-check and similarity gates? | Apply only the published first-hit statistics on the fixed sample | Quality and path rates both pass without target-image access or extra thresholds |
 | C2-D4 | `projection-collateral` | Can software and RTL share a reproducible random-hyperplane matrix without selecting a seed from paper results? | Export one manifest-hashed matrix generated independently of evaluation metrics and load the same quantized values in both implementations | RTL/software signatures are bit-exact and six bounded pilots pass without seed search |
 
@@ -349,3 +350,10 @@
   tolerance against 72.1% and 99.91%. The coverage correction remains because
   it fixes the evidence definition; its dirty diagnostic is preserved under
   `outputs/ae_failures/diagnostics/transplat-re10k-fsdr-all-context-v3/`.
+- C2-D3 six-pair clean pilot: all six canonical one-sample rows completed at
+  commit `fcdd916` with 8,192 authentic pixels per row and no fallback. Guided
+  Rate was 84.85%--95.09% and every row failed its paper target. Re10K exact
+  Top-1 Coverage was 96.75%--98.04%; ACID was 99.24%--99.97%. Because these are
+  single-sample diagnostics compared with dataset aggregates, C2-D3b measures a
+  fixed 32-sample prefix before deciding whether a full run has information
+  value. Evidence is under `outputs/ae_pilot_fsdr_v3/`.

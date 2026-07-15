@@ -163,8 +163,10 @@ diagnostics, and repeat the clean-room checks on the final DOI-bound bundles.
   cache reset.
 - [x] Run the corrected TranSplat/Re10K bounded diagnostic over both context
   frames; 90.36% Guided Rate and 96.812% Top-1 Coverage still fail.
-- [ ] Rerun the six bounded FSDR pilots with authentic probabilities and
+- [x] Rerun the six bounded FSDR pilots with authentic probabilities and
   candidate tensors from every context frame.
+- [ ] Run a fixed 32-sample canonical-prefix aggregate for all six pairs to
+  distinguish sample variance from a systematic projection/feature mismatch.
 - [ ] Promote a routing or projection fix only if it is derived independently
   of the paper result values and passes the unchanged fixed-sample gates.
 - [ ] Resume six quality pilots and full matrices only after the corresponding
