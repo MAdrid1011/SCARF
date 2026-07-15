@@ -27,13 +27,26 @@ for tool in sbt verilator python3; do
     command -v "${tool}" >/dev/null || { echo "required tool not found: ${tool}" >&2; exit 1; }
 done
 
+normalize_root_paths() {
+    SCARF_LOG_ROOT="${ROOT}" python3 -c '
+import os
+import sys
+
+root = os.environ["SCARF_LOG_ROOT"]
+for line in sys.stdin:
+    sys.stdout.write(line.replace(root, "$SCARF_ROOT"))
+'
+}
+
 mkdir -p "${OUTPUT_DIR}/rtl" "${OUTPUT_DIR}/traces"
 
 (
     cd "${ROOT}/chisel"
-    sbt test 2>&1 | tee "${OUTPUT_DIR}/sbt-test.log"
+    sbt test 2>&1 | normalize_root_paths | tee "${OUTPUT_DIR}/sbt-test.log"
     rm -rf generated
-    sbt "runMain scarf.VerilogEmitter" 2>&1 | tee "${OUTPUT_DIR}/emit.log"
+    sbt "runMain scarf.VerilogEmitter" 2>&1 \
+        | normalize_root_paths \
+        | tee "${OUTPUT_DIR}/emit.log"
     cp generated/ScarfTop.sv "${OUTPUT_DIR}/rtl/ScarfTop.sv"
     cp generated/split/filelist.f "${OUTPUT_DIR}/rtl/filelist.f"
     verilator --lint-only --Wall -Wno-fatal --top-module ScarfTop \

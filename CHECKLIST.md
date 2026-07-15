@@ -82,9 +82,9 @@ Results Reproduced evidence complete from diagnostics.
 
 Verified on 2026-07-15:
 
-- Base `pytest -q`: 190 passed and 9 skipped. The skipped tests require optional
+- Base `pytest -q`: 191 passed and 9 skipped. The skipped tests require optional
   PyTorch or external toolchains.
-- Locked classic profile: all 211 tests pass. Both classic and DepthSplat
+- Locked classic profile: all 212 tests pass. Both classic and DepthSplat
   environment checkers pass with CUDA 12.1 on the declared compiler path.
 - Strict quick passed on the RTX 3060 with the pinned classic profile. It loaded
   MVSplat once, selected all three declared target views, emitted positive

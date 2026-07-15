@@ -49,6 +49,23 @@ def test_dram_raw_trace_files_are_selected_for_staging(tmp_path):
     }
 
 
+def test_rtl_emission_and_execution_manifests_are_selected(tmp_path):
+    from scripts.stage_reference_results import selected_files
+
+    emitted = tmp_path / "rtl/rtl"
+    emitted.mkdir(parents=True)
+    (emitted / "ScarfTop.sv").write_text("module ScarfTop; endmodule\n")
+    (emitted / "filelist.f").write_text("ScarfTop.sv\n")
+    (tmp_path / "manifest-rtl.json").write_text("{}\n")
+
+    selected = set(selected_files(tmp_path).values())
+    assert selected == {
+        Path("manifest-rtl.json"),
+        Path("rtl/rtl/ScarfTop.sv"),
+        Path("rtl/rtl/filelist.f"),
+    }
+
+
 def test_prepared_dataset_validations_are_selected_for_staging(tmp_path):
     from scripts.stage_reference_results import selected_files
 

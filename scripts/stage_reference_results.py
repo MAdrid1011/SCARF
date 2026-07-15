@@ -66,6 +66,7 @@ def sha256_file(path: Path) -> str:
 
 def selected_files(source: Path) -> dict[Path, Path]:
     patterns = (
+        "manifest-*.json",
         "quick/*/results.json",
         "quick/*/pair-execution.json",
         "quick/*/progress.jsonl",
@@ -88,6 +89,8 @@ def selected_files(source: Path) -> dict[Path, Path]:
         "datasets/*.json",
         "rtl/results.json",
         "rtl/*.log",
+        "rtl/rtl/*.sv",
+        "rtl/rtl/*.f",
         "rtl/traces/*.vcd",
         "dram/*.json",
         "dram/*.csv",
