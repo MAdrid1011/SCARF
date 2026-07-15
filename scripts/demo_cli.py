@@ -87,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="representative",
         help="Use the paper-faithful sparse path or a non-claim dense diagnostic",
     )
+    parser.add_argument(
+        "--saes-decision-semantics",
+        choices=("current", "probe-vector-first-hit"),
+        default="current",
+        help="Select a non-claiming probe-vector first-hit decision diagnostic",
+    )
     parser.add_argument("--tile-size", type=positive_int)
     parser.add_argument("--fsdr-cache-size", type=positive_int)
     parser.add_argument("--fsdr-hamming", type=nonnegative_int)
@@ -123,6 +129,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if strict_run and args.saes_diagnostic_sweep:
         build_parser().error(f"{mode} forbids --saes-diagnostic-sweep")
+    if strict_run and args.saes_decision_semantics != "current":
+        build_parser().error(
+            f"{mode} forbids non-default --saes-decision-semantics"
+        )
     if args.fsdr_only and not args.claim_run:
         build_parser().error("--fsdr-only requires --claim-run")
     if args.fsdr_only and any(

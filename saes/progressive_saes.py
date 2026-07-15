@@ -117,6 +117,7 @@ class ProgressiveSAES:
         view_count: int = 1,
         primitives_per_pixel: int = 1,
         materialization: str = "representative",
+        decision_semantics: str = "current",
     ):
         self.H = H
         self.W = W
@@ -137,6 +138,9 @@ class ProgressiveSAES:
         if materialization not in ("representative", "dense-diagnostic"):
             raise ValueError(f"unsupported SAES materialization: {materialization}")
         self.materialization = materialization
+        if decision_semantics not in ("current", "probe-vector-first-hit"):
+            raise ValueError(f"unsupported SAES decision semantics: {decision_semantics}")
+        self.decision_semantics = decision_semantics
 
         # --- Adaptive probe positions (K(T) formula) ---
         T = initial_tile_size
@@ -153,6 +157,7 @@ class ProgressiveSAES:
 
         # Statistics
         self.stats: Dict = {
+            'decision_semantics': self.decision_semantics,
             'total_tiles_processed': 0,
             'level0_tiles': 0,
             'level1_tiles': 0,
@@ -177,6 +182,7 @@ class ProgressiveSAES:
         tile_size: int,
         threshold: float = 0.02,
         per_view: bool = False,
+        statistic: str = "current-channel-std",
     ) -> Tuple[Dict[Tuple[int, int], float], 'torch.Tensor']:
         """
         Classify tiles by feature variance from S1 feature maps.
@@ -201,19 +207,43 @@ class ProgressiveSAES:
 
         tiles_h = h // tile_size
         tiles_w = w // tile_size
+        if statistic not in (
+            "current-channel-std",
+            "raw-probe-vector-variance",
+        ):
+            raise ValueError(f"unsupported feature statistic: {statistic}")
+        statistic_features = (
+            feat_norm if statistic == "current-channel-std" else feat_up
+        )
         tiled = (
-            feat_norm[:, :, : tiles_h * tile_size, : tiles_w * tile_size]
+            statistic_features[:, :, : tiles_h * tile_size, : tiles_w * tile_size]
             .unfold(2, tile_size, tile_size)
             .unfold(3, tile_size, tile_size)
             .contiguous()
         )
-        values = (
-            tiled.reshape(tiled.shape[0], tiled.shape[1], tiles_h, tiles_w, -1)
-            .std(dim=-1)
-            .mean(dim=1)
-            .detach()
-            .cpu()
-        )
+        if statistic == "raw-probe-vector-variance":
+            probes = ProgressiveSAES.compute_probe_positions(tile_size)
+            probe_vectors = torch.stack(
+                [tiled[..., local_y, local_x] for local_y, local_x in probes],
+                dim=-1,
+            )
+            probe_mean = probe_vectors.mean(dim=-1, keepdim=True)
+            values = (
+                (probe_vectors - probe_mean)
+                .square()
+                .sum(dim=1)
+                .mean(dim=-1)
+                .detach()
+                .cpu()
+            )
+        else:
+            values = (
+                tiled.reshape(tiled.shape[0], tiled.shape[1], tiles_h, tiles_w, -1)
+                .std(dim=-1)
+                .mean(dim=1)
+                .detach()
+                .cpu()
+            )
         if per_view:
             tile_variances = {
                 (view, th, tw): float(values[view, th, tw])
@@ -241,6 +271,7 @@ class ProgressiveSAES:
         probe_positions: List[Tuple[int, int]] = None,
         view_index: int = 0,
         primitive_slot: int = 0,
+        relative: bool = True,
     ) -> bool:
         """
         Check if probe pixel depths within a tile are uniform.
@@ -276,10 +307,12 @@ class ProgressiveSAES:
             return False
 
         d_mean = sum(probe_depths) / len(probe_depths)
-        if abs(d_mean) < 1e-8:
-            return True
         d_std = (sum((d - d_mean) ** 2 for d in probe_depths)
                  / len(probe_depths)) ** 0.5
+        if not relative:
+            return d_std < threshold
+        if abs(d_mean) < 1e-8:
+            return True
         return d_std / (abs(d_mean) + 1e-8) < threshold
 
     @staticmethod
@@ -746,32 +779,49 @@ class ProgressiveSAES:
                     )
 
                     selected_level = None
-                    if (
-                        feature_variance < self.feature_var_threshold
-                        and self.probe_cross_check(gaussians_full, first_probes)
-                    ):
-                        selected_level = 'L0'
-                    elif depths is not None and self.check_depth_uniformity(
-                        depths,
-                        th,
-                        tw,
-                        tile_size,
-                        self.H,
-                        self.W,
-                        self.depth_std_threshold,
-                        probe_positions=self.probe_positions,
-                        view_index=view,
-                    ):
-                        probe_similarity = self.compute_tile_similarity(
-                            gaussians_full, first_probes, include_position=False
-                        )
-                        if (
-                            probe_similarity >= 0.90
-                            and self.probe_cross_check(
-                                gaussians_full, first_probes
-                            )
+                    if self.decision_semantics == "probe-vector-first-hit":
+                        if feature_variance < self.feature_var_threshold:
+                            selected_level = 'L0'
+                        elif depths is not None and self.check_depth_uniformity(
+                            depths,
+                            th,
+                            tw,
+                            tile_size,
+                            self.H,
+                            self.W,
+                            self.depth_std_threshold,
+                            probe_positions=self.probe_positions,
+                            view_index=view,
+                            relative=False,
                         ):
                             selected_level = 'L1'
+                    else:
+                        if (
+                            feature_variance < self.feature_var_threshold
+                            and self.probe_cross_check(gaussians_full, first_probes)
+                        ):
+                            selected_level = 'L0'
+                        elif depths is not None and self.check_depth_uniformity(
+                            depths,
+                            th,
+                            tw,
+                            tile_size,
+                            self.H,
+                            self.W,
+                            self.depth_std_threshold,
+                            probe_positions=self.probe_positions,
+                            view_index=view,
+                        ):
+                            probe_similarity = self.compute_tile_similarity(
+                                gaussians_full, first_probes, include_position=False
+                            )
+                            if (
+                                probe_similarity >= 0.90
+                                and self.probe_cross_check(
+                                    gaussians_full, first_probes
+                                )
+                            ):
+                                selected_level = 'L1'
 
                     if selected_level is not None:
                         for slot in range(self.primitives_per_pixel):
@@ -862,6 +912,7 @@ def apply_progressive_saes(
     collect_continue_pixels: bool = False,
     view_count: int = None,
     materialization: str = "representative",
+    decision_semantics: str = "current",
 ) -> Tuple['torch.Tensor', Dict, List]:
     """
     Apply progressive SAES v4 (Dataflow-aligned, L0+L1) to Gaussians.
@@ -909,6 +960,11 @@ def apply_progressive_saes(
             threshold=(feature_var_threshold
                        if feature_var_threshold is not None else 0.012),
             per_view=True,
+            statistic=(
+                "raw-probe-vector-variance"
+                if decision_semantics == "probe-vector-first-hit"
+                else "current-channel-std"
+            ),
         )
         tile_variances = _tv
         if _feat_norm is None:
@@ -922,6 +978,7 @@ def apply_progressive_saes(
         view_count=view_count,
         primitives_per_pixel=primitives_per_pixel,
         materialization=materialization,
+        decision_semantics=decision_semantics,
     )
     modified_mask, stats = saes.process_all_tiles(
         gaussians_full, gpp,

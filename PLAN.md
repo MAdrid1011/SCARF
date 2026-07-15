@@ -141,6 +141,7 @@
 | 2026-07-16 | Close sparse-SAES recovery and move the badge frontier to FSDR Table 2 | Raw-feature and probe-Gaussian rankings both fail even at one quarter of the declared L0 rate, and LightGaussian supplies pruning plus finetuning rather than the cited moment-matching operation |
 | 2026-07-16 | Remove FSDR Guided Rate from the reproduction frontier | All six real one-sample rows differ materially from Table 2, and the RTL LSH projection ROM contains only zero initialization rather than the hyperplanes needed to reproduce the software signatures |
 | 2026-07-16 | Replace continuous-depth Top-1 approximation with discrete candidate evidence | Table 2 defines coverage over the full-search argmax candidate and retained candidate subset; a +/-25% continuous-depth window is not that metric |
+| 2026-07-16 | Isolate the remaining SAES vector-variance interpretation | Test raw probe-vector total variance and threshold-only first-hit routing as an explicitly non-claiming mode; do not change the default simulator unless the fixed sample passes every unchanged quality gate |
 
 ## 9. Paper-Formula SAES Audit
 
@@ -386,3 +387,29 @@
   promote direct mono-feature hashing. Continue with a source-level audit of
   projection collateral and RTL/software signature equivalence without seed
   search or paper-target fitting.
+
+## 13. SAES Probe-Vector Decision Audit
+
+- Run ID: `saes-probe-vector-first-hit-v1`.
+- Research question: does the manuscript's vector-valued feature variance,
+  implemented as the mean squared L2 distance of the executed raw probe
+  vectors, recover a usable L0/L1 split when the unpublished Gaussian gates are
+  removed?
+- Fixed conditions: canonical TranSplat/Re10K sample 0, context and target
+  views, seed 0, checkpoint, raw S1 tensor, four corner probes at tile size 4,
+  `tau_f=0.2`, `tau_d=0.1`, representative materialization, renderer, and the
+  existing PSNR/SSIM/LPIPS tolerances.
+- One-factor change: add a diagnostic decision mode in which L0 uses only raw
+  probe-vector total variance and L1, strictly after an L0 miss, uses only the
+  absolute population standard deviation of probe depths. The default formal
+  simulator remains unchanged.
+- Evidence boundary: the CLI must reject this mode for claim and Functional
+  runs, and its generated result must set `paper_result_eligible=false`.
+- Continue condition: the fixed sample has a non-degenerate first-hit split and
+  passes all three unchanged tolerances: PSNR <= 0.15 dB absolute delta, SSIM <=
+  0.005, and LPIPS <= 0.005.
+- Abandonment condition: any quality gate fails, the split remains degenerate,
+  or implementation requires a normalization, gate, threshold, or seed absent
+  from the paper. Preserve the output and do not launch six-pair pilots.
+- Physical flow remains independently gated on no Vivado process and at least
+  48 GiB `MemAvailable`.

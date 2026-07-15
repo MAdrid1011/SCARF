@@ -287,6 +287,7 @@ def build_result_record(
     num_samples: int = 1,
     baseline_source: str = "diagnostic_device_timing",
     fallback_stages: list[str] | None = None,
+    paper_result_eligible: bool | None = None,
 ) -> dict[str, Any]:
     if not dataset_representation:
         raise ValueError("dataset representation must be recorded")
@@ -383,6 +384,11 @@ def build_result_record(
     ]
     source = source_identity()
     functional_fixture = dataset_representation == "re10k-synthetic-functional-v1"
+    if paper_result_eligible is None:
+        paper_result_eligible = not functional_fixture
+    elif not isinstance(paper_result_eligible, bool):
+        raise ValueError("paper_result_eligible must be a boolean")
+    paper_result_eligible = paper_result_eligible and not functional_fixture
     return {
         "schema_version": "1.0",
         "provenance": {
@@ -400,7 +406,7 @@ def build_result_record(
                 "name": dataset,
                 "representation": dataset_representation,
                 "functional_fixture": functional_fixture,
-                "paper_result_eligible": not functional_fixture,
+                "paper_result_eligible": paper_result_eligible,
                 "manifest": _display_path(dataset_manifest),
                 "sha256": sha256_file(dataset_manifest),
                 "tree_sha256": dataset_tree_sha256,

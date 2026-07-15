@@ -166,8 +166,10 @@ def test_result_record_marks_diagnostic_fallback_as_nonreproducible(tmp_path):
             "target_indices": [0],
         },
         fallback_stages=["depth"],
+        paper_result_eligible=False,
     )
 
+    assert record["provenance"]["dataset"]["paper_result_eligible"] is False
     assert record["validation"] == {
         "reproducible": False,
         "reference_fallback_used": True,

@@ -178,13 +178,26 @@ diagnostics, and repeat the clean-room checks on the final DOI-bound bundles.
 - [ ] Resume six quality pilots and full matrices only after the corresponding
   claim-critical mechanism gates pass.
 
+### SAES Probe-Vector Decision Audit
+
+- [x] Bind the audit to one canonical TranSplat/Re10K sample and unchanged
+  thresholds, materialization, quality metrics, and selection.
+- [x] Add failure-first tests for raw probe-vector total variance, per-view
+  probe selection, and L1 execution strictly after an L0 miss.
+- [x] Add an explicitly non-claiming diagnostic CLI mode; keep the default SAES
+  decision behavior compatible.
+- [ ] Run the fixed sample once and preserve the complete result under a new
+  non-overwriting diagnostic directory.
+- [ ] Promote only if L0/L1 is non-degenerate and all three existing quality
+  tolerances pass without unpublished gates or fitted constants.
+
 ## Latest Local Verification
 
 Verified on 2026-07-16:
 
-- Base `pytest -q`: 251 passed after the model-specific FSDR feature-source and
-  runtime-dimension diagnostics.
-- Locked classic profile: all 251 tests pass. Both classic and DepthSplat
+- Base `pytest -q`: 256 passed after the probe-vector first-hit diagnostic was
+  isolated from claim and Functional runs.
+- Locked classic profile: all 256 tests pass. Both classic and DepthSplat
   environment checkers pass with CUDA 12.1 on the declared compiler path.
 - Strict quick passed on the RTX 3060 with the pinned classic profile. It loaded
   MVSplat once, selected all three declared target views, emitted positive

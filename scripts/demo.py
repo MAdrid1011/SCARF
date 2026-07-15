@@ -2634,6 +2634,7 @@ def main(argv=None):
             cross_check_threshold=CONFIG.saes_cross_check,
             view_count=V_ctx,
             materialization=args.saes_materialization,
+            decision_semantics=args.saes_decision_semantics,
         )
 
         # Print feature variance distribution for threshold calibration
@@ -3509,6 +3510,9 @@ def main(argv=None):
             )
         ),
         fallback_stages=fallback_stages,
+        paper_result_eligible=(
+            False if args.saes_decision_semantics != 'current' else None
+        ),
     )
     if strict_run:
         validate(record)

@@ -176,6 +176,25 @@ def test_saes_diagnostic_sweep_is_non_claiming_only():
         )
 
 
+def test_probe_vector_first_hit_is_non_claiming_only():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(["--saes-decision-semantics", "probe-vector-first-hit"])
+    assert args.saes_decision_semantics == "probe-vector-first-hit"
+
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--saes-decision-semantics",
+                    "probe-vector-first-hit",
+                ]
+            )
+
+
 def test_fsdr_only_is_an_isolated_claim_mode():
     from scripts.demo_cli import parse_args
 

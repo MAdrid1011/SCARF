@@ -47,6 +47,64 @@ def test_batched_tile_variance_matches_direct_formula():
             )
 
 
+def test_probe_vector_variance_uses_only_paper_probes_per_view():
+    from saes.progressive_saes import ProgressiveSAES
+
+    features = torch.zeros(1, 2, 2, 4, 4)
+    for (y, x), value in {
+        (0, 0): (0.0, 0.0),
+        (0, 3): (2.0, 0.0),
+        (3, 0): (0.0, 2.0),
+        (3, 3): (2.0, 2.0),
+    }.items():
+        features[0, 0, :, y, x] = torch.tensor(value)
+    features[0, 0, :, 1:3, 1:3] = 1000.0
+    features[0, 1] = 7.0
+
+    variances, _ = ProgressiveSAES.classify_tiles_by_features(
+        features,
+        4,
+        4,
+        tile_size=4,
+        per_view=True,
+        statistic="raw-probe-vector-variance",
+    )
+
+    assert variances == pytest.approx({(0, 0, 0): 2.0, (1, 0, 0): 0.0})
+
+
+def test_probe_vector_first_hit_routes_l1_without_unpublished_gaussian_gate():
+    from saes.progressive_saes import apply_progressive_saes
+
+    gaussians = _gaussians()
+    gaussians.harmonics[0, 0] *= -10.0
+    features = torch.zeros(1, 1, 2, 4, 4)
+    for (y, x), value in {
+        (0, 0): (0.0, 0.0),
+        (0, 3): (2.0, 0.0),
+        (3, 0): (0.0, 2.0),
+        (3, 3): (2.0, 2.0),
+    }.items():
+        features[0, 0, :, y, x] = torch.tensor(value)
+    depths = torch.ones(1, 1, 16, 1, 1)
+
+    _, stats, _ = apply_progressive_saes(
+        gaussians,
+        4,
+        4,
+        feature_var_threshold=0.2,
+        depth_std_threshold=0.1,
+        features=features,
+        depths=depths,
+        cross_check_threshold=0.0,
+        decision_semantics="probe-vector-first-hit",
+    )
+
+    assert stats["level0_tiles"] == 0
+    assert stats["level1_tiles"] == 1
+    assert stats["full_tiles"] == 0
+
+
 def test_probe_cross_check_exposes_the_continuous_error():
     from saes.progressive_saes import ProgressiveSAES
 

@@ -105,7 +105,7 @@ def validate(record: dict[str, Any]) -> None:
         paper_result_eligible, bool
     ):
         raise ValueError("dataset eligibility fields must be boolean")
-    if paper_result_eligible is functional_fixture:
+    if functional_fixture and paper_result_eligible:
         raise ValueError("dataset paper-result eligibility is inconsistent")
     if functional_fixture and representation != "re10k-synthetic-functional-v1":
         raise ValueError("functional fixture representation is invalid")
