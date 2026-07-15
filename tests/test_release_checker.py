@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 
 def test_local_path_patterns_reject_author_home(tmp_path: Path):
     from scripts.check_release import check_local_paths
@@ -14,6 +16,28 @@ def test_repository_has_no_tracked_author_local_paths():
     from scripts.check_release import archive_files, check_local_paths
 
     assert check_local_paths(archive_files()) == []
+
+
+def test_archive_file_scan_falls_back_to_source_release_manifest(
+    tmp_path: Path, monkeypatch
+):
+    import scripts.check_release as release
+
+    readme = tmp_path / "README.md"
+    readme.write_text("portable\n", encoding="utf-8")
+    (tmp_path / "release-manifest.json").write_text(
+        json.dumps(
+            {
+                "bundle_kind": "source",
+                "validation": {"pass": True},
+                "files": {"README.md": "0" * 64},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(release, "ROOT", tmp_path)
+
+    assert release.archive_files() == [readme]
 
 
 def test_dataset_sources_require_verified_terms_and_tree_hashes(tmp_path: Path):
@@ -181,6 +205,8 @@ def test_protocol_and_staged_reference_evidence_are_release_ready():
     from scripts.check_release import check_evaluation_protocol, check_reference_results
 
     assert check_evaluation_protocol() == []
+    if not (Path(__file__).resolve().parents[1] / "artifact/reference_results/evidence").is_dir():
+        pytest.skip("reference evidence is distributed in the separate evidence bundle")
     assert check_reference_results() == []
 
 

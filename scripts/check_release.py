@@ -60,6 +60,30 @@ def sha256_file(path: Path) -> str:
 
 
 def archive_files() -> list[Path]:
+    release_manifest = ROOT / "release-manifest.json"
+    if release_manifest.is_file():
+        record = json.loads(release_manifest.read_text(encoding="utf-8"))
+        files = record.get("files")
+        if (
+            record.get("bundle_kind") != "source"
+            or record.get("validation", {}).get("pass") is not True
+            or not isinstance(files, dict)
+            or not files
+        ):
+            raise RuntimeError("release manifest has an invalid source file set")
+        selected = []
+        for relative in files:
+            pure = PurePosixPath(relative)
+            path = ROOT / pure
+            if (
+                not isinstance(relative, str)
+                or pure.is_absolute()
+                or ".." in pure.parts
+                or not path.is_file()
+            ):
+                raise RuntimeError(f"release manifest has an invalid file: {relative}")
+            selected.append(path)
+        return sorted(selected)
     output = git("ls-files", "--recurse-submodules", "-z")
     return sorted(
         ROOT / name

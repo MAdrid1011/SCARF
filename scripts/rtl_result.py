@@ -7,12 +7,16 @@ import argparse
 import hashlib
 import json
 import re
-import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.result_record import source_identity
 
 
 def sha256_file(path: Path) -> str:
@@ -24,14 +28,7 @@ def sha256_file(path: Path) -> str:
 
 
 def git_commit() -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip()
+    return source_identity(ROOT)["git_commit"]
 
 
 def build_result(output_dir: Path) -> dict:
