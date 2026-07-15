@@ -301,3 +301,51 @@
   hyperplanes that cannot be tied to the all-zero RTL ROM or the paper. Preserve
   `outputs/ae_pilot_fsdr_v2/` as diagnostic evidence and keep Table 2 outside
   the Results Reproduced claim.
+
+## 12. Mechanism Recovery Campaign V3
+
+- Campaign ID: `mechanism-recovery-v3`.
+- Parent evidence: `saes-recovery-v2` and `fsdr-table2-six-pair` at commit
+  `6f210ad`.
+- Main question: do two concrete implementation-contract mismatches, rather
+  than tuned thresholds, explain enough of the SAES/FSDR gap to restore a valid
+  six-pair reproduction path?
+- Fixed conditions: canonical sample/view selection, checkpoints, dataset tree,
+  target views, paper thresholds (`tau_f=0.2`, `tau_d=0.1`, `tau_h=3`), cache
+  size 32, candidate ratio `D/4`, quality metrics, tolerances, tile size, and
+  seed. Generated results remain immutable and no paper table value may be used
+  as an implementation constant.
+
+| Exp ID | Slice ID | Question | Intervention | Continue signal |
+|---|---|---|---|---|
+| C1-D4 | `candidate-coordinate-depth` | Is the fixed L1 threshold intended for the model's dimensionless depth-candidate coordinate rather than metric depth? | Map each predicted depth through the exact upstream inverse-depth near/far parameterization and report aligned first-hit rates without changing SAES output | The paper-fixed thresholds produce a non-degenerate L0/L1 split and identify a falsifiable routing correction |
+| C2-D3 | `all-context-frames` | Did the FSDR pilot measure only context view zero even though the paper metric covers frames and resets the cache per frame? | Process every authentic probability/candidate view, clear frame-local cache state at each frame boundary, and aggregate integer counts | All context pixels are covered and the corrected bounded pilots pass the unchanged Table 2 tolerance |
+| C1-D5 | `paper-routing-replay` | Does the candidate-coordinate result support a paper-defined L0/L1 router without the unpublished cross-check and similarity gates? | Apply only the published first-hit statistics on the fixed sample | Quality and path rates both pass without target-image access or extra thresholds |
+| C2-D4 | `projection-collateral` | Can software and RTL share a reproducible random-hyperplane matrix without selecting a seed from paper results? | Export one manifest-hashed matrix generated independently of evaluation metrics and load the same quantized values in both implementations | RTL/software signatures are bit-exact and six bounded pilots pass without seed search |
+
+- Order: run C1-D4 and C2-D3 first because both are correctness diagnostics.
+  C1-D5 is allowed only if C1-D4 yields a coherent first-hit interpretation.
+  C2-D4 is allowed only after multi-frame evidence shows that projection
+  collateral, rather than measurement coverage, is the remaining blocker.
+- Success condition: one paper-derived implementation passes the fixed
+  TranSplat/Re10K quality gate and all six FSDR pilot rows pass the existing
+  mechanism validator, after which the six quality pilots and full protocols
+  may resume.
+- Abandonment condition: corrected coordinate/frame semantics still fail the
+  fixed bounded gates, or recovery requires choosing normalization, seed,
+  routing, or retention constants by minimizing error to the paper tables.
+- C1-D4 result: refuted. On the canonical TranSplat/Re10K sample, raw probe
+  vector variance produced L0=3.80%. Among the remaining tiles, metric-depth
+  standard deviation produced L1=86.27%, while the exact upstream normalized
+  inverse-depth candidate coordinate produced L1=94.89%. The latter makes the
+  split more degenerate rather than explaining the paper's 17.2%/14.8% rates.
+  The diagnostic is preserved under
+  `outputs/ae_failures/diagnostics/transplat-re10k-saes-candidate-coordinate-v3/`;
+  candidate-coordinate normalization is not promoted into SAES routing.
+- C2-D3 bounded TranSplat/Re10K result: all 8,192 pixels from both context
+  frames were measured with a cache reset at each frame boundary. Guided Rate
+  changed from the view-zero-only 89.36% to 90.36%, and exact Top-1 Coverage
+  changed from 96.694% to 96.812%. Both still fail the unchanged 0.02 absolute
+  tolerance against 72.1% and 99.91%. The coverage correction remains because
+  it fixes the evidence definition; its dirty diagnostic is preserved under
+  `outputs/ae_failures/diagnostics/transplat-re10k-fsdr-all-context-v3/`.

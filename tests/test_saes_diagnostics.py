@@ -95,6 +95,47 @@ def test_decision_statistics_use_vector_variance_and_absolute_depth_spread():
     assert record["depth"]["relative_std"]["mean"] == pytest.approx(3**0.5 / 3)
 
 
+def test_candidate_coordinate_depth_and_first_hit_are_near_far_normalized():
+    from scripts.saes_diagnostics import decision_statistics, normalize_inverse_depth
+
+    near = torch.tensor([[1.0]])
+    far = torch.tensor([[5.0]])
+    metric = torch.tensor([[[[[1.0]], [[5.0]], [[5.0 / 3.0]]]]])
+    normalized = normalize_inverse_depth(metric, near=near, far=far)
+    assert normalized.flatten().tolist() == pytest.approx([1.0, 0.0, 0.5])
+
+    features = torch.zeros(1, 1, 2, 4, 8)
+    for (y, x), value in {
+        (0, 4): (0.0, 0.0),
+        (0, 7): (2.0, 0.0),
+        (3, 4): (0.0, 2.0),
+        (3, 7): (2.0, 2.0),
+    }.items():
+        features[0, 0, :, y, x] = torch.tensor(value)
+    midpoint_depth = 1.0 / ((1.0 / 5.0) + 0.5 * ((1.0 / 1.0) - (1.0 / 5.0)))
+    depths = torch.full((1, 1, 32, 1, 1), midpoint_depth)
+
+    record = decision_statistics(
+        features,
+        depths,
+        height=4,
+        width=8,
+        tile_size=4,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+        near=near,
+        far=far,
+    )
+
+    assert record["depth"]["candidate_coordinate_std"]["mean"] == pytest.approx(0.0)
+    first_hit = record["first_hit"]["raw_vector_variance"][
+        "candidate_coordinate_std"
+    ]
+    assert first_hit["l0_count"] == 1
+    assert first_hit["l1_count"] == 1
+    assert first_hit["full_count"] == 0
+
+
 def test_probe_feature_variances_are_keyed_by_view_and_tile():
     from scripts.saes_diagnostics import probe_feature_variances
 

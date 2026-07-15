@@ -149,12 +149,34 @@ diagnostics, and repeat the clean-room checks on the final DOI-bound bundles.
 - [x] Stop before the six full protocol rows: every Guided Rate fails and the
   paper/RTL guided set cannot be recovered from the all-zero projection ROM.
 
+### Mechanism Recovery Campaign V3
+
+- [x] Bind the campaign to commit `6f210ad`, the canonical fixed samples, and
+  unchanged paper thresholds and validators.
+- [x] Add failure-first tests for inverse-depth candidate normalization and
+  aligned L0-to-L1 first-hit statistics.
+- [x] Run the candidate-coordinate SAES diagnostic without changing sparse
+  materialization or using target images for routing.
+- [x] Reject candidate-coordinate routing: it yields 3.80% L0 and 94.89% L1 on
+  the fixed TranSplat/Re10K sample, farther from the declared split.
+- [x] Add failure-first tests for all-context FSDR measurement and per-frame
+  cache reset.
+- [x] Run the corrected TranSplat/Re10K bounded diagnostic over both context
+  frames; 90.36% Guided Rate and 96.812% Top-1 Coverage still fail.
+- [ ] Rerun the six bounded FSDR pilots with authentic probabilities and
+  candidate tensors from every context frame.
+- [ ] Promote a routing or projection fix only if it is derived independently
+  of the paper result values and passes the unchanged fixed-sample gates.
+- [ ] Resume six quality pilots and full matrices only after the corresponding
+  claim-critical mechanism gates pass.
+
 ## Latest Local Verification
 
 Verified on 2026-07-16:
 
-- Base `pytest -q`: 244 passed after the exact FSDR candidate-evidence changes.
-- Locked classic profile: all 216 tests pass. Both classic and DepthSplat
+- Base `pytest -q`: 247 passed after the V3 candidate-coordinate and all-context
+  FSDR evidence changes.
+- Locked classic profile: all 247 tests pass. Both classic and DepthSplat
   environment checkers pass with CUDA 12.1 on the declared compiler path.
 - Strict quick passed on the RTX 3060 with the pinned classic profile. It loaded
   MVSplat once, selected all three declared target views, emitted positive

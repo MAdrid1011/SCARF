@@ -105,6 +105,7 @@ class FSDRSimulator:
         self.reuse_data = {}
 
         self.stats = {
+            'frames_started': 0,
             'total_pixels': 0,
             'cache_hits': 0,
             'cache_misses': 0,
@@ -121,6 +122,13 @@ class FSDRSimulator:
             'total_validated': 0,   # backward compat
             'depth_errors': [],
         }
+
+    def begin_frame(self) -> None:
+        """Reset the paper-defined frame-local cache without discarding aggregates."""
+        self.cache.clear()
+        self.recent_depths.clear()
+        self.reuse_data.clear()
+        self.stats['frames_started'] += 1
 
     def _check_depth_consistency(self, position: Tuple[int, int], cached_depth: float) -> bool:
         """Check cached depth consistency with local region (ASIC register file)."""
@@ -326,6 +334,7 @@ class FSDRSimulator:
         *,
         width: int,
         pixel_order: List[int] = None,
+        pixel_index_offset: int = 0,
     ) -> List[str]:
         """Process a frame with exact full-search candidate identities."""
         if features.dim() != 2 or features.shape[1] != self.config.feature_dim:
@@ -358,7 +367,7 @@ class FSDRSimulator:
                 int(signatures[pixel_idx]),
                 float(anchor_values[pixel_idx]),
                 (y, x),
-                pixel_idx,
+                pixel_index_offset + pixel_idx,
                 top1_index=int(top1_values[pixel_idx]),
                 candidate_values=candidate_rows[pixel_idx],
             )

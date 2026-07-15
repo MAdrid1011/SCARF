@@ -175,3 +175,30 @@ def prepare_fsdr_candidate_frame(
         (probabilities * candidates).sum(dim=0) / probability_mass
     ).reshape(-1)
     return feature_frame, anchors, top1, candidate_frame, (height, width)
+
+
+def prepare_fsdr_candidate_frames(
+    features: torch.Tensor,
+    depth_probs: torch.Tensor,
+    depth_candidates: torch.Tensor,
+) -> list[
+    tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        tuple[int, int],
+    ]
+]:
+    """Prepare authentic full-search evidence for every context frame."""
+    if features.dim() != 5 or features.shape[0] != 1:
+        raise ValueError(f"unsupported FSDR feature shape: {tuple(features.shape)}")
+    return [
+        prepare_fsdr_candidate_frame(
+            features,
+            depth_probs,
+            depth_candidates,
+            view_index=view_index,
+        )
+        for view_index in range(features.shape[1])
+    ]

@@ -71,3 +71,26 @@ def test_candidate_frame_rejects_probability_candidate_mismatch():
 
     with pytest.raises(ValueError, match="candidate count"):
         prepare_fsdr_candidate_frame(features, probabilities, candidates)
+
+
+def test_candidate_frames_cover_every_context_view():
+    from scripts.fsdr_trace import prepare_fsdr_candidate_frames
+
+    features = torch.zeros(1, 2, 3, 2, 2)
+    features[:, 0].fill_(1.0)
+    features[:, 1].fill_(9.0)
+    probabilities = torch.zeros(1, 2, 4, 2, 2)
+    probabilities[:, 0, 1] = 1.0
+    probabilities[:, 1, 3] = 1.0
+    candidates = torch.tensor(
+        [[[[[1.0]], [[2.0]], [[3.0]], [[4.0]]],
+          [[[10.0]], [[20.0]], [[30.0]], [[40.0]]]]]
+    )
+
+    frames = prepare_fsdr_candidate_frames(features, probabilities, candidates)
+
+    assert len(frames) == 2
+    assert torch.equal(frames[0][0], torch.ones_like(frames[0][0]))
+    assert torch.equal(frames[1][0], torch.full_like(frames[1][0], 9.0))
+    assert torch.equal(frames[0][2], torch.ones(4, dtype=torch.long))
+    assert torch.equal(frames[1][2], torch.full((4,), 3, dtype=torch.long))

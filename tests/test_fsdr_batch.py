@@ -146,3 +146,25 @@ def test_discrete_top1_coverage_uses_the_actual_nearest_candidate_subset():
     assert summary["guided_top1_missed"] == 1
     assert summary["top1_coverage"] == pytest.approx(0.5)
     assert summary["discrete_candidate_evidence"] is True
+
+
+def test_begin_frame_clears_frame_local_state_but_preserves_aggregate_counts():
+    from fsdr import FSDRSimulator
+
+    simulator = FSDRSimulator(
+        feature_dim=2,
+        cache_size=2,
+        hamming_threshold=3,
+        num_depth_candidates=4,
+        seed=37,
+    )
+    simulator.process_signature(0b0011, 1.0, (0, 0), 0)
+    simulator.reuse_data[7] = {"depth_ratio": 1.0, "in_window": True}
+
+    simulator.begin_frame()
+
+    assert len(simulator.cache) == 0
+    assert simulator.recent_depths == {}
+    assert simulator.reuse_data == {}
+    assert simulator.stats["total_pixels"] == 1
+    assert simulator.stats["frames_started"] == 1

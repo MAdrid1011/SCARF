@@ -359,6 +359,55 @@ def _depth_value(
     raise ValueError(f"unsupported depth shape: {tuple(depths.shape)}")
 
 
+def normalize_inverse_depth(
+    depths: torch.Tensor,
+    *,
+    near: torch.Tensor,
+    far: torch.Tensor,
+) -> torch.Tensor:
+    """Map metric depths to the upstream models' inverse-depth candidate coordinate."""
+    if depths.dim() not in (4, 5) or depths.shape[:2] != near.shape:
+        raise ValueError("depths and near bounds must share [batch, view] dimensions")
+    if far.shape != near.shape:
+        raise ValueError("near and far bounds must have identical shapes")
+    if not torch.isfinite(depths).all() or not torch.isfinite(near).all() or not torch.isfinite(far).all():
+        raise ValueError("depth values and bounds must be finite")
+    if (depths <= 0).any() or (near <= 0).any() or (far <= near).any():
+        raise ValueError("inverse-depth normalization requires 0 < near < far")
+
+    trailing = (1,) * (depths.dim() - 2)
+    near_inverse = near.to(depths).reciprocal().reshape(*near.shape, *trailing)
+    far_inverse = far.to(depths).reciprocal().reshape(*far.shape, *trailing)
+    return (depths.reciprocal() - far_inverse) / (near_inverse - far_inverse)
+
+
+def _first_hit_summary(
+    feature_values: list[float],
+    depth_values: list[float],
+    *,
+    feature_threshold: float,
+    depth_threshold: float,
+) -> dict[str, Any]:
+    if len(feature_values) != len(depth_values):
+        raise ValueError("aligned feature and depth statistics must have equal lengths")
+    l0_count = sum(value < feature_threshold for value in feature_values)
+    l1_count = sum(
+        feature >= feature_threshold and depth < depth_threshold
+        for feature, depth in zip(feature_values, depth_values)
+    )
+    count = len(feature_values)
+    full_count = count - l0_count - l1_count
+    return {
+        "count": count,
+        "l0_count": l0_count,
+        "l1_count": l1_count,
+        "full_count": full_count,
+        "l0_rate": l0_count / count if count else 0.0,
+        "l1_rate": l1_count / count if count else 0.0,
+        "full_rate": full_count / count if count else 0.0,
+    }
+
+
 def decision_statistics(
     features: torch.Tensor,
     depths: torch.Tensor,
@@ -368,6 +417,8 @@ def decision_statistics(
     tile_size: int,
     feature_threshold: float,
     depth_threshold: float,
+    near: torch.Tensor | None = None,
+    far: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     """Compare plausible scalar interpretations of the paper's probe statistics."""
     if features.dim() != 5:
@@ -383,6 +434,14 @@ def decision_statistics(
     current_channel_std: list[float] = []
     absolute_depth_std: list[float] = []
     relative_depth_std: list[float] = []
+    if (near is None) != (far is None):
+        raise ValueError("near and far bounds must be provided together")
+    candidate_depths = (
+        normalize_inverse_depth(depths, near=near, far=far)
+        if near is not None and far is not None
+        else None
+    )
+    candidate_coordinate_std: list[float] = []
 
     for view in range(feature_up.shape[0]):
         for tile_y in range(0, height - tile_size + 1, tile_size):
@@ -441,6 +500,34 @@ def decision_statistics(
                 relative = absolute / probe_depths.mean().abs().clamp_min(1e-8)
                 absolute_depth_std.append(float(absolute.item()))
                 relative_depth_std.append(float(relative.item()))
+                if candidate_depths is not None:
+                    candidate_probe_depths = torch.stack(
+                        [
+                            _depth_value(
+                                candidate_depths,
+                                view,
+                                tile_y + local_y,
+                                tile_x + local_x,
+                                width,
+                            ).float()
+                            for local_y, local_x in probes
+                        ]
+                    )
+                    candidate_coordinate_std.append(
+                        float(candidate_probe_depths.std(unbiased=False).item())
+                    )
+
+    feature_statistics = {
+        "raw_vector_variance": raw_vector_variance,
+        "unit_vector_variance": unit_vector_variance,
+        "current_channel_std": current_channel_std,
+    }
+    depth_statistics = {
+        "absolute_std": absolute_depth_std,
+        "relative_std": relative_depth_std,
+    }
+    if candidate_depths is not None:
+        depth_statistics["candidate_coordinate_std"] = candidate_coordinate_std
 
     return {
         "schema_version": "1.0",
@@ -450,18 +537,23 @@ def decision_statistics(
         "view_count": int(feature_up.shape[0]),
         "probe_count": len(probes),
         "feature": {
-            "raw_vector_variance": _summary(
-                raw_vector_variance, feature_threshold
-            ),
-            "unit_vector_variance": _summary(
-                unit_vector_variance, feature_threshold
-            ),
-            "current_channel_std": _summary(
-                current_channel_std, feature_threshold
-            ),
+            name: _summary(values, feature_threshold)
+            for name, values in feature_statistics.items()
         },
         "depth": {
-            "absolute_std": _summary(absolute_depth_std, depth_threshold),
-            "relative_std": _summary(relative_depth_std, depth_threshold),
+            name: _summary(values, depth_threshold)
+            for name, values in depth_statistics.items()
+        },
+        "first_hit": {
+            feature_name: {
+                depth_name: _first_hit_summary(
+                    feature_values,
+                    depth_values,
+                    feature_threshold=feature_threshold,
+                    depth_threshold=depth_threshold,
+                )
+                for depth_name, depth_values in depth_statistics.items()
+            }
+            for feature_name, feature_values in feature_statistics.items()
         },
     }

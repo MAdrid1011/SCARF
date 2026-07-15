@@ -1986,34 +1986,41 @@ def main(argv=None):
                 "FSDR-only claim requires authentic full-search probabilities and candidates"
             )
         from scripts.fsdr_trace import (
-            prepare_fsdr_candidate_frame,
+            prepare_fsdr_candidate_frames,
             tile_probe_pixel_order,
         )
 
-        (
-            feature_frame,
-            candidate_anchors,
-            top1_indices,
-            candidate_frame,
-            fsdr_shape,
-        ) = prepare_fsdr_candidate_frame(
+        fsdr_frames = prepare_fsdr_candidate_frames(
             pipeline_features,
             fsdr_depth_probs,
             fsdr_depth_candidates,
         )
+        fsdr_shape = fsdr_frames[0][4]
         fsdr_height, fsdr_width = fsdr_shape
-        fsdr.process_discrete_frame(
+        pixel_count_per_frame = fsdr_height * fsdr_width
+        for frame_index, (
             feature_frame,
             candidate_anchors,
             top1_indices,
             candidate_frame,
-            width=fsdr_width,
-            pixel_order=tile_probe_pixel_order(
-                height=fsdr_height,
+            frame_shape,
+        ) in enumerate(fsdr_frames):
+            if frame_shape != fsdr_shape:
+                raise RuntimeError("FSDR context frames have inconsistent evidence shapes")
+            fsdr.begin_frame()
+            fsdr.process_discrete_frame(
+                feature_frame,
+                candidate_anchors,
+                top1_indices,
+                candidate_frame,
                 width=fsdr_width,
-                tile_size=CONFIG.tile_size,
-            ),
-        )
+                pixel_order=tile_probe_pixel_order(
+                    height=fsdr_height,
+                    width=fsdr_width,
+                    tile_size=CONFIG.tile_size,
+                ),
+                pixel_index_offset=frame_index * pixel_count_per_frame,
+            )
         summary = fsdr.get_summary()
         if summary.get('discrete_candidate_evidence') is not True:
             raise RuntimeError("FSDR discrete candidate evidence is incomplete")
@@ -2671,6 +2678,8 @@ def main(argv=None):
                 tile_size=CONFIG.tile_size,
                 feature_threshold=CONFIG.feature_var_threshold,
                 depth_threshold=CONFIG.depth_std_threshold,
+                near=near,
+                far=far,
             )
             saes_diagnostic_record.update(
                 {
