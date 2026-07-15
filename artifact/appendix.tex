@@ -22,7 +22,9 @@ with at least 24\,GB VRAM and the pinned Python 3.10 environments. The optional
 system baseline uses a Jetson Orin NX 16\,GB in MAXN mode, but it
 is outside the current reproduced claim. RTL validation needs
 JDK~11+, sbt~1.9+, Chisel~6.6, and Verilator~5+. The public physical flow uses
-iFlow commit \texttt{04b4d98} and ASAP7.
+iFlow commit \texttt{04b4d98} and ASAP7. Its clean-worktree and collateral
+preflight is included, but routed PPA is outside the current claim because the
+host did not satisfy the fixed no-Vivado/48\,GiB resource gate.
 
 \paragraph{Data and models.}
 The artifact records download sources, licenses, formats, and SHA256 values for
@@ -41,9 +43,10 @@ contains 6,474 Re10K samples, 1,595 ACID samples, and 140 DL3DV samples.
 
 \paragraph{Workflow and key results.}
 After installation, \texttt{run\_ae.sh quick} validates the setup.
-The modes \texttt{quality} and \texttt{ablation} expose the Re10K and ACID
-diagnostics, but Table~1 and Tables~2--3 are not claimed: real sparse-SAES
-probes exceed the quality tolerance and do not reproduce the reported L1 rates.
+The claim-aware \texttt{quality} and \texttt{ablation} modes explicitly skip
+unclaimed rows; focused diagnostics remain available through the experiment
+driver. Table~1 and Tables~2--3 are not claimed: real sparse-SAES probes exceed
+the quality tolerance and do not reproduce the reported L1 rates.
 A dense interpolation diagnostic retains every Gaussian and is forbidden in
 claim runs. Figure~8, Figure~11, the DL3DV rows, and Figures~13--16 are also
 not claimed. Each run emits structured results
@@ -53,18 +56,19 @@ explicit \texttt{PASS}, \texttt{FAIL}, \texttt{NOT\_RUN}, or
 \texttt{NOT\_CLAIMED} states.
 
 Figure~8 uses the 1\,GHz architectural target in the paper. It is not in the
-current reproduced claim because raw Orin NX timing is unavailable. The public
-physical flow reports achieved ASAP7 timing independently and preserves any
-negative slack.
+current reproduced claim because raw Orin NX timing is unavailable. A completed
+public physical run would report ASAP7 timing independently and preserve any
+negative slack; no routed run is claimed in this release.
 
 \paragraph{Public hardware proxy.}
 The commercial TSMC 28\,nm PDK, memory compiler, and Liberty collateral cannot
 be redistributed. We therefore include a fully public predictive-PDK workflow:
-the Chisel RTL is implemented with iFlow/ASAP7, and its raw 7\,nm PPA is retained
-before applying the paper-cited DeepScaleTool model to obtain a 28\,nm-equivalent
-estimate. This estimate validates the normalization method and hardware trend.
-It is not described as a foundry-specific TSMC 28\,nm post-layout measurement.
-The report separates logic, SRAM proxies, and excluded LPDDR PHY/pad components.
+the Chisel RTL can be implemented with iFlow/ASAP7, after which the paper-cited
+DeepScaleTool model can produce a 28\,nm-equivalent estimate. In the current
+release, routed ASAP7 PPA is \texttt{NOT\_CLAIMED\_RESOURCE\_LIMIT} and scaling
+is \texttt{NOT\_CLAIMED\_NO\_PHYSICAL\_INPUT}; only the pinned preflight and
+deterministic scaling tests are Functional evidence. No estimate is described
+as a foundry-specific TSMC 28\,nm post-layout measurement.
 
 \paragraph{Expected variation.}
 Quality tolerances are 0.15\,dB PSNR, 0.005 SSIM, and 0.005 LPIPS. Optional Orin

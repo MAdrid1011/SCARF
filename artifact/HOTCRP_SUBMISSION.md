@@ -24,10 +24,13 @@ Zenodo, and that DOI must resolve to the exact release validated by
 
 ## Key Results to be Reproduced
 
-1. **RTL and public physical proxy.** Validate the Chisel RTL and reproduce the
-   public iFlow/ASAP7 physical-design reports and deterministic DeepScaleTool
-   7-to-28 nm normalization with `bash scripts/run_ae.sh rtl`, `physical`, and
-   `scale`.
+1. **RTL functionality.** Validate the Chisel RTL, SystemVerilog emission,
+   Verilator lint, and representative VCD with `bash scripts/run_ae.sh rtl`.
+
+The public iFlow/ASAP7 workflow passed its pinned clean-worktree, container,
+command, and collateral-hash dry-run but is `NOT_CLAIMED_RESOURCE_LIMIT` because
+the host resource gate was not met. DeepScale formula/table tests remain
+Functional; no 28 nm estimate is reported without routed ASAP7 input.
 
 Table 1 and Tables 2--3 must not be listed as reproduced in the present
 submission. Real sparse-SAES probes exceed the quality tolerance and do not

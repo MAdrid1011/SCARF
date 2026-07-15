@@ -26,8 +26,10 @@
   positive simulator cycles, FSDR evidence, strict sparse-SAES failure records,
   and a claim guard that rejects the dense diagnostic. Orin timing and
   sensitivity figures are not in the active claim set.
-- Required hardware metrics: routed ASAP7 area, delay/frequency, dynamic and
+- Optional physical metrics: routed ASAP7 area, delay/frequency, dynamic and
   leakage power, utilization, route/DRC status, plus deterministic scaling.
+  They are currently outside the claim because the 48 GiB/no-Vivado resource
+  gate is not met; DeepScale table/formula tests remain Functional evidence.
 - Comparability risks: unavailable ACID/DL3DV payloads and checkpoints,
   incompatible model environments, absent Orin measurements, absent iFlow
   reports, SRAM abstraction differences, and commercial TSMC28 exclusions.

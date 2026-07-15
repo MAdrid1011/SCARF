@@ -1,8 +1,20 @@
 import json
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_plot_style_loads_without_invalid_color_warnings():
+    import matplotlib.pyplot as plt
+
+    stderr = StringIO()
+    with redirect_stderr(stderr):
+        plt.style.use(ROOT / "artifact/plot_style.mplstyle")
+
+    assert "Bad value" not in stderr.getvalue()
 
 
 def result(pair: str, target: dict, mechanisms: dict, speedup: float = 2.94) -> dict:

@@ -13,6 +13,15 @@ ASAP7 is a predictive research PDK. Neither layer is described as a TSMC 28 nm
 post-layout measurement. Every generated JSON record includes `evidence_type`,
 `source_process`, `target_process`, and tool/library hashes.
 
+## Current Execution Status
+
+The release's clean iFlow `04b4d98`/ASAP7/container/collateral dry-run passes.
+The routed flow is `NOT_CLAIMED_RESOURCE_LIMIT` because an unrelated Vivado
+sweep was active and only 11.8--14.0 GiB was available, below the fixed 48 GiB
+gate. Consequently DeepScale execution is `NOT_CLAIMED_NO_PHYSICAL_INPUT`.
+Unit tests still verify the published node table, examples, round trips, and
+7-to-28 formulas; no paper number is substituted for missing PPA.
+
 ## DeepScaleTool Convention
 
 For a metric with table values `v[current]` and `v[target]`, the scaling factor

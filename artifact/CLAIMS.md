@@ -20,8 +20,6 @@ results and do not support a Results Reproduced badge request by themselves.
 | ID | Paper result | Command | Acceptance criterion |
 |---|---|---|---|
 | C6 | RTL functionality | `bash scripts/run_ae.sh rtl` | Chisel tests, SystemVerilog emission, and Verilator lint complete without errors. |
-| C7 | Public physical-design proxy | `bash scripts/run_ae.sh physical` | iFlow completes routing and GDS generation with pinned ASAP7 RC data. It emits provenance, timing, area, vectorless logic power, zero-DRC status, and route reports. Timing failure at the 1 GHz target is reported rather than hidden. |
-| C8 | Technology normalization | `bash scripts/run_ae.sh scale` | DeepScaleTool factors and the 7-to-28 nm calculation match the pinned reference tables exactly. |
 
 ## Explicitly Not Claimed
 
@@ -38,6 +36,11 @@ results and do not support a Results Reproduced badge request by themselves.
 - Figure 8 is `NOT_CLAIMED_NO_ORIN_EVIDENCE`.
 - Figure 11 and Figures 13-16 are
   `NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX`.
+- C7 is `NOT_CLAIMED_RESOURCE_LIMIT`: a concurrent 180-design Vivado sweep
+  left less than 48 GiB available memory. The clean iFlow/ASAP7/container
+  dry-run passed, but no routed PPA is claimed.
+- C8 is `NOT_CLAIMED_NO_PHYSICAL_INPUT`. DeepScale table and formula tests pass
+  as Functional checks, but no 7-to-28 result is emitted without valid C7 PPA.
 
 ## Not Claimed as Exactly Reproduced
 

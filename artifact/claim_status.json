@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "generated_on": "2026-07-13",
+  "generated_on": "2026-07-15",
   "software_pairs": {
     "transplat/re10k": "NOT_CLAIMED_SAES_SPARSE_QUALITY_MISMATCH",
     "transplat/acid": "NOT_CLAIMED_SAES_SPARSE_QUALITY_MISMATCH",
@@ -28,6 +28,6 @@
   "sensitivity": "NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX",
   "rtl": "CLAIMED",
   "dram": "FUNCTIONAL_ONLY",
-  "physical_asap7": "CLAIMED",
-  "deepscale": "CLAIMED"
+  "physical_asap7": "NOT_CLAIMED_RESOURCE_LIMIT",
+  "deepscale": "NOT_CLAIMED_NO_PHYSICAL_INPUT"
 }

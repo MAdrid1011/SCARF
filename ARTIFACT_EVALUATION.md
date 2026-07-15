@@ -199,10 +199,10 @@ Simulator cycles are deterministic. The GPU baseline uses archived measurements
 from the documented Jetson Orin NX state. The AE path does not estimate Orin
 latency from the peak TFLOPS of another GPU.
 
-Figure 8 uses the 1 GHz architectural clock target in the paper. The public ASAP7
-flow reports achieved timing independently. A routed ASAP7 result that misses
-1 GHz remains a visible timing failure and does not validate the unavailable
-commercial TSMC28 implementation.
+Figure 8 uses the 1 GHz architectural clock target in the paper. When executed,
+the public ASAP7 flow reports achieved timing independently. A routed ASAP7
+result that misses 1 GHz remains a visible timing failure and does not validate
+the unavailable commercial TSMC28 implementation.
 
 ### Figure 11 and Tables 2-3: Ablation and Mechanisms
 
@@ -240,7 +240,9 @@ bash scripts/run_ae.sh validate
 `all` follows the machine-readable claim status. The six-pair software matrix
 is currently diagnostic rather than required claim work; it must not be used to
 turn the dense path into sparse evidence. The declared workflow runs RTL, the
-public DRAM proxy, physical design, scaling, report generation, and validation.
+public DRAM proxy, report generation, and validation. Physical design and
+scaling are also skipped because their machine-readable states are
+`NOT_CLAIMED_RESOURCE_LIMIT` and `NOT_CLAIMED_NO_PHYSICAL_INPUT`.
 `validate`
 returns nonzero when a claimed result is missing, structurally invalid, outside
 its tolerance, or based on an unfinalized sample protocol.
@@ -270,6 +272,12 @@ Full workload runs can pass measured address events directly to
 
 ## ASAP7 Physical Proxy
 
+Current state: `NOT_CLAIMED_RESOURCE_LIMIT`. The pinned clean-worktree,
+container, command, and collateral-hash dry-run passed, but a concurrent
+180-design Vivado sweep left less than the required 48 GiB available memory.
+No routed PPA is included or claimed. The command below remains the documented
+workflow for a sufficiently provisioned host.
+
 ```bash
 export IFLOW_ROOT=/path/to/clean/iFlow
 
@@ -294,6 +302,11 @@ a TSMC 28 nm measurement. SRAM proxies are reported separately. LPDDR PHY and
 pads are excluded. The public hardware scope document defines the boundary.
 
 ## DeepScaleTool Normalization
+
+Current state: `NOT_CLAIMED_NO_PHYSICAL_INPUT`. The node-table, published
+examples, round-trip, and formula tests are Functional evidence. The command
+below intentionally fails without a valid routed ASAP7 `ppa.json` and is not
+used to synthesize a result from manuscript constants.
 
 ```bash
 python hardware/scaling/deepscale.py \

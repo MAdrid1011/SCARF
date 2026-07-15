@@ -8,9 +8,11 @@ The submission is ready only when every required item is checked.
 - [ ] `bash scripts/run_ae.sh validate` reports no `FAIL` or `NOT_RUN` claim
   from the shared default `outputs/ae` result tree.
 - [x] Chisel tests, SystemVerilog emission, and Verilator lint pass.
-- [ ] The ASAP7 run records complete tool/library provenance and raw reports.
-- [ ] DeepScaleTool normalization preserves raw values and reports factors.
-- [x] Claimed Re10K and ACID sources, formats, terms, and hashes are verified.
+- [x] ASAP7 is `NOT_CLAIMED_RESOURCE_LIMIT`; its clean preflight and guard
+      failure are preserved without partial PPA.
+- [x] DeepScale is `NOT_CLAIMED_NO_PHYSICAL_INPUT`; formula/table tests pass and
+      no result is synthesized without raw PPA.
+- [x] Prepared Re10K and ACID sources, formats, terms, and hashes are verified.
 - [x] DL3DV is marked gated and outside the current claim.
 - [x] The LPDDR5 smoke proxy is labeled Functional and not used as a paper result.
 - [x] Figure 8 is outside the claim because no real Orin evidence exists.

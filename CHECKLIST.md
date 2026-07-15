@@ -51,10 +51,13 @@
 - [x] Pinned Ramulator 2.1 and DRAMPower 6.0.2 binaries were built and the
   real trace-to-timing-to-energy chain produced relocatable PASS evidence.
 - [x] Clean iFlow `04b4d98` front end through global placement was exercised.
-- [ ] Corrected ASAP7 RC overlay is rerun from a clean iFlow worktree.
-- [ ] Routed ASAP7 PPA reports and provenance are complete.
+- [x] Clean iFlow/ASAP7/container/collateral preflight passes from pinned
+  commit `04b4d98`.
+- [x] Routed ASAP7 PPA is explicitly `NOT_CLAIMED_RESOURCE_LIMIT`; no partial
+  run or manuscript constant is substituted.
 - [x] SRAM proxy, PDN evidence, and excluded PHY/I/O fields are explicit.
-- [ ] 7-to-28 normalization of the real ASAP7 run is reproducible.
+- [x] 7-to-28 execution is `NOT_CLAIMED_NO_PHYSICAL_INPUT`; deterministic
+  DeepScale tables, examples, and formulas remain unit-tested Functional code.
 
 ## Validation And Release
 
@@ -70,17 +73,18 @@ but the pilot gate originally checked schema rather than paper tolerance. A
 corrected formal run and focused TranSplat/MVSplat diagnostics prove that
 sparse SAES does not meet Table 1 or Tables 2--3. C1/C4 are suspended and the
 dense diagnostic is forbidden in claim runs. Formal RTL/DRAM evidence remains
-complete. The corrected iFlow overlay still requires that every Vivado process
-has exited and that at least 48 GiB is available. Do not mark routed PPA,
-clean-room, DOI, or Results Reproduced evidence complete from diagnostics.
+complete. The clean iFlow preflight passed, but a 180-design external Vivado
+sweep and less than 48 GiB available memory triggered the mandatory resource
+guard. C7/C8 are not claimed. Do not mark routed PPA, clean-room, DOI, or
+Results Reproduced evidence complete from diagnostics.
 
 ## Latest Local Verification
 
 Verified on 2026-07-15:
 
-- Base `pytest -q`: 189 passed and 9 skipped. The skipped tests require optional
+- Base `pytest -q`: 190 passed and 9 skipped. The skipped tests require optional
   PyTorch or external toolchains.
-- Locked classic profile: all 210 tests pass. Both classic and DepthSplat
+- Locked classic profile: all 211 tests pass. Both classic and DepthSplat
   environment checkers pass with CUDA 12.1 on the declared compiler path.
 - Strict quick passed on the RTX 3060 with the pinned classic profile. It loaded
   MVSplat once, selected all three declared target views, emitted positive
@@ -137,9 +141,10 @@ Verified on 2026-07-15:
   and prepared tree `0e21d05f448675e160529881d583701a2d03f19dbaae1af7941f37137688c187`
   also passed. Real experiment evidence, clean-room results, and the DOI remain
   unresolved until their workflows run.
-- The corrected ASAP7 RC flow has not been rerun because an unrelated Vivado
-  job remains active and available memory is below 48 GiB. Software pilots no
-  longer wait for that job; the physical resource guard remains mandatory.
+- The corrected ASAP7 RC flow is `NOT_CLAIMED_RESOURCE_LIMIT`: an unrelated
+  180-design Vivado sweep had completed 84 designs with 96 remaining, and
+  available memory was 11.8--14.0 GiB. The guard failure and successful clean
+  dry-run are retained under `outputs/ae_failures/physical/`.
 - Source-archive runs verify every file against `release-manifest.json` and no
   longer require Git metadata after Zenodo extraction.
 - The paper and one-page Artifact Appendix build successfully as a 15-page PDF
