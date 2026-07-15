@@ -134,6 +134,7 @@
 | 2026-07-15 | Suspend C1/C4 sparse-SAES claims | TranSplat and MVSplat real probes exceed quality tolerance and produce zero L1 tiles; dense interpolation is not accepted as pruning evidence |
 | 2026-07-15 | Reopen one bounded paper-formula SAES audit | The implementation uses normalized full-tile feature variance, relative depth spread, and undocumented decision gates, while the manuscript specifies raw probe variance, absolute probe depth standard deviation, and first-hit threshold decisions |
 | 2026-07-15 | Stop the paper-formula SAES audit after one discriminative run | Literal raw-probe variance made 99.9% of tiles L0, left L1 effectively zero, and worsened PSNR/SSIM substantially; the manuscript leaves the feature-vector reduction and normalization under-specified |
+| 2026-07-15 | Include only the synthetic quick dataset in the source bundle | A clean-room reviewer could not run `quick` because the blanket dataset exclusion also removed its manifest and sample; real datasets remain excluded |
 
 ## 9. Paper-Formula SAES Audit
 

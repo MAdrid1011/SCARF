@@ -208,7 +208,9 @@ __marimo__/
 
 # Output files
 outputs/
-datasets/
+datasets/*
+!datasets/quick-re10k/
+!datasets/quick-re10k/**
 .milestones/
 artifact/reference_results/evidence/
 

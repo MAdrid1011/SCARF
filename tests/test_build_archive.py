@@ -12,6 +12,27 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_source_bundle_includes_only_synthetic_quick_dataset():
+    from scripts.build_archive import source_release_files
+
+    relative_files = {
+        path.relative_to(ROOT).as_posix() for path in source_release_files()
+    }
+    fixture_files = {
+        "datasets/quick-re10k/.scarf-manifest.json",
+        "datasets/quick-re10k/.scarf-source.json",
+        "datasets/quick-re10k/test/000000.torch",
+        "datasets/quick-re10k/test/index.json",
+    }
+
+    assert fixture_files <= relative_files
+    assert all(
+        not relative.startswith("datasets/")
+        or relative.startswith("datasets/quick-re10k/")
+        for relative in relative_files
+    )
+
+
 def test_build_archive_cli_resolves_repository_modules():
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/build_archive.py"), "--help"],

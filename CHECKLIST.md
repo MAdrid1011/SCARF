@@ -98,14 +98,19 @@ Results Reproduced evidence complete from diagnostics.
 
 Verified on 2026-07-15:
 
-- Base `pytest -q`: 194 passed and 9 skipped. The skipped tests require optional
+- Base `pytest -q`: 195 passed and 9 skipped. The skipped tests require optional
   PyTorch or external toolchains.
-- Locked classic profile: all 215 tests pass. Both classic and DepthSplat
+- Locked classic profile: all 216 tests pass. Both classic and DepthSplat
   environment checkers pass with CUDA 12.1 on the declared compiler path.
 - Strict quick passed on the RTX 3060 with the pinned classic profile. It loaded
   MVSplat once, selected all three declared target views, emitted positive
   feature/depth/Gaussian/GGU cycles, and produced a validator-PASS aggregate.
 - A fresh post-fix strict quick run also passed under `outputs/ae_regression`.
+- Release clean-room testing found that the source bundle omitted the synthetic
+  quick dataset because all of `datasets/` was excluded. The archive now
+  includes only the four tracked `datasets/quick-re10k` fixture files, which
+  remain explicitly ineligible for paper results; the archive regression and
+  repository strict quick tests pass.
 - The first strict quick attempt exposed batched LPIPS aggregation drift. The
   result builder now derives every aggregate metric from the recorded per-view
   values; the regression test and repeated strict run pass.

@@ -68,7 +68,12 @@ def source_release_files() -> list[Path]:
     selected = []
     for path in release_files():
         relative = path.relative_to(ROOT)
-        if relative.parts[:1] in {("datasets",), ("outputs",)}:
+        if relative.parts[:1] == ("outputs",):
+            continue
+        if (
+            relative.parts[:1] == ("datasets",)
+            and relative.parts[:2] != ("datasets", "quick-re10k")
+        ):
             continue
         if "checkpoints" in relative.parts:
             continue
