@@ -1,10 +1,27 @@
 import hashlib
 import io
 import json
-import tarfile
 import subprocess
+import sys
+import tarfile
+from pathlib import Path
 
 import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_build_archive_cli_resolves_repository_modules():
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/build_archive.py"), "--help"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Build and verify a deterministic SCARF AE source archive" in result.stdout
 
 
 def make_archive(path, *, extra=False, unsafe=False):

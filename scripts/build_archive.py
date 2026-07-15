@@ -20,6 +20,8 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 MANIFEST_NAME = "release-manifest.json"
 VERSION_RE = __import__("re").compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
 
