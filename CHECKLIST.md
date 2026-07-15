@@ -79,6 +79,21 @@ sweep and less than 48 GiB available memory triggered the mandatory resource
 guard. C7/C8 are not claimed. Do not mark routed PPA, clean-room, DOI, or
 Results Reproduced evidence complete from diagnostics.
 
+### Paper-Formula SAES Audit
+
+- [x] Run the bounded canonical TranSplat/Re10K diagnostic without changing
+  the dataset, selected views, materialization policy, or quality metrics.
+- [x] Preserve the failed output under
+  `outputs/ae_failures/diagnostics/transplat-re10k-paper-formula-v1/`.
+- [x] Stop wider reruns: L0 rose from 29.2% to 99.9%, L1 remained effectively
+  zero, PSNR fell from 26.1724 to 23.5173 dB, and SSIM fell from 0.87879 to
+  0.80966 relative to the prior sparse diagnostic.
+- [x] Restore the last-known-good Functional implementation. The paper does
+  not define the feature-vector variance reduction/normalization or justify
+  the additional Gaussian gates well enough to recover the reported path mix.
+- [x] Keep C1/C4 and Results Reproduced suspended; do not expand this failed
+  hypothesis to MVSplat, ACID, DepthSplat, or the full matrix.
+
 ## Latest Local Verification
 
 Verified on 2026-07-15:

@@ -132,3 +132,34 @@
 | 2026-07-15 | Stop the full matrix after four systematic SAES quality failures | Avoid spending weeks on a non-comparable run and preserve every raw result |
 | 2026-07-15 | Pair reference numerics with executed hardware cycle traces | Remove approximate-weight quality drift while retaining positive S1/S2/S3/GGU evidence |
 | 2026-07-15 | Suspend C1/C4 sparse-SAES claims | TranSplat and MVSplat real probes exceed quality tolerance and produce zero L1 tiles; dense interpolation is not accepted as pruning evidence |
+| 2026-07-15 | Reopen one bounded paper-formula SAES audit | The implementation uses normalized full-tile feature variance, relative depth spread, and undocumented decision gates, while the manuscript specifies raw probe variance, absolute probe depth standard deviation, and first-hit threshold decisions |
+| 2026-07-15 | Stop the paper-formula SAES audit after one discriminative run | Literal raw-probe variance made 99.9% of tiles L0, left L1 effectively zero, and worsened PSNR/SSIM substantially; the manuscript leaves the feature-vector reduction and normalization under-specified |
+
+## 9. Paper-Formula SAES Audit
+
+- Run ID: `saes-paper-formula-v1`.
+- Research question: does matching the published L0/L1 decision formulas restore
+  the nonzero L1 protocol and paper quality without changing the dataset,
+  sampler, materialization policy, or metric definitions?
+- Null hypothesis: decision-formula alignment does not improve both sparse
+  quality and L0/L1 agreement.
+- Alternative hypothesis: raw probe-feature variance, absolute probe-depth
+  standard deviation, and threshold-only first-hit routing remove the observed
+  protocol mismatch.
+- Minimal experiment: one canonical TranSplat/Re10K sample, compared with the
+  archived corrected sparse result.
+- Acceptance keys: PSNR and SSIM deltas, L0 rate, L1 rate, effective Gaussian
+  count, and `paper_result_eligible` provenance.
+- Continue condition: quality and L0/L1 agreement both improve without dense
+  materialization. Otherwise preserve the result as a refuted implementation
+  hypothesis and keep C1/C4 suspended.
+- Result: the alternative hypothesis is refuted on the bounded canonical
+  sample. Relative to `transplat-re10k-moment-match-v6`, PSNR changed from
+  26.1724 to 23.5173 dB, SSIM from 0.87879 to 0.80966, L0 from 29.2% to 99.9%,
+  and L1 remained effectively zero (2/8192 tiles). The output is preserved at
+  `outputs/ae_failures/diagnostics/transplat-re10k-paper-formula-v1/` with
+  `git_dirty=true` and is not claim evidence.
+- Decision: restore the last-known-good Functional implementation, make no
+  wider SAES rerun, and keep Results Reproduced suspended. Raw-probe variance
+  plus the published threshold is not a recoverable reproduction contract
+  without an absent normalization/reduction definition or original logs.
