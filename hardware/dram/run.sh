@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-RAMULATOR_ROOT="${RAMULATOR_ROOT:-}"
-DRAMPOWER_ROOT="${DRAMPOWER_ROOT:-}"
+RAMULATOR_ROOT="${RAMULATOR_ROOT:-${ROOT}/downloads/tools/ramulator2}"
+DRAMPOWER_ROOT="${DRAMPOWER_ROOT:-${ROOT}/downloads/tools/DRAMPower}"
 EVENTS=""
 OUTPUT_DIR="${ROOT}/outputs/dram"
 
@@ -18,8 +18,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -n "${RAMULATOR_ROOT}" ]] || { echo "RAMULATOR_ROOT or --ramulator-root is required" >&2; exit 2; }
-[[ -n "${DRAMPOWER_ROOT}" ]] || { echo "DRAMPOWER_ROOT or --drampower-root is required" >&2; exit 2; }
+[[ -d "${RAMULATOR_ROOT}" ]] || { echo "Ramulator root not found: ${RAMULATOR_ROOT}" >&2; exit 2; }
+[[ -d "${DRAMPOWER_ROOT}" ]] || { echo "DRAMPower root not found: ${DRAMPOWER_ROOT}" >&2; exit 2; }
 [[ -n "${EVENTS}" ]] || { echo "--events must name measured memory-events.jsonl" >&2; exit 2; }
 mkdir -p "${OUTPUT_DIR}"
 EVENTS_COPY="${OUTPUT_DIR}/memory-events.jsonl"

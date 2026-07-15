@@ -1,5 +1,6 @@
 import csv
 import json
+from pathlib import Path
 
 import pytest
 
@@ -141,3 +142,11 @@ def test_drampower_memspec_adaptation_is_explicit_and_hashed(tmp_path):
         field: 0 for field in LPDDR5_TIMING_COMPATIBILITY_FIELDS
     }
     assert sha256_file(derived) != original_hash
+
+
+def test_dram_runner_discovers_installed_pinned_tools_by_default():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "hardware/dram/run.sh").read_text(encoding="utf-8")
+
+    assert 'RAMULATOR_ROOT="${RAMULATOR_ROOT:-${ROOT}/downloads/tools/ramulator2}"' in source
+    assert 'DRAMPOWER_ROOT="${DRAMPOWER_ROOT:-${ROOT}/downloads/tools/DRAMPower}"' in source

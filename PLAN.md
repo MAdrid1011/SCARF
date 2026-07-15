@@ -66,6 +66,9 @@
 - CLI smoke: `bash scripts/run_ae.sh quick`.
 - Software smoke and model pilots may run while an unrelated Vivado synthesis
   is active. They remain sequential and use the assigned single GPU.
+- Do not run `scripts/run_rtl.sh` concurrently with a clean claim pair. The RTL
+  emitter temporarily recreates `chisel/generated`, so formal RTL and software
+  evidence runs are serialized to keep Git identity stable.
 - Full software: `bash scripts/run_ae.sh all`.
 - Full mode reuses the embedded ablation and mechanism records from each quality run
   instead of repeating the same model and sample matrix.
@@ -114,3 +117,5 @@
 | 2026-07-15 | Bind DepthSplat checkpoints to their published Hydra variants | The Re10K/ACID checkpoint is ViT-L and the DL3DV checkpoint is ViT-B, not the default ViT-S |
 | 2026-07-15 | Construct DINOv2 from pinned local source without pretrained downloads | Full DepthSplat checkpoints already contain the backbone and claim runs must not access the network |
 | 2026-07-15 | Complete DepthSplat multi-scale S2 and traced S3 cycles | Remove one-scale assumptions and zero Gaussian cycles exposed by strict pilots |
+| 2026-07-15 | Serialize the RTL emitter and software claim runner | A concurrent emitter correctly triggered the dirty-worktree evidence guard; no invalid sample was accepted |
+| 2026-07-15 | Discover pinned DRAM tools from the repository install tree | Keep the public `run_ae.sh dram` entry functional without hidden environment variables |

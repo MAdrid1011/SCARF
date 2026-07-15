@@ -61,20 +61,21 @@
 ## Current Frontier
 
 The strict quick path and all six Re10K/ACID one-sample pilots pass. Complete
-the delivery regression and create a clean source commit, then start the full
-six-pair quality run. The single quality run for each pair also emits the
-complete ablation and mechanism record. Software may run while an unrelated
-Vivado job is active, but the corrected iFlow overlay still requires that every
-Vivado process has exited and that at least 48 GiB is available. Do not mark
-routed PPA, clean-room, or DOI evidence complete from dry runs, smoke vectors,
-or fixtures.
+the full six-pair quality run from the clean delivery commit. Do not run the RTL
+emitter concurrently with a claim pair because its temporary `chisel/generated`
+tree changes the live Git identity; formal RTL evidence is already complete.
+The single quality run for each pair also emits the complete ablation and
+mechanism record. Software may run while an unrelated Vivado job is active, but
+the corrected iFlow overlay still requires that every Vivado process has exited
+and that at least 48 GiB is available. Do not mark routed PPA, clean-room, or DOI
+evidence complete from dry runs, smoke vectors, or fixtures.
 
 ## Latest Local Verification
 
 Verified on 2026-07-15:
 
-- Base `pytest -q`: 184 passed and 6 skipped. The skipped tests require PyTorch.
-- Locked classic profile: all 197 tests pass. Both classic and DepthSplat
+- Base `pytest -q`: 185 passed and 6 skipped. The skipped tests require PyTorch.
+- Locked classic profile: all 198 tests pass. Both classic and DepthSplat
   environment checkers pass with CUDA 12.1 on the declared compiler path.
 - Strict quick passed on the RTX 3060 with the pinned classic profile. It loaded
   MVSplat once, selected all three declared target views, emitted positive
@@ -99,6 +100,14 @@ Verified on 2026-07-15:
   and mono feature pyramids, uses scale-specific 128/64-channel regressors, and
   traces S3 cycles from the executed feature upsampler, regressor, and Gaussian
   head. Re10K and ACID strict pilots both pass without fallback.
+- Formal RTL evidence under `outputs/ae/rtl` passes eight Chisel tests,
+  SystemVerilog emission, Verilator lint, and VCD capture. Formal DRAM evidence
+  under `outputs/ae/dram` passes the pinned LPDDR5 trace-to-energy chain. The
+  DRAM public runner now discovers the repository-local pinned tool installs by
+  default instead of requiring undocumented environment variables.
+- The first formal quality attempt correctly rejected sample 1 when a concurrent
+  RTL emitter temporarily changed the worktree identity. No mismatched sample
+  was accepted; the clean rerun resumes from canonical sample boundaries.
 - `cd chisel && sbt test`: all 8 tests passed.
 - Python compilation, shell syntax, Markdown style, and `git diff --check`
   passed.
