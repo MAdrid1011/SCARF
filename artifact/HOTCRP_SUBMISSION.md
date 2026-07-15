@@ -1,8 +1,8 @@
 # MICRO 2026 AE Submission Fields
 
-This file is copy-ready except for the DOI URL and measured clean-room resource
-figures. Do not mark the HotCRP submission ready until every item in the final
-checklist is complete.
+This file is copy-ready except for the DOI URL and the final post-DOI clean-room
+confirmation. Do not mark the HotCRP submission ready until every item in the
+final checklist is complete.
 
 Current badge scope is **Artifact Available** and **Artifact Functional**.
 Do not request **Results Reproduced** unless both the sparse-SAES contract and

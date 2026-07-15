@@ -84,8 +84,10 @@ sparse SAES does not meet Table 1 or Tables 2--3. C1/C4 are suspended and the
 dense diagnostic is forbidden in claim runs. Formal RTL/DRAM evidence remains
 complete. The clean iFlow preflight passed, but a 180-design external Vivado
 sweep and less than 48 GiB available memory triggered the mandatory resource
-guard. C7/C8 are not claimed. Do not mark routed PPA, clean-room, DOI, or
-Results Reproduced evidence complete from diagnostics.
+guard. C7/C8 are not claimed. Pre-release source/evidence bundles pass the
+clean-room hash, validation, public-asset download, and strict CUDA quick
+checks. Do not mark routed PPA or Results Reproduced evidence complete from
+diagnostics, and repeat the clean-room checks on the final DOI-bound bundles.
 
 ### Paper-Formula SAES Audit
 
@@ -151,7 +153,7 @@ Results Reproduced evidence complete from diagnostics.
 
 Verified on 2026-07-16:
 
-- Base `pytest -q`: 243 passed after the exact FSDR candidate-evidence changes.
+- Base `pytest -q`: 244 passed after the exact FSDR candidate-evidence changes.
 - Locked classic profile: all 216 tests pass. Both classic and DepthSplat
   environment checkers pass with CUDA 12.1 on the declared compiler path.
 - Strict quick passed on the RTX 3060 with the pinned classic profile. It loaded
@@ -216,8 +218,9 @@ Verified on 2026-07-16:
   passed complete validation. ACID archive
   `c9f0685175bda403991493332b5cc10785678a51fbd5c497401d92d176a1a4ac`
   and prepared tree `0e21d05f448675e160529881d583701a2d03f19dbaae1af7941f37137688c187`
-  also passed. Real experiment evidence, clean-room results, and the DOI remain
-  unresolved until their workflows run.
+  also passed. Paper-result reproduction remains outside the claim. Pre-release
+  clean-room validation is complete; the DOI-bound rebuild and account-side
+  publication remain pending.
 - The corrected ASAP7 RC flow is `NOT_CLAIMED_RESOURCE_LIMIT`: an unrelated
   180-design Vivado sweep had completed 84 designs with 96 remaining, and
   available memory was 11.8--14.0 GiB. The guard failure and successful clean
