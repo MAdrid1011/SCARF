@@ -61,6 +61,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tune-thresholds", action="store_true")
     parser.add_argument("--baseline-only", action="store_true")
     parser.add_argument("--sensitivity-trace", action="store_true")
+    parser.add_argument(
+        "--fsdr-only",
+        action="store_true",
+        help="Emit target-free FSDR Table 2 evidence without SAES or rendering",
+    )
+    parser.add_argument(
+        "--saes-diagnostic-sweep",
+        action="store_true",
+        help="Run a non-claim decision-statistic and sparse-coverage sweep",
+    )
 
     parser.add_argument("--saes-fv", type=float)
     parser.add_argument("--saes-ds", type=float)
@@ -104,5 +114,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if strict_run and args.saes_materialization != "representative":
         build_parser().error(
             f"{mode} requires --saes-materialization representative"
+        )
+    if strict_run and args.saes_diagnostic_sweep:
+        build_parser().error(f"{mode} forbids --saes-diagnostic-sweep")
+    if args.fsdr_only and not args.claim_run:
+        build_parser().error("--fsdr-only requires --claim-run")
+    if args.fsdr_only and any(
+        (
+            args.ablation,
+            args.baseline_only,
+            args.sensitivity_trace,
+            args.saes_diagnostic_sweep,
+            args.tune_thresholds,
+        )
+    ):
+        build_parser().error("--fsdr-only cannot be combined with other run modes")
+    if args.saes_diagnostic_sweep and (
+        args.no_saes
+        or args.baseline_only
+        or args.saes_materialization != "representative"
+    ):
+        build_parser().error(
+            "--saes-diagnostic-sweep requires the sparse representative SAES path"
         )
     return args

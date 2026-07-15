@@ -109,12 +109,53 @@ def test_quick_dry_run_is_small_and_re10k_based(tmp_path):
     )
 
 
+def test_fsdr_plan_runs_six_claim_pairs_without_saes_or_rendering(tmp_path):
+    plan = dry_run(tmp_path, "fsdr", "--num-samples", "1")
+
+    assert len(plan["experiments"]) == 6
+    assert {(item["model"], item["dataset"]) for item in plan["experiments"]} == {
+        (model, dataset)
+        for model in ("transplat", "mvsplat", "depthsplat")
+        for dataset in ("re10k", "acid")
+    }
+    for item in plan["experiments"]:
+        demo = item["command"][item["command"].index("--") + 1 :]
+        assert "--claim-run" in demo
+        assert "--fsdr-only" in demo
+        assert demo[demo.index("--image-output-policy") + 1] == "none"
+        assert "aggregate_fsdr.py" in item["aggregate_command"][1]
+        assert "--require-match" not in item["aggregate_command"]
+
+
+def test_full_fsdr_plan_requires_the_paper_comparison(tmp_path):
+    import scripts.run_ae as runner
+
+    plan = runner.build_plan(
+        type(
+            "Args",
+            (),
+            {
+                "mode": "fsdr",
+                "output_root": tmp_path,
+                "python": None,
+                "num_samples": None,
+            },
+        )()
+    )
+    assert len(plan["experiments"]) == 6
+    assert all(
+        "--require-match" in item["aggregate_command"]
+        for item in plan["experiments"]
+    )
+
+
 def test_all_reuses_quality_runs_for_embedded_ablation_and_validation(tmp_path):
     plan = dry_run(tmp_path, "all", "--num-samples", "2")
 
-    assert not plan["experiments"]
-    assert not plan["dataset_commands"]
-    assert plan["software_claim_scope"]["status"] == "NO_CLAIMED_PAIRS"
+    assert len(plan["experiments"]) == 6
+    assert all(item["workflow"] == "fsdr" for item in plan["experiments"])
+    assert len(plan["dataset_commands"]) == 2
+    assert plan["software_claim_scope"]["status"] == "ACTIVE"
     command_text = [" ".join(command) for command in plan["commands"]]
     assert any("hardware/dram/run.sh" in command for command in command_text)
     assert command_text[-1].endswith(f"validate_ae.py --input {tmp_path}")

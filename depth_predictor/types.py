@@ -138,6 +138,9 @@ class DepthPredictorOutput:
     
     # Intermediate outputs (for debugging/comparison)
     depth_probs: Optional[torch.Tensor] = None  # [B, V, D, H, W] - softmax probs
+    depth_candidates: Optional[torch.Tensor] = None  # [B, V, D, 1, 1] or spatial
+    candidate_domain: Optional[str] = None
+    probability_source: Optional[str] = None
     cost_volume: Optional[torch.Tensor] = None  # [B, V, D, H, W] - raw cost volume
     
     # Cycle statistics

@@ -425,6 +425,7 @@ def check_claim_status(path: Path | None = None) -> list[str]:
             "CLAIMED",
             "NOT_CLAIMED_GATED_DATA",
             "NOT_CLAIMED_SAES_PROTOCOL_MISMATCH",
+            "NOT_CLAIMED_FSDR_LSH_AND_SAES_PROTOCOL_MISMATCH",
         },
     }
     for field in ("software_pairs", "mechanism_pairs"):

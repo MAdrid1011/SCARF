@@ -956,10 +956,14 @@ def tune_thresholds(
                    hasattr(features, 'shape'))
     
     if has_features:
-        B_f, V_f, C_f, H_f, W_f = features.shape
-        features_up = F.interpolate(
-            features[0], size=(h, w), mode='bilinear', align_corners=False
-        ).mean(dim=0)
+        from scripts.fsdr_trace import prepare_fsdr_frame, tile_probe_pixel_order
+
+        depth_input = depths
+        if depth_input is None:
+            depth_input = torch.ones(1, 1, h, w, device=features.device)
+        fsdr_features, frame_depths = prepare_fsdr_frame(
+            features, depth_input, height=h, width=w
+        )
     
     trial_fsdr = FSDRSimulator(
         feature_dim=CONFIG.feature_dim,
@@ -972,18 +976,13 @@ def tune_thresholds(
     )
     
     if has_features:
-        if depths is None:
-            frame_depths = torch.ones(h * w, device=features_up.device)
-        elif depths.dim() == 5:
-            frame_depths = depths[0, 0, : h * w, 0, 0]
-        elif depths.dim() == 4:
-            frame_depths = depths[0, 0, :h, :w].reshape(-1)
-        else:
-            frame_depths = torch.ones(h * w, device=features_up.device)
         trial_fsdr.process_frame(
-            features_up.permute(1, 2, 0).reshape(h * w, C_f),
+            fsdr_features,
             frame_depths,
             w,
+            pixel_order=tile_probe_pixel_order(
+                height=h, width=w, tile_size=CONFIG.tile_size
+            ),
         )
     
     reuse_rate = trial_fsdr.get_reuse_ratio()
@@ -1221,15 +1220,6 @@ def main(argv=None):
         CONFIG.fsdr_hamming_threshold = args.fsdr_hamming
         CONFIG.fsdr_reuse_hamming = args.fsdr_hamming
     
-    # Set model-specific num_depth_candidates
-    # TranSplat and DepthSplat use 128 depth candidates; MVSplat uses 32
-    if args.model in ['transplat', 'depthsplat']:
-        CONFIG.num_depth_candidates = 128
-        CONFIG.fsdr_narrowed_candidates = 32  # 128/4 = 32
-    else:
-        CONFIG.num_depth_candidates = 32
-        CONFIG.fsdr_narrowed_candidates = 8   # 32/4 = 8
-    
     # All models use the same universal SAES/FSDR configuration.
     # DINOv2 (DepthSplat) vs CNN (TranSplat/MVSplat) features naturally have different
     # variance distributions, but the threshold is set to work well across all models.
@@ -1246,8 +1236,6 @@ def main(argv=None):
     print(f"  cache_size={CONFIG.fsdr_cache_size}, hamming_threshold={CONFIG.fsdr_hamming_threshold}")
     print(f"  reuse_hamming={CONFIG.fsdr_reuse_hamming}, reuse_spatial={CONFIG.fsdr_reuse_spatial}")
     print(f"  reuse_confidence={CONFIG.fsdr_reuse_confidence} (cache hit → use cached Gaussians)")
-    print(f"[Config] Depth Prediction (S2):")
-    print(f"  num_depth_candidates={CONFIG.num_depth_candidates}")
     print(f"[Config] GGU:")
     print(f"  scale_range=({CONFIG.scale_min}, {CONFIG.scale_max})")
     print()
@@ -1273,6 +1261,25 @@ def main(argv=None):
         sample_index=args.sample_index,
     )
     print("  ✓ Model and data loaded")
+    model_depth_predictor = getattr(model.encoder, 'depth_predictor', None)
+    actual_depth_candidates = getattr(
+        model_depth_predictor, 'num_depth_candidates', None
+    )
+    if (
+        not isinstance(actual_depth_candidates, int)
+        or isinstance(actual_depth_candidates, bool)
+        or actual_depth_candidates < 4
+        or actual_depth_candidates % 4
+    ):
+        raise RuntimeError(
+            "loaded depth predictor does not expose a valid D divisible by four"
+        )
+    CONFIG.num_depth_candidates = actual_depth_candidates
+    CONFIG.fsdr_narrowed_candidates = actual_depth_candidates // 4
+    print(
+        "  ✓ S2 candidates from loaded predictor: "
+        f"D={CONFIG.num_depth_candidates}, narrowed={CONFIG.fsdr_narrowed_candidates}"
+    )
     
     # --------------------------------------------------------
     # Step 2: Extract batch info
@@ -1290,106 +1297,112 @@ def main(argv=None):
     target = {k: v[:, :V_tgt].to(device) if torch.is_tensor(v) and v.dim() > 1 else (v.to(device) if torch.is_tensor(v) else v) for k, v in batch['target'].items()}
     
     # --------------------------------------------------------
-    # Step 3: Run BASELINE (full TranSplat encoder)
+    # Step 3: Run BASELINE (full encoder) when image evidence needs it.
     # --------------------------------------------------------
     print()
-    print("[3/6] Running BASELINE (original TranSplat)...")
-    
-    # Query GPU info for cycle conversion
     gpu_info = get_gpu_info()
     gpu_freq_mhz = gpu_info['freq_mhz']
     gpu_name = gpu_info['name']
-    print(f"  GPU: {gpu_name} @ {gpu_freq_mhz} MHz (max SM clock)")
-    
-    # --- One forward pass to get outputs (for downstream use) ---
     paired_rng_state = capture_torch_rng_state()
-    with torch.no_grad():
-        encoder_output = model.encoder(context, False, deterministic=False)
-        
-        # Handle different encoder output formats
-        # DepthSplat may return dict with 'gaussians' key when return_depth=True
-        if isinstance(encoder_output, dict):
-            baseline_gaussians = encoder_output.get('gaussians', encoder_output)
-        else:
-            baseline_gaussians = encoder_output
-        
-        tgt_ext = target['extrinsics']
-        tgt_int = target['intrinsics']
-        baseline_output = model.decoder.forward(
-            baseline_gaussians, tgt_ext, tgt_int,
-            target['near'], target['far'], (h, w), depth_mode=None
-        )
-    baseline_images = baseline_output.color[0, :V_tgt]
-    baseline_image = baseline_images[0]
-    baseline_count = baseline_gaussians.means.shape[1]
-    
-    # --- Precise GPU timing (encoder only) via CUDA events ---
-    def _baseline_encoder():
-        return model.encoder(context, False, deterministic=False)
-    
-    if args.sensitivity_trace:
-        # Sensitivity uses the already-produced baseline tensors and replays
-        # parameter decisions. Encoder timing is outside this claim.
-        baseline_gpu_time_ms = 0.0
-        baseline_timing_samples_ms = []
+    if args.fsdr_only:
+        print("[3/6] Baseline encoder and renderer: SKIPPED (--fsdr-only)")
+        print(f"  GPU: {gpu_name}")
     else:
-        is_orin = device.type == "cuda" and "Orin" in gpu_name
-        timing_repetitions = 5 if is_orin else 1
-        baseline_gpu_time_ms, baseline_timing_samples_ms = gpu_timed_inference(
-            _baseline_encoder,
-            warmup=1 if is_orin else 0,
-            repeats=timing_repetitions,
-            device=device,
-            return_samples=True,
+        print("[3/6] Running BASELINE (original model)...")
+        print(f"  GPU: {gpu_name} @ {gpu_freq_mhz} MHz (max SM clock)")
+        with torch.no_grad():
+            encoder_output = model.encoder(context, False, deterministic=False)
+            if isinstance(encoder_output, dict):
+                baseline_gaussians = encoder_output.get('gaussians', encoder_output)
+            else:
+                baseline_gaussians = encoder_output
+            tgt_ext = target['extrinsics']
+            tgt_int = target['intrinsics']
+            baseline_output = model.decoder.forward(
+                baseline_gaussians,
+                tgt_ext,
+                tgt_int,
+                target['near'],
+                target['far'],
+                (h, w),
+                depth_mode=None,
+            )
+        baseline_images = baseline_output.color[0, :V_tgt]
+        baseline_image = baseline_images[0]
+        baseline_count = baseline_gaussians.means.shape[1]
+
+        def _baseline_encoder():
+            return model.encoder(context, False, deterministic=False)
+
+        if args.sensitivity_trace:
+            baseline_gpu_time_ms = 0.0
+            baseline_timing_samples_ms = []
+        else:
+            is_orin = device.type == "cuda" and "Orin" in gpu_name
+            timing_repetitions = 5 if is_orin else 1
+            baseline_gpu_time_ms, baseline_timing_samples_ms = gpu_timed_inference(
+                _baseline_encoder,
+                warmup=1 if is_orin else 0,
+                repeats=timing_repetitions,
+                device=device,
+                return_samples=True,
+            )
+        baseline_gpu_freq_hz = gpu_freq_mhz * 1e6
+        baseline_gpu_cycles = int(
+            baseline_gpu_time_ms * 1e-3 * baseline_gpu_freq_hz
         )
-    baseline_gpu_freq_hz = gpu_freq_mhz * 1e6
-    baseline_gpu_cycles = int(baseline_gpu_time_ms * 1e-3 * baseline_gpu_freq_hz)
-    
-    print(f"  ✓ Baseline: {baseline_image.shape}, Gaussians: {baseline_count:,}")
-    print(
-        f"    GPU encoder time: {baseline_gpu_time_ms:.2f} ms "
-        f"({len(baseline_timing_samples_ms)} diagnostic sample(s))"
-    )
-    print(f"    GPU encoder cycles: {baseline_gpu_cycles:,} (@ {gpu_freq_mhz} MHz)")
-    
-    # Print baseline depth statistics for comparison
-    if hasattr(baseline_gaussians, 'depths'):
-        baseline_depths = baseline_gaussians.depths.reshape(-1)
-        print(f"    Baseline depth stats: min={baseline_depths.min():.4f}, max={baseline_depths.max():.4f}, mean={baseline_depths.mean():.4f}")
-    elif hasattr(baseline_gaussians, 'means'):
-        # Use Z-coordinate of means as depth proxy
-        means = baseline_gaussians.means.reshape(-1, 3)
-        z_depths = means[:, 2]
-        print(f"    Baseline Z-coord depth: min={z_depths.min():.4f}, max={z_depths.max():.4f}, mean={z_depths.mean():.4f}")
-    
-    # Print baseline opacities for debugging
-    if hasattr(baseline_gaussians, 'opacities'):
-        bl_op = baseline_gaussians.opacities.reshape(-1)
-        print(f"    Baseline opacities: min={bl_op.min():.4f}, max={bl_op.max():.4f}, mean={bl_op.mean():.4f}")
-    
-    # Handle baseline-only mode
-    if args.baseline_only:
-        gt_image = target['image'][0, 0]
-        mse = F.mse_loss(baseline_image, gt_image)
-        psnr = -10 * torch.log10(mse).item()
-        
-        print()
-        print("[4/6] SCARF Pipeline: SKIPPED (--baseline-only)")
-        print("[5/6] Rendering: SKIPPED (--baseline-only)")
-        print()
-        print("======================================================================")
-        print("RESULTS - Baseline Only")
-        print("======================================================================")
-        print()
-        print("### Baseline Metrics")
-        print(f"  PSNR: {psnr:.2f} dB")
-        print(f"  Gaussians: {baseline_count:,}")
+        print(f"  ✓ Baseline: {baseline_image.shape}, Gaussians: {baseline_count:,}")
         print(
-            f"  GPU encoder time: {baseline_gpu_time_ms:.2f} ms "
+            f"    GPU encoder time: {baseline_gpu_time_ms:.2f} ms "
             f"({len(baseline_timing_samples_ms)} diagnostic sample(s))"
         )
-        print(f"  GPU encoder cycles: {baseline_gpu_cycles:,} (@ {gpu_freq_mhz} MHz)")
-        return
+        print(f"    GPU encoder cycles: {baseline_gpu_cycles:,} (@ {gpu_freq_mhz} MHz)")
+        if hasattr(baseline_gaussians, 'depths'):
+            baseline_depths = baseline_gaussians.depths.reshape(-1)
+            print(
+                "    Baseline depth stats: "
+                f"min={baseline_depths.min():.4f}, "
+                f"max={baseline_depths.max():.4f}, "
+                f"mean={baseline_depths.mean():.4f}"
+            )
+        elif hasattr(baseline_gaussians, 'means'):
+            z_depths = baseline_gaussians.means.reshape(-1, 3)[:, 2]
+            print(
+                "    Baseline Z-coord depth: "
+                f"min={z_depths.min():.4f}, max={z_depths.max():.4f}, "
+                f"mean={z_depths.mean():.4f}"
+            )
+        if hasattr(baseline_gaussians, 'opacities'):
+            bl_op = baseline_gaussians.opacities.reshape(-1)
+            print(
+                "    Baseline opacities: "
+                f"min={bl_op.min():.4f}, max={bl_op.max():.4f}, "
+                f"mean={bl_op.mean():.4f}"
+            )
+        if args.baseline_only:
+            gt_image = target['image'][0, 0]
+            mse = F.mse_loss(baseline_image, gt_image)
+            psnr = -10 * torch.log10(mse).item()
+            print()
+            print("[4/6] SCARF Pipeline: SKIPPED (--baseline-only)")
+            print("[5/6] Rendering: SKIPPED (--baseline-only)")
+            print()
+            print("=" * 70)
+            print("RESULTS - Baseline Only")
+            print("=" * 70)
+            print()
+            print("### Baseline Metrics")
+            print(f"  PSNR: {psnr:.2f} dB")
+            print(f"  Gaussians: {baseline_count:,}")
+            print(
+                f"  GPU encoder time: {baseline_gpu_time_ms:.2f} ms "
+                f"({len(baseline_timing_samples_ms)} diagnostic sample(s))"
+            )
+            print(
+                f"  GPU encoder cycles: {baseline_gpu_cycles:,} "
+                f"(@ {gpu_freq_mhz} MHz)"
+            )
+            return
     
     # --------------------------------------------------------
     # Step 4: Run SCARF Pipeline (Clear 3-Stage Flow)
@@ -1588,6 +1601,10 @@ def main(argv=None):
     pipeline_depths = None
     pipeline_densities = None
     pipeline_raw_gaussians = None
+    fsdr_depth_probs = None
+    fsdr_depth_candidates = None
+    fsdr_candidate_domain = None
+    fsdr_probability_source = None
     
     # near/far already computed before Stage 1 (used by DepthSplat GPU fallback)
     
@@ -1739,6 +1756,10 @@ def main(argv=None):
                 pipeline_depths = dp_output.depths
                 pipeline_densities = dp_output.densities
                 pipeline_raw_gaussians = dp_output.raw_gaussians
+                fsdr_depth_probs = dp_output.depth_probs
+                fsdr_depth_candidates = dp_output.depth_candidates
+                fsdr_candidate_domain = dp_output.candidate_domain
+                fsdr_probability_source = dp_output.probability_source
                 
                 print(f"    ✓ Depths: {pipeline_depths.shape if pipeline_depths is not None else 'None'}")
                 
@@ -1767,6 +1788,21 @@ def main(argv=None):
                                 extrinsics=context['extrinsics'],
                             )
                             depthsplat_results = results_dict
+                            from scripts.fsdr_trace import (
+                                depthsplat_global_candidate_tensors,
+                            )
+
+                            fsdr_depth_probs, fsdr_depth_candidates = (
+                                depthsplat_global_candidate_tensors(
+                                    results_dict['match_probs'],
+                                    near=near_bv,
+                                    far=far_bv,
+                                )
+                            )
+                            fsdr_candidate_domain = 'inverse_depth'
+                            fsdr_probability_source = (
+                                'pinned_original_depthsplat_first_scale_softmax'
+                            )
                             
                             depth_final = results_dict['depth_preds'][-1]
                             match_prob = results_dict['match_probs'][-1]
@@ -1937,7 +1973,157 @@ def main(argv=None):
             print(f"    ✓ raw_gaussians: {pipeline_raw_gaussians.shape}")
             d_flat = pipeline_depths.reshape(-1)
             print(f"      Depth stats: min={d_flat.min():.4f}, max={d_flat.max():.4f}, mean={d_flat.mean():.4f}")
-    
+
+    if args.fsdr_only:
+        if (
+            pipeline_features is None
+            or fsdr_depth_probs is None
+            or fsdr_depth_candidates is None
+            or fsdr_candidate_domain != 'inverse_depth'
+            or not fsdr_probability_source
+        ):
+            raise RuntimeError(
+                "FSDR-only claim requires authentic full-search probabilities and candidates"
+            )
+        from scripts.fsdr_trace import (
+            prepare_fsdr_candidate_frame,
+            tile_probe_pixel_order,
+        )
+
+        (
+            feature_frame,
+            candidate_anchors,
+            top1_indices,
+            candidate_frame,
+            fsdr_shape,
+        ) = prepare_fsdr_candidate_frame(
+            pipeline_features,
+            fsdr_depth_probs,
+            fsdr_depth_candidates,
+        )
+        fsdr_height, fsdr_width = fsdr_shape
+        fsdr.process_discrete_frame(
+            feature_frame,
+            candidate_anchors,
+            top1_indices,
+            candidate_frame,
+            width=fsdr_width,
+            pixel_order=tile_probe_pixel_order(
+                height=fsdr_height,
+                width=fsdr_width,
+                tile_size=CONFIG.tile_size,
+            ),
+        )
+        summary = fsdr.get_summary()
+        if summary.get('discrete_candidate_evidence') is not True:
+            raise RuntimeError("FSDR discrete candidate evidence is incomplete")
+        from scripts.fsdr_evidence import (
+            build_fsdr_sample_record,
+            validate_fsdr_record,
+            write_json,
+        )
+        from scripts.result_record import (
+            build_environment_provenance,
+            cached_sha256_file,
+            portable_command,
+            sha256_file,
+            source_identity,
+        )
+
+        source = source_identity()
+        output_dir = (
+            Path(args.output_dir)
+            if args.output_dir
+            else SCARF_ROOT / 'outputs' / 'fsdr-demo'
+        )
+        protocol_index = (
+            args.protocol_sample_index
+            if args.protocol_sample_index is not None
+            else args.sample_index
+        )
+        record = build_fsdr_sample_record(
+            provenance={
+                'git_commit': source['git_commit'],
+                'git_dirty': source['git_dirty'],
+                'source_identity': source['source'],
+                'submodules': source['submodules'],
+                'model': args.model,
+                'dataset': {
+                    'name': args.dataset,
+                    'representation': dataset_identity['representation'],
+                    'tree_sha256': dataset_identity['tree_sha256'],
+                    'manifest': str(dataset_manifest.relative_to(SCARF_ROOT)),
+                    'manifest_sha256': sha256_file(dataset_manifest),
+                    'paper_result_eligible': True,
+                },
+                'checkpoint': {
+                    'path': str(checkpoint_path.relative_to(SCARF_ROOT)),
+                    'sha256': cached_sha256_file(checkpoint_path),
+                    'load': getattr(model, '_scarf_checkpoint_load', {}),
+                },
+                'environment': build_environment_provenance(
+                    experiment.environment_profile
+                ),
+                'runtime_assets': runtime_assets,
+                'command': portable_command(
+                    [
+                        sys.executable,
+                        str(SCARF_ROOT / 'scripts/demo.py'),
+                        *(list(argv) if argv is not None else sys.argv[1:]),
+                    ]
+                ),
+                'seed': args.seed,
+                'device': {
+                    'type': device.type,
+                    'name': (
+                        torch.cuda.get_device_name(device)
+                        if device.type == 'cuda'
+                        else str(device)
+                    ),
+                },
+                'evaluation': {
+                    'kind': 'sample',
+                    'sample_index': protocol_index,
+                    'execution_index': args.sample_index,
+                    'candidate_count': args.num_samples,
+                    'scene': str(scene_name),
+                    'context_indices': [
+                        int(value)
+                        for value in batch['context']['index'][0].tolist()
+                    ],
+                    'target_indices': [
+                        int(value)
+                        for value in batch['target']['index'][0, :V_tgt].tolist()
+                    ],
+                },
+            },
+            total_pixels=int(summary['total_pixels']),
+            cache_hits=int(summary['cache_hits']),
+            cache_misses=int(summary['cache_misses']),
+            guided_pixels=int(summary['guided']),
+            guided_in_window=int(summary['guided_in_window']),
+            guided_out_window=int(summary['guided_out_window']),
+            guided_top1_covered=int(summary['guided_top1_covered']),
+            guided_top1_missed=int(summary['guided_top1_missed']),
+            depth_inconsistent=int(summary.get('depth_inconsistent', 0)),
+            hit_no_guide=int(summary['hit_no_guide']),
+            full_depth_candidates=CONFIG.num_depth_candidates,
+            narrowed_depth_candidates=CONFIG.fsdr_narrowed_candidates,
+            candidate_domain=fsdr_candidate_domain,
+            probability_source=fsdr_probability_source,
+            evidence_height=fsdr_height,
+            evidence_width=fsdr_width,
+        )
+        validate_fsdr_record(record)
+        write_json(record, output_dir / 'results.json')
+        print(
+            "  FSDR-only evidence: "
+            f"guided={record['fsdr']['metrics']['guided_rate']*100:.2f}%, "
+            f"top1={record['fsdr']['metrics']['top1_coverage']*100:.4f}%"
+        )
+        print(f"Structured result: {output_dir / 'results.json'}")
+        return
+
     # ============================================================
     # STAGE 3: Gaussian Generation
     # ============================================================
@@ -2286,6 +2472,9 @@ def main(argv=None):
         'mean_similarity': 0.0,
         'threshold': 0.90,
     }
+    saes_diagnostic_record = None
+    saes_representatives = None
+    saes_diagnostic_images = {}
     
     # Clone original Gaussians BEFORE any modifications (needed for ablation configs)
     orig_means = scarf_gaussians_full.means.clone()
@@ -2459,6 +2648,42 @@ def main(argv=None):
               f"({saes_low_var_stats['low_var_tiles']}/{saes_low_var_stats['early_tiles']} early tiles, "
               f"mean sim={saes_low_var_stats['mean_similarity']:.3f})")
 
+        if args.saes_diagnostic_sweep:
+            from scripts.saes_diagnostics import (
+                decision_statistics,
+                representative_indices,
+            )
+
+            primitives_per_pixel = N // (V_ctx * h * w)
+            saes_representatives = representative_indices(
+                modified_mask,
+                view_count=V_ctx,
+                height=h,
+                width=w,
+                tile_size=CONFIG.tile_size,
+                primitives_per_pixel=primitives_per_pixel,
+            )
+            saes_diagnostic_record = decision_statistics(
+                features,
+                depths,
+                height=h,
+                width=w,
+                tile_size=CONFIG.tile_size,
+                feature_threshold=CONFIG.feature_var_threshold,
+                depth_threshold=CONFIG.depth_std_threshold,
+            )
+            saes_diagnostic_record.update(
+                {
+                    'model': args.model,
+                    'dataset': args.dataset,
+                    'sample_index': args.sample_index,
+                    'representative_count': int(saes_representatives.numel()),
+                    'coverage_sweep': [],
+                    'component_attribution': [],
+                    'retention_boundary': [],
+                }
+            )
+
     # Record SAES v4 savings for cycle model
     # Use h*w (pixel positions) as base, not N (total Gaussians incl. surfaces)
     # because ASIC processes per pixel position - skipping a position skips all surfaces
@@ -2475,22 +2700,23 @@ def main(argv=None):
                        hasattr(features, 'shape'))
         
         if has_features and len(all_pixels) > 0:
-            B_feat, V_feat, C_f, H_feat, W_feat = features.shape
-            features_up = F.interpolate(
-                features[0], size=(h, w), mode='bilinear', align_corners=False
-            ).mean(dim=0)  # [C, H, W]
+            from scripts.fsdr_trace import prepare_fsdr_frame, tile_probe_pixel_order
+
             if depths is None:
-                frame_depths = torch.ones(h * w, device=features_up.device)
-            elif depths.dim() == 5:
-                frame_depths = depths[0, 0, : h * w, 0, 0]
-            elif depths.dim() == 4:
-                frame_depths = depths[0, 0, :h, :w].reshape(-1)
-            else:
-                raise RuntimeError("FSDR received an unsupported depth tensor")
+                raise RuntimeError("FSDR requires a real depth frame")
+            feature_frame, frame_depths = prepare_fsdr_frame(
+                features,
+                depths,
+                height=h,
+                width=w,
+            )
             paths = fsdr.process_frame(
-                features_up.permute(1, 2, 0).reshape(h * w, C_f),
+                feature_frame,
                 frame_depths,
                 w,
+                pixel_order=tile_probe_pixel_order(
+                    height=h, width=w, tile_size=CONFIG.tile_size
+                ),
             )
             for pixel_idx, path in enumerate(paths):
                 savings.record_fsdr_pixel(path, reused=(pixel_idx in fsdr.reuse_data))
@@ -2702,6 +2928,207 @@ def main(argv=None):
     scarf_psnr = scarf_quality['psnr_db']
     scarf_ssim = scarf_quality['ssim']
     scarf_lpips = scarf_quality['lpips']
+
+    if args.saes_diagnostic_sweep:
+        from scripts.saes_diagnostics import (
+            build_component_variant,
+            build_coverage_variant,
+            build_ranked_tile_subset_variant,
+            declared_level0_rate,
+            probe_cross_check_errors,
+            probe_feature_variances,
+        )
+
+        if saes_diagnostic_record is None or saes_representatives is None:
+            raise RuntimeError("SAES diagnostic state was not initialized")
+
+        def record_diagnostic(
+            destination,
+            *,
+            key,
+            diagnostic_kind,
+            diagnostic_images,
+            fields,
+        ):
+            view_metrics = compute_view_metrics(diagnostic_images, gt_images)
+            quality = {
+                metric: float(
+                    sum(view[metric] for view in view_metrics) / len(view_metrics)
+                )
+                for metric in ('psnr_db', 'ssim', 'lpips')
+            }
+            delta = {
+                metric: quality[metric] - baseline_quality[metric]
+                for metric in ('psnr_db', 'ssim', 'lpips')
+            }
+            accepted = (
+                abs(delta['psnr_db']) <= 0.15
+                and abs(delta['ssim']) <= 0.005
+                and abs(delta['lpips']) <= 0.005
+            )
+            destination.append(
+                {
+                    'key': key,
+                    'diagnostic_kind': diagnostic_kind,
+                    **fields,
+                    'quality': quality,
+                    'delta_from_baseline': delta,
+                    'within_existing_tolerances': accepted,
+                }
+            )
+            print(
+                f"    {key}: dPSNR={delta['psnr_db']:+.4f} dB, "
+                f"dSSIM={delta['ssim']:+.6f}, "
+                f"dLPIPS={delta['lpips']:+.6f}, pass={accepted}"
+            )
+            saes_diagnostic_images[key] = diagnostic_images.detach().cpu()
+
+        # A projected 2D Gaussian's integral scales approximately with its
+        # covariance multiplier and alpha. Pair the two in opposite directions
+        # so this sweep tests coverage rather than simply adding opacity mass.
+        mass_conserving_pairs = (
+            (0.5, 2.0),
+            (1.0, 1.0),
+            (1.5, 2.0 / 3.0),
+            (2.0, 0.5),
+            (3.0, 1.0 / 3.0),
+            (4.0, 0.25),
+        )
+        print("  Diagnostic mass-conserving coverage sweep:")
+        for covariance_scale, alpha_exponent in mass_conserving_pairs:
+            key = f"mass_cov_{covariance_scale:g}_alpha_{alpha_exponent:.6g}"
+            if covariance_scale == 1.0 and alpha_exponent == 1.0:
+                diagnostic_images = ablation_renders['asic_saes']
+            else:
+                variant = build_coverage_variant(
+                    saes_gaussians,
+                    saes_representatives,
+                    covariance_scale=covariance_scale,
+                    opacity_scale=alpha_exponent,
+                )
+                diagnostic_images = _render(variant)
+            record_diagnostic(
+                saes_diagnostic_record['coverage_sweep'],
+                key=key,
+                diagnostic_kind='mass_conserving_coverage',
+                diagnostic_images=diagnostic_images,
+                fields={
+                    'covariance_scale': covariance_scale,
+                    'alpha_exponent': alpha_exponent,
+                },
+            )
+
+        component_variants = (
+            ('restore_means', ('means',)),
+            ('restore_covariances', ('covariances',)),
+            ('restore_harmonics', ('harmonics',)),
+            ('restore_opacities', ('opacities',)),
+            ('restore_means_covariances', ('means', 'covariances')),
+            ('restore_harmonics_opacities', ('harmonics', 'opacities')),
+            (
+                'zero_only',
+                ('means', 'covariances', 'harmonics', 'opacities'),
+            ),
+        )
+        print("  Diagnostic representative-component attribution:")
+        for key, restored_components in component_variants:
+            variant = build_component_variant(
+                saes_gaussians,
+                g_noopt,
+                saes_representatives,
+                restore=restored_components,
+            )
+            diagnostic_images = _render(variant)
+            record_diagnostic(
+                saes_diagnostic_record['component_attribution'],
+                key=key,
+                diagnostic_kind='representative_component_attribution',
+                diagnostic_images=diagnostic_images,
+                fields={'restored_components': list(restored_components)},
+            )
+
+        declared_rate = declared_level0_rate(
+            SCARF_ROOT / 'artifact/expected_results.json',
+            args.model,
+            args.dataset,
+        )
+        tile_scores = probe_feature_variances(
+            features,
+            height=h,
+            width=w,
+            tile_size=CONFIG.tile_size,
+        )
+        current_rate = float(saes_stats['level0_ratio'])
+        retention_fractions = sorted(
+            {
+                declared_rate * numerator / 4.0
+                for numerator in range(1, 5)
+            }
+            | {current_rate}
+        )
+        print("  Diagnostic target-free L0 retention boundary:")
+        for target_fraction in retention_fractions:
+            variant, metadata = build_ranked_tile_subset_variant(
+                g_noopt,
+                saes_gaussians,
+                modified_mask,
+                tile_scores,
+                view_count=V_ctx,
+                height=h,
+                width=w,
+                tile_size=CONFIG.tile_size,
+                primitives_per_pixel=primitives_per_pixel,
+                target_fraction=target_fraction,
+                ranking_statistic='raw_probe_vector_variance',
+            )
+            diagnostic_images = _render(variant)
+            key = f"retention_{metadata['selected_fraction']:.6f}"
+            record_diagnostic(
+                saes_diagnostic_record['retention_boundary'],
+                key=key,
+                diagnostic_kind='target_free_retention_boundary',
+                diagnostic_images=diagnostic_images,
+                fields={
+                    **metadata,
+                    'declared_level0_rate': declared_rate,
+                },
+            )
+
+        cross_check_scores = probe_cross_check_errors(
+            g_noopt,
+            view_count=V_ctx,
+            height=h,
+            width=w,
+            tile_size=CONFIG.tile_size,
+            primitives_per_pixel=primitives_per_pixel,
+        )
+        print("  Diagnostic target-free probe-error retention boundary:")
+        for target_fraction in retention_fractions:
+            variant, metadata = build_ranked_tile_subset_variant(
+                g_noopt,
+                saes_gaussians,
+                modified_mask,
+                cross_check_scores,
+                view_count=V_ctx,
+                height=h,
+                width=w,
+                tile_size=CONFIG.tile_size,
+                primitives_per_pixel=primitives_per_pixel,
+                target_fraction=target_fraction,
+                ranking_statistic='probe_gaussian_leave_one_out_error',
+            )
+            diagnostic_images = _render(variant)
+            key = f"probe_error_retention_{metadata['selected_fraction']:.6f}"
+            record_diagnostic(
+                saes_diagnostic_record['retention_boundary'],
+                key=key,
+                diagnostic_kind='target_free_probe_error_retention_boundary',
+                diagnostic_images=diagnostic_images,
+                fields={
+                    **metadata,
+                    'declared_level0_rate': declared_rate,
+                },
+            )
     
     # Check quality budget (compare optimized configs vs no-opt, excluding no-opt itself)
     opt_configs = {k: v for k, v in ablation_quality.items() if k != 'asic'}
@@ -2714,6 +3141,25 @@ def main(argv=None):
     # Save outputs
     output_dir = Path(args.output_dir) if args.output_dir else SCARF_ROOT / 'outputs' / 'demo'
     output_dir.mkdir(parents=True, exist_ok=True)
+    if saes_diagnostic_record is not None:
+        saes_diagnostic_record['selection'] = {
+            'scene': str(scene_name),
+            'context_indices': [
+                int(value) for value in batch['context']['index'][0].tolist()
+            ],
+            'target_indices': [
+                int(value)
+                for value in batch['target']['index'][0, :V_tgt].tolist()
+            ],
+        }
+        saes_diagnostic_record['command'] = [
+            sys.executable,
+            str(SCARF_ROOT / 'scripts/demo.py'),
+            *(list(argv) if argv is not None else sys.argv[1:]),
+        ]
+        with open(output_dir / 'saes_diagnostic.json', 'w', encoding='utf-8') as stream:
+            json.dump(saes_diagnostic_record, stream, indent=2, sort_keys=True)
+            stream.write('\n')
     
     save_images = args.image_output_policy == 'all' or (
         args.image_output_policy == 'representative' and args.sample_index == 0
@@ -2733,6 +3179,11 @@ def main(argv=None):
                 save_image(
                     cfg_images[view_index],
                     output_dir / f'ablation_{cfg_key}_{view_index:02d}.png',
+                )
+            for key, diagnostic_images in saes_diagnostic_images.items():
+                save_image(
+                    diagnostic_images[view_index],
+                    output_dir / f'saes_{key}_{view_index:02d}.png',
                 )
     
     # Get statistics

@@ -343,21 +343,20 @@ class ProgressiveSAES:
 
         return total_sim / count if count > 0 else 1.0
 
-    def probe_cross_check(
+    def probe_cross_check_error(
         self,
         gaussians_full,
         probe_indices: List[int],
-    ) -> bool:
+    ) -> float:
         """
-        ASIC-implementable quality validation: leave-one-out cross-check.
+        Return the ASIC-implementable leave-one-out probe prediction error.
 
-        For each probe, predict it from the average of the other probes.
-        Returns True if max prediction error <= cross_check_threshold.
-        Works for any K ≥ 2 probes.
+        For each probe, predict it from the average of the other probes and
+        return the maximum covariance or harmonic cosine error.
         """
         K = len(probe_indices)
         if K < 2:
-            return False
+            return float("inf")
 
         harmo = gaussians_full.harmonics[0]
         covs = gaussians_full.covariances[0]
@@ -386,7 +385,18 @@ class ProgressiveSAES:
                     c_flat_actual.unsqueeze(0)).item()
                 max_err = max(max_err, 1.0 - max(c_sim, 0.0))
 
-        return max_err <= self.cross_check_threshold
+        return max_err
+
+    def probe_cross_check(
+        self,
+        gaussians_full,
+        probe_indices: List[int],
+    ) -> bool:
+        """Return whether the continuous probe error passes the configured gate."""
+        return (
+            self.probe_cross_check_error(gaussians_full, probe_indices)
+            <= self.cross_check_threshold
+        )
 
     # ------------------------------------------------------------------ #
     # Core interpolation / update methods                                  #

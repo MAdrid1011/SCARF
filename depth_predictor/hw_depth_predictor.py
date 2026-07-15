@@ -664,7 +664,7 @@ class HWUNetUnit:
             if len(in_layers_list) > 1:
                 in_rest = nn.Sequential(*in_layers_list[:-1])
                 in_conv = in_layers_list[-1]
-                
+
                 h, cycles = self._hw_sequential(h, in_rest, device)
                 total_cycles += cycles
                 h, cycles = self._hw_layer(h, block.h_upd, device)
@@ -1938,40 +1938,51 @@ class HWDepthPredictor:
         """
         B, V, C, H, W = features.shape
         D = self.config.num_depth_candidates
+        captured_logits: List[torch.Tensor] = []
+        depth_head = getattr(self._original_depth_predictor, "depth_head_lowres", None)
+        hook = None
+        if isinstance(depth_head, nn.Module):
+            hook = depth_head.register_forward_hook(
+                lambda _module, _inputs, output: captured_logits.append(output.detach())
+            )
         
         # Run original model
-        with torch.no_grad():
-            # Build kwargs for original model
-            model_kwargs = self._reference_model_kwargs(kwargs)
-            model_kwargs.setdefault('gaussians_per_pixel', 1)
-            model_kwargs.setdefault('deterministic', True)
-            
-            gaussian_modules = [
-                getattr(self._original_depth_predictor, name)
-                for name in (
-                    "upsampler",
-                    "proj_feature",
-                    "refine_unet",
-                    "to_gaussians",
-                )
-                if hasattr(self._original_depth_predictor, name)
-            ]
-            if gaussian_modules:
-                from .module_cycle_trace import run_callable_with_module_cycle_trace
+        try:
+            with torch.no_grad():
+                # Build kwargs for original model
+                model_kwargs = self._reference_model_kwargs(kwargs)
+                model_kwargs.setdefault('gaussians_per_pixel', 1)
+                model_kwargs.setdefault('deterministic', True)
 
-                gaussian_trace = run_callable_with_module_cycle_trace(
-                    lambda: self._original_depth_predictor(
+                gaussian_modules = [
+                    getattr(self._original_depth_predictor, name)
+                    for name in (
+                        "upsampler",
+                        "proj_feature",
+                        "refine_unet",
+                        "to_gaussians",
+                    )
+                    if hasattr(self._original_depth_predictor, name)
+                ]
+                if gaussian_modules:
+                    from .module_cycle_trace import run_callable_with_module_cycle_trace
+
+                    gaussian_trace = run_callable_with_module_cycle_trace(
+                        lambda: self._original_depth_predictor(
+                            features, intrinsics, extrinsics, near, far, **model_kwargs
+                        ),
+                        gaussian_modules,
+                    )
+                    output = gaussian_trace.output
+                    gaussian_head_cycles = gaussian_trace.total_cycles
+                else:
+                    output = self._original_depth_predictor(
                         features, intrinsics, extrinsics, near, far, **model_kwargs
-                    ),
-                    gaussian_modules,
-                )
-                output = gaussian_trace.output
-                gaussian_head_cycles = gaussian_trace.total_cycles
-            else:
-                output = self._original_depth_predictor(
-                    features, intrinsics, extrinsics, near, far, **model_kwargs
-                )
-                gaussian_head_cycles = 0
+                    )
+                    gaussian_head_cycles = 0
+        finally:
+            if hook is not None:
+                hook.remove()
         
         # Parse output
         if isinstance(output, tuple):
@@ -1995,10 +2006,53 @@ class HWDepthPredictor:
             gaussian_head=gaussian_head_cycles,
         )
         
+        depth_probs = None
+        depth_candidates_evidence = None
+        probability_source = None
+        if len(captured_logits) == 1:
+            logits = captured_logits[0]
+            if logits.dim() == 4 and logits.shape[0] == V * B:
+                D = logits.shape[1]
+                depth_probs = rearrange(
+                    torch.softmax(logits, dim=1),
+                    '(v b) d h w -> b v d h w',
+                    v=V,
+                    b=B,
+                )
+
+                def expand_bound(bound: torch.Tensor, label: str) -> torch.Tensor:
+                    bound = bound.to(device=logits.device, dtype=logits.dtype)
+                    if bound.dim() == 0:
+                        return bound.reshape(1, 1).expand(B, V)
+                    if bound.shape == (B, V):
+                        return bound
+                    if bound.dim() == 1 and bound.numel() == B:
+                        return bound[:, None].expand(B, V)
+                    if bound.dim() == 1 and B == 1 and bound.numel() == V:
+                        return bound[None, :]
+                    raise ValueError(f"{label} cannot be aligned to [B,V]")
+
+                near_bv = expand_bound(near, "near").clamp_min(1e-8)
+                far_bv = expand_bound(far, "far").clamp_min(1e-8)
+                interpolation = torch.linspace(
+                    0.0, 1.0, D, device=logits.device, dtype=logits.dtype
+                ).reshape(1, 1, D)
+                min_inverse_depth = (1.0 / far_bv).unsqueeze(-1)
+                max_inverse_depth = (1.0 / near_bv).unsqueeze(-1)
+                depth_candidates_evidence = (
+                    min_inverse_depth
+                    + interpolation * (max_inverse_depth - min_inverse_depth)
+                )[..., None, None]
+                probability_source = "pinned_original_depth_head_softmax"
+
         return DepthPredictorOutput(
             depths=depths,
             densities=densities,
             raw_gaussians=raw_gaussians,
+            depth_probs=depth_probs,
+            depth_candidates=depth_candidates_evidence,
+            candidate_domain="inverse_depth" if depth_probs is not None else None,
+            probability_source=probability_source,
             total_cycles=self._cycle_breakdown.total,
             cycle_breakdown=self._cycle_breakdown,
         )

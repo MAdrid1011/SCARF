@@ -5,9 +5,9 @@ figures. Do not mark the HotCRP submission ready until every item in the final
 checklist is complete.
 
 Current badge scope is **Artifact Available** and **Artifact Functional**.
-Do not request **Results Reproduced** unless a later sparse-SAES implementation
-passes C1/C4 and the machine-readable claim status is restored with real
-aggregate evidence.
+Do not request **Results Reproduced** unless both the sparse-SAES contract and
+the missing FSDR LSH collateral are recovered and the machine-readable claim
+status is restored with real aggregate evidence.
 
 ## Blocking Abstract Correction
 
@@ -34,8 +34,13 @@ Functional; no 28 nm estimate is reported without routed ASAP7 input.
 
 Table 1 and Tables 2--3 must not be listed as reproduced in the present
 submission. Real sparse-SAES probes exceed the quality tolerance and do not
-reproduce the paper's L1 rates. The closer dense-interpolation diagnostic
-retains every Gaussian and is explicitly rejected by claim runs.
+reproduce the paper's L1 rates. Six FSDR-only pilots also fail the Guided Rate
+targets; the public RTL contains an all-zero LSH projection ROM rather than the
+hyperplanes needed to reproduce the paper's guided set. Exact discrete Top-1
+evidence is retained as a diagnostic but is not claimed independently because
+its denominator depends on that unrecoverable guided set. The closer
+dense-interpolation diagnostic retains every Gaussian and is explicitly
+rejected by claim runs.
 
 All dataset-level claims use the ordered protocol recovered from the committed
 upstream evaluation indices. Source index hashes, prepared tree hashes, and

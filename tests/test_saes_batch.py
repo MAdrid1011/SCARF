@@ -47,6 +47,24 @@ def test_batched_tile_variance_matches_direct_formula():
             )
 
 
+def test_probe_cross_check_exposes_the_continuous_error():
+    from saes.progressive_saes import ProgressiveSAES
+
+    gaussians = _gaussians()
+    probes = [0, 3, 12, 15]
+    saes = ProgressiveSAES(4, 4, cross_check_threshold=1e-6)
+
+    baseline_error = saes.probe_cross_check_error(gaussians, probes)
+    gaussians.harmonics[0, probes[0]] *= -1.0
+    changed_error = saes.probe_cross_check_error(gaussians, probes)
+
+    assert baseline_error >= 0.0
+    assert changed_error > baseline_error
+    assert saes.probe_cross_check(gaussians, probes) == (
+        changed_error <= saes.cross_check_threshold
+    )
+
+
 def test_representative_path_performs_full_gaussian_moment_matching():
     from saes.progressive_saes import apply_progressive_saes
 

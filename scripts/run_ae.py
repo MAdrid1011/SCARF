@@ -28,8 +28,13 @@ from scripts.ae_config import (
 from scripts.compile_protocol import canonicalize_index
 
 
-SOFTWARE_MODES = {"quick", "quality", "speedup", "ablation", "orin"}
-CLAIM_ONLY_SOFTWARE_MODES = {"quality", "speedup", "ablation", "orin"}
+SOFTWARE_MODES = {"quick", "quality", "speedup", "ablation", "orin", "fsdr"}
+CLAIM_ONLY_SOFTWARE_MODES = {"quality", "speedup", "ablation", "orin", "fsdr"}
+FSDR_MATRIX = tuple(
+    (model, dataset)
+    for model in ("transplat", "mvsplat", "depthsplat")
+    for dataset in ("re10k", "acid")
+)
 MODES = tuple(
     sorted(
         SOFTWARE_MODES
@@ -69,6 +74,8 @@ def _python_for(profile: str, override: str | None) -> str:
 def _pairs_for_mode(mode: str) -> tuple[tuple[str, str], ...]:
     if mode == "quick":
         return (("mvsplat", "re10k"),)
+    if mode == "fsdr":
+        return FSDR_MATRIX
     if mode in {"quality", "ablation"}:
         return _claimed_pairs()
     if mode in {"speedup", "orin"}:
@@ -162,6 +169,8 @@ def build_software_plan(
         ]
         if mode in {"ablation", "all"}:
             demo_command.append("--ablation")
+        if mode == "fsdr":
+            demo_command.extend(("--fsdr-only", "--image-output-policy", "none"))
         command = [
             profile_python,
             str(SCRIPT_DIR / "run_pair.py"),
@@ -180,16 +189,32 @@ def build_software_plan(
             *demo_command,
         ]
         commands = [command]
-        aggregate_command = [
-            sys.executable,
-            str(SCRIPT_DIR / "aggregate_results.py"),
-            "--input-dir",
-            str(output_dir / "samples"),
-            "--expected-count",
-            str(sample_count),
-            "--output",
-            str(output_dir / "results.json"),
-        ]
+        if mode == "fsdr":
+            aggregate_command = [
+                sys.executable,
+                str(SCRIPT_DIR / "aggregate_fsdr.py"),
+                "--input-dir",
+                str(output_dir / "samples"),
+                "--expected-count",
+                str(sample_count),
+                "--expected-results",
+                str(ROOT / "artifact/expected_results.json"),
+                "--output",
+                str(output_dir / "results.json"),
+            ]
+            if num_samples is None:
+                aggregate_command.append("--require-match")
+        else:
+            aggregate_command = [
+                sys.executable,
+                str(SCRIPT_DIR / "aggregate_results.py"),
+                "--input-dir",
+                str(output_dir / "samples"),
+                "--expected-count",
+                str(sample_count),
+                "--output",
+                str(output_dir / "results.json"),
+            ]
         experiments.append(
             {
                 "workflow": mode,
@@ -276,7 +301,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     num_samples = getattr(args, "num_samples", 1)
     if args.mode == "all":
         experiments = []
-        for workflow in ("quality", "speedup"):
+        for workflow in ("quality", "speedup", "fsdr"):
             experiments.extend(
                 build_software_plan(workflow, args.output_root, args.python, num_samples)
             )

@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "generated_on": "2026-07-15",
+  "generated_on": "2026-07-16",
   "software_pairs": {
     "transplat/re10k": "NOT_CLAIMED_SAES_SPARSE_QUALITY_MISMATCH",
     "transplat/acid": "NOT_CLAIMED_SAES_SPARSE_QUALITY_MISMATCH",
@@ -13,14 +13,14 @@
     "depthsplat/dl3dv": "NOT_CLAIMED_GATED_DATA"
   },
   "mechanism_pairs": {
-    "transplat/re10k": "NOT_CLAIMED_SAES_PROTOCOL_MISMATCH",
-    "transplat/acid": "NOT_CLAIMED_SAES_PROTOCOL_MISMATCH",
+    "transplat/re10k": "NOT_CLAIMED_FSDR_LSH_AND_SAES_PROTOCOL_MISMATCH",
+    "transplat/acid": "NOT_CLAIMED_FSDR_LSH_AND_SAES_PROTOCOL_MISMATCH",
     "transplat/dl3dv": "NOT_CLAIMED_GATED_DATA",
-    "mvsplat/re10k": "NOT_CLAIMED_SAES_PROTOCOL_MISMATCH",
-    "mvsplat/acid": "NOT_CLAIMED_SAES_PROTOCOL_MISMATCH",
+    "mvsplat/re10k": "NOT_CLAIMED_FSDR_LSH_AND_SAES_PROTOCOL_MISMATCH",
+    "mvsplat/acid": "NOT_CLAIMED_FSDR_LSH_AND_SAES_PROTOCOL_MISMATCH",
     "mvsplat/dl3dv": "NOT_CLAIMED_GATED_DATA",
-    "depthsplat/re10k": "NOT_CLAIMED_SAES_PROTOCOL_MISMATCH",
-    "depthsplat/acid": "NOT_CLAIMED_SAES_PROTOCOL_MISMATCH",
+    "depthsplat/re10k": "NOT_CLAIMED_FSDR_LSH_AND_SAES_PROTOCOL_MISMATCH",
+    "depthsplat/acid": "NOT_CLAIMED_FSDR_LSH_AND_SAES_PROTOCOL_MISMATCH",
     "depthsplat/dl3dv": "NOT_CLAIMED_GATED_DATA"
   },
   "figure8": "NOT_CLAIMED_NO_ORIN_EVIDENCE",

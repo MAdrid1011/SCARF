@@ -25,6 +25,15 @@ class SampleSession(Protocol):
     def run_sample(self, selection: dict[str, Any], output_dir: Path) -> dict[str, Any]: ...
 
 
+def _validate_record(record: dict[str, Any]) -> None:
+    if record.get("kind") in {"fsdr_sample", "fsdr_dataset_aggregate"}:
+        from scripts.fsdr_evidence import validate_fsdr_record
+
+        validate_fsdr_record(record)
+    else:
+        validate(record)
+
+
 def _append_progress(output_dir: Path, event: dict[str, Any]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     record = {
@@ -71,7 +80,7 @@ def _complete_sample(
     provenance = record.get("provenance")
     if isinstance(provenance, dict):
         try:
-            validate(record)
+            _validate_record(record)
         except (KeyError, TypeError, ValueError):
             return False
         identity = identity or source_identity()

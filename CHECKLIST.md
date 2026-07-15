@@ -42,6 +42,14 @@
 - [x] Table 1 and Tables 2--3 were removed from the claim set instead of using
   dense interpolation, edited results, or relaxed tolerances.
 - [x] DL3DV and Orin results are explicitly outside the current claim.
+- [x] Six real FSDR-only pilots completed without fallback; all six Guided Rate
+  rows fail Table 2 and are retained as negative evidence.
+- [x] FSDR Guided Rate is excluded because the tracked RTL projection ROM is
+  all zero and no authentic hyperplane/feature-vector collateral is available.
+- [x] Replace the continuous-depth-window Top-1 approximation with exact
+  full-search argmax-in-candidate-subset evidence and rerun six bounded pilots.
+- [x] Keep every Table 2 Top-1 row diagnostic-only: the exact tensors are
+  available, but their guided denominator depends on missing LSH collateral.
 
 ## RTL And Hardware
 
@@ -94,17 +102,65 @@ Results Reproduced evidence complete from diagnostics.
 - [x] Keep C1/C4 and Results Reproduced suspended; do not expand this failed
   hypothesis to MVSplat, ACID, DepthSplat, or the full matrix.
 
+### SAES Recovery Campaign V2
+
+- [x] Bind the campaign to the fixed TranSplat/Re10K sample and immutable
+  quality/selection contract.
+- [x] Prioritize decision-statistic and sparse-coverage attribution before
+  another threshold or full-matrix retry.
+- [x] Add failure-first tests for diagnostic CLI isolation, representative
+  layout recovery, and covariance/opacity coverage transforms.
+- [x] Emit raw/unit-normalized vector-variance, absolute/relative depth-spread,
+  and current gate distributions from one real run.
+- [x] Run a fixed covariance/opacity sweep without changing selected tiles or
+  using a dense materialization.
+- [x] Attribute representative attributes independently. All restorations
+  failed, while the current moment-matched representatives remained the least
+  damaging sparse variant.
+- [x] Record the structural L1 blocker: all tiles are below the current L0
+  statistic threshold, and L0/L1 share the same Gaussian cross-check, making
+  L1 unreachable after an L0 miss.
+- [x] Add a target-free retention-boundary diagnostic at one-quarter intervals
+  through the paper-declared L0 rate, plus the current measured L0 rate.
+- [x] Run that diagnostic in a new non-overwriting directory and decide whether
+  4/16 sparse materialization has any path to the paper's declared L0 rate.
+- [x] Test the manuscript's literal constrained-average SH/opacity wording.
+  Preserve the -5.1204 dB failure and revert it instead of promoting a
+  paper-aligned but nonfunctional implementation.
+- [x] No theory-consistent SAES correction passed PSNR, SSIM, and LPIPS on the
+  fixed sample; preserve the contradiction without promotion.
+- [x] Do not restore the formal SAES matrix or C1/C4 claims because the existing
+  validators do not pass unchanged.
+- [x] Close the sparse-SAES line after both target-free rankings failed at every
+  tested nonzero rate; keep C1/C4 not claimed.
+
+### FSDR Table 2 Recovery
+
+- [x] Define a Table 2-only result schema and validator using the existing
+  expected values and absolute mechanism tolerance.
+- [x] Add failure-first tests for FSDR-only CLI isolation, persistent model
+  reuse, complete-sample resume, selection hash, and zero/reference fallback.
+- [x] Implement a persistent FSDR-only pair runner that skips SAES and rendering
+  while preserving the canonical model/data path.
+- [x] Run one exact-discrete sample for TranSplat, MVSplat, and DepthSplat on
+  Re10K and ACID under `outputs/ae_pilot_fsdr_v2/`.
+- [x] Stop before the six full protocol rows: every Guided Rate fails and the
+  paper/RTL guided set cannot be recovered from the all-zero projection ROM.
+
 ## Latest Local Verification
 
-Verified on 2026-07-15:
+Verified on 2026-07-16:
 
-- Base `pytest -q`: 195 passed and 9 skipped. The skipped tests require optional
-  PyTorch or external toolchains.
+- Base `pytest -q`: 243 passed after the exact FSDR candidate-evidence changes.
 - Locked classic profile: all 216 tests pass. Both classic and DepthSplat
   environment checkers pass with CUDA 12.1 on the declared compiler path.
 - Strict quick passed on the RTX 3060 with the pinned classic profile. It loaded
   MVSplat once, selected all three declared target views, emitted positive
   feature/depth/Gaussian/GGU cycles, and produced a validator-PASS aggregate.
+- The exact FSDR pilot completed all six accessible pairs. Exact Top-1 Coverage
+  was 96.694/99.244%, 96.129/98.789%, and 96.706/100.000% for
+  TranSplat, MVSplat, and DepthSplat on Re10K/ACID respectively. All six Guided
+  Rates failed, and no row is promoted because the RTL projection ROM is empty.
 - A fresh post-fix strict quick run also passed under `outputs/ae_regression`.
 - Release clean-room testing found that the source bundle omitted the synthetic
   quick dataset because all of `datasets/` was excluded. The archive now

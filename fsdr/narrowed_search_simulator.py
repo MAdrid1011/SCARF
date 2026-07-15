@@ -96,9 +96,6 @@ class FSDRSimulator:
         self.reuse_spatial = reuse_spatial
         self.reuse_confidence = reuse_confidence
 
-        # Depth cache: entry_sig_key -> cached depth value
-        self.depth_cache = {}
-
         # Local depth consistency buffer (ASIC: register file of recent depths)
         self.recent_depths = {}
         self.depth_consistency_threshold = 0.05  # 5% tolerance (wider: narrowed search is safe)
@@ -114,6 +111,9 @@ class FSDRSimulator:
             'guided': 0,            # Guided search (narrowed S2)
             'guided_in_window': 0,  # Actual depth was in narrowed window
             'guided_out_window': 0, # Actual depth was outside window (rare)
+            'guided_top1_covered': 0,
+            'guided_top1_missed': 0,
+            'discrete_top1_pixels': 0,
             'depth_inconsistent': 0,
             'hit_no_guide': 0,      # Hit but criteria not met
             'full_compute': 0,      # Cache miss
@@ -121,9 +121,6 @@ class FSDRSimulator:
             'total_validated': 0,   # backward compat
             'depth_errors': [],
         }
-
-    def _entry_sig_key(self, entry):
-        return tuple(entry.signature.tolist()) if hasattr(entry.signature, 'tolist') else str(entry.signature)
 
     def _check_depth_consistency(self, position: Tuple[int, int], cached_depth: float) -> bool:
         """Check cached depth consistency with local region (ASIC register file)."""
@@ -149,6 +146,23 @@ class FSDRSimulator:
             oldest = list(self.recent_depths.keys())[:256]
             for k in oldest:
                 del self.recent_depths[k]
+
+    def _insert_current(
+        self, signature: int, depth: float, position: Tuple[int, int]
+    ) -> None:
+        """Mirror the RTL sInsert state executed after every pixel."""
+        self.cache.insert(
+            CacheEntry(
+                signature=int(signature),
+                position=position,
+                best_depth=float(depth),
+                best_idx=0,
+                peak_prob=0.9,
+                second_offset=1,
+                spread=0.1,
+                valid=True,
+            )
+        )
 
     def _depth_in_window(self, actual_depth: float, cached_depth: float) -> bool:
         """Check if actual depth falls within the narrowed search window."""
@@ -180,34 +194,46 @@ class FSDRSimulator:
         actual_depth: float,
         position: Tuple[int, int],
         pixel_idx: int,
+        *,
+        top1_index: int = None,
+        candidate_values=None,
     ) -> Tuple[str, int, float]:
         """Process one precomputed hardware LSH signature."""
+        has_top1 = top1_index is not None or candidate_values is not None
+        if has_top1 and (top1_index is None or candidate_values is None):
+            raise ValueError("top1 index and candidate values must be provided together")
+        if has_top1:
+            candidates = np.asarray(candidate_values, dtype=np.float64).reshape(-1)
+            if candidates.size != self.num_depth_candidates:
+                raise ValueError("candidate count does not match the FSDR configuration")
+            if not np.isfinite(candidates).all():
+                raise ValueError("candidate values must be finite")
+            top1_index = int(top1_index)
+            if not 0 <= top1_index < candidates.size:
+                raise ValueError("top1 candidate index is out of range")
+            self.stats['discrete_top1_pixels'] += 1
         self.stats['total_pixels'] += 1
 
-        sig_key = tuple(signature.tolist()) if hasattr(signature, 'tolist') else str(signature)
         entry, hamming_dist = self.cache.lookup(signature)
 
         if entry is not None:
             self.stats['cache_hits'] += 1
-            entry_sig_key = self._entry_sig_key(entry)
-
-            # GUIDANCE DECISION: can we narrow the search?
-            can_guide = (
-                hamming_dist <= self.reuse_hamming and
-                entry.peak_prob > self.reuse_confidence and
-                entry_sig_key in self.depth_cache
-            )
-
-            if can_guide:
-                cached_depth = self.depth_cache[entry_sig_key]
-                if not self._check_depth_consistency(position, cached_depth):
-                    can_guide = False
-                    self.stats['depth_inconsistent'] += 1
-
-            if can_guide:
+            # CacheTable already enforces distance <= tau_h. The paper and RTL
+            # route every such hit to the narrowed candidate path.
+            if hamming_dist <= self.config.hamming_threshold:
                 # GUIDED: S2 runs with D/4 candidates centered on cached_depth
-                cached_depth = self.depth_cache[entry_sig_key]
+                cached_depth = entry.best_depth
                 in_window = self._depth_in_window(actual_depth, cached_depth)
+
+                if has_top1:
+                    narrowed = max(1, self.num_depth_candidates // 4)
+                    nearest = np.argpartition(
+                        np.abs(candidates - cached_depth), narrowed - 1
+                    )[:narrowed]
+                    if top1_index in nearest:
+                        self.stats['guided_top1_covered'] += 1
+                    else:
+                        self.stats['guided_top1_missed'] += 1
 
                 if in_window:
                     # Actual depth is in narrowed window → zero quality impact
@@ -238,16 +264,14 @@ class FSDRSimulator:
                 self.stats['total_validated'] += 1
 
                 # Update cache with actual depth (S2 computed it, even if narrowed)
-                self.cache.update(entry, float(actual_depth))
-                self.depth_cache[entry_sig_key] = float(actual_depth)
+                self._insert_current(signature, float(actual_depth), position)
                 self._update_recent_depths(position, float(actual_depth))
 
-                return 'guided', 32, actual_depth  # 32 candidates searched
+                return 'guided', max(1, self.num_depth_candidates // 4), actual_depth
             else:
-                # Hit but can't guide
+                # Defensive only: CacheTable must not return an over-threshold hit.
                 self.stats['hit_no_guide'] += 1
-                self.cache.update(entry, float(actual_depth))
-                self.depth_cache[entry_sig_key] = float(actual_depth)
+                self._insert_current(signature, float(actual_depth), position)
                 self._update_recent_depths(position, float(actual_depth))
                 return 'hit_no_guide', self.num_depth_candidates, actual_depth
         else:
@@ -255,18 +279,7 @@ class FSDRSimulator:
             self.stats['cache_misses'] += 1
             self.stats['full_compute'] += 1
 
-            new_entry = CacheEntry(
-                signature=signature,
-                position=position,
-                best_depth=float(actual_depth),
-                best_idx=0,
-                peak_prob=0.9,
-                second_offset=1,
-                spread=0.1,
-                valid=True,
-            )
-            self.cache.insert(new_entry)
-            self.depth_cache[sig_key] = float(actual_depth)
+            self._insert_current(signature, float(actual_depth), position)
             self._update_recent_depths(position, float(actual_depth))
 
             return 'full_compute', self.num_depth_candidates, actual_depth
@@ -276,8 +289,9 @@ class FSDRSimulator:
         features: torch.Tensor,
         depths: torch.Tensor,
         width: int,
+        pixel_order: List[int] = None,
     ) -> List[str]:
-        """Process a raster-ordered frame with one batched LSH projection."""
+        """Process a frame in the requested schedule with batched LSH projection."""
         if features.dim() != 2 or features.shape[1] != self.config.feature_dim:
             raise ValueError("features must have shape [pixels, feature_dim]")
         flat_depths = depths.detach().reshape(-1)
@@ -285,13 +299,70 @@ class FSDRSimulator:
             raise ValueError("depth count and frame width must match the feature frame")
         signatures = self.hasher.hash_batch(features).detach().cpu().tolist()
         depth_values = flat_depths.cpu().tolist()
-        paths = []
-        for pixel_idx, (signature, depth) in enumerate(zip(signatures, depth_values)):
+        if pixel_order is None:
+            pixel_order = list(range(features.shape[0]))
+        if (
+            len(pixel_order) != features.shape[0]
+            or sorted(pixel_order) != list(range(features.shape[0]))
+        ):
+            raise ValueError("pixel_order must be a permutation of every frame pixel")
+        paths = [None] * features.shape[0]
+        for pixel_idx in pixel_order:
+            signature = signatures[pixel_idx]
+            depth = depth_values[pixel_idx]
             y, x = divmod(pixel_idx, width)
             path, _, _ = self.process_signature(
                 int(signature), float(depth), (y, x), pixel_idx
             )
-            paths.append(path)
+            paths[pixel_idx] = path
+        return paths
+
+    def process_discrete_frame(
+        self,
+        features: torch.Tensor,
+        candidate_anchors: torch.Tensor,
+        top1_indices: torch.Tensor,
+        candidate_values: torch.Tensor,
+        *,
+        width: int,
+        pixel_order: List[int] = None,
+    ) -> List[str]:
+        """Process a frame with exact full-search candidate identities."""
+        if features.dim() != 2 or features.shape[1] != self.config.feature_dim:
+            raise ValueError("features must have shape [pixels, feature_dim]")
+        pixel_count = features.shape[0]
+        anchors = candidate_anchors.detach().reshape(-1)
+        top1 = top1_indices.detach().reshape(-1)
+        candidates = candidate_values.detach()
+        if (
+            anchors.numel() != pixel_count
+            or top1.numel() != pixel_count
+            or candidates.shape != (pixel_count, self.num_depth_candidates)
+            or width <= 0
+            or pixel_count % width
+        ):
+            raise ValueError("discrete candidate frame shapes are inconsistent")
+        if pixel_order is None:
+            pixel_order = list(range(pixel_count))
+        if len(pixel_order) != pixel_count or sorted(pixel_order) != list(range(pixel_count)):
+            raise ValueError("pixel_order must be a permutation of every frame pixel")
+
+        signatures = self.hasher.hash_batch(features).detach().cpu().tolist()
+        anchor_values = anchors.cpu().tolist()
+        top1_values = top1.cpu().tolist()
+        candidate_rows = candidates.cpu().numpy()
+        paths = [None] * pixel_count
+        for pixel_idx in pixel_order:
+            y, x = divmod(pixel_idx, width)
+            path, _, _ = self.process_signature(
+                int(signatures[pixel_idx]),
+                float(anchor_values[pixel_idx]),
+                (y, x),
+                pixel_idx,
+                top1_index=int(top1_values[pixel_idx]),
+                candidate_values=candidate_rows[pixel_idx],
+            )
+            paths[pixel_idx] = path
         return paths
 
     def get_reuse_ratio(self) -> float:
@@ -326,9 +397,21 @@ class FSDRSimulator:
         summary['reuse_rate'] = summary['guided_rate']
         summary['validated_rate'] = summary['guided_rate']
         summary['in_window_rate'] = self.stats['guided_in_window'] / max(self.stats['guided'], 1)
+        exact_guided = (
+            self.stats['guided_top1_covered'] + self.stats['guided_top1_missed']
+        )
+        summary['discrete_candidate_evidence'] = (
+            self.stats['discrete_top1_pixels'] == total
+            and exact_guided == self.stats['guided']
+        )
+        summary['top1_coverage'] = (
+            self.stats['guided_top1_covered'] / exact_guided
+            if exact_guided
+            else None
+        )
         summary['hit_no_guide_rate'] = self.stats['hit_no_guide'] / total
         summary['full_compute_rate'] = self.stats['full_compute'] / total
-        summary['depth_cache_size'] = len(self.depth_cache)
+        summary['depth_cache_size'] = len(self.cache)
         summary['reuse_data_size'] = len(self.reuse_data)
         summary['total_validated'] = self.stats['total_reuse']
         summary['depth_error'] = self.get_depth_error_stats()

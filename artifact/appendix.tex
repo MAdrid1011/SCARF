@@ -9,8 +9,8 @@ final archival DOI is recorded in the MICRO artifact-evaluation submission and
 in the release manifest. GitHub may be used during evaluation, but the Artifact
 Available badge refers to the DOI archive.
 The current submission requests Artifact Available and Artifact Functional.
-It does not request Results Reproduced while the sparse-SAES Table~1 and
-Tables~2--3 contracts remain unresolved.
+It does not request Results Reproduced while the sparse-SAES Table~1/Table~3
+contracts and the FSDR Table~2 LSH contract remain unresolved.
 
 \paragraph{Hardware and software requirements.}
 Quick strict inference requires an NVIDIA CUDA GPU with at least 8\,GB VRAM,
@@ -46,7 +46,9 @@ After installation, \texttt{run\_ae.sh quick} validates the setup.
 The claim-aware \texttt{quality} and \texttt{ablation} modes explicitly skip
 unclaimed rows. Focused diagnostics remain available through the experiment
 driver. Table~1 and Tables~2--3 are not claimed: real sparse-SAES probes exceed
-the quality tolerance and do not reproduce the reported L1 rates.
+the quality tolerance and do not reproduce the reported L1 rates, while six
+FSDR pilots miss the Guided Rate targets and the public RTL has no populated
+LSH projection ROM.
 A dense interpolation diagnostic retains every Gaussian and is forbidden in
 claim runs. Figure~8, Figure~11, the DL3DV rows, and Figures~13--16 are also
 not claimed. Each run emits structured results
@@ -65,13 +67,10 @@ The commercial TSMC 28\,nm PDK, memory compiler, and Liberty collateral cannot
 be redistributed. We therefore include a fully public predictive-PDK workflow:
 the Chisel RTL can be implemented with iFlow/ASAP7, after which the paper-cited
 DeepScaleTool model can produce a 28\,nm-equivalent estimate. In the current
-release, routed ASAP7 PPA is
-\texttt{NOT\_CLAIMED\_\allowbreak RESOURCE\_\allowbreak LIMIT}.
-Scaling is
-\texttt{NOT\_CLAIMED\_\allowbreak NO\_\allowbreak PHYSICAL\_\allowbreak INPUT}.
-Only the pinned preflight and deterministic scaling tests are Functional
-evidence. No estimate is described as a foundry-specific TSMC 28\,nm post-layout
-measurement.
+release, routed ASAP7 PPA is not claimed because the host failed the resource
+gate. Scaling is not claimed because no valid routed PPA is available. Only the
+pinned preflight and deterministic scaling tests are Functional evidence. No
+estimate is described as a foundry-specific TSMC 28\,nm post-layout measurement.
 
 \paragraph{Expected variation.}
 Quality tolerances are 0.15\,dB PSNR, 0.005 SSIM, and 0.005 LPIPS. Optional Orin

@@ -29,8 +29,16 @@ results and do not support a Results Reproduced badge request by themselves.
   path is numerically identical to the pinned model and FSDR remains within the
   sample quality budget, but sparse SAES exceeds the declared tolerance.
 - Re10K and ACID Tables 2--3 rows are
-  `NOT_CLAIMED_SAES_PROTOCOL_MISMATCH`: real probes produced zero L1 tiles
-  where the paper target requires nonzero L1 rates.
+  `NOT_CLAIMED_FSDR_LSH_AND_SAES_PROTOCOL_MISMATCH`. For Table 2, all six
+  one-sample Guided Rates miss the paper targets, and the tracked RTL initializes
+  the complete LSH projection ROM to zero while the software uses untracked
+  seed-0 Gaussian hyperplanes. The authentic discrete full-search Top-1 check
+  also misses the fixed tolerance on all three Re10K pilots. For Table 3, real
+  probes produce zero L1 tiles where the paper requires nonzero L1 rates.
+- The ACID Top-1 pilot values happen to fall within the numeric tolerance, but
+  they are diagnostic only: Top-1 Coverage is conditioned on the guided pixel
+  set, which cannot be tied to the paper or RTL without the missing projection
+  matrix and feature-vector contract.
 - `--saes-materialization dense-diagnostic` retains every Gaussian and is
   rejected by claim runs. It cannot be used as evidence for sparse SAES.
 - Figure 8 is `NOT_CLAIMED_NO_ORIN_EVIDENCE`.

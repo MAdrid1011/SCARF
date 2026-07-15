@@ -24,6 +24,7 @@ def test_demo_help_exposes_public_ae_arguments():
         "--seed",
         "--functional-run",
         "--image-output-policy",
+        "--fsdr-only",
     ):
         assert option in result.stdout
 
@@ -153,5 +154,63 @@ def test_claim_run_rejects_dense_saes_diagnostic():
                 "index.json",
                 "--saes-materialization",
                 "dense-diagnostic",
+            ]
+        )
+
+
+def test_saes_diagnostic_sweep_is_non_claiming_only():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(["--saes-diagnostic-sweep"])
+    assert args.saes_diagnostic_sweep is True
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--claim-run",
+                "--evaluation-index",
+                "index.json",
+                "--saes-diagnostic-sweep",
+            ]
+        )
+
+
+def test_fsdr_only_is_an_isolated_claim_mode():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(
+        ["--claim-run", "--evaluation-index", "index.json", "--fsdr-only"]
+    )
+    assert args.fsdr_only is True
+
+    with pytest.raises(SystemExit):
+        parse_args(["--fsdr-only"])
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--claim-run",
+                "--evaluation-index",
+                "index.json",
+                "--fsdr-only",
+                "--ablation",
+            ]
+        )
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--saes-diagnostic-sweep",
+                "--saes-materialization",
+                "dense-diagnostic",
+            ]
+        )
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--functional-run",
+                "--evaluation-index",
+                "index.json",
+                "--saes-diagnostic-sweep",
             ]
         )

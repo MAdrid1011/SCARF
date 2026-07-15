@@ -5,7 +5,8 @@ Accelerator with Semantic Reuse and Fused Dataflow
 
 **Badges requested:** Artifacts Available and Artifacts Evaluated (Functional).
 Results Reproduced is not requested because the real sparse-SAES probes do not
-meet the paper's Table 1 and Tables 2--3 contracts.
+meet the paper's Table 1/Table 3 contracts and the public FSDR implementation
+cannot reproduce Table 2's LSH-guided set.
 
 The exact claim scope, commands, and tolerances are defined in
 [`artifact/CLAIMS.md`](artifact/CLAIMS.md). The final archival DOI must be added
@@ -214,8 +215,10 @@ When rows are claimed, the output includes FSDR-only, SAES-only, combined, and
 no-optimization results, plus guided-rate, Top-1 coverage, L0/L1, Gaussian, and
 memory statistics. Current state: `NOT_CLAIMED_SAES_PROTOCOL_MISMATCH`; the
 claim-aware command is therefore an explicit no-op. Real probes produced zero
-L1 tiles instead of the nonzero paper targets, so Tables 2--3 and Figure 11 are
-not claimed.
+L1 tiles instead of the nonzero paper targets. Separately, all six FSDR pilots
+miss the Guided Rate targets and the tracked RTL projection ROM is all zero;
+the software's seed-0 hyperplanes are not paper collateral. Tables 2--3 and
+Figure 11 are therefore not claimed.
 
 ### Figures 13-16: Sensitivity
 
