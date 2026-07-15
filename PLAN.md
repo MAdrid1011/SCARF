@@ -413,3 +413,13 @@
   from the paper. Preserve the output and do not launch six-pair pilots.
 - Physical flow remains independently gated on no Vivado process and at least
   48 GiB `MemAvailable`.
+- Result: refuted at clean commit `1aec94c`. The fixed sample produced
+  L0/L1/Full rates of 3.796%/86.267%/9.937%. Relative to the unmodified
+  baseline, the combined path changed PSNR by -3.1708 dB, SSIM by -0.103587,
+  and LPIPS by +0.180455, failing every unchanged tolerance. The schema-valid
+  non-claim evidence and log are preserved under
+  `outputs/ae_failures/diagnostics/transplat-re10k-saes-probe-vector-first-hit-v2/`.
+- Decision: do not promote this decision mode and do not launch six-pair
+  pilots. The available paper text does not define a route that simultaneously
+  recovers its path rates and sparse quality without an unpublished
+  normalization, gate, or materialization/recovery procedure.

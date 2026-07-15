@@ -186,10 +186,10 @@ diagnostics, and repeat the clean-room checks on the final DOI-bound bundles.
   probe selection, and L1 execution strictly after an L0 miss.
 - [x] Add an explicitly non-claiming diagnostic CLI mode; keep the default SAES
   decision behavior compatible.
-- [ ] Run the fixed sample once and preserve the complete result under a new
+- [x] Run the fixed sample once and preserve the complete result under a new
   non-overwriting diagnostic directory.
-- [ ] Promote only if L0/L1 is non-degenerate and all three existing quality
-  tolerances pass without unpublished gates or fitted constants.
+- [x] Reject promotion: L1 reached 86.267%, while PSNR, SSIM, and LPIPS missed
+  the unchanged gates by large margins. Keep six-pair pilots stopped.
 
 ## Latest Local Verification
 
@@ -210,6 +210,10 @@ Verified on 2026-07-16:
   still fails. Directly hashing DepthSplat's authentic 1,024-channel ViT-L mono
   tensor also fails at 99.976% Guided Rate and 68.791% Top-1 Coverage, so the
   model-specific DINO hypothesis is not promoted.
+- The clean probe-vector first-hit audit at commit `1aec94c` records
+  L0/L1/Full=3.796%/86.267%/9.937% and quality deltas of -3.1708 dB PSNR,
+  -0.103587 SSIM, and +0.180455 LPIPS. Its result and run log validate but are
+  explicitly non-claim evidence; the interpretation is not promoted.
 - A fresh post-fix strict quick run also passed under `outputs/ae_regression`.
 - Release clean-room testing found that the source bundle omitted the synthetic
   quick dataset because all of `datasets/` was excluded. The archive now
