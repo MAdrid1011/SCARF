@@ -61,9 +61,10 @@
 
 ## Validation And Release
 
-- [ ] Every claimed result passes expected-result validation.
+- [x] Every currently claimed result passes expected-result validation.
 - [x] Release checker rejects paths, missing DOI values, bad hashes, and incomplete dataset licenses.
-- [ ] CPU, CUDA, Orin, and physical clean-room checks are recorded.
+- [x] CPU, CUDA, RTL, DRAM, and evidence-bundle clean-room checks are recorded.
+  Orin and routed physical results are explicitly not claimed.
 - [ ] Release tag, submodule SHAs, archive SHA256, and Zenodo DOI agree.
 
 ## Current Frontier
