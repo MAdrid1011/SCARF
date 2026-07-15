@@ -1,45 +1,66 @@
 #!/usr/bin/env bash
-# Download DL3DV test split.
-#
-# DL3DV is hosted at https://dl3dv-10k.github.io/DL3DV-10K/
-# The preprocessed evaluation split used by DepthSplat is available at:
-#   https://huggingface.co/datasets/haofeixu/depthsplat-data
-#
-# Usage:
-#   bash data/download_dl3dv.sh [OUTPUT_DIR]
-#   default OUTPUT_DIR: datasets/dl3dv
-
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-OUT_DIR="${1:-$ROOT/datasets/dl3dv}"
-mkdir -p "$OUT_DIR"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT_ROOT="${1:-${ROOT}/datasets/dl3dv}"
+RAW_DIR="${SCARF_DL3DV_RAW:-${ROOT}/downloads/dl3dv-benchmark}"
+REVISION="9684e8382278c5e18173c1e72bd246daf2874539"
+SOURCE="huggingface:DL3DV/DL3DV-Benchmark"
 
-echo "Downloading DL3DV test split to $OUT_DIR ..."
-echo "Source: https://huggingface.co/datasets/haofeixu/depthsplat-data"
-echo ""
-echo "Using huggingface_hub snapshot download ..."
+python3 -c 'import huggingface_hub' >/dev/null 2>&1 || {
+    echo "huggingface_hub is required; install the locked profile first" >&2
+    exit 2
+}
+python3 - <<PY
+from huggingface_hub import get_token, snapshot_download
 
-python3 - <<EOF
-from huggingface_hub import snapshot_download
-import shutil, pathlib
-
-dest = pathlib.Path("$OUT_DIR")
-tmp = snapshot_download(
-    repo_id="haofeixu/depthsplat-data",
+if get_token() is None:
+    raise SystemExit(
+        "DL3DV-Benchmark is gated. Accept its Hugging Face access terms and "
+        "run `hf auth login` before this command."
+    )
+snapshot_download(
+    repo_id="DL3DV/DL3DV-Benchmark",
     repo_type="dataset",
-    allow_patterns=["dl3dv/**"],
-    local_dir=str(dest.parent / "depthsplat-data-tmp"),
+    revision="${REVISION}",
+    local_dir="${RAW_DIR}",
+    allow_patterns=[
+        "*/nerfstudio/transforms.json",
+        "*/nerfstudio/images_4/*",
+        "*/nerfstudio/images_8/*",
+    ],
 )
-src = pathlib.Path(tmp) / "dl3dv"
-if src.exists():
-    if dest.exists():
-        shutil.rmtree(dest)
-    shutil.move(str(src), str(dest))
-    shutil.rmtree(str(pathlib.Path(tmp).parent / "depthsplat-data-tmp"), ignore_errors=True)
-    print(f"DL3DV ready at: {dest}")
-else:
-    print(f"Downloaded to: {tmp}")
-    print("Move the dl3dv/ subfolder to $OUT_DIR manually.")
-EOF
+PY
+
+python3 "${ROOT}/data/convert_dl3dv.py" \
+    --input-dir "${RAW_DIR}" \
+    --output-dir "${OUT_ROOT}/native" \
+    --image-subdir images_8 \
+    --target-height 270 \
+    --target-width 480 \
+    --schema depthsplat-native-270x480-v1 \
+    --source "${SOURCE}" \
+    --revision "${REVISION}"
+python3 "${ROOT}/data/generate_chunk_index.py" --stage "${OUT_ROOT}/native/test"
+python3 "${ROOT}/data/build_manifest.py" \
+    --root "${OUT_ROOT}/native" \
+    --name dl3dv-native \
+    --source "${SOURCE}" \
+    --revision "${REVISION}"
+
+python3 "${ROOT}/data/convert_dl3dv.py" \
+    --input-dir "${RAW_DIR}" \
+    --output-dir "${OUT_ROOT}/re10k" \
+    --image-subdir images_4 \
+    --target-height 360 \
+    --target-width 640 \
+    --resize \
+    --schema re10k-compatible-360x640-v1 \
+    --source "${SOURCE}" \
+    --revision "${REVISION}"
+python3 "${ROOT}/data/generate_chunk_index.py" --stage "${OUT_ROOT}/re10k/test"
+python3 "${ROOT}/data/build_manifest.py" \
+    --root "${OUT_ROOT}/re10k" \
+    --name dl3dv-re10k \
+    --source "${SOURCE}" \
+    --revision "${REVISION}"

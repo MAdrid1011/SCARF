@@ -367,6 +367,11 @@ class HWUNetUnit:
                     
                 else:
                     # Unknown module type - try to execute it directly
+                    if self.strict_mode:
+                        raise RuntimeError(
+                            "unsupported hardware layer in forward_with_weights: "
+                            f"name={name}, type={type(module).__name__}"
+                        )
                     import warnings
                     warnings.warn(f"[CRITICAL FALLBACK] forward_with_weights using ORIGINAL module: name={name}, type={type(module).__name__}")
                     try:
@@ -612,6 +617,10 @@ class HWUNetUnit:
         
         else:
             # Fallback: should not happen for known layer types
+            if self.strict_mode:
+                raise RuntimeError(
+                    f"unsupported hardware layer: {type(layer).__name__}"
+                )
             import warnings
             warnings.warn(f"[CRITICAL FALLBACK] _hw_layer using ORIGINAL module: {type(layer).__name__}")
             try:
@@ -1452,6 +1461,7 @@ class HWDepthPredictor:
         self.config = config or DepthPredictorConfig()
         self.device = device
         self.model_type = model_type
+        self.strict_mode = False
         
         # Select cost volume mode based on model type
         # TranSplat uses transformer attention, MVSplat/DepthSplat use plane-sweep
@@ -1531,7 +1541,7 @@ class HWDepthPredictor:
         
         # Pooling unit for avg_pool2d / max_pool2d
         self.pooling = PoolingUnit()
-        
+
         # Padding unit for standalone padding operations
         self.pad_unit = PadUnit()
         
@@ -1540,6 +1550,9 @@ class HWDepthPredictor:
         
         self._initialized = False
         self._cycle_breakdown = CycleBreakdown()
+
+    def set_strict_mode(self, strict: bool) -> None:
+        self.strict_mode = bool(strict)
     
     # =========================================================================
     # Helper methods: route computation through hardware units
@@ -2844,10 +2857,16 @@ class HWDepthPredictor:
                 )
             except Exception as e:
                 logger.warning("_forward_stereo_batched_hw failed: %s", e, exc_info=True)
+                if self.strict_mode:
+                    raise RuntimeError(
+                        "strict MVSplat batched hardware path failed"
+                    ) from e
                 # Fall back to per-view processing
                 pass
         
         # Per-view processing (less accurate but more portable)
+        if self.strict_mode:
+            raise RuntimeError("strict hardware path forbids per-view stereo fallback")
         return self._forward_stereo_perview_hw(
             features, intrinsics, extrinsics, near, far,
             H_out, W_out, D, device, disp_candidates, depth_candidates, images,
@@ -4748,6 +4767,13 @@ class HWDepthPredictor:
         )
         total_cycles += mv_cycles
         # features_list_mv: list of [BV, C, H, W]
+        if num_scales > 1:
+            if dp is None or not hasattr(dp, 'mv_pyramid'):
+                raise RuntimeError("DepthSplat multi-scale model has no mv_pyramid")
+            features_list_mv, pyramid_cycles = self._hw_ds_feature_pyramid(
+                features_list_mv[0], dp.mv_pyramid
+            )
+            total_cycles += pyramid_cycles
         
         # ===== 4. DINOv2 ViT =====
         mono_intermediate_features, vit_cycles = self._hw_ds_dinov2(
@@ -4763,7 +4789,22 @@ class HWDepthPredictor:
             mono_features, c = self._hw_interpolate(mono_features, scale_factor=2)
             total_cycles += c
         
-        features_list_mono = [mono_features]
+        if num_scales > 1:
+            if dp is None or not hasattr(dp, 'mono_pyramid'):
+                raise RuntimeError("DepthSplat multi-scale model has no mono_pyramid")
+            features_list_mono, pyramid_cycles = self._hw_ds_feature_pyramid(
+                mono_features, dp.mono_pyramid
+            )
+            total_cycles += pyramid_cycles
+        else:
+            features_list_mono = [mono_features]
+
+        if len(features_list_mv) != num_scales or len(features_list_mono) != num_scales:
+            raise RuntimeError(
+                "DepthSplat feature pyramid scale mismatch: "
+                f"expected={num_scales}, mv={len(features_list_mv)}, "
+                f"mono={len(features_list_mono)}"
+            )
         
         # Close S1-shared feature extraction cycle tracking
         _fe_cycles = total_cycles - _fe_start
@@ -4878,11 +4919,19 @@ class HWDepthPredictor:
             
             # Use regressor with hardware units
             regressor = dp.regressor[scale_idx]
-            out, reg_cycles = self._hw_unet.forward_with_weights(concat, 128, {}, original_module=regressor)
+            regressor_res = dp.regressor_residual[scale_idx]
+            regressor_channels = self._depthsplat_regressor_output_channels(
+                dp, scale_idx
+            )
+            out, reg_cycles = self._hw_unet.forward_with_weights(
+                concat,
+                regressor_channels,
+                {},
+                original_module=regressor,
+            )
             total_cycles += reg_cycles
             
             # Residual path
-            regressor_res = dp.regressor_residual[scale_idx]
             w_res = regressor_res.weight.data
             b_res = regressor_res.bias.data if regressor_res.bias is not None else torch.zeros(w_res.shape[0], device=device)
             if w_res.shape[1] != concat.shape[1]:
@@ -5289,6 +5338,58 @@ class HWDepthPredictor:
         features_mv = rearrange(torch.stack(out_features, dim=1), "b v c h w -> (b v) c h w")
         
         return [features_mv], total_cycles
+
+    def _hw_ds_feature_pyramid(
+        self, x: torch.Tensor, pyramid: nn.Module
+    ) -> Tuple[list[torch.Tensor], int]:
+        """Run DepthSplat's ViT feature pyramid with hardware units."""
+        stages = getattr(pyramid, 'stages', None)
+        if stages is None:
+            raise ValueError("DepthSplat feature pyramid has no stages")
+
+        outputs = []
+        total_cycles = 0
+        for stage in stages:
+            out = x
+            for layer in stage:
+                if isinstance(layer, nn.ConvTranspose2d):
+                    out, cycles = self._hw_conv_transpose(out, layer)
+                elif isinstance(layer, nn.Conv2d):
+                    out, cycles = self._hw_conv(out, layer)
+                elif isinstance(layer, nn.GELU):
+                    out, cycles = self._hw_activation(out, 'gelu')
+                elif isinstance(layer, nn.MaxPool2d):
+                    out, stats = self.pooling.max_pool2d(
+                        out,
+                        layer.kernel_size,
+                        stride=layer.stride,
+                        padding=layer.padding,
+                    )
+                    cycles = stats.total_cycles
+                elif isinstance(layer, nn.Identity):
+                    cycles = 0
+                else:
+                    raise RuntimeError(
+                        "unsupported DepthSplat feature-pyramid layer: "
+                        f"{type(layer).__name__}"
+                    )
+                total_cycles += cycles
+            outputs.append(out)
+
+        return outputs, total_cycles
+
+    @staticmethod
+    def _depthsplat_regressor_output_channels(
+        depth_predictor: nn.Module, scale_idx: int
+    ) -> int:
+        """Return the checkpoint-defined U-Net width for one depth scale."""
+        residual = depth_predictor.regressor_residual[scale_idx]
+        channels = getattr(residual, 'out_channels', None)
+        if not isinstance(channels, int) or channels <= 0:
+            raise ValueError(
+                f"DepthSplat scale {scale_idx} has no positive regressor width"
+            )
+        return channels
     
     @staticmethod
     def _hw_ds_batch_features(features):
@@ -6577,6 +6678,8 @@ class HWDepthPredictor:
         
         # If no weights were applied, use simplified fallback
         if not applied_any:
+            if self.strict_mode:
+                raise RuntimeError("strict hardware U-Net has no applicable loaded weights")
             return self._simplified_unet_forward(x, out_channels, device)
         
         # Ensure output has correct number of channels
@@ -7028,6 +7131,3 @@ class HWDepthPredictor:
     @property
     def cycle_breakdown(self) -> CycleBreakdown:
         return self._cycle_breakdown
-
-
-

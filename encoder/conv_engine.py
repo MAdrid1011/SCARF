@@ -112,8 +112,19 @@ class ConvEngine:
             stride=stride, padding=padding, output_padding=output_padding, groups=groups
         )
         
-        # Cycle model: transposed conv ≈ standard conv on zero-inserted input
-        # Zero-insertion expands input by stride, then standard conv
+        cycles = self._compute_transposed_cycles(input, weight, output)
+        self._total_cycles += cycles.total_cycles
+        return output, cycles
+
+    def _compute_transposed_cycles(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        output: torch.Tensor,
+    ) -> CycleStats:
+        """Compute transposed-convolution cycles from executed tensor shapes."""
+        # Cycle model: transposed conv is a standard convolution on a
+        # zero-inserted input, plus address-generation overhead.
         B, Cout, H_out, W_out = output.shape
         Cin = weight.shape[0]
         K = weight.shape[2]
@@ -136,8 +147,7 @@ class ConvEngine:
                 'type': 'transposed',
             }
         )
-        self._total_cycles += cycles.total_cycles
-        return output, cycles
+        return cycles
     
     def _compute_cycles(
         self,

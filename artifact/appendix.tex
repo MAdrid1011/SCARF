@@ -1,0 +1,67 @@
+\appendix
+\section{Artifact Appendix}
+
+\paragraph{Artifact access.}
+The archived SCARF artifact contains the Python cycle and functional simulator,
+FSDR and SAES implementations, three model adapters, Chisel RTL, experiment
+automation, expected-result manifests, and a public physical-design proxy. The
+final archival DOI is recorded in the MICRO artifact-evaluation submission and
+in the release manifest. GitHub may be used during evaluation, but the Artifact
+Available badge refers to the DOI archive.
+
+\paragraph{Hardware and software requirements.}
+Quick strict inference requires an NVIDIA CUDA GPU with at least 8\,GB VRAM,
+an x86-64 Linux host with 16\,GB RAM, and 20\,GB free disk. It uses a
+deterministic synthetic fixture and provides Functional evidence only. CPU
+smoke validation covers the CLI, result schema, DeepScale, and applicable RTL
+tools. Full quality evaluation uses an NVIDIA GPU
+with at least 24\,GB VRAM and the pinned Python 3.10 environments. The optional
+system baseline uses a Jetson Orin NX 16\,GB in MAXN mode, but it
+is outside the current reproduced claim. RTL validation needs
+JDK~11+, sbt~1.9+, Chisel~6.6, and Verilator~5+. The public physical flow uses
+iFlow commit \texttt{04b4d98} and ASAP7.
+
+\paragraph{Data and models.}
+The artifact records download sources, licenses, formats, and SHA256 values for
+Re10K, ACID, DL3DV, and the official pretrained checkpoints. The claimed
+software results use Re10K and ACID. DL3DV remains an unclaimed gated workflow.
+Full datasets are downloaded separately. The final archive records the ordered sample indices,
+dataset tree hashes, and context and target view rule used for every reported
+aggregate. A representative LPDDR5 trace validates the public Ramulator and
+DRAMPower workflow but is not a paper workload.
+
+The selection protocol uses the committed upstream evaluation indices shared
+by the three model repositories. Null index entries are recorded but excluded
+because the upstream evaluation samplers reject them. The executable protocol
+contains 6,474 Re10K samples, 1,595 ACID samples, and 140 DL3DV samples.
+
+\paragraph{Workflow and key results.}
+After installation, \texttt{run\_ae.sh quick} validates the setup.
+The modes \texttt{quality} and \texttt{ablation} reproduce the six Re10K and
+ACID rows from Table~1 and Tables~2--3. Figure~8, Figure~11, the DL3DV rows, and
+Figures~13--16 are explicitly not claimed. Each run emits structured results
+with source, environment, data, checkpoint, and command provenance. The
+\texttt{validate} mode compares results with archived expectations and reports
+explicit \texttt{PASS}, \texttt{FAIL}, \texttt{NOT\_RUN}, or
+\texttt{NOT\_CLAIMED} states.
+
+Figure~8 uses the 1\,GHz architectural target in the paper. It is not in the
+current reproduced claim because raw Orin NX timing is unavailable. The public
+physical flow reports achieved ASAP7 timing independently and preserves any
+negative slack.
+
+\paragraph{Public hardware proxy.}
+The commercial TSMC 28\,nm PDK, memory compiler, and Liberty collateral cannot
+be redistributed. We therefore include a fully public predictive-PDK workflow:
+the Chisel RTL is implemented with iFlow/ASAP7, and its raw 7\,nm PPA is retained
+before applying the paper-cited DeepScaleTool model to obtain a 28\,nm-equivalent
+estimate. This estimate validates the normalization method and hardware trend.
+It is not described as a foundry-specific TSMC 28\,nm post-layout measurement.
+The report separates logic, SRAM proxies, and excluded LPDDR PHY/pad components.
+
+\paragraph{Expected variation.}
+Quality tolerances are 0.15\,dB PSNR, 0.005 SSIM, and 0.005 LPIPS. Optional Orin
+measurements allow 5\% variation under the documented power and clock state,
+but are outside the current claim. Deterministic cycle, RTL, report-parsing, and technology-scaling
+checks must match exactly. DeepScaleTool model uncertainty and cross-node
+extrapolation limitations are reported alongside the nominal estimate.

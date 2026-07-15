@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0",
+  "tolerances": {
+    "psnr_db": 0.15,
+    "ssim": 0.005,
+    "lpips": 0.005,
+    "speedup_relative": 0.05
+  },
+  "table1": {
+    "transplat/re10k": {"baseline": [28.08, 0.919, 0.128], "scarf": [28.07, 0.917, 0.130]},
+    "transplat/acid": {"baseline": [29.58, 0.899, 0.145], "scarf": [29.60, 0.901, 0.144]},
+    "transplat/dl3dv": {"baseline": [25.08, 0.854, 0.178], "scarf": [25.07, 0.852, 0.180]},
+    "mvsplat/re10k": {"baseline": [30.22, 0.942, 0.128], "scarf": [30.23, 0.944, 0.123]},
+    "mvsplat/acid": {"baseline": [32.08, 0.916, 0.144], "scarf": [32.06, 0.915, 0.146]},
+    "mvsplat/dl3dv": {"baseline": [28.02, 0.914, 0.145], "scarf": [28.05, 0.912, 0.146]},
+    "depthsplat/re10k": {"baseline": [28.43, 0.925, 0.122], "scarf": [28.42, 0.923, 0.123]},
+    "depthsplat/acid": {"baseline": [29.43, 0.910, 0.137], "scarf": [29.44, 0.910, 0.137]},
+    "depthsplat/dl3dv": {"baseline": [26.93, 0.885, 0.157], "scarf": [26.98, 0.886, 0.156]}
+  },
+  "figure8": {"geometric_mean_speedup": 2.94},
+  "ablation": {"fsdr": 1.35, "saes": 1.26, "combined": 1.59},
+  "mechanism_tolerance_absolute": 0.02,
+  "mechanisms": {
+    "transplat/re10k": {"guided_rate": 0.721, "top1_coverage": 0.9991, "level0_rate": 0.172, "level1_rate": 0.148, "low_variance_agreement": 1.0, "gaussians_saved": 0.202},
+    "transplat/acid": {"guided_rate": 0.760, "top1_coverage": 0.9993, "level0_rate": 0.213, "level1_rate": 0.112, "low_variance_agreement": 0.9986, "gaussians_saved": 0.243},
+    "transplat/dl3dv": {"guided_rate": 0.650, "top1_coverage": 0.9988, "level0_rate": 0.120, "level1_rate": 0.101, "low_variance_agreement": 0.9923, "gaussians_saved": 0.170},
+    "mvsplat/re10k": {"guided_rate": 0.662, "top1_coverage": 0.9990, "level0_rate": 0.290, "level1_rate": 0.125, "low_variance_agreement": 1.0, "gaussians_saved": 0.240},
+    "mvsplat/acid": {"guided_rate": 0.710, "top1_coverage": 0.9987, "level0_rate": 0.360, "level1_rate": 0.180, "low_variance_agreement": 0.9977, "gaussians_saved": 0.280},
+    "mvsplat/dl3dv": {"guided_rate": 0.580, "top1_coverage": 0.9983, "level0_rate": 0.213, "level1_rate": 0.085, "low_variance_agreement": 0.9975, "gaussians_saved": 0.161},
+    "depthsplat/re10k": {"guided_rate": 0.830, "top1_coverage": 0.9989, "level0_rate": 0.387, "level1_rate": 0.186, "low_variance_agreement": 0.9959, "gaussians_saved": 0.292},
+    "depthsplat/acid": {"guided_rate": 0.870, "top1_coverage": 0.9995, "level0_rate": 0.467, "level1_rate": 0.251, "low_variance_agreement": 0.9985, "gaussians_saved": 0.338},
+    "depthsplat/dl3dv": {"guided_rate": 0.780, "top1_coverage": 0.9985, "level0_rate": 0.307, "level1_rate": 0.132, "low_variance_agreement": 0.9962, "gaussians_saved": 0.248}
+  },
+  "sensitivity_grids": {
+    "fsdr_cache_size": {"values": [8, 16, 32, 64, 128], "default": 32},
+    "fsdr_hamming_threshold": {"values": [1, 2, 3, 4, 5], "default": 3},
+    "saes_feature_variance": {"values": [0.1, 0.2, 0.3, 0.4, 0.5], "default": 0.2},
+    "saes_depth_variance": {"values": [0.01, 0.05, 0.1, 0.2, 0.5], "default": 0.1},
+    "saes_tile_size": {"values": [2, 4, 8, 16, 32], "default": 4}
+  },
+  "hardware_comparison_target": {
+    "process": "commercial TSMC 28 nm post-layout",
+    "area_mm2": 27.8,
+    "total_power_w": 2.092,
+    "frequency_mhz": 1000.0,
+    "includes_lpddr4x_phy_and_io": true,
+    "reproduction_claimed": false
+  },
+  "sensitivity_expected_runs": 225,
+  "sensitivity_claims": {
+    "throughput_ratio_tolerance": 0.02,
+    "quality_absolute_tolerance_pct": 0.5,
+    "cache_throughput_peak": 32,
+    "hamming": {
+      "throughput_ratio_3_over_1": 1.181,
+      "throughput_ratio_5_over_3": 1.015,
+      "throughput_ratio_5_over_4": 1.002,
+      "max_degradation_at_3_pct": 1.15,
+      "degradation_at_5_pct": 3.47
+    },
+    "feature_variance_throughput_peak": 0.2,
+    "depth_variance_saturation_start": 0.1,
+    "tile_throughput_ratio_to_4": {
+      "2": 0.959,
+      "8": 0.904,
+      "16": 0.879,
+      "32": 0.873
+    }
+  }
+}

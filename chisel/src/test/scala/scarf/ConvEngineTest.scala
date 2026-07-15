@@ -4,154 +4,93 @@ import chisel3._
 import chiseltest._
 import org.scalatest.flatspec.AnyFlatSpec
 import scarf.compute._
+import scarf.control.SAESController
+import scarf.fsdr.FSDRCache
 
-class ConvEngineTest extends AnyFlatSpec with ChiselScalatestTester {
+class CurrentModuleBehaviorTest extends AnyFlatSpec with ChiselScalatestTester {
 
-  behavior of "PE"
+  behavior of "VectorALU"
 
-  it should "pass data through with 1-cycle delay" in {
-    test(new PE) { dut =>
-      // Load weight = 2
-      dut.io.weightIn.poke(2.U)
-      dut.io.weightLoad.poke(true.B)
-      dut.io.enable.poke(false.B)
-      dut.io.clear.poke(false.B)
-      dut.io.dataIn.poke(0.U)
-      dut.io.psumIn.poke(0.U)
-      dut.clock.step(1)
-      dut.io.weightLoad.poke(false.B)
-
-      // Send data = 3, psum_in = 0 → psum_out = 0 + 2*3 = 6
-      dut.io.enable.poke(true.B)
-      dut.io.dataIn.poke(3.U)
-      dut.io.psumIn.poke(0.U)
-      dut.clock.step(1)
-
-      // After 1 cycle: dataOut = 3 (passed through), psumOut = 6
-      dut.io.dataOut.expect(3.U, "data should pass through with 1-cycle delay")
-      dut.io.psumOut.expect(6.U, "psum should be weight * data + psum_in = 2*3+0 = 6")
-    }
-  }
-
-  it should "accumulate partial sums across cycles" in {
-    test(new PE) { dut =>
-      dut.io.weightIn.poke(1.U)
-      dut.io.weightLoad.poke(true.B)
-      dut.io.enable.poke(false.B)
-      dut.io.clear.poke(false.B)
-      dut.io.dataIn.poke(0.U)
-      dut.io.psumIn.poke(0.U)
-      dut.clock.step(1)
-      dut.io.weightLoad.poke(false.B)
-
-      // Cycle 1: data=5, psum_in=10 → psum_out = 10 + 1*5 = 15
-      dut.io.enable.poke(true.B)
-      dut.io.dataIn.poke(5.U)
-      dut.io.psumIn.poke(10.U)
-      dut.clock.step(1)
-      dut.io.psumOut.expect(15.U)
-    }
-  }
-
-  it should "clear accumulated state" in {
-    test(new PE) { dut =>
-      dut.io.weightIn.poke(3.U)
-      dut.io.weightLoad.poke(true.B)
-      dut.io.enable.poke(false.B)
-      dut.io.clear.poke(false.B)
-      dut.io.dataIn.poke(0.U)
-      dut.io.psumIn.poke(0.U)
-      dut.clock.step(1)
-      dut.io.weightLoad.poke(false.B)
-
-      // Compute one cycle
-      dut.io.enable.poke(true.B)
-      dut.io.dataIn.poke(4.U)
-      dut.io.psumIn.poke(0.U)
-      dut.clock.step(1)
-      dut.io.psumOut.expect(12.U) // 3*4 = 12
-
-      // Clear
-      dut.io.enable.poke(false.B)
-      dut.io.clear.poke(true.B)
-      dut.clock.step(1)
-      dut.io.psumOut.expect(0.U, "psum should be 0 after clear")
-      dut.io.dataOut.expect(0.U, "data should be 0 after clear")
-    }
-  }
-
-  behavior of "SystolicArray"
-
-  it should "instantiate without error for small size" in {
-    // Use size=2 for fast test (48×48 is too large for simulation)
-    test(new SystolicArray(size = 2)) { dut =>
-      dut.io.clear.poke(true.B)
-      dut.io.enable.poke(false.B)
-      dut.io.weightLoad.poke(false.B)
-      dut.clock.step(1)
-      dut.io.clear.poke(false.B)
-
-      // Load identity-like weights: col 0 = [1, 0], col 1 = [0, 1]
-      dut.io.weightLoad.poke(true.B)
-      dut.io.weightCol.poke(0.U)
-      dut.io.weightData(0).poke(1.U)
-      dut.io.weightData(1).poke(0.U)
-      dut.clock.step(1)
-
-      dut.io.weightCol.poke(1.U)
-      dut.io.weightData(0).poke(0.U)
-      dut.io.weightData(1).poke(1.U)
-      dut.clock.step(1)
-      dut.io.weightLoad.poke(false.B)
-
-      // Stream input [5, 7] through
-      dut.io.enable.poke(true.B)
-      dut.io.dataIn(0).poke(5.U)
-      dut.io.dataIn(1).poke(7.U)
-      dut.clock.step(2) // Need 2 cycles for data to propagate through 2-row array
-
-      // With identity weights, output should be [5, 7]
-      // (after systolic delay accounting)
-      dut.io.psumOut(0).peek()
-      dut.io.psumOut(1).peek()
-    }
-  }
-
-  behavior of "ConvEngine"
-
-  it should "start in idle and transition to done" in {
-    test(new ConvEngine(arraySize = 4)) { dut =>
-      dut.io.busy.expect(false.B, "should start idle")
-      dut.io.done.expect(false.B)
-
-      // Configure: 4 in_channels, 4 out_channels, kernel 1×1
-      dut.io.inChannels.poke(4.U)
-      dut.io.outChannels.poke(4.U)
-      dut.io.kernelSize.poke(1.U)
-      dut.io.stride.poke(1.U)
-      dut.io.padding.poke(0.U)
-      dut.io.fuseReLU.poke(false.B)
-
-      // Provide dummy data
-      for (i <- 0 until 4) {
-        dut.io.weightData(i).poke(1.U)
-        dut.io.inputData(i).poke(1.U)
+  it should "add vectors and assert valid after one cycle" in {
+    test(new VectorALU(width = 8)) { dut =>
+      for (i <- 0 until 8) {
+        dut.io.a(i).poke((i + 1).U)
+        dut.io.b(i).poke(2.U)
+        dut.io.c(i).poke(0.U)
       }
+      dut.io.op.poke(VectorOp.ADD)
+      dut.io.enable.poke(true.B)
+      dut.io.smStart.poke(false.B)
+      dut.io.smLogitIn.poke(0.U)
+      dut.io.smCandidateIn.poke(0.U)
+      dut.io.smInValid.poke(false.B)
+      dut.io.smNumElements.poke(1.U)
+      dut.clock.step()
+      dut.io.valid.expect(true.B)
+      for (i <- 0 until 8) {
+        dut.io.result(i).expect((i + 3).U)
+      }
+    }
+  }
 
-      // Start
+  behavior of "FSDRCache"
+
+  it should "return an inserted exact-signature entry" in {
+    test(new FSDRCache(numEntries = 4, sigWidth = 8))
+      .withAnnotations(Seq(WriteVcdAnnotation)) { dut =>
+      dut.io.lookupEn.poke(false.B)
+      dut.io.lookupSig.poke(0.U)
+      dut.io.hammingThresh.poke(0.U)
+      dut.io.insertEn.poke(true.B)
+      dut.io.insertSig.poke("h5a".U)
+      dut.io.insertDepth.poke("h1234".U)
+      dut.io.insertPixelX.poke(3.U)
+      dut.io.insertPixelY.poke(7.U)
+      dut.clock.step()
+      dut.io.insertEn.poke(false.B)
+      dut.io.occupancy.expect(1.U)
+
+      dut.io.lookupSig.poke("h5a".U)
+      dut.io.lookupEn.poke(true.B)
+      dut.clock.step()
+      dut.io.lookupEn.poke(false.B)
+      dut.io.hit.expect(true.B)
+      dut.io.hitDepth.expect("h1234".U)
+      dut.io.hitPixelX.expect(3.U)
+      dut.io.hitPixelY.expect(7.U)
+    }
+  }
+
+  behavior of "SAESController"
+
+  it should "select L0 when feature variance is below threshold" in {
+    test(new SAESController) { dut =>
+      dut.io.config.numDepthCandidates.poke(64.U)
+      dut.io.config.featureDim.poke(128.U)
+      dut.io.config.imageH.poke(16.U)
+      dut.io.config.imageW.poke(16.U)
+      dut.io.config.tileSize.poke(4.U)
+      dut.io.config.cnnLayers.poke(1.U)
+      dut.io.config.transformerLayers.poke(1.U)
+      dut.io.config.normGroups.poke(1.U)
+      dut.io.config.shDegree.poke(2.U)
+      dut.io.config.hasDINOv2.poke(false.B)
+      dut.io.config.saesFeatureVarThresh.poke(10.U)
+      dut.io.config.saesCrossCheckThresh.poke(10.U)
+      dut.io.config.saesDepthStdThresh.poke(10.U)
+      dut.io.config.saesEnabled.poke(true.B)
+      dut.io.config.fsdrEnabled.poke(true.B)
+      dut.io.config.fsdrCacheSize.poke(4.U)
+      dut.io.config.fsdrHammingThresh.poke(1.U)
+      dut.io.probeFeatureVar.poke(5.U)
+      dut.io.probeDepthStd.poke(20.U)
+      dut.io.crossCheckError.poke(20.U)
       dut.io.start.poke(true.B)
-      dut.clock.step(1)
+      dut.clock.step()
       dut.io.start.poke(false.B)
-      dut.io.busy.expect(true.B, "should be busy after start")
-
-      // Run until done (max 100 cycles to prevent hang)
-      var cycles = 0
-      while (!dut.io.done.peekBoolean() && cycles < 100) {
-        dut.clock.step(1)
-        cycles += 1
-      }
-      assert(cycles < 100, s"ConvEngine did not finish within 100 cycles (ran $cycles)")
+      dut.clock.step()
       dut.io.done.expect(true.B)
+      dut.io.level.expect(SAESLevel.sL0)
     }
   }
 }

@@ -208,7 +208,9 @@ __marimo__/
 
 # Output files
 outputs/
+datasets/
 .milestones/
+artifact/reference_results/evidence/
 
 # Paper draft (do not distribute)
 main.pdf

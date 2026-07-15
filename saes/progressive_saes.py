@@ -189,15 +189,24 @@ class ProgressiveSAES:
 
         tiles_h = h // tile_size
         tiles_w = w // tile_size
-        tile_variances: Dict[Tuple[int, int], float] = {}
-
-        for th in range(tiles_h):
-            for tw in range(tiles_w):
-                y0, x0 = th * tile_size, tw * tile_size
-                tile_feat = feat_norm[:, y0:y0 + tile_size, x0:x0 + tile_size]
-                tile_flat = tile_feat.reshape(tile_feat.shape[0], -1)
-                channel_std = tile_flat.std(dim=1)
-                tile_variances[(th, tw)] = channel_std.mean().item()
+        tiled = (
+            feat_norm[:, : tiles_h * tile_size, : tiles_w * tile_size]
+            .unfold(1, tile_size, tile_size)
+            .unfold(2, tile_size, tile_size)
+            .contiguous()
+        )
+        values = (
+            tiled.reshape(tiled.shape[0], tiles_h, tiles_w, -1)
+            .std(dim=-1)
+            .mean(dim=0)
+            .detach()
+            .cpu()
+        )
+        tile_variances = {
+            (th, tw): float(values[th, tw])
+            for th in range(tiles_h)
+            for tw in range(tiles_w)
+        }
 
         return tile_variances, feat_norm
 
@@ -703,6 +712,7 @@ def apply_progressive_saes(
     depths=None,
     cross_check_threshold: float = 0.015,
     feat_norm=None,            # pre-computed [C, H, W]; computed internally if None
+    collect_continue_pixels: bool = False,
 ) -> Tuple['torch.Tensor', Dict, List]:
     """
     Apply progressive SAES v4 (Dataflow-aligned, L0+L1) to Gaussians.
@@ -750,13 +760,12 @@ def apply_progressive_saes(
         feat_norm=_feat_norm,
     )
 
-    # Collect unmodified pixels (for FSDR)
     continue_pixels = []
-    for idx in range(modified_mask.shape[0]):
-        if not modified_mask[idx]:
+    if collect_continue_pixels:
+        indices = torch.nonzero(~modified_mask, as_tuple=False).flatten().cpu().tolist()
+        for idx in indices:
             pixel_idx = idx // gpp
-            y = pixel_idx // W
-            x = pixel_idx % W
+            y, x = divmod(pixel_idx, W)
             if y < H and x < W:
                 continue_pixels.append((y, x, pixel_idx))
 

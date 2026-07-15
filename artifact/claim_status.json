@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "generated_on": "2026-07-13",
+  "software_pairs": {
+    "transplat/re10k": "CLAIMED",
+    "transplat/acid": "CLAIMED",
+    "transplat/dl3dv": "NOT_CLAIMED_GATED_DATA",
+    "mvsplat/re10k": "CLAIMED",
+    "mvsplat/acid": "CLAIMED",
+    "mvsplat/dl3dv": "NOT_CLAIMED_GATED_DATA",
+    "depthsplat/re10k": "CLAIMED",
+    "depthsplat/acid": "CLAIMED",
+    "depthsplat/dl3dv": "NOT_CLAIMED_GATED_DATA"
+  },
+  "mechanism_pairs": {
+    "transplat/re10k": "CLAIMED",
+    "transplat/acid": "CLAIMED",
+    "transplat/dl3dv": "NOT_CLAIMED_GATED_DATA",
+    "mvsplat/re10k": "CLAIMED",
+    "mvsplat/acid": "CLAIMED",
+    "mvsplat/dl3dv": "NOT_CLAIMED_GATED_DATA",
+    "depthsplat/re10k": "CLAIMED",
+    "depthsplat/acid": "CLAIMED",
+    "depthsplat/dl3dv": "NOT_CLAIMED_GATED_DATA"
+  },
+  "figure8": "NOT_CLAIMED_NO_ORIN_EVIDENCE",
+  "figure11": "NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX",
+  "sensitivity": "NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX",
+  "rtl": "CLAIMED",
+  "dram": "FUNCTIONAL_ONLY",
+  "physical_asap7": "CLAIMED",
+  "deepscale": "CLAIMED"
+}

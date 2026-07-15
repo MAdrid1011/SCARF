@@ -2,12 +2,20 @@
 
 SCARF is a hardware-realizable accelerator for depth-guided generalizable 3D Gaussian Splatting (G-3DGS) encoders, co-designed with a scene-adaptive dataflow that exploits semantic similarity in 2D feature space (FSDR) and geometric continuity in 3D space (SAES).
 
+## MICRO 2026 Artifact Evaluation
+
+The reviewer-facing setup, claim-to-command mapping, tolerances, and public
+ASAP7/DeepScaleTool hardware scope are documented in
+[artifact evaluation guide](ARTIFACT_EVALUATION.md). Use that guide for badge
+evaluation. The examples below are developer-oriented.
+
 ## Key Features
 
 ### End-to-End Hardware Simulation
 - Full pipeline runs through ASIC hardware unit simulators by default
-- Feature Extractor → Depth Predictor → GGU, each stage's output feeds the next
-- Zero `SW_FALLBACK` — every `F.*` / `torch.*` operation is routed through a hardware unit
+- Feature Extractor → Depth Predictor → GGU, with each stage feeding the next
+- Result provenance records the simulated stages and rejects missing cycle data
+  in artifact-evaluation mode
 
 ### Hardware Units (encoder/)
 
@@ -17,7 +25,7 @@ SCARF is a hardware-realizable accelerator for depth-guided generalizable 3D Gau
 | **GEMMUnit** | Matrix multiplication, batched matmul |
 | **ActivationUnit** | ReLU, GELU, SiLU, Sigmoid, Softplus |
 | **NormalizationUnit** | LayerNorm, BatchNorm, InstanceNorm, GroupNorm (configurable eps) |
-| **BilinearUnit** | Bilinear / nearest / bicubic interpolation, grid_sample |
+| **BilinearUnit** | Bilinear / nearest / bicubic interpolation, `grid_sample` |
 | **SoftmaxUnit** | Softmax with optional temperature (LUT-based exp) |
 | **PoolingUnit** | Average pooling, max pooling, adaptive average pooling |
 | **PadUnit** | Constant / reflect / replicate / circular padding |
@@ -100,18 +108,29 @@ git submodule update --init --recursive
 ### 2. Environment Setup
 
 ```bash
-# Create conda environment (recommended)
-conda create -n transplat python=3.10
-conda activate transplat
+# TranSplat and MVSplat (PyTorch 2.1 profile)
+bash install.sh --profile classic --venv .venv/classic
 
-# Install SCARF core dependencies
-pip install -r requirements.txt
-
-# Install model-specific dependencies (pick the model(s) you need)
-pip install -r transplat/requirements.txt
-pip install -r mvsplat/requirements.txt
-pip install -r depthsplat/requirements.txt
+# DepthSplat uses a separate PyTorch 2.4 environment
+bash install.sh --profile depthsplat --venv .venv/depthsplat
 ```
+
+Do not install all three upstream requirement files into one environment.
+Their PyTorch and CUDA constraints differ. The AE runner discovers these two
+default virtual environments automatically. If they live elsewhere, export
+`SCARF_PYTHON_CLASSIC` and `SCARF_PYTHON_DEPTHSPLAT` with their interpreter
+paths.
+
+For a small Functional smoke test that does not download Re10K, build the
+deterministic synthetic fixture and run quick mode:
+
+```bash
+bash data/download_checkpoints.sh --profile quick
+.venv/classic/bin/python data/build_quick_dataset.py --output datasets/quick-re10k
+bash scripts/run_ae.sh quick
+```
+
+This fixture cannot be used for a paper-result claim.
 
 ### 3. Setup Data
 
@@ -120,7 +139,7 @@ Copy (or symlink) checkpoints and datasets into each submodule directory:
 ```bash
 # --- TranSplat ---
 cp -r /path/to/checkpoints/re10k.ckpt          transplat/checkpoints/
-cp -r /path/to/checkpoints/depth_anything_v2_vits.pth transplat/checkpoints/
+cp -r /path/to/checkpoints/depth_anything_v2_vitb.pth transplat/checkpoints/
 cp -r /path/to/datasets/re10k                   transplat/datasets/
 
 # --- MVSplat ---
@@ -142,7 +161,7 @@ Required files per model:
 
 | Model | Checkpoints | Dataset |
 |-------|------------|---------|
-| TranSplat | `re10k.ckpt`, `depth_anything_v2_vits.pth` | `re10k/` |
+| TranSplat | `re10k.ckpt`, `depth_anything_v2_vitb.pth` | `re10k/` |
 | MVSplat | `re10k.ckpt` | `re10k/` |
 | DepthSplat | `depthsplat_re10k.ckpt` | `re10k/` |
 
@@ -214,8 +233,8 @@ When SAES and FSDR are enabled (default), they sit between Depth Predictor and G
 - [Architecture Overview](docs/architecture.md)
 
 Module-level documentation:
-- [feature_extractor/README.md](feature_extractor/README.md) — Feature extraction
-- [depth_predictor/README.md](depth_predictor/README.md) — Depth prediction
+- [Feature extraction](feature_extractor/README.md)
+- [Depth prediction](depth_predictor/README.md)
 
 ## License
 
@@ -223,7 +242,7 @@ MIT License
 
 ## Related Projects
 
-- [TranSplat](https://github.com/xingyoujun/transplat) - Original TranSplat implementation (AAAI 2025)
+- [TranSplat](https://github.com/xingyoujun/transplat), the original AAAI 2025 implementation
 
 ## Citation
 

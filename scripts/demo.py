@@ -56,14 +56,20 @@ import sys
 import os
 from pathlib import Path
 
-# Set TORCH_HOME to use local cache (avoid network check for DINOv2 etc.)
-os.environ.setdefault('TORCH_HOME', os.path.expanduser('~/.cache/torch'))
-
 # SCARF root directory
 SCARF_ROOT = Path(__file__).parent.parent.resolve()
 
+# All network-fetched model assets are prepared and hash-checked in advance.
+os.environ.setdefault('TORCH_HOME', str(SCARF_ROOT / 'assets' / 'torch'))
+
 # Add SCARF to path for imports
 sys.path.insert(0, str(SCARF_ROOT))
+
+from scripts.demo_cli import parse_args as parse_demo_args
+
+# Keep the public CLI inspectable before heavyweight model dependencies exist.
+if any(option in sys.argv[1:] for option in ("-h", "--help")):
+    parse_demo_args()
 
 import torch
 import torch.nn.functional as F
@@ -80,6 +86,7 @@ from integration import create_model_loader, ModelBundle, DataBundle
 from ggu import GGUProcessor, GGUConfig
 from fsdr import FSDRSimulator
 from saes import ProgressiveSAES, apply_progressive_saes
+from scripts.result_record import strict_stage_error
 
 # SCARF hardware clock frequency (MHz) — default 1 GHz, overridable via --freq
 SCARF_FREQ_MHZ = 1000
@@ -110,12 +117,26 @@ def get_gpu_info() -> Dict[str, object]:
     except Exception:
         pass
 
-    # Fallback
-    name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'Unknown GPU'
-    return {'name': name, 'freq_mhz': 1500}
+    if torch.cuda.is_available():
+        for path in Path("/sys/devices").glob("**/devfreq/*gpu*/max_freq"):
+            try:
+                raw = int(path.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                continue
+            freq_mhz = raw / 1_000_000 if raw >= 1_000_000 else raw / 1_000
+            if freq_mhz > 0:
+                return {'name': torch.cuda.get_device_name(0), 'freq_mhz': freq_mhz}
+        raise RuntimeError("cannot determine GPU clock from nvidia-smi or device sysfs")
+    return {'name': 'CPU', 'freq_mhz': 0}
 
 
-def gpu_timed_inference(fn, warmup: int = 1, repeats: int = 5) -> float:
+def gpu_timed_inference(
+    fn,
+    warmup: int = 1,
+    repeats: int = 5,
+    device: Optional[torch.device] = None,
+    return_samples: bool = False,
+):
     """
     Precisely measure GPU inference time using CUDA events.
     
@@ -131,6 +152,19 @@ def gpu_timed_inference(fn, warmup: int = 1, repeats: int = 5) -> float:
     for _ in range(warmup):
         with torch.no_grad():
             fn()
+    use_cuda = torch.cuda.is_available() and (device is None or device.type == "cuda")
+    if not use_cuda:
+        import statistics
+
+        times_ms = []
+        for _ in range(repeats):
+            start = time.perf_counter()
+            with torch.no_grad():
+                fn()
+            times_ms.append((time.perf_counter() - start) * 1000.0)
+        median = statistics.median(times_ms)
+        return (median, times_ms) if return_samples else median
+
     torch.cuda.synchronize()
 
     # Timed runs
@@ -146,8 +180,10 @@ def gpu_timed_inference(fn, warmup: int = 1, repeats: int = 5) -> float:
         times_ms.append(start.elapsed_time(end))
 
     # Return median
-    times_ms.sort()
-    return times_ms[len(times_ms) // 2]
+    import statistics
+
+    median = statistics.median(times_ms)
+    return (median, times_ms) if return_samples else median
 
 
 # ============================================================
@@ -207,7 +243,7 @@ class SCARFConfig:
     tile_size: int = 4
     saes_cov_safety: float = 1.02     # Safety factor for interpolated covariances
     feature_var_threshold: float = 0.20   # Level 0: natural saturation (~18-34% tiles, model-dependent)
-    depth_std_threshold: float = 0.003    # Level 1: ~3% of remaining tiles (depth-flat, geometrically planar)
+    depth_std_threshold: float = 0.10     # Paper default tau_d
     saes_cross_check: float = 0.015       # Probe cross-check error threshold (conservative, ≤2% quality across all models)
     
     # ---- FSDR config — Depth-Only Reuse (Realistic ASIC) ----
@@ -216,7 +252,7 @@ class SCARFConfig:
     # Quality impact is proportional to depth error (very small for matched pixels)
     # This allows much more aggressive reuse criteria than full-Gaussian reuse
     fsdr_cache_size: int = 32
-    fsdr_hamming_threshold: int = 4       # Cache lookup hamming range
+    fsdr_hamming_threshold: int = 3       # Paper default tau_h
     fsdr_reuse_hamming: int = 3           # Moderate hamming (depth-only is safe)
     fsdr_reuse_spatial: int = 12          # Moderate spatial distance
     fsdr_reuse_confidence: float = 0.80   # Min peak_prob for reuse decision
@@ -235,7 +271,6 @@ class SCARFConfig:
     sh_degree: int = 4
     
     # Test config
-    test_views: int = 1
     
     def apply_adapter_overrides(self, adapter: BaseAdapter):
         """Apply model-specific configuration from adapter."""
@@ -259,6 +294,19 @@ class SCARFConfig:
 
 # Global config (initialized in main)
 CONFIG: SCARFConfig = None
+_MODEL_BUNDLE_CACHE = {}
+_LPIPS_METRIC_CACHE = {}
+
+
+def get_lpips_metric(device: torch.device):
+    key = str(device)
+    metric = _LPIPS_METRIC_CACHE.get(key)
+    if metric is None:
+        from lpips import LPIPS
+
+        metric = LPIPS(net="vgg").to(device).eval()
+        _LPIPS_METRIC_CACHE[key] = metric
+    return metric
 
 
 # ============================================================
@@ -507,9 +555,12 @@ class SavingsTracker:
         # FSDR: fraction of remaining (non-SAES) pixels that get guided search
         fsdr_ratio = self.fsdr_validated_saving_ratio()
         
-        if dp_core_cycles == 0 and gauss_gen_cycles == 0:
-            dp_core_cycles = depth_cycles
-            gauss_gen_cycles = 0
+        if min(feature_cycles, dp_core_cycles, gauss_gen_cycles, ggu_cycles) <= 0:
+            raise ValueError("complete positive S1, S2, S3, and GGU cycles are required")
+        if not 0 < s1_cnn_cycles <= feature_cycles:
+            raise ValueError("S1 CNN cycle breakdown is missing or inconsistent")
+        if not 0 < cost_volume_cycles < dp_core_cycles:
+            raise ValueError("S2 cost-volume cycle breakdown is missing or inconsistent")
         
         # ================================================================
         # Apply differentiated hardware scaling per stage
@@ -520,27 +571,18 @@ class SavingsTracker:
         S1_CNN_BOOST = CONFIG.s1_cnn_boost   # 1.8x additional for CNN
         S1_VIT_BOOST = CONFIG.s1_vit_boost   # 1.15x additional for ViT
         
-        if s1_cnn_cycles > 0 and feature_cycles > 0:
-            s1_vit_cycles = max(0, feature_cycles - s1_cnn_cycles)
-            fe_cnn = int(s1_cnn_cycles / (HW_SCALE_C * S1_CNN_BOOST))
-            fe_vit = int(s1_vit_cycles / (HW_SCALE_C * S1_VIT_BOOST))
-            feature_cycles = fe_cnn + fe_vit
-        else:
-            # Fallback: uniform compute scaling (no CNN/ViT breakdown available)
-            feature_cycles = int(feature_cycles / HW_SCALE_C)
+        s1_vit_cycles = feature_cycles - s1_cnn_cycles
+        fe_cnn = int(s1_cnn_cycles / (HW_SCALE_C * S1_CNN_BOOST))
+        fe_vit = int(s1_vit_cycles / (HW_SCALE_C * S1_VIT_BOOST))
+        feature_cycles = fe_cnn + fe_vit
         
         # S2 (Depth Prediction): split cost_volume (memory-bound) from rest (compute-bound)
         #   cost_volume: bilinear warping + correlation → limited by SRAM read bandwidth
         #   unet + depth_head + regression: convolutions/GEMM → compute-bound
-        if cost_volume_cycles > 0 and dp_core_cycles > 0:
-            non_cv_cycles = dp_core_cycles - cost_volume_cycles
-            dp_cv_scaled = int(cost_volume_cycles / HW_SCALE_M)   # memory-bound
-            dp_rest_scaled = int(non_cv_cycles / HW_SCALE_C)      # compute-bound
-            dp_core_cycles = dp_cv_scaled + dp_rest_scaled
-        else:
-            # Fallback: treat as uniformly compute-bound
-            dp_cv_scaled = 0
-            dp_core_cycles = int(dp_core_cycles / HW_SCALE_C)
+        non_cv_cycles = dp_core_cycles - cost_volume_cycles
+        dp_cv_scaled = int(cost_volume_cycles / HW_SCALE_M)   # memory-bound
+        dp_rest_scaled = int(non_cv_cycles / HW_SCALE_C)      # compute-bound
+        dp_core_cycles = dp_cv_scaled + dp_rest_scaled
         
         # S3 (Gaussian Generation): refine_unet + to_gaussians → compute-bound
         gauss_gen_cycles = int(gauss_gen_cycles / HW_SCALE_C)
@@ -592,7 +634,7 @@ class SavingsTracker:
         #   Tier-1 S3 bypass in the current simulation.  Claiming S3 savings
         #   for any fraction of guided pixels would overstate the speedup.
         #
-        # Architecture: LSH hash unit (16-bit) + 512-entry cache table.
+        # Architecture: LSH hash unit (16-bit) + 32-entry default cache table.
         #   Guided (cache hit, hamming ≤ reuse_hamming): narrowed D/4 search.
         #   Miss: full D-candidate search.
         #
@@ -603,10 +645,7 @@ class SavingsTracker:
         #   that feeds S3 normally).
         FSDR_TIER2_RATIO = 1.0  # All guided pixels use narrowed search
 
-        if dp_core_cycles > 0 and dp_cv_scaled > 0:
-            cv_frac_scaled = dp_cv_scaled / dp_core_cycles
-        else:
-            cv_frac_scaled = 0.69  # Typical for TranSplat (fallback)
+        cv_frac_scaled = dp_cv_scaled / dp_core_cycles
 
         # depth_dep_frac: fraction of S2 that depends on D (depth candidates).
         # Components:
@@ -672,7 +711,7 @@ class SavingsTracker:
             feature_cycles, dp_core_cycles, gauss_gen_cycles, ggu_cycles,
             0.0, 0.0, cfg_key='asic')
         
-        # 2. ASIC + FSDR only (two-tier: Tier1 full Gaussian reuse, Tier2 narrowed search)
+        # 2. ASIC + FSDR only (single-tier narrowed depth search)
         fsdr_alone_s2 = fsdr_ratio * FSDR_S2_SAVE_PER_PIXEL
         fsdr_alone_s3 = fsdr_ratio * FSDR_S3_SAVE_PER_PIXEL
         dp_fsdr = int(dp_core_cycles * (1.0 - fsdr_alone_s2))
@@ -736,6 +775,13 @@ class SavingsTracker:
 # ============================================================
 def load_model_and_data(
     model_type: str = 'transplat',
+    dataset_name: str = 're10k',
+    checkpoint_path: Optional[Path] = None,
+    dataset_root: Optional[Path] = None,
+    evaluation_index: Optional[Path] = None,
+    experiment_name: str = 're10k',
+    hydra_overrides: tuple[str, ...] = (),
+    device: Optional[torch.device] = None,
     num_samples: int = 1,
     sample_index: int = 0,
 ):
@@ -750,36 +796,46 @@ def load_model_and_data(
     Returns:
         (model, batch, cfg, device)
     """
-    # Create model loader
-    loader = create_model_loader(model_type)
-    
-    # Determine checkpoint path based on model type
-    checkpoint_paths = {
-        'transplat': SCARF_ROOT / 'transplat' / 'checkpoints' / 're10k.ckpt',
-        'mvsplat': SCARF_ROOT / 'mvsplat' / 'checkpoints' / 're10k.ckpt',
-        'depthsplat': SCARF_ROOT / 'depthsplat' / 'checkpoints' / 're10k.ckpt',
-    }
-    
-    checkpoint_path = checkpoint_paths.get(model_type)
     if checkpoint_path is None:
-        raise ValueError(f"Unknown model type: {model_type}")
-    
-    checkpoint_path = str(checkpoint_path)
+        checkpoint_path = SCARF_ROOT / model_type / 'checkpoints' / 're10k.ckpt'
+    checkpoint_path = Path(checkpoint_path).resolve()
     
     # Check if checkpoint exists
-    if not Path(checkpoint_path).exists():
+    if not checkpoint_path.is_file():
         raise FileNotFoundError(
             f"Checkpoint not found: {checkpoint_path}\n"
             f"Please download the checkpoint for {model_type}.\n"
             f"See docs/multi-model-demo-guide.md for instructions."
         )
     
-    # Load model
-    model_bundle = loader.load_model(checkpoint_path)
+    cache_key = (
+        model_type,
+        str(checkpoint_path),
+        str(Path(dataset_root).resolve()) if dataset_root is not None else None,
+        str(Path(evaluation_index).resolve()) if evaluation_index is not None else None,
+        experiment_name,
+        tuple(hydra_overrides),
+        str(device) if device is not None else "auto",
+    )
+    cached = _MODEL_BUNDLE_CACHE.get(cache_key)
+    if cached is None:
+        loader = create_model_loader(model_type)
+        model_bundle = loader.load_model(
+            str(checkpoint_path),
+            device=device,
+            experiment_name=experiment_name,
+            dataset_root=dataset_root,
+            evaluation_index=evaluation_index,
+            hydra_overrides=tuple(hydra_overrides),
+        )
+        _MODEL_BUNDLE_CACHE[cache_key] = (loader, model_bundle)
+    else:
+        loader, model_bundle = cached
     
     # Load data
     data_bundle = loader.load_data(
         model_bundle,
+        dataset_name=dataset_name,
         num_samples=max(num_samples, sample_index + 1),
         sample_index=sample_index,
     )
@@ -915,23 +971,19 @@ def tune_thresholds(
     )
     
     if has_features:
-        for y in range(h):
-            for x in range(w):
-                pixel_idx = y * w + x
-                feat = features_up[:, y, x]
-                if depths is not None:
-                    if depths.dim() == 5:
-                        ad = depths[0, 0, pixel_idx, 0, 0].item()
-                    elif depths.dim() == 4:
-                        ad = depths[0, 0, y, x].item()
-                    else:
-                        ad = 1.0
-                else:
-                    ad = 1.0
-                trial_fsdr.process_pixel(
-                    feat, ad, (y, x), pixel_idx,
-                    actual_gaussians=gaussians_full, gauss_idx=pixel_idx,
-                )
+        if depths is None:
+            frame_depths = torch.ones(h * w, device=features_up.device)
+        elif depths.dim() == 5:
+            frame_depths = depths[0, 0, : h * w, 0, 0]
+        elif depths.dim() == 4:
+            frame_depths = depths[0, 0, :h, :w].reshape(-1)
+        else:
+            frame_depths = torch.ones(h * w, device=features_up.device)
+        trial_fsdr.process_frame(
+            features_up.permute(1, 2, 0).reshape(h * w, C_f),
+            frame_depths,
+            w,
+        )
     
     reuse_rate = trial_fsdr.get_reuse_ratio()
     print(f"  Reuse rate (skip S2+S3): {reuse_rate*100:.1f}%")
@@ -1056,60 +1108,59 @@ def compute_saes_low_var_agreement(
 # ============================================================
 # Main Pipeline
 # ============================================================
-def main():
+def main(argv=None):
     global CONFIG
     
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='SCARF Demo')
-    parser.add_argument('--model', type=str, default='transplat',
-                        choices=['transplat', 'mvsplat', 'depthsplat'],
-                        help='Model type to use')
-    # Hardware simulator control options
-    parser.add_argument('--no-feature', action='store_true',
-                        help='Disable SCARF feature extraction HW simulator, use original GPU')
-    parser.add_argument('--no-depth', action='store_true',
-                        help='Disable SCARF depth prediction HW simulator, use original GPU')
-    parser.add_argument('--no-gaussian', action='store_true',
-                        help='Disable SCARF gaussian generation HW simulator (GGU), use original GPU')
-    
-    # Performance optimization options
-    parser.add_argument('--no-saes', action='store_true',
-                        help='Disable SAES early-stopping optimization')
-    parser.add_argument('--no-fsdr', action='store_true',
-                        help='Disable FSDR depth reuse optimization')
-    
-    # Ablation experiment
-    parser.add_argument('--ablation', action='store_true',
-                        help='Run full ablation: GPU / ASIC / ASIC+FSDR / ASIC+SAES / ASIC+FSDR+SAES. '
-                             'Forces both SAES and FSDR to run regardless of --no-saes/--no-fsdr.')
-    parser.add_argument('--tune-thresholds', action='store_true',
-                        help='Sweep SAES/FSDR thresholds to find optimal settings '
-                             'within 1.0%% relative PSNR quality budget.')
-    
-    # Other options
-    parser.add_argument('--baseline-only', action='store_true',
-                        help='Only run baseline, skip SCARF pipeline')
-    parser.add_argument('--num-samples', type=int, default=1,
-                        help='Number of test samples exposed by the dataloader')
-    parser.add_argument('--sample-index', type=int, default=0,
-                        help='Zero-based sample index to run from the test dataloader')
-    parser.add_argument('--output-dir', type=str, default=None,
-                        help='Directory for saved demo images')
-    parser.add_argument('--freq', type=int, default=1000,
-                        help='SCARF ASIC clock frequency in MHz (default: 1000 = 1 GHz)')
-    parser.add_argument('--saes-fv', type=float, default=None,
-                        help='Override feature_var_threshold for SAES L0')
-    parser.add_argument('--saes-ds', type=float, default=None,
-                        help='Override depth_std_threshold for SAES L1')
-    parser.add_argument('--saes-cc', type=float, default=None,
-                        help='Override saes_cross_check threshold (probe similarity gate)')
-    parser.add_argument('--tile-size', type=int, default=None,
-                        help='Override SAES tile size (4 or 8)')
-    parser.add_argument('--fsdr-cache-size', type=int, default=None,
-                        help='Override FSDR cache size (number of entries)')
-    parser.add_argument('--fsdr-hamming', type=int, default=None,
-                        help='Override FSDR hamming threshold for cache lookup')
-    args = parser.parse_args()
+    args = parse_demo_args(argv)
+    strict_run = args.claim_run or args.functional_run
+    fallback_stages = []
+    from scripts.ae_config import (
+        resolve_experiment,
+        validate_claim_dataset_tree,
+        validate_prepared_dataset,
+    )
+    from scripts.runtime_assets import validate_runtime_assets
+
+    experiment = resolve_experiment(args.model, args.dataset, SCARF_ROOT)
+    runtime_assets = validate_runtime_assets(args.model)
+    checkpoint_path = (args.checkpoint or experiment.checkpoint).resolve()
+    dataset_root = (args.dataset_root or experiment.dataset_root).resolve()
+    dataset_manifest = (
+        args.dataset_manifest or dataset_root / ".scarf-manifest.json"
+    ).resolve()
+    if not dataset_manifest.is_file():
+        raise FileNotFoundError(
+            f"dataset provenance manifest not found: {dataset_manifest}\n"
+            "Run the documented dataset preparation command before evaluation."
+        )
+    dataset_identity = validate_prepared_dataset(
+        experiment,
+        dataset_root,
+        dataset_manifest,
+        allow_functional_fixture=args.functional_run,
+    )
+    if args.claim_run:
+        validate_claim_dataset_tree(
+            args.model,
+            args.dataset,
+            dataset_identity['tree_sha256'],
+            SCARF_ROOT,
+        )
+    if args.device == "auto":
+        selected_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        selected_device = torch.device(args.device)
+    if selected_device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"requested CUDA device is unavailable: {args.device}")
+
+    import random
+    import numpy as np
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     
     # Override global SCARF frequency from CLI
     global SCARF_FREQ_MHZ
@@ -1202,6 +1253,13 @@ def main():
     print("[1/6] Loading model and data...")
     model, batch, cfg, device = load_model_and_data(
         args.model,
+        dataset_name=args.dataset,
+        checkpoint_path=checkpoint_path,
+        dataset_root=dataset_root,
+        evaluation_index=args.evaluation_index,
+        experiment_name=experiment.experiment,
+        hydra_overrides=experiment.hydra_overrides,
+        device=selected_device,
         num_samples=args.num_samples,
         sample_index=args.sample_index,
     )
@@ -1217,7 +1275,6 @@ def main():
     _, V_tgt, _, _, _ = batch['target']['image'].shape
     scene_name = batch['scene'][0] if 'scene' in batch else 'unknown'
     
-    V_tgt = min(V_tgt, CONFIG.test_views)
     print(f"  ✓ Scene: {scene_name}, Testing {V_tgt} view(s), Size: {h}x{w}")
     
     context = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch['context'].items()}
@@ -1252,19 +1309,37 @@ def main():
             baseline_gaussians, tgt_ext, tgt_int,
             target['near'], target['far'], (h, w), depth_mode=None
         )
-    baseline_image = baseline_output.color[0, 0]
+    baseline_images = baseline_output.color[0, :V_tgt]
+    baseline_image = baseline_images[0]
     baseline_count = baseline_gaussians.means.shape[1]
     
     # --- Precise GPU timing (encoder only) via CUDA events ---
     def _baseline_encoder():
         return model.encoder(context, False)
     
-    baseline_gpu_time_ms = gpu_timed_inference(_baseline_encoder, warmup=1, repeats=5)
+    if args.sensitivity_trace:
+        # Sensitivity uses the already-produced baseline tensors and replays
+        # parameter decisions. Encoder timing is outside this claim.
+        baseline_gpu_time_ms = 0.0
+        baseline_timing_samples_ms = []
+    else:
+        is_orin = device.type == "cuda" and "Orin" in gpu_name
+        timing_repetitions = 5 if is_orin else 1
+        baseline_gpu_time_ms, baseline_timing_samples_ms = gpu_timed_inference(
+            _baseline_encoder,
+            warmup=1 if is_orin else 0,
+            repeats=timing_repetitions,
+            device=device,
+            return_samples=True,
+        )
     baseline_gpu_freq_hz = gpu_freq_mhz * 1e6
     baseline_gpu_cycles = int(baseline_gpu_time_ms * 1e-3 * baseline_gpu_freq_hz)
     
     print(f"  ✓ Baseline: {baseline_image.shape}, Gaussians: {baseline_count:,}")
-    print(f"    GPU encoder time: {baseline_gpu_time_ms:.2f} ms (median of 5)")
+    print(
+        f"    GPU encoder time: {baseline_gpu_time_ms:.2f} ms "
+        f"({len(baseline_timing_samples_ms)} diagnostic sample(s))"
+    )
     print(f"    GPU encoder cycles: {baseline_gpu_cycles:,} (@ {gpu_freq_mhz} MHz)")
     
     # Print baseline depth statistics for comparison
@@ -1299,7 +1374,10 @@ def main():
         print("### Baseline Metrics")
         print(f"  PSNR: {psnr:.2f} dB")
         print(f"  Gaussians: {baseline_count:,}")
-        print(f"  GPU encoder time: {baseline_gpu_time_ms:.2f} ms (median of 5)")
+        print(
+            f"  GPU encoder time: {baseline_gpu_time_ms:.2f} ms "
+            f"({len(baseline_timing_samples_ms)} diagnostic sample(s))"
+        )
         print(f"  GPU encoder cycles: {baseline_gpu_cycles:,} (@ {gpu_freq_mhz} MHz)")
         return
     
@@ -1417,12 +1495,19 @@ def main():
                 
                 print(f"    ✓ Features: {pipeline_features.shape if pipeline_features is not None else 'None'}")
         except Exception as e:
+            if strict_run:
+                raise strict_stage_error("feature simulator", e) from e
             print(f"    ⚠ HW Simulator error: {e}, falling back to GPU")
             import traceback
             traceback.print_exc()
             use_feature_sim = False
     
     if not use_feature_sim or pipeline_features is None:
+        if strict_run:
+            raise RuntimeError(
+                "strict run feature simulator produced no features; GPU fallback is forbidden"
+            )
+        fallback_stages.append("feature")
         # Fallback: Use original GPU for feature extraction
         print(f"    Mode: Original GPU" + (" (fallback)" if use_feature_sim else " (--no-feature)"))
         
@@ -1546,6 +1631,8 @@ def main():
             elif args.model == 'depthsplat':
                 depth_predictor_sim = DepthSplatDepthPredictorSim(device=device)
                 depth_predictor_sim.load_from_model(model.encoder)
+            if depth_predictor_sim is not None:
+                depth_predictor_sim.set_strict_mode(strict_run)
             
             # DepthSplat can work with either features or images (features extracted internally)
             can_run_hw = (depth_predictor_sim is not None and
@@ -1592,16 +1679,10 @@ def main():
                     depth_sim_cycles = dp_core_cycles
                     print(f"    [DepthSplat] S2 de-duplicated: subtracted {fe_in_dp:,} "
                           f"DP-internal feature extraction cycles (S1-shared)")
-                elif args.model == 'depthsplat' and feature_sim_cycles > 0:
-                    # Fallback guard: if CycleBreakdown.feature_extraction is missing
-                    # (e.g. older depth predictor version), approximate de-duplication
-                    # by subtracting S1 total cycles.  This path should NOT be reached
-                    # with the current hw_depth_predictor which always reports
-                    # feature_extraction, but is kept for safety.
-                    overlap = min(feature_sim_cycles, dp_core_cycles)
-                    dp_core_cycles -= overlap
-                    depth_sim_cycles = dp_core_cycles
-                    print(f"    [DepthSplat] S2 de-duplicated (fallback): subtracted {overlap:,} S1 feature cycles")
+                elif args.model == 'depthsplat':
+                    raise RuntimeError(
+                        "DepthSplat cycle breakdown has no feature_extraction field"
+                    )
                 
                 # --- Probe-first scheduling overhead (Gap 5 / Dataflow spec) ---
                 # Per the SCARF Dataflow spec, S2 processes pixels within each tile in
@@ -1665,13 +1746,19 @@ def main():
                             
                             depth_final = results_dict['depth_preds'][-1]
                             match_prob = results_dict['match_probs'][-1]
-                            
-                            features_upsampled = model.encoder.feature_upsampler(
+
+                            from depth_predictor.module_cycle_trace import (
+                                run_module_with_cycle_trace,
+                            )
+
+                            feature_upsampler_trace = run_module_with_cycle_trace(
+                                model.encoder.feature_upsampler,
                                 results_dict["features_mono_intermediate"],
                                 cnn_features=results_dict["features_cnn_all_scales"][::-1],
                                 mv_features=results_dict["features_mv"][0] if model.encoder.cfg.num_scales == 1
                                            else results_dict["features_mv"][::-1]
                             )
+                            features_upsampled = feature_upsampler_trace.output
                             
                             match_prob_max = torch.max(match_prob, dim=1, keepdim=True)[0]
                             if match_prob_max.shape[-2:] != depth_final.shape[-2:]:
@@ -1684,7 +1771,10 @@ def main():
                                 features_upsampled,
                             ), dim=1)
                             
-                            regressor_out = model.encoder.gaussian_regressor(concat_input)
+                            gaussian_regressor_trace = run_module_with_cycle_trace(
+                                model.encoder.gaussian_regressor, concat_input
+                            )
+                            regressor_out = gaussian_regressor_trace.output
                             
                             gaussian_head_input = torch.cat([
                                 regressor_out,
@@ -1693,7 +1783,15 @@ def main():
                                 match_prob_max,
                             ], dim=1)
                             
-                            gaussians_bv = model.encoder.gaussian_head(gaussian_head_input)
+                            gaussian_head_trace = run_module_with_cycle_trace(
+                                model.encoder.gaussian_head, gaussian_head_input
+                            )
+                            gaussians_bv = gaussian_head_trace.output
+                            gauss_gen_cycles = (
+                                feature_upsampler_trace.total_cycles
+                                + gaussian_regressor_trace.total_cycles
+                                + gaussian_head_trace.total_cycles
+                            )
                             pipeline_raw_gaussians = gaussians_bv
                             pipeline_densities = rearrange(match_prob_max, "(b v) c h w -> b v (c h w) () ()", b=b_ds, v=v_ds)
                             
@@ -1705,17 +1803,35 @@ def main():
                                 )
                             
                             print(f"      ✓ raw_gaussians computed: {pipeline_raw_gaussians.shape}")
+                            print(
+                                "      ✓ S3 traced cycles: "
+                                f"{gauss_gen_cycles:,} "
+                                f"(feature upsampler={feature_upsampler_trace.total_cycles:,}, "
+                                f"regressor={gaussian_regressor_trace.total_cycles:,}, "
+                                f"head={gaussian_head_trace.total_cycles:,})"
+                            )
                     except Exception as e2:
+                        if strict_run:
+                            raise strict_stage_error(
+                                "DepthSplat Gaussian input generation", e2
+                            ) from e2
                         print(f"      ⚠ Failed to compute raw_gaussians: {e2}")
                         import traceback
                         traceback.print_exc()
         except Exception as e:
+            if strict_run:
+                raise strict_stage_error("depth simulator", e) from e
             print(f"    ⚠ HW Simulator error: {e}, falling back to GPU")
             import traceback
             traceback.print_exc()
             use_depth_sim = False
     
     if not use_depth_sim or pipeline_depths is None:
+        if strict_run:
+            raise RuntimeError(
+                "strict run depth simulator produced no depths; GPU fallback is forbidden"
+            )
+        fallback_stages.append("depth")
         # Fallback: Use original GPU for depth prediction
         print(f"    Mode: Original GPU" + (" (fallback)" if use_depth_sim else " (--no-depth)"))
         
@@ -1955,12 +2071,19 @@ def main():
             print(f"    ✓ GGU vs Baseline PSNR (means): {ggu_psnr_means:.2f} dB")
             
         except Exception as e:
+            if strict_run:
+                raise strict_stage_error("GGU simulator", e) from e
             print(f"    ⚠ GGU error: {e}, falling back to GPU")
             import traceback
             traceback.print_exc()
             use_gaussian_sim = False
     
     if not all_hw_disabled and (not use_gaussian_sim or not has_gaussian_inputs):
+        if strict_run:
+            raise RuntimeError(
+                "strict run GGU has incomplete inputs; GPU fallback is forbidden"
+            )
+        fallback_stages.append("gaussian")
         # Use original GPU for gaussian generation
         print(f"    Mode: Original GPU" + (" (fallback)" if use_gaussian_sim else " (--no-gaussian)"))
         
@@ -2144,6 +2267,88 @@ def main():
     orig_covs = scarf_gaussians_full.covariances.clone()
     orig_harmo = scarf_gaussians_full.harmonics.clone()
     orig_opacs = scarf_gaussians_full.opacities.clone()
+
+    if args.sensitivity_trace:
+        from scripts.sensitivity_replay import replay_sample
+        from scripts.sensitivity_sweep import STUDIES
+
+        def _sensitivity_render(gaussians_obj):
+            with torch.no_grad():
+                rendered = model.decoder.forward(
+                    gaussians_obj,
+                    tgt_ext,
+                    tgt_int,
+                    target['near'],
+                    target['far'],
+                    (h, w),
+                    depth_mode=None,
+                )
+            return rendered.color[0, :V_tgt]
+
+        replays, trace = replay_sample(
+            studies=STUDIES,
+            config=CONFIG,
+            gaussians=scarf_gaussians_full,
+            features=features,
+            depths=depths,
+            target_images=target['image'][0, :V_tgt],
+            render=_sensitivity_render,
+            gaussian_type=Gaussians,
+            savings_tracker_type=SavingsTracker,
+            cycle_counter_type=HWCycleCounter,
+            image_height=h,
+            image_width=w,
+            feature_cycles=feature_sim_cycles,
+            depth_cycles=depth_sim_cycles,
+            dp_core_cycles=dp_core_cycles,
+            cost_volume_cycles=cost_volume_cycles,
+            gauss_gen_cycles=gauss_gen_cycles,
+            s1_cnn_cycles=s1_cnn_cycles,
+        )
+        protocol_sample_index = (
+            args.protocol_sample_index
+            if args.protocol_sample_index is not None
+            else args.sample_index
+        )
+        selection = {
+            'sample_index': protocol_sample_index,
+            'scene': str(scene_name),
+            'context_indices': [
+                int(value) for value in batch['context']['index'][0].tolist()
+            ],
+            'target_indices': [
+                int(value)
+                for value in batch['target']['index'][0, :V_tgt].tolist()
+            ],
+        }
+        from scripts.result_record import cached_sha256_file
+
+        trace_record = {
+            'schema_version': '1.0',
+            'kind': 'sensitivity_sample_trace',
+            **selection,
+            'execution_index': args.sample_index,
+            'candidate_count': args.num_samples,
+            'model': args.model,
+            'dataset': args.dataset,
+            'dataset_representation': dataset_identity['representation'],
+            'dataset_tree_sha256': dataset_identity['tree_sha256'],
+            'checkpoint_sha256': cached_sha256_file(checkpoint_path),
+            'seed': args.seed,
+            'trace': trace,
+            'replays': replays,
+        }
+        output_dir = (
+            Path(args.output_dir)
+            if args.output_dir
+            else SCARF_ROOT / 'outputs' / 'sensitivity-trace'
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        from scripts.result_record import write_result
+
+        write_result(trace_record, output_dir / 'results.json')
+        print(f"Sensitivity trace: {output_dir / 'results.json'}")
+        return
     
     # ---- Step 4b: SAES v4 (L0+L1: feature + depth) ----
     if args.no_saes:
@@ -2240,29 +2445,20 @@ def main():
             features_up = F.interpolate(
                 features[0], size=(h, w), mode='bilinear', align_corners=False
             ).mean(dim=0)  # [C, H, W]
-            
-            for (y, x, pixel_idx) in all_pixels:
-                feat = features_up[:, y, x]
-                
-                # Get actual depth (for cache building on miss/non-reuse)
-                if depths is not None:
-                    if depths.dim() == 5:
-                        actual_depth = depths[0, 0, pixel_idx, 0, 0].item()
-                    elif depths.dim() == 4:
-                        actual_depth = depths[0, 0, y, x].item()
-                    else:
-                        actual_depth = 1.0
-                else:
-                    actual_depth = 1.0
-                
-                # FSDR processing (realistic: reuse decision before compute)
-                path, num_searches, output_depth = fsdr.process_pixel(
-                    feat, actual_depth, (y, x), pixel_idx,
-                    actual_gaussians=scarf_gaussians_full,
-                    gauss_idx=pixel_idx,
-                )
-                
-                # Record path for savings tracking
+            if depths is None:
+                frame_depths = torch.ones(h * w, device=features_up.device)
+            elif depths.dim() == 5:
+                frame_depths = depths[0, 0, : h * w, 0, 0]
+            elif depths.dim() == 4:
+                frame_depths = depths[0, 0, :h, :w].reshape(-1)
+            else:
+                raise RuntimeError("FSDR received an unsupported depth tensor")
+            paths = fsdr.process_frame(
+                features_up.permute(1, 2, 0).reshape(h * w, C_f),
+                frame_depths,
+                w,
+            )
+            for pixel_idx, path in enumerate(paths):
                 savings.record_fsdr_pixel(path, reused=(pixel_idx in fsdr.reuse_data))
         
         fsdr_stats = fsdr.get_summary()
@@ -2284,13 +2480,13 @@ def main():
     print("[5/6] Real Ablation: 4-config rendering (realistic ASIC behavior)...")
     
     def _render(gaussians_obj):
-        """Render a Gaussian set and return the image."""
+        """Render a Gaussian set for every selected target view."""
         with torch.no_grad():
             out = model.decoder.forward(
                 gaussians_obj, tgt_ext, tgt_int,
                 target['near'], target['far'], (h, w), depth_mode=None
             )
-        return out.color[0, 0]
+        return out.color[0, :V_tgt]
     
     ablation_renders = {}
     
@@ -2367,8 +2563,8 @@ def main():
     else:
         ablation_renders['asic_fsdr_saes'] = ablation_renders['asic']
     
-    # Use the best config (FSDR+SAES) as the "SCARF image" for backward compatibility
-    scarf_image = ablation_renders['asic_fsdr_saes']
+    # Use the combined configuration as the SCARF output.
+    scarf_images = ablation_renders['asic_fsdr_saes']
     scarf_time = time.time() - t0
     
     # Gaussian stats
@@ -2389,22 +2585,47 @@ def main():
     # --------------------------------------------------------
     print()
     print("[6/6] Evaluating per-config quality...")
+    from scripts.result_record import mean_view_quality
     
-    gt_image = target['image'][0, 0]
+    gt_images = target['image'][0, :V_tgt]
     
     # Metrics
     def compute_psnr(img1, img2):
-        mse = F.mse_loss(img1, img2)
-        return -10 * torch.log10(mse).item()
+        if img1.dim() == 3:
+            img1 = img1.unsqueeze(0)
+            img2 = img2.unsqueeze(0)
+        mse = (img1 - img2).square().flatten(1).mean(dim=1)
+        return (-10 * torch.log10(mse)).mean().item()
     
     def compute_ssim(img1, img2):
-        from torchmetrics.image import StructuralSimilarityIndexMeasure
-        ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(img1.device)
-        return ssim(img1.unsqueeze(0), img2.unsqueeze(0)).item()
-    
-    # Baseline quality (original model, no SCARF)
-    baseline_psnr = compute_psnr(baseline_image, gt_image)
-    baseline_ssim = compute_ssim(baseline_image, gt_image)
+        from torchmetrics.functional.image import structural_similarity_index_measure
+
+        if img1.dim() == 3:
+            img1 = img1.unsqueeze(0)
+            img2 = img2.unsqueeze(0)
+        return structural_similarity_index_measure(
+            img1, img2, data_range=1.0
+        ).item()
+
+    lpips_metric = get_lpips_metric(gt_images.device)
+
+    def compute_lpips(img1, img2):
+        with torch.no_grad():
+            if img1.dim() == 3:
+                img1 = img1.unsqueeze(0)
+                img2 = img2.unsqueeze(0)
+            value = lpips_metric(img1, img2, normalize=True)
+        return value.reshape(-1).mean().item()
+
+    def compute_view_metrics(images, references):
+        return [
+            {
+                'psnr_db': compute_psnr(images[index], references[index]),
+                'ssim': compute_ssim(images[index], references[index]),
+                'lpips': compute_lpips(images[index], references[index]),
+            }
+            for index in range(images.shape[0])
+        ]
     
     # Per-config quality (real ablation)
     # Reference: SCARF no-opt is the "correct" ASIC output.
@@ -2412,12 +2633,12 @@ def main():
     ablation_quality = {}
     
     # First compute no-opt quality (reference for loss calculation)
-    noopt_psnr = compute_psnr(ablation_renders['asic'], gt_image)
-    noopt_ssim = compute_ssim(ablation_renders['asic'], gt_image)
+    noopt_psnr = compute_psnr(ablation_renders['asic'], gt_images)
+    noopt_ssim = compute_ssim(ablation_renders['asic'], gt_images)
     
     for cfg_key, cfg_image in ablation_renders.items():
-        psnr = compute_psnr(cfg_image, gt_image)
-        ssim = compute_ssim(cfg_image, gt_image)
+        psnr = compute_psnr(cfg_image, gt_images)
+        ssim = compute_ssim(cfg_image, gt_images)
         # Loss vs SCARF no-opt (the "correct" ASIC output)
         loss_db = psnr - noopt_psnr
         loss_pct = abs(loss_db) / noopt_psnr * 100 if noopt_psnr > 0 else 0
@@ -2429,8 +2650,24 @@ def main():
         print(f"  {cfg_key:<20s}: PSNR={psnr:.4f} dB, SSIM={ssim:.6f}, {ref_label}")
     
     # Use FSDR+SAES as the "SCARF" result
-    scarf_psnr = ablation_quality['asic_fsdr_saes']['psnr']
-    scarf_ssim = ablation_quality['asic_fsdr_saes']['ssim']
+    baseline_view_metrics = compute_view_metrics(baseline_images, gt_images)
+    scarf_view_metrics = compute_view_metrics(scarf_images, gt_images)
+    quality_views = [
+        {
+            'target_index': int(batch['target']['index'][0, view_index].item()),
+            'baseline': baseline_view_metrics[view_index],
+            'scarf': scarf_view_metrics[view_index],
+        }
+        for view_index in range(V_tgt)
+    ]
+    baseline_quality = mean_view_quality(quality_views, 'baseline')
+    scarf_quality = mean_view_quality(quality_views, 'scarf')
+    baseline_psnr = baseline_quality['psnr_db']
+    baseline_ssim = baseline_quality['ssim']
+    baseline_lpips = baseline_quality['lpips']
+    scarf_psnr = scarf_quality['psnr_db']
+    scarf_ssim = scarf_quality['ssim']
+    scarf_lpips = scarf_quality['lpips']
     
     # Check quality budget (compare optimized configs vs no-opt, excluding no-opt itself)
     opt_configs = {k: v for k, v in ablation_quality.items() if k != 'asic'}
@@ -2444,12 +2681,25 @@ def main():
     output_dir = Path(args.output_dir) if args.output_dir else SCARF_ROOT / 'outputs' / 'demo'
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    from torchvision.utils import save_image
-    save_image(gt_image, output_dir / 'gt_00.png')
-    save_image(baseline_image, output_dir / 'baseline_00.png')
-    save_image(scarf_image, output_dir / 'scarf_00.png')
-    for cfg_key, cfg_image in ablation_renders.items():
-        save_image(cfg_image, output_dir / f'ablation_{cfg_key}.png')
+    save_images = args.image_output_policy == 'all' or (
+        args.image_output_policy == 'representative' and args.sample_index == 0
+    )
+    if save_images:
+        from torchvision.utils import save_image
+        for view_index in range(V_tgt):
+            save_image(gt_images[view_index], output_dir / f'gt_{view_index:02d}.png')
+            save_image(
+                baseline_images[view_index],
+                output_dir / f'baseline_{view_index:02d}.png',
+            )
+            save_image(
+                scarf_images[view_index], output_dir / f'scarf_{view_index:02d}.png'
+            )
+            for cfg_key, cfg_images in ablation_renders.items():
+                save_image(
+                    cfg_images[view_index],
+                    output_dir / f'ablation_{cfg_key}_{view_index:02d}.png',
+                )
     
     # Get statistics
     ggu_stats = cycle_counter.get_summary()
@@ -2474,51 +2724,14 @@ def main():
     # Base cycle counts (no SAES/FSDR savings)
     base_ggu_cycles = ggu_stats['ggu_cycles']
     
-    # ================================================================
-    # Fallback: Reference cycle counts (per-model, 256×256 @ 1GHz)
-    # When HW simulators produce 0 cycles, use architecture-derived reference values.
-    # Base hardware: 32×32 PE array (1024 MACs), 32-ch BilinearUnit, 64-wide Vector ALU.
-    # These values are scaled by compute_ablation's differentiated HW scaling (2.0x/1.5x).
-    # ================================================================
-    if feature_sim_cycles == 0:
-        if args.model == 'depthsplat':
-            # DepthSplat S1: CNN backbone + DINOv2 ViT-S (12 layers, 384-dim) + MV Transformer
-            feature_sim_cycles = 160_000_000
-        elif args.model == 'mvsplat':
-            # MVSplat S1: CNN backbone + 6-layer MV Transformer (no DINOv2)
-            feature_sim_cycles = 90_000_000
-        else:
-            # TranSplat S1: CNN backbone + ViT transformer layers
-            feature_sim_cycles = 155_273_000
-        print(f"    [Fallback] Using reference S1 feature cycles: {feature_sim_cycles:,}")
-    
-    if dp_core_cycles == 0:
-        if args.model == 'depthsplat':
-            # DepthSplat S2: Cost volume (128 candidates) + Regressor UNet + DPT head
-            dp_core_cycles = 180_000_000
-            cost_volume_cycles = 85_000_000
-        elif args.model == 'mvsplat':
-            # MVSplat S2: Cost volume (32 candidates) + UNet + depth_head
-            dp_core_cycles = 80_000_000
-            cost_volume_cycles = 25_000_000
-        else:
-            # TranSplat S2: UVTransformer (deformable attn) + UNet + depth_head + regression
-            dp_core_cycles = 200_000_000
-            cost_volume_cycles = 95_000_000
-        depth_sim_cycles = dp_core_cycles  # total S2 for legacy compatibility
-        print(f"    [Fallback] Using reference S2 depth cycles: {dp_core_cycles:,} (cv: {cost_volume_cycles:,})")
-    
-    if gauss_gen_cycles == 0:
-        if args.model == 'depthsplat':
-            # DepthSplat S3: DPT upsampler + gaussian regressor + head (SH degree 2)
-            gauss_gen_cycles = 110_000_000
-        elif args.model == 'mvsplat':
-            # MVSplat S3: depth refinement UNet + gaussian head (SH degree 4)
-            gauss_gen_cycles = 130_000_000
-        else:
-            # TranSplat S3: refine_unet + to_gaussians (full-res spatial processing)
-            gauss_gen_cycles = 180_000_000
-        print(f"    [Fallback] Using reference S3 gauss gen cycles: {gauss_gen_cycles:,}")
+    from scripts.result_record import require_positive_cycles
+
+    require_positive_cycles({
+        'feature': feature_sim_cycles,
+        'depth': dp_core_cycles,
+        'gaussian': gauss_gen_cycles,
+        'ggu': base_ggu_cycles,
+    })
     
     # Compute ablation table (with real savings from SAES/FSDR)
     # FSDR narrowing ratio: 1 - narrowed/original
@@ -2653,11 +2866,11 @@ def main():
           f"(HW_SCALE×VIT_BOOST = {pipe_info.get('HW_SCALE_C', 2.0):.1f}×{s1_vit_b:.2f})")
     cv_frac = pipe_info.get('cv_frac_scaled', 0)
     print(f"  S2 cost_volume frac:{cv_frac*100:5.1f}%  (after scaling; memory-bound portion)")
-    print(f"  S1 FE overlap:      x{pipe_info.get('PIPE_FE', 0.92):.2f}  "
+    print(f"  S1 FE overlap:      x{pipe_info['PIPE_FE']:.2f}  "
           f"(ConvEngine || GEMM in ViT, double buffering)")
-    print(f"  S2 DP overlap:      x{pipe_info.get('PIPE_DP', 0.82):.2f}  "
+    print(f"  S2 DP overlap:      x{pipe_info['PIPE_DP']:.2f}  "
           f"(BilinearUnit || VectorALU || ConvEngine tile pipeline)")
-    print(f"  S3 GaussNN overlap: x{pipe_info.get('PIPE_GG_NN', 0.95):.2f}  "
+    print(f"  S3 GaussNN overlap: x{pipe_info['PIPE_GG_NN']:.2f}  "
           f"(refine_unet → to_gauss output buf || weight prefetch)")
     print(f"  GGU Post:           hidden (dedicated PEs overlap with ConvEngine)")
     _ggu_s = ggu_stats.get('compact_writeback_bytes_saved', 0)
@@ -2675,470 +2888,114 @@ def main():
     print(f"  Total S2 saving:    {pipe_info.get('combined_s2_saving', 0)*100:.1f}%")
     print(f"  Total S3 saving:    {pipe_info.get('combined_s3_saving', 0)*100:.1f}%")
     
-    # --------------------------------------------------------
-    # Jetson Orin Estimation (from measured RTX 3060 time)
-    # --------------------------------------------------------
-    # Estimation methodology:
-    #   Jetson Orin runs the SAME PyTorch model on its Ampere GPU.
-    #   We scale the measured RTX 3060 time by the FP32 compute + memory BW ratio.
-    #
-    # Specs (FP32 TFLOPS / Memory BW):
-    #   RTX 3060:              12.74 TFLOPS, 360 GB/s,  3584 CUDA @ 1780 MHz
-    #   Jetson AGX Orin 64GB:   5.32 TFLOPS, 204.8 GB/s, 2048 CUDA @ 1300 MHz
-    #   Jetson Orin NX  16GB:   1.88 TFLOPS, 102.4 GB/s, 1024 CUDA @  918 MHz
-    #
-    # Scaling: weighted mix of compute-bound (60%) and memory-bound (40%) slowdown.
-    # NOTE: This is an estimation methodology commonly used in architecture papers.
-    # The 60/40 ratio is a heuristic for 3DGS encoder workloads (heavy convolutions
-    # + moderate feature map reads). For precise comparisons, on-device measurement
-    # is recommended. All GPU results are marked "(estimated)" in the output.
-    
-    RTX3060_FP32_TFLOPS = 12.74
-    RTX3060_MEM_BW_GBS = 360.0
-    
-    # GPU platform definitions: (name, FP32 TFLOPS, mem BW GB/s, CUDA cores, freq MHz)
-    GPU_PLATFORMS = {
-        # Workstation / Server
-        'A6000':            ('NVIDIA RTX A6000',        38.70, 768.0, 10752, 1800),
-        # Desktop (measured)
-        'RTX3060':          ('NVIDIA RTX 3060',         12.74, 360.0,  3584, 1780),
-        # Edge: Jetson Orin
-        'AGX_Orin_64GB':    ('Jetson AGX Orin 64GB',     5.32, 204.8,  2048, 1300),
-        'Orin_NX_16GB':     ('Jetson Orin NX 16GB',      1.88, 102.4,  1024,  918),
-        # Edge: Jetson Xavier
-        'AGX_Xavier':       ('Jetson AGX Xavier',        1.40, 136.5,   512, 1370),
-    }
-    
-    # Estimate inference time from measured RTX 3060 baseline
-    gpu_estimates = {}
-    for key, (pname, p_tflops, p_bw, p_cuda, p_freq) in GPU_PLATFORMS.items():
-        compute_ratio = RTX3060_FP32_TFLOPS / p_tflops
-        mem_ratio = RTX3060_MEM_BW_GBS / p_bw
-        # Mixed workload: 60% compute-bound, 40% memory-bound
-        slowdown = 0.6 * compute_ratio + 0.4 * mem_ratio
-        est_time_ms = baseline_gpu_time_ms * slowdown
-        gpu_estimates[key] = {
-            'name': pname,
-            'tflops': p_tflops,
-            'mem_bw': p_bw,
-            'cuda_cores': p_cuda,
-            'freq_mhz': p_freq,
-            'slowdown': slowdown,
-            'est_time_ms': est_time_ms,
-        }
-    
-    # --------------------------------------------------------
-    # Ablation: Performance Comparison
-    # --------------------------------------------------------
-    print()
-    print("### Ablation: Performance Comparison")
-    print()
-    
-    # Helper to format time from cycles
-    def _fmt_time(cycles: int) -> str:
-        ms = cycles / (SCARF_FREQ_MHZ * 1e3)
-        return f"{ms:.2f} ms"
-    
-    # ---- [1] GPU Baseline (RTX 3060) ----
-    print(f"  [1] GPU Baseline ({gpu_name} @ {gpu_freq_mhz} MHz):")
-    print(f"      FP32: {RTX3060_FP32_TFLOPS} TFLOPS  |  Mem BW: {RTX3060_MEM_BW_GBS} GB/s")
-    print(f"      Encoder time:  {baseline_gpu_time_ms:.2f} ms")
-    print(f"      GPU cycles:    {baseline_gpu_cycles:,}")
-    print()
-    
-    # ---- [2..N] GPU Platform Estimated Baselines ----
-    idx = 2
-    # Print order: server -> desktop -> edge (high to low)
-    gpu_print_order = ['A6000', 'AGX_Orin_64GB', 'Orin_NX_16GB', 'AGX_Xavier']
-    for key in gpu_print_order:
-        ge = gpu_estimates[key]
-        tag = "(measured)" if key == 'RTX3060' else "(estimated)"
-        print(f"  [{idx}] {ge['name']} {tag}, {ge['cuda_cores']} CUDA @ {ge['freq_mhz']} MHz:")
-        print(f"      FP32: {ge['tflops']} TFLOPS  |  Mem BW: {ge['mem_bw']} GB/s")
-        if key != 'RTX3060':
-            print(f"      Slowdown vs RTX 3060: {ge['slowdown']:.2f}x (60% compute + 40% memory)")
-        print(f"      Estimated encoder time: {ge['est_time_ms']:.2f} ms")
-        print()
-        idx += 1
-    
-    # ---- ASIC Ablation ----
-    # Key comparison targets
-    ge_a6000  = gpu_estimates['A6000']
-    ge_agx    = gpu_estimates['AGX_Orin_64GB']
-    ge_nx     = gpu_estimates['Orin_NX_16GB']
-    ge_xavier = gpu_estimates['AGX_Xavier']
-    
-    def _fmt_vs_gpus(asic_ms: float) -> str:
-        """Format SCARF speedup/slowdown vs GPU platforms (SCARF-centric)."""
-        targets = [
-            ('A6000',     ge_a6000),
-            ('AGX Orin',  ge_agx),
-            ('Orin NX',   ge_nx),
-            ('AGX Xavier', ge_xavier),
-        ]
-        parts = []
-        for tname, tdata in targets:
-            t = tdata['est_time_ms']
-            if t <= 0:
-                continue
-            if asic_ms <= t:
-                speedup = t / asic_ms
-                parts.append(f"{speedup:.2f}× faster than {tname}")
-            else:
-                slowdown = asic_ms / t
-                parts.append(f"{slowdown:.2f}× slower than {tname}")
-        return " | ".join(parts)
-    
-    # Helper to print 3-stage ASIC breakdown with serial + pipeline numbers
-    H_out = W_out = 256  # output resolution
-    def _print_asic_config(label, c, ggu_pe_count):
-        # Serial (algorithmic) numbers
-        serial_ms = c['total'] / (SCARF_FREQ_MHZ * 1e3)
-        # Effective (pipeline-adjusted) numbers
-        eff_total = c.get('eff_total', c['total'])
-        eff_ms = eff_total / (SCARF_FREQ_MHZ * 1e3)
-        eff_fe_ms = c.get('eff_feature', c['feature']) / (SCARF_FREQ_MHZ * 1e3)
-        eff_dp_ms = c.get('eff_dp_core', c['dp_core']) / (SCARF_FREQ_MHZ * 1e3)
-        eff_gg_ms = c.get('eff_gauss_gen', c.get('gauss_head_nn', 0)) / (SCARF_FREQ_MHZ * 1e3)
-        pipe_saving = c.get('pipeline_saving', 0.0)
-        
-        print(f"  {label}:")
-        if c['depth_saving'] > 0 or c.get('gauss_saving', 0) > 0:
-            parts = []
-            if c['depth_saving'] > 0:
-                parts.append(f"DP -{c['depth_saving']*100:.1f}%")
-            if c.get('gauss_saving', 0) > 0:
-                parts.append(f"GaussGen -{c['gauss_saving']*100:.1f}%")
-            print(f"      Savings:            {', '.join(parts)}")
-        print(f"      S1 Feature Extract: {c.get('eff_feature', c['feature']):>12,} ({eff_fe_ms:>7.2f} ms)")
-        print(f"      S2 Depth Predict:   {c.get('eff_dp_core', c['dp_core']):>12,} ({eff_dp_ms:>7.2f} ms)")
-        print(f"      S3 Gaussian Gen:    {c.get('eff_gauss_gen', c.get('gauss_head_nn', 0)):>12,} ({eff_gg_ms:>7.2f} ms)")
-        ggu_p = c.get('ggu_post', 0)
-        ggu_p_ms = ggu_p / (SCARF_FREQ_MHZ * 1e3)
-        print(f"         └ GGU Post:      {ggu_p:>12,}  → hidden ({ggu_pe_count} dedicated PEs ∥ ConvEngine)")
-        print(f"      Serial total:       {c['total']:>12,} ({serial_ms:>7.2f} ms)")
-        print(f"      Pipeline effective: {eff_total:>12,} ({eff_ms:>7.2f} ms)  [-{pipe_saving*100:.1f}% overlap]")
-        print(f"      {_fmt_vs_gpus(eff_ms)}")
-        print()
-        return eff_ms
-    
-    ggu_pe = ggu_stats['ggu_pe_count']
-    
-    # [4] ASIC no optimizations
-    _print_asic_config(f"[{idx}] SCARF ASIC @ {SCARF_FREQ_MHZ} MHz (no optimizations)", ablation['asic'], ggu_pe)
-    idx += 1
-    
-    # [5] ASIC + FSDR
-    _print_asic_config(f"[{idx}] SCARF ASIC + FSDR", ablation['asic_fsdr'], ggu_pe)
-    idx += 1
-    
-    # [6] ASIC + SAES v4
-    _print_asic_config(f"[{idx}] SCARF ASIC + SAES v4", ablation['asic_saes'], ggu_pe)
-    idx += 1
+    from scripts.result_record import (
+        build_environment_provenance,
+        build_result_record,
+        write_result,
+    )
+    from scripts.validate_result import validate
 
-    # [7] ASIC + SAES v4 + FSDR
-    asic_best_ms = _print_asic_config(f"[{idx}] SCARF ASIC + SAES v4 + FSDR", ablation['asic_fsdr_saes'], ggu_pe)
-    
-    # --------------------------------------------------------
-    # Summary Table (with per-config quality)
-    # --------------------------------------------------------
-    print("### Performance Summary Table (Real Ablation)")
-    print(f"  {'Config':<30s}  {'Eff.Cycles':>12s}  {'Time(ms)':>9s}  {'PSNR(dB)':>10s}  {'SSIM':>8s}  {'SCARF speedup':>14s}")
-    print(f"  {'─'*30}  {'─'*12}  {'─'*9}  {'─'*10}  {'─'*8}  {'─'*14}")
-    
-    def _eff_ms(cfg_key):
-        c = ablation[cfg_key]
-        return c.get('eff_total', c['total']) / (SCARF_FREQ_MHZ * 1e3)
-    
-    # Best ASIC config
-    asic_best_time = _eff_ms('asic_fsdr_saes')
-    
-    # Reference GPU platforms
-    gpu_rows = [
-        (f"RTX A6000 (est.)",             ge_a6000['est_time_ms']),
-        (f"RTX 3060 @ {gpu_freq_mhz} MHz", baseline_gpu_time_ms),
-        (f"Jetson AGX Orin 64GB (est.)",   ge_agx['est_time_ms']),
-        (f"Jetson Orin NX 16GB (est.)",    ge_nx['est_time_ms']),
-        (f"Jetson AGX Xavier (est.)",      ge_xavier['est_time_ms']),
-    ]
-    for name, t_ms in gpu_rows:
-        if t_ms > 0 and asic_best_time <= t_ms:
-            tag = f"{t_ms / asic_best_time:.2f}x faster"
-        elif t_ms > 0:
-            tag = f"{asic_best_time / t_ms:.2f}x slower"
-        else:
-            tag = "N/A"
-        print(f"  {name:<30s}  {'':>12s}  {t_ms:>9.2f}  "
-              f"{baseline_psnr:>10.4f}  {baseline_ssim:>8.6f}  {tag:>14s}")
-    
-    print(f"  {'─'*30}  {'─'*12}  {'─'*9}  {'─'*10}  {'─'*8}  {'─'*14}")
-    
-    # SCARF ASIC configurations with quality
-    asic_configs = [
-        ('asic',           f"SCARF @ {SCARF_FREQ_MHZ}MHz (no opt)"),
-        ('asic_fsdr',      f"  + FSDR"),
-        ('asic_saes',      f"  + SAES v4"),
-        ('asic_fsdr_saes', f"  + SAES v4+FSDR << best"),
-    ]
-    for cfg_key, label in asic_configs:
-        t_ms = _eff_ms(cfg_key)
-        eff_cyc = ablation[cfg_key].get('eff_total', ablation[cfg_key]['total'])
-        q = ablation_quality.get(cfg_key, {})
-        psnr = q.get('psnr', baseline_psnr)
-        ssim = q.get('ssim', baseline_ssim)
-        # Speedup vs no-opt ASIC
-        noopt_ms = _eff_ms('asic')
-        if t_ms > 0 and t_ms < noopt_ms:
-            speedup_tag = f"{noopt_ms / t_ms:.2f}x vs base"
-        else:
-            speedup_tag = "baseline"
-        print(f"  {label:<30s}  {eff_cyc:>12,}  {t_ms:>9.2f}  "
-              f"{psnr:>10.4f}  {ssim:>8.6f}  {speedup_tag:>14s}")
-    
-    print()
-    print("  (All quality measured via real rendering, not estimated)")
-    
-    print()
-    print("### Quality & Savings Summary")
-    best_q = ablation_quality.get('asic_fsdr_saes', {})
-    print(f"  Best config quality:  PSNR={best_q.get('psnr', 0):.4f} dB, "
-          f"loss={best_q.get('loss_db', 0):+.4f} dB ({best_q.get('loss_pct', 0):.4f}%)")
-    print(f"  SAES v4 total:        {savings.saes_interpolation_ratio()*100:.1f}% pixels modified "
-          f"(L0={savings.level0_ratio()*100:.1f}%, L1={savings.level1_ratio()*100:.1f}%)")
-    print(f"  FSDR guided:          {savings.fsdr_validated_saving_ratio()*100:.1f}% "
-          f"({savings.fsdr_validated:,} pixels narrowed S2 search)")
-    if baseline_gpu_time_ms > 0:
-        print(f"  Best ASIC time:       {asic_best_ms:.2f} ms (pipeline-adjusted)")
-        for tname, tdata in [('A6000', ge_a6000), ('AGX Orin', ge_agx),
-                             ('Orin NX', ge_nx), ('AGX Xavier', ge_xavier)]:
-            ref = tdata['est_time_ms']
-            if ref <= 0:
-                continue
-            if asic_best_ms <= ref:
-                print(f"    vs {tname:<13s} {ref:>7.2f} ms  ->  SCARF {ref/asic_best_ms:.2f}x faster")
-            else:
-                print(f"    vs {tname:<13s} {ref:>7.2f} ms  ->  SCARF {asic_best_ms/ref:.2f}x slower")
-    # --------------------------------------------------------
-    # 28nm ASIC Power & Area Estimation
-    # --------------------------------------------------------
-    # Methodology:
-    #   Based on Horowitz ISSCC 2014 energy model, scaled from 45nm to 28nm (×0.55).
-    #   Reference: Envision (JSSC 2017) measured ~6 pJ/MAC at 28nm including SRAM overhead.
-    #   Systolic array data reuse amortizes SRAM access energy across 32× reuse factor.
-    #
-    # Energy per operation at 28nm (pJ):
-    #   FP16 MAC (pure arithmetic):   0.83 pJ
-    #   FP16 MAC + register xfer:     1.1 pJ  (systolic array with data reuse)
-    #   32KB SRAM read (32-bit):      2.75 pJ
-    #   64KB SRAM read (32-bit):      3.3 pJ
-    #   128KB SRAM read (32-bit):     4.4 pJ
-    #   DRAM access (64-bit):         ~350 pJ
-    #
-    # Process: TSMC 28nm HPC+ (1.0V nominal, 1 GHz achievable for systolic array)
-    
-    print()
-    print("### 28nm ASIC Power & Area Estimation")
-    print()
-    
-    freq_ghz = SCARF_FREQ_MHZ / 1000.0
-    
-    # ---- Per-unit energy model (pJ per operation at 28nm) ----
-    E_MAC_FP16 = 1.1       # FP16 MAC including register transfer in systolic array
-    E_MAC_GEMM = 1.2       # GEMM MAC (slightly higher due to output-stationary overhead)
-    E_SRAM_64KB = 3.3      # 64KB SRAM read, 32-bit
-    E_SRAM_128KB = 4.4     # 128KB SRAM read, 32-bit
-    E_ALU_FP16 = 0.22      # FP16 add (vector ALU)
-    E_BILINEAR = 3.6       # Per bilinear sample (4 mul + 3 add + addr)
-    E_BILINEAR_MEM = 10.0  # Per bilinear sample memory reads (4 neighbors)
-    
-    # ---- Compute units (upgraded: 48×48 arrays) ----
-    conv_macs = 2304    # 48×48 ConvEngine (upgraded from 32×32)
-    gemm_macs = 2304    # 48×48 GEMM (upgraded from 32×32)
-    valu_width = 64     # 64-wide Vector ALU (upgraded from 32)
-    bilinear_samplers = 32   # 32 samplers (upgraded from 16)
-    bilinear_channels = 64   # 64 channels (upgraded from 32)
-    ggu_pes = CONFIG.ggu_pe_count  # 32 (upgraded from 16)
-    ggu_macs_per_pe = 20  # avg MACs per GGU PE per active cycle
-    
-    # ---- Stage utilization (fraction of total inference time each unit is active) ----
-    # Derived from cycle breakdown: S1(FE) + S2(DP) + S3(GaussGen)
-    total_eff = ablation['asic_fsdr_saes'].get('eff_total', 0)
-    eff_fe = ablation['asic_fsdr_saes'].get('eff_feature', 0)
-    eff_dp = ablation['asic_fsdr_saes'].get('eff_dp_core', 0)
-    eff_gg = ablation['asic_fsdr_saes'].get('eff_gauss_gen', 0)
-    
-    # ConvEngine: active during CNN(S1), UNet/DepthHead(S2), refine_unet/to_gauss(S3)
-    util_conv = 0.80   # ~80% of inference time
-    # GEMM: active during Transformer(S1), attention/regression(S2)
-    util_gemm = 0.25   # ~25% of inference time
-    # BilinearUnit: active during cost_volume(S2), upsampling
-    util_bilinear = 0.25
-    # VectorALU: element-wise ops scattered throughout
-    util_valu = 0.40
-    # GGU PEs: only during GGU post-processing (hidden, but still consumes power)
-    util_ggu = 0.02    # ~2% (very short active period)
-    
-    # ---- Component power (mW) ----
-    # P = N_units × E_per_op × freq × utilization
-    
-    p_conv_compute = conv_macs * E_MAC_FP16 * freq_ghz * util_conv          # mW
-    p_gemm_compute = gemm_macs * E_MAC_GEMM * freq_ghz * util_gemm
-    p_valu = valu_width * E_ALU_FP16 * freq_ghz * util_valu
-    p_bilinear = bilinear_samplers * (E_BILINEAR + E_BILINEAR_MEM) * freq_ghz * util_bilinear
-    p_ggu = ggu_pes * ggu_macs_per_pe * E_MAC_FP16 * freq_ghz * util_ggu
-    p_activation = 15.0  # LUT-based, very low
-    
-    # ---- SRAM power ----
-    # Upgraded SRAM: larger buffers for 48×48 arrays
-    # ConvEngine buffers: weight(128KB) + input(~16KB) → ~300 reads/cycle avg
-    # GEMM buffer: 192KB → ~150 reads/cycle avg
-    # Feature buffers: ~384KB → ~80 reads/cycle avg
-    sram_total_kb = 128 + 16 + 192 + 384 + 96  # 816 KB
-    p_sram_conv = 300 * E_SRAM_64KB * freq_ghz * util_conv      # weight + input reads
-    p_sram_gemm = 150 * E_SRAM_128KB * freq_ghz * util_gemm
-    p_sram_feat = 80 * E_SRAM_64KB * freq_ghz * 0.50            # intermittent
-    p_sram_total = p_sram_conv + p_sram_gemm + p_sram_feat
-    
-    # ---- Clock tree + PLL ----
-    p_clock = 100 * freq_ghz  # ~100 mW at 1 GHz, scales with freq
-    p_pll = 12.0
-    
-    # ---- Control logic ----
-    p_control = 35.0 * freq_ghz
-    
-    # ---- I/O + DRAM interface ----
-    p_io_ddr = 150.0    # LPDDR4 PHY + pads
-    p_io_misc = 20.0
-    
-    # ---- Static (leakage) power at 28nm ----
-    # 28nm HPC+: ~0.02 mW/gate equivalent, or ~20% of dynamic for moderate designs
-    # With power gating of idle units
-    p_leakage = 420.0  # mW, includes all transistors + SRAM leakage (scaled for larger arrays)
-    
-    # ---- Totals ----
-    p_compute = p_conv_compute + p_gemm_compute + p_valu + p_bilinear + p_ggu + p_activation
-    p_memory = p_sram_total
-    p_infra = p_clock + p_pll + p_control + p_io_ddr + p_io_misc
-    p_dynamic = p_compute + p_memory + p_infra
-    p_total = p_dynamic + p_leakage
-    
-    # Peak power (all units at 100% utilization simultaneously - theoretical max)
-    p_peak_compute = (conv_macs * E_MAC_FP16 + gemm_macs * E_MAC_GEMM) * freq_ghz
-    p_peak_sram = 300 * E_SRAM_64KB * freq_ghz + 150 * E_SRAM_128KB * freq_ghz
-    p_peak = p_peak_compute + p_peak_sram + p_infra + p_leakage
-    
-    # ---- Area estimation (28nm TSMC) ----
-    # FP16 MAC unit: ~0.004 mm² at 28nm (including local registers)
-    # SRAM: 0.127 mm²/Mbit (TSMC 28nm standard)
-    a_conv = conv_macs * 0.004 * 1.3   # +30% routing overhead
-    a_gemm = gemm_macs * 0.004 * 1.3
-    a_valu = valu_width * 0.001
-    a_bilinear = bilinear_samplers * 0.02
-    a_ggu = ggu_pes * 0.04
-    a_misc_logic = 0.3 + 0.15  # activation/norm + FSDR/SAES
-    a_sram = sram_total_kb * 8 / 1024 * 0.127  # KB → Mbit → mm²
-    a_control = 0.5
-    a_io = 2.5  # DDR PHY + pads
-    a_pad = 3.0  # pad ring + ESD
-    a_total = a_conv + a_gemm + a_valu + a_bilinear + a_ggu + a_misc_logic + a_sram + a_control + a_io + a_pad
-    die_side = a_total ** 0.5
-    
-    # ---- Energy per inference ----
-    asic_time_s = asic_best_ms / 1000.0
-    asic_energy_mj = p_total * asic_time_s  # mW × s = mJ
-    
-    # GPU platform typical inference power (W)
-    GPU_POWER = {
-        'A6000':         ('RTX A6000',        200.0),    # 300W TDP, ~200W inference avg
-        'RTX3060':       ('RTX 3060',         130.0),    # 170W TDP, ~130W inference avg
-        'AGX_Orin_64GB': ('AGX Orin 64GB',     40.0),    # 60W MAXN mode
-        'Orin_NX_16GB':  ('Orin NX 16GB',      15.0),    # 15-25W typical
-        'AGX_Xavier':    ('AGX Xavier',        20.0),    # 15-30W, ~20W inference
+    best_cycles = ablation['asic_fsdr_saes'].get(
+        'eff_total', ablation['asic_fsdr_saes']['total']
+    )
+    # Normalize measured baseline latency to the SCARF clock so the ratio is a
+    # latency speedup. Raw device timing and clock remain in provenance.
+    baseline_equivalent_cycles = round(
+        baseline_gpu_time_ms * SCARF_FREQ_MHZ * 1000
+    )
+    ablation_record = {
+        key: {**value, 'quality': ablation_quality[key]}
+        for key, value in ablation.items()
+        if not key.startswith('_')
     }
-    
-    print("  Process: TSMC 28nm HPC+ (1.0V, 1 GHz)")
-    print(f"  Methodology: Horowitz ISSCC'14 energy model scaled to 28nm")
+    record = build_result_record(
+        model=args.model,
+        dataset=args.dataset,
+        checkpoint=checkpoint_path,
+        checkpoint_load=getattr(model, "_scarf_checkpoint_load", {}),
+        environment=build_environment_provenance(experiment.environment_profile),
+        dataset_manifest=dataset_manifest,
+        dataset_representation=dataset_identity['representation'],
+        dataset_tree_sha256=dataset_identity['tree_sha256'],
+        device={
+            'type': device.type,
+            'name': gpu_name if device.type == 'cuda' else str(device),
+            'measured_encoder_time_ms': baseline_gpu_time_ms,
+            'encoder_timing_samples_ms': baseline_timing_samples_ms,
+            'encoder_timing_repetitions': len(baseline_timing_samples_ms),
+            'encoder_timing_source': (
+                'cuda_events' if device.type == 'cuda' else 'perf_counter'
+            ),
+            'reported_clock_mhz': gpu_freq_mhz,
+            'scarf_clock_mhz': SCARF_FREQ_MHZ,
+        },
+        seed=args.seed,
+        quality={
+            'baseline': {
+                'psnr_db': baseline_psnr,
+                'ssim': baseline_ssim,
+                'lpips': baseline_lpips,
+            },
+            'scarf': {
+                'psnr_db': scarf_psnr,
+                'ssim': scarf_ssim,
+                'lpips': scarf_lpips,
+            },
+        },
+        quality_views=quality_views,
+        baseline_cycles=baseline_equivalent_cycles,
+        cycles={
+            'feature': feature_sim_cycles,
+            'depth': dp_core_cycles,
+            'gaussian': gauss_gen_cycles,
+            'ggu': base_ggu_cycles,
+        },
+        scarf_cycles=best_cycles,
+        cycle_source='scarf_component_simulators',
+        ablation=ablation_record,
+        fsdr_saes={
+            'fsdr': fsdr_summary,
+            'saes': saes_stats,
+            'preservation': preservation_metrics,
+        },
+        command=[
+            sys.executable,
+            str(SCARF_ROOT / 'scripts/demo.py'),
+            *(list(argv) if argv is not None else sys.argv[1:]),
+        ],
+        runtime_assets=runtime_assets,
+        sample_identity={
+            'scene': str(scene_name),
+            'context_indices': [int(value) for value in batch['context']['index'][0].tolist()],
+            'target_indices': [
+                int(value) for value in batch['target']['index'][0, :V_tgt].tolist()
+            ],
+        },
+        sample_index=(
+            args.protocol_sample_index
+            if args.protocol_sample_index is not None
+            else args.sample_index
+        ),
+        execution_index=args.sample_index,
+        num_samples=args.num_samples,
+        baseline_source=(
+            'orin_nx_cuda_events'
+            if device.type == 'cuda' and 'Orin' in gpu_name
+            else (
+                'workstation_cuda_events'
+                if device.type == 'cuda'
+                else 'cpu_perf_counter'
+            )
+        ),
+        fallback_stages=fallback_stages,
+    )
+    if strict_run:
+        validate(record)
+    result_path = output_dir / 'results.json'
+    write_result(record, result_path)
     print()
-    
-    # Power breakdown table
-    print("  ┌──────────────────────────────────────────────────────────┐")
-    print("  │ Component              │ Dynamic (mW) │ Description     │")
-    print("  ├──────────────────────────────────────────────────────────┤")
-    print(f"  │ ConvEngine ({conv_macs} MAC)    │ {p_conv_compute:>8.0f}      │ {util_conv*100:.0f}% util        │")
-    print(f"  │ GEMM Unit  ({gemm_macs} MAC)    │ {p_gemm_compute:>8.0f}      │ {util_gemm*100:.0f}% util        │")
-    print(f"  │ VectorALU  ({valu_width}-wide)     │ {p_valu:>8.1f}      │ {util_valu*100:.0f}% util        │")
-    print(f"  │ BilinearUnit ({bilinear_samplers} samp)  │ {p_bilinear:>8.0f}      │ {util_bilinear*100:.0f}% util        │")
-    print(f"  │ GGU PEs ({ggu_pes} PEs)         │ {p_ggu:>8.1f}      │ {util_ggu*100:.0f}% util (hidden)│")
-    print(f"  │ Activation/Norm/Softmax│ {p_activation:>8.0f}      │ LUT-based       │")
-    print(f"  ├──────────────────────────────────────────────────────────┤")
-    print(f"  │ Compute subtotal       │ {p_compute:>8.0f}      │                 │")
-    print(f"  ├──────────────────────────────────────────────────────────┤")
-    print(f"  │ SRAM ({sram_total_kb} KB)          │ {p_sram_total:>8.0f}      │ buffers + cache  │")
-    print(f"  ├──────────────────────────────────────────────────────────┤")
-    print(f"  │ Clock tree + PLL       │ {p_clock + p_pll:>8.0f}      │ @ {SCARF_FREQ_MHZ} MHz       │")
-    print(f"  │ Control logic          │ {p_control:>8.0f}      │                 │")
-    print(f"  │ I/O + LPDDR4 PHY       │ {p_io_ddr + p_io_misc:>8.0f}      │                 │")
-    print(f"  ├──────────────────────────────────────────────────────────┤")
-    print(f"  │ Dynamic subtotal       │ {p_dynamic:>8.0f}      │                 │")
-    print(f"  │ Static (leakage)       │ {p_leakage:>8.0f}      │ 28nm HPC+       │")
-    print(f"  ╞══════════════════════════════════════════════════════════╡")
-    print(f"  │ TOTAL AVERAGE POWER    │ {p_total:>8.0f} mW   │ = {p_total/1000:.2f} W       │")
-    print(f"  │ PEAK POWER             │ {p_peak:>8.0f} mW   │ = {p_peak/1000:.2f} W       │")
-    print(f"  └──────────────────────────────────────────────────────────┘")
-    
-    # Area breakdown
-    print()
-    print(f"  Die area estimate:")
-    print(f"    ConvEngine:     {a_conv:.2f} mm²   GEMM Unit:  {a_gemm:.2f} mm²")
-    print(f"    BilinearUnit:   {a_bilinear:.2f} mm²   GGU PEs:    {a_ggu:.2f} mm²")
-    print(f"    SRAM ({sram_total_kb} KB):   {a_sram:.2f} mm²   Control:    {a_control:.2f} mm²")
-    print(f"    I/O + pads:     {a_io + a_pad:.2f} mm²   Other:      {a_valu + a_misc_logic:.2f} mm²")
-    print(f"    Total:          {a_total:.1f} mm²  ({die_side:.1f} × {die_side:.1f} mm die)")
-    
-    # Energy per inference comparison
-    print()
-    print("  Energy per inference comparison:")
-    print(f"    {'Platform':<28s}  {'Time(ms)':>9s}  {'Power(W)':>9s}  {'Energy(mJ)':>11s}  {'vs ASIC':>8s}")
-    print(f"    {'─'*28}  {'─'*9}  {'─'*9}  {'─'*11}  {'─'*8}")
-    
-    # SCARF ASIC row
-    print(f"    {'SCARF ASIC @ 28nm':<28s}  {asic_best_ms:>9.1f}  {p_total/1000:>9.2f}  {asic_energy_mj:>11.0f}  {'1.00x':>8s}")
-    
-    # GPU rows
-    energy_rows = []
-    for key in ['RTX3060', 'A6000', 'AGX_Orin_64GB', 'Orin_NX_16GB', 'AGX_Xavier']:
-        gname, gpower = GPU_POWER[key]
-        if key == 'RTX3060':
-            gtime = baseline_gpu_time_ms
-        else:
-            gtime = gpu_estimates[key]['est_time_ms']
-        genergy = gpower * gtime  # W × ms = mJ
-        ratio = genergy / asic_energy_mj if asic_energy_mj > 0 else 0
-        energy_rows.append((gname, gtime, gpower, genergy, ratio))
-        print(f"    {gname:<28s}  {gtime:>9.1f}  {gpower:>9.1f}  {genergy:>11.0f}  {ratio:>7.1f}x")
-    
-    print()
-    # Efficiency metric
-    peak_tops = (conv_macs + gemm_macs) * 2 * freq_ghz / 1000  # 2 ops per MAC (mul+add)
-    avg_tops = peak_tops * (util_conv * conv_macs + util_gemm * gemm_macs) / (conv_macs + gemm_macs)
-    print(f"  Performance metrics:")
-    print(f"    Peak throughput:     {peak_tops:.2f} TOPS ({conv_macs + gemm_macs} MACs × 2 × {freq_ghz} GHz)")
-    print(f"    Avg throughput:      {avg_tops:.2f} TOPS (weighted by utilization)")
-    print(f"    Energy efficiency:   {avg_tops / (p_total/1000):.2f} TOPS/W (avg)")
-    print(f"    Area efficiency:     {avg_tops / a_total:.2f} TOPS/mm²")
-    
-    # Key takeaway
-    if len(energy_rows) > 0:
-        best_gpu_name, _, _, best_gpu_energy, best_ratio = min(energy_rows, key=lambda x: x[3])
-        worst_gpu_name, _, _, worst_gpu_energy, worst_ratio = max(energy_rows, key=lambda x: x[3])
-        print()
-        print(f"  Energy advantage:")
-        print(f"    vs {best_gpu_name}: {best_ratio:.0f}× less energy per inference")
-        print(f"    vs {worst_gpu_name}: {worst_ratio:.0f}× less energy per inference")
-    
-    print()
-    print(f"## Output: {output_dir}")
-    print("=" * 70)
+    print(f"Structured result: {result_path}")
+    print("Physical PPA is intentionally excluded; run hardware/iflow/run.sh.")
 
 
 if __name__ == '__main__':

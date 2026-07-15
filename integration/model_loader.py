@@ -3,11 +3,79 @@ Model Loader
 
 Abstract base class and implementations for loading different 3DGS models.
 """
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional
 from dataclasses import dataclass
 import torch
+
+
+DINOV2_COMMIT = "7764ea0f912e53c92e82eb78a2a1631e92725fc8"
+DINOV2_SOURCE = (
+    Path(__file__).resolve().parents[1]
+    / "assets/torch/hub"
+    / f"facebookresearch_dinov2_{DINOV2_COMMIT}"
+)
+
+
+def load_checkpoint_state(model: torch.nn.Module, checkpoint: Any) -> dict[str, Any]:
+    state_dict = checkpoint.get("state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    if not isinstance(state_dict, dict) or not state_dict:
+        raise ValueError("checkpoint has no non-empty state dictionary")
+    model_state = model.state_dict()
+    shape_mismatches = [
+        key
+        for key, value in state_dict.items()
+        if key in model_state
+        and torch.is_tensor(value)
+        and value.shape != model_state[key].shape
+    ]
+    if shape_mismatches:
+        raise ValueError(
+            "checkpoint tensor shape mismatch: " + ", ".join(shape_mismatches[:3])
+        )
+    tensor_state = {
+        key: value for key, value in state_dict.items() if torch.is_tensor(value)
+    }
+    matched = {key: value for key, value in tensor_state.items() if key in model_state}
+    if not matched:
+        raise ValueError("checkpoint has no tensor matching the configured model")
+    incompatible = model.load_state_dict(matched, strict=False)
+    checkpoint_numel = sum(value.numel() for value in tensor_state.values())
+    matched_numel = sum(value.numel() for value in matched.values())
+    report = {
+        "checkpoint_tensors": len(tensor_state),
+        "matched_tensors": len(matched),
+        "missing_model_tensors": len(incompatible.missing_keys),
+        "unmatched_checkpoint_tensors": len(tensor_state) - len(matched),
+        "checkpoint_numel": checkpoint_numel,
+        "matched_numel": matched_numel,
+        "matched_checkpoint_numel_fraction": matched_numel / checkpoint_numel,
+    }
+    model._scarf_checkpoint_load = report
+    return report
+
+
+def get_depthsplat_encoder(get_encoder, encoder_cfg):
+    original_hub_load = torch.hub.load
+
+    def pinned_hub_load(repo_or_dir, model, *args, **kwargs):
+        if repo_or_dir == "facebookresearch/dinov2":
+            repo_or_dir = str(DINOV2_SOURCE)
+            kwargs["source"] = "local"
+            # The hash-pinned DepthSplat checkpoints contain the complete
+            # DINO backbone. Avoid redundant weights and all run-time network
+            # access while constructing the matching module hierarchy.
+            kwargs["pretrained"] = False
+        return original_hub_load(repo_or_dir, model, *args, **kwargs)
+
+    torch.hub.load = pinned_hub_load
+    try:
+        return get_encoder(encoder_cfg)
+    finally:
+        torch.hub.load = original_hub_load
 
 
 @dataclass
@@ -27,6 +95,51 @@ class DataBundle:
     data_shim: Any
 
 
+def _load_sequential_data(
+    loader: Any,
+    model_bundle: ModelBundle,
+    dataset_name: str,
+    num_samples: int,
+    sample_index: int,
+) -> DataBundle:
+    """Reuse one ordered test dataloader for a model/dataset pair."""
+    loader._setup_imports()
+    try:
+        from src.dataset.data_module import DataModule, get_data_shim
+
+        key = (id(model_bundle), dataset_name, num_samples)
+        state = getattr(loader, "_data_session", None)
+        if state is None or state["key"] != key or sample_index < state["index"]:
+            cfg = model_bundle.config
+            cfg.dataset.test_len = num_samples
+            data_module = DataModule(cfg.dataset, cfg.data_loader)
+            data_module.setup("test")
+            state = {
+                "key": key,
+                "iterator": iter(data_module.test_dataloader()),
+                "data_module": data_module,
+                "data_shim": get_data_shim(model_bundle.encoder),
+                "index": -1,
+                "batch": None,
+            }
+            loader._data_session = state
+
+        while state["index"] < sample_index:
+            try:
+                state["batch"] = next(state["iterator"])
+            except StopIteration as exc:
+                raise IndexError(f"sample_index={sample_index} is out of range") from exc
+            state["index"] += 1
+        if state["batch"] is None:
+            raise IndexError(f"sample_index={sample_index} is out of range")
+        return DataBundle(
+            batch=state["data_shim"](state["batch"]),
+            data_shim=state["data_shim"],
+        )
+    finally:
+        loader._restore_cwd()
+
+
 class BaseModelLoader(ABC):
     """
     Abstract base class for model loaders.
@@ -44,6 +157,10 @@ class BaseModelLoader(ABC):
         checkpoint_path: str,
         config_path: Optional[str] = None,
         device: Optional[torch.device] = None,
+        experiment_name: str = 're10k',
+        dataset_root: Optional[Path] = None,
+        evaluation_index: Optional[Path] = None,
+        hydra_overrides: Tuple[str, ...] = (),
     ) -> ModelBundle:
         """
         Load model from checkpoint.
@@ -52,6 +169,10 @@ class BaseModelLoader(ABC):
             checkpoint_path: Path to model checkpoint
             config_path: Optional path to config directory
             device: Target device (default: cuda if available)
+            experiment_name: Hydra experiment configuration to compose
+            dataset_root: Optional absolute dataset root override
+            evaluation_index: Optional upstream evaluation sampler index
+            hydra_overrides: Checkpoint-variant overrides from the experiment contract
         
         Returns:
             ModelBundle with encoder, decoder, model, config, device
@@ -127,8 +248,18 @@ class TransplatLoader(BaseModelLoader):
         checkpoint_path: str,
         config_path: Optional[str] = None,
         device: Optional[torch.device] = None,
+        experiment_name: str = 're10k',
+        dataset_root: Optional[Path] = None,
+        evaluation_index: Optional[Path] = None,
+        hydra_overrides: Tuple[str, ...] = (),
     ) -> ModelBundle:
         """Load TranSplat model."""
+        checkpoint_path = str(Path(checkpoint_path).resolve())
+        config_path = str(Path(config_path).resolve()) if config_path is not None else None
+        dataset_root = Path(dataset_root).resolve() if dataset_root is not None else None
+        evaluation_index = (
+            Path(evaluation_index).resolve() if evaluation_index is not None else None
+        )
         self._setup_imports()
         
         try:
@@ -155,7 +286,21 @@ class TransplatLoader(BaseModelLoader):
             GlobalHydra.instance().clear()
             
             with initialize_config_dir(config_dir=config_path, version_base=None):
-                cfg_dict = compose(config_name="main", overrides=["+experiment=re10k"])
+                overrides = [f"+experiment={experiment_name}", *hydra_overrides]
+                if evaluation_index is not None:
+                    overrides.append("dataset/view_sampler=evaluation")
+                cfg_dict = compose(config_name="main", overrides=overrides)
+
+            if dataset_root is not None:
+                cfg_dict.dataset.roots = [str(Path(dataset_root).resolve())]
+            if evaluation_index is not None:
+                index_path = Path(evaluation_index).resolve()
+                if not index_path.is_file():
+                    raise FileNotFoundError(f"evaluation index not found: {index_path}")
+                cfg_dict.dataset.view_sampler.index_path = str(index_path)
+            cfg_dict.data_loader.test.num_workers = 0
+            cfg_dict.data_loader.test.persistent_workers = False
+            cfg_dict.data_loader.test.batch_size = 1
             
             cfg_dict.mode = 'test'
             set_cfg(cfg_dict)
@@ -173,11 +318,7 @@ class TransplatLoader(BaseModelLoader):
             )
             
             # Load weights
-            state_dict = ckpt.get('state_dict', ckpt)
-            model_state = model.state_dict()
-            filtered_state = {k: v for k, v in state_dict.items() 
-                              if k in model_state and v.shape == model_state[k].shape}
-            model.load_state_dict(filtered_state, strict=False)
+            load_checkpoint_state(model, ckpt)
             
             model = model.to(device)
             model.eval()
@@ -200,33 +341,9 @@ class TransplatLoader(BaseModelLoader):
         sample_index: int = 0,
     ) -> DataBundle:
         """Load TranSplat test data."""
-        self._setup_imports()
-        
-        try:
-            from src.dataset.data_module import DataModule, get_data_shim
-            
-            cfg = model_bundle.config
-            cfg.dataset.test_len = max(num_samples, sample_index + 1)
-            
-            data_module = DataModule(cfg.dataset, cfg.data_loader)
-            data_module.setup("test")
-            test_loader = data_module.test_dataloader()
-            
-            batch = None
-            for idx, candidate in enumerate(test_loader):
-                if idx == sample_index:
-                    batch = candidate
-                    break
-            if batch is None:
-                raise IndexError(f"sample_index={sample_index} is out of range")
-            
-            # Apply data shim
-            data_shim = get_data_shim(model_bundle.encoder)
-            batch = data_shim(batch)
-            
-            return DataBundle(batch=batch, data_shim=data_shim)
-        finally:
-            self._restore_cwd()
+        return _load_sequential_data(
+            self, model_bundle, dataset_name, num_samples, sample_index
+        )
     
     def get_model_type(self) -> str:
         return 'transplat'
@@ -272,8 +389,18 @@ class MVSplatLoader(BaseModelLoader):
         checkpoint_path: str,
         config_path: Optional[str] = None,
         device: Optional[torch.device] = None,
+        experiment_name: str = 're10k',
+        dataset_root: Optional[Path] = None,
+        evaluation_index: Optional[Path] = None,
+        hydra_overrides: Tuple[str, ...] = (),
     ) -> ModelBundle:
         """Load MVSplat model."""
+        checkpoint_path = str(Path(checkpoint_path).resolve())
+        config_path = str(Path(config_path).resolve()) if config_path is not None else None
+        dataset_root = Path(dataset_root).resolve() if dataset_root is not None else None
+        evaluation_index = (
+            Path(evaluation_index).resolve() if evaluation_index is not None else None
+        )
         self._setup_imports()
         
         try:
@@ -300,7 +427,21 @@ class MVSplatLoader(BaseModelLoader):
             GlobalHydra.instance().clear()
             
             with initialize_config_dir(config_dir=config_path, version_base=None):
-                cfg_dict = compose(config_name="main", overrides=["+experiment=re10k"])
+                overrides = [f"+experiment={experiment_name}", *hydra_overrides]
+                if evaluation_index is not None:
+                    overrides.append("dataset/view_sampler=evaluation")
+                cfg_dict = compose(config_name="main", overrides=overrides)
+
+            if dataset_root is not None:
+                cfg_dict.dataset.roots = [str(Path(dataset_root).resolve())]
+            if evaluation_index is not None:
+                index_path = Path(evaluation_index).resolve()
+                if not index_path.is_file():
+                    raise FileNotFoundError(f"evaluation index not found: {index_path}")
+                cfg_dict.dataset.view_sampler.index_path = str(index_path)
+            cfg_dict.data_loader.test.num_workers = 0
+            cfg_dict.data_loader.test.persistent_workers = False
+            cfg_dict.data_loader.test.batch_size = 1
             
             cfg_dict.mode = 'test'
             set_cfg(cfg_dict)
@@ -318,11 +459,7 @@ class MVSplatLoader(BaseModelLoader):
             )
             
             # Load weights
-            state_dict = ckpt.get('state_dict', ckpt)
-            model_state = model.state_dict()
-            filtered_state = {k: v for k, v in state_dict.items() 
-                              if k in model_state and v.shape == model_state[k].shape}
-            model.load_state_dict(filtered_state, strict=False)
+            load_checkpoint_state(model, ckpt)
             
             model = model.to(device)
             model.eval()
@@ -345,33 +482,9 @@ class MVSplatLoader(BaseModelLoader):
         sample_index: int = 0,
     ) -> DataBundle:
         """Load MVSplat test data."""
-        self._setup_imports()
-        
-        try:
-            from src.dataset.data_module import DataModule, get_data_shim
-            
-            cfg = model_bundle.config
-            cfg.dataset.test_len = max(num_samples, sample_index + 1)
-            
-            data_module = DataModule(cfg.dataset, cfg.data_loader)
-            data_module.setup("test")
-            test_loader = data_module.test_dataloader()
-            
-            batch = None
-            for idx, candidate in enumerate(test_loader):
-                if idx == sample_index:
-                    batch = candidate
-                    break
-            if batch is None:
-                raise IndexError(f"sample_index={sample_index} is out of range")
-            
-            # Apply data shim
-            data_shim = get_data_shim(model_bundle.encoder)
-            batch = data_shim(batch)
-            
-            return DataBundle(batch=batch, data_shim=data_shim)
-        finally:
-            self._restore_cwd()
+        return _load_sequential_data(
+            self, model_bundle, dataset_name, num_samples, sample_index
+        )
     
     def get_model_type(self) -> str:
         return 'mvsplat'
@@ -417,8 +530,18 @@ class DepthSplatLoader(BaseModelLoader):
         checkpoint_path: str,
         config_path: Optional[str] = None,
         device: Optional[torch.device] = None,
+        experiment_name: str = 're10k',
+        dataset_root: Optional[Path] = None,
+        evaluation_index: Optional[Path] = None,
+        hydra_overrides: Tuple[str, ...] = (),
     ) -> ModelBundle:
         """Load DepthSplat model."""
+        checkpoint_path = str(Path(checkpoint_path).resolve())
+        config_path = str(Path(config_path).resolve()) if config_path is not None else None
+        dataset_root = Path(dataset_root).resolve() if dataset_root is not None else None
+        evaluation_index = (
+            Path(evaluation_index).resolve() if evaluation_index is not None else None
+        )
         self._setup_imports()
         
         try:
@@ -445,14 +568,30 @@ class DepthSplatLoader(BaseModelLoader):
             GlobalHydra.instance().clear()
             
             with initialize_config_dir(config_dir=config_path, version_base=None):
-                cfg_dict = compose(config_name="main", overrides=["+experiment=re10k"])
+                overrides = [f"+experiment={experiment_name}", *hydra_overrides]
+                if evaluation_index is not None:
+                    overrides.append("dataset/view_sampler=evaluation")
+                cfg_dict = compose(config_name="main", overrides=overrides)
+
+            if dataset_root is not None:
+                cfg_dict.dataset.roots = [str(Path(dataset_root).resolve())]
+            if evaluation_index is not None:
+                index_path = Path(evaluation_index).resolve()
+                if not index_path.is_file():
+                    raise FileNotFoundError(f"evaluation index not found: {index_path}")
+                cfg_dict.dataset.view_sampler.index_path = str(index_path)
+            cfg_dict.data_loader.test.num_workers = 0
+            cfg_dict.data_loader.test.persistent_workers = False
+            cfg_dict.data_loader.test.batch_size = 1
             
             cfg_dict.mode = 'test'
             set_cfg(cfg_dict)
             cfg = load_typed_root_config(cfg_dict)
             
             # Build model
-            encoder, encoder_visualizer = get_encoder(cfg.model.encoder)
+            encoder, encoder_visualizer = get_depthsplat_encoder(
+                get_encoder, cfg.model.encoder
+            )
             decoder = get_decoder(cfg.model.decoder, cfg.dataset)
             losses = get_losses(cfg.loss)
             step_tracker = StepTracker()
@@ -463,11 +602,7 @@ class DepthSplatLoader(BaseModelLoader):
             )
             
             # Load weights
-            state_dict = ckpt.get('state_dict', ckpt)
-            model_state = model.state_dict()
-            filtered_state = {k: v for k, v in state_dict.items() 
-                              if k in model_state and v.shape == model_state[k].shape}
-            model.load_state_dict(filtered_state, strict=False)
+            load_checkpoint_state(model, ckpt)
             
             model = model.to(device)
             model.eval()
@@ -490,33 +625,9 @@ class DepthSplatLoader(BaseModelLoader):
         sample_index: int = 0,
     ) -> DataBundle:
         """Load DepthSplat test data."""
-        self._setup_imports()
-        
-        try:
-            from src.dataset.data_module import DataModule, get_data_shim
-            
-            cfg = model_bundle.config
-            cfg.dataset.test_len = max(num_samples, sample_index + 1)
-            
-            data_module = DataModule(cfg.dataset, cfg.data_loader)
-            data_module.setup("test")
-            test_loader = data_module.test_dataloader()
-            
-            batch = None
-            for idx, candidate in enumerate(test_loader):
-                if idx == sample_index:
-                    batch = candidate
-                    break
-            if batch is None:
-                raise IndexError(f"sample_index={sample_index} is out of range")
-            
-            # Apply data shim
-            data_shim = get_data_shim(model_bundle.encoder)
-            batch = data_shim(batch)
-            
-            return DataBundle(batch=batch, data_shim=data_shim)
-        finally:
-            self._restore_cwd()
+        return _load_sequential_data(
+            self, model_bundle, dataset_name, num_samples, sample_index
+        )
     
     def get_model_type(self) -> str:
         return 'depthsplat'

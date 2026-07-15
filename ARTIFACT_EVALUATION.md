@@ -1,238 +1,350 @@
-# SCARF — Artifact Evaluation Guide (MICRO 2026)
+# SCARF Artifact Evaluation Guide (MICRO 2026)
 
-**Paper:** SCARF: A Scene-Adaptive Depth-Guided G-3DGS Encoder Accelerator
-with Semantic Reuse and Fused Dataflow
+**Paper:** SCARF: A Scene-Adaptive Depth-Guided G-3DGS Encoder
+Accelerator with Semantic Reuse and Fused Dataflow
 
-**Badges claimed:** Artifacts Available · Artifacts Evaluated — Functional · Results Reproduced
+**Badges requested:** Artifacts Available, Artifacts Evaluated (Functional),
+and Results Reproduced.
 
----
+The exact claim scope, commands, and tolerances are defined in
+[`artifact/CLAIMS.md`](artifact/CLAIMS.md). The final archival DOI must be added
+to this guide only after the Zenodo release passes clean-room validation.
 
-## Quick Start (< 5 minutes to first result)
+## Quick Start
 
 ```bash
-# 1. Clone and set up environment
-git clone https://github.com/MAdrid1011/SCARF
+git clone --recursive https://github.com/MAdrid1011/SCARF.git
 cd SCARF
-conda create -n scarf python=3.10 -y && conda activate scarf
-bash install.sh
 
-# 2. Download model checkpoints (~3 GB)
-bash data/download_checkpoints.sh
+# TranSplat and MVSplat environment
+bash install.sh --profile classic --venv .venv/classic
 
-# 3. Smoke-test on Re10K × MVSplat (~10 min on GPU)
+# Download the quick-test checkpoint and build the redistributable synthetic fixture
+bash data/download_checkpoints.sh --profile quick
+.venv/classic/bin/python data/build_quick_dataset.py \
+  --output datasets/quick-re10k
+
+# First structured result
 bash scripts/run_ae.sh quick
-
-# 4. Full reproduction of all paper results (~3 h on GPU)
-bash scripts/run_ae.sh all
 ```
 
-All results are written to `outputs/ae_<timestamp>/`.
+Generated files are placed below the shared `outputs/ae/` root unless
+`--output-root` is supplied. A successful quick
+run creates `results.json` and passes schema validation. Preparation and runtime
+measurements in the final release manifest supersede estimates in this guide.
+The quick fixture is labeled `re10k-synthetic-functional-v1` and is never used
+for a paper-result claim. Full quality runs require the real prepared datasets.
 
----
+## Components
 
-## What This Artifact Provides
-
-| Component | Location | Description |
-|-----------|----------|-------------|
-| Hardware simulator | `encoder/` | Cycle-accurate Python HW units (ConvEngine, GEMMUnit, etc.) |
-| FSDR | `fsdr/` | Feature Similarity Depth Reuse implementation |
-| SAES | `saes/` | Scene-Adaptive Early Sparsification implementation |
-| Model adapters | `adapters/` | MVSplat, TranSplat, DepthSplat integration |
-| Demo script | `scripts/demo.py` | Single model × dataset evaluation |
-| AE sweep script | `scripts/run_ae.sh` | Reproduces all paper figures and tables |
-| Sensitivity sweep | `scripts/sensitivity_sweep.py` | Figure 7 parameter sensitivity |
-| RTL implementation | `Zircon-SCARF/` | Chisel/Verilator full RTL (optional, ~8 h) |
-
----
+| Component | Location | Purpose |
+|---|---|---|
+| Hardware simulator | `encoder/`, `depth_predictor/`, `ggu/` | Functional and cycle models |
+| FSDR | `fsdr/` | Feature Similarity Depth Reuse |
+| SAES | `saes/` | Scene-Adaptive Early Sparsification |
+| Model integration | `adapters/`, `integration/` | TranSplat, MVSplat, and DepthSplat adapters |
+| Experiment driver | `scripts/run_ae.py` | Matrix execution, aggregation, and validation |
+| Compatibility wrapper | `scripts/run_ae.sh` | Stable shell entry point |
+| RTL | `chisel/` | Chisel implementation and tests |
+| Public physical flow | `hardware/iflow/` | iFlow/ASAP7 predictive implementation |
+| Technology scaling | `hardware/scaling/` | DeepScaleTool normalization |
+| AE metadata | `artifact/` | Claims, expected results, manifests, and appendix |
 
 ## System Requirements
 
-| Requirement | Minimum | Tested |
-|-------------|---------|--------|
-| OS | Ubuntu 20.04+ | Ubuntu 22.04 |
-| Python | 3.9+ | 3.10.14 |
-| GPU | 8 GB VRAM (CUDA 12.1+) | RTX 3060 12 GB |
-| RAM | 16 GB | 32 GB |
-| Disk | 15 GB | — |
-| CUDA | 12.1+ | 12.1 |
+| Workflow | Minimum public configuration |
+|---|---|
+| Quick strict inference | NVIDIA CUDA GPU with 8 GB VRAM, 16 GB RAM, 20 GB free disk |
+| CPU schema smoke | Ubuntu 22.04, x86-64 CPU, 8 GB RAM |
+| Full quality matrix | NVIDIA CUDA GPU with 24 GB VRAM, 32 GB RAM |
+| Orin baseline | Jetson Orin NX 16 GB, documented JetPack and MAXN state |
+| RTL validation | JDK 11+, sbt 1.9+, Verilator 5+ |
+| ASAP7 physical proxy | x86-64 Linux, 128 GB RAM recommended, 100 GB free disk, pinned iFlow checkout |
 
-**CPU-only mode** is supported (`--device cpu`) but is ~5× slower.
-No FPGA or ASIC hardware is required for any paper result.
+CPU mode validates the CLI, protocol, result schema, DeepScale, and applicable
+RTL tooling. The Gaussian rasterizer makes strict model inference a CUDA
+workflow, and workstation CUDA timing is not a substitute for archived Orin NX
+performance evidence.
 
----
+Software and CUDA evaluation do not depend on the physical-flow resource gate.
+The ASAP7 workflow alone refuses to start while any Vivado process is active or
+while less than 48 GiB of host memory is available.
 
-## Installation
+## Environments
 
-```bash
-conda create -n scarf python=3.10 -y
-conda activate scarf
-bash install.sh          # installs PyTorch 2.1.2+cu121 + all deps
-```
-
-Alternatively, install manually:
+The model repositories require two pinned profiles:
 
 ```bash
-pip install torch==2.1.2+cu121 torchvision==0.16.2+cu121 \
-    --extra-index-url https://download.pytorch.org/whl/cu121
-pip install -r requirements.txt
+# PyTorch 2.1 profile for TranSplat and MVSplat
+bash install.sh --profile classic --venv .venv/classic
+
+# PyTorch 2.4 profile for DepthSplat
+bash install.sh --profile depthsplat --venv .venv/depthsplat
+
+# Jetson-specific instructions and dependency checks
+bash install.sh --profile orin --check-only
 ```
 
----
+Do not mix the classic and DepthSplat packages in one Python environment. The
+orchestrator automatically uses `.venv/classic/bin/python` and
+`.venv/depthsplat/bin/python`. For environments installed elsewhere, set
+`SCARF_PYTHON_CLASSIC` and `SCARF_PYTHON_DEPTHSPLAT` to their Python
+interpreters. Before loading a model, every real workflow validates the profile
+and saves its environment record below `outputs/ae/environments/`.
 
-## Data and Checkpoint Downloads
+## Data and Checkpoints
+
+The machine-readable sources, formats, model mapping, licenses, and hashes live
+in `artifact/manifests/`.
 
 ```bash
-bash data/download_checkpoints.sh   # TranSplat, MVSplat, DepthSplat (~3 GB)
-bash data/download_re10k.sh         # RealEstate10K test split (~3 GB)
-bash data/download_acid.sh          # ACID test split (~3 GB)
-bash data/download_dl3dv.sh         # DL3DV test split (~4 GB)
+bash data/download_checkpoints.sh --profile all
+bash data/download_re10k.sh
+bash data/download_acid.sh
+bash data/download_dl3dv.sh
 ```
 
-**Pre-packaged test vectors** (Re10K only, ~200 MB, sufficient for quality
-reproduction) are available at the Zenodo archive:
+DL3DV preparation creates two hash-manifested representations. DepthSplat uses
+`datasets/dl3dv/native`, which keeps the native 270 by 480 test images.
+TranSplat and MVSplat use `datasets/dl3dv/re10k`, which contains deterministic
+360 by 640 images for their Re10K-compatible loaders. The second representation
+is resized from the higher-resolution `images_4` source with a fixed conversion
+recipe. The experiment mapping rejects a representation that does not match the
+selected model.
 
-```bash
-wget https://zenodo.org/record/XXXXXXX/files/testvecs.tar.gz
-tar -xzf testvecs.tar.gz
-```
+The pinned DL3DV benchmark is a gated Hugging Face dataset. Before running its
+download command, accept the dataset access terms and authenticate with
+`hf auth login`. The script downloads only the required `nerfstudio` metadata
+and `images_4` and `images_8` trees. Dataset terms are not inferred from access
+approval. The manifest records the reviewed terms URL and explicitly forbids
+redistribution in the Zenodo package. Gated access is never bypassed.
 
----
+Download scripts do not install packages implicitly. They verify required tools
+before downloading and reject files whose configured SHA256 does not match.
+Full third-party datasets are not copied into the archival package unless their
+redistribution terms permit it.
 
-## Reproducing Paper Results
+The checkpoint command also prepares hash-pinned runtime assets. These assets
+include VGG16 weights for LPIPS, the CC-BY-NC-4.0 Depth Anything V2 Base
+backbone required only by TranSplat, and a fixed DINOv2 source snapshot. The
+full DINO backbone weights are already contained in the pinned DepthSplat
+checkpoints, so the local source constructs them with `pretrained=false` and
+never fetches a second copy. Runtime assets are downloaded from pinned public
+revisions and are not redistributed in the release archives. Model evaluation
+does not download weights or hub code at run time.
 
-### Table 2 — Quality (PSNR / SSIM / LPIPS)
+DepthSplat ACID evaluation follows the upstream zero-shot protocol. It uses the
+official large Re10K checkpoint with the ACID data root and evaluation index,
+as documented by the pinned DepthSplat submodule. TranSplat and MVSplat use
+their official ACID checkpoints.
+
+The large DepthSplat checkpoint is composed with the upstream evaluation
+overrides `num_scales=2`, `upsample_factor=2`,
+`lowest_feature_resolution=4`, and `monodepth_vit_type=vitl`. The unclaimed
+native DL3DV workflow retains the upstream base-model ViT-B overrides. These
+variant choices are part of the experiment manifest rather than inferred by a
+permissive checkpoint load.
+
+### Evaluation Sample Protocol
+
+The artifact recovers the committed evaluation indices shared by the three
+upstream model repositories. Re10K has 6,474 executable entries, ACID has 1,595,
+and DL3DV has 140. Source index counts and rejected null entries are also
+recorded. Claim runs use these exact context and target views through the
+evaluation sampler. A one-sample run remains Functional evidence only. See the
+evaluation protocol document.
+
+## Claimed Experiments
+
+### Table 1: Rendering Quality
 
 ```bash
 bash scripts/run_ae.sh quality
 ```
 
-Expected: PSNR deviation from baseline ≤ 0.072% across all nine
-model × dataset pairs. Results in `outputs/ae_<ts>/quality/*/results.json`.
+This evaluates PSNR, SSIM, and LPIPS for all claimed model/dataset pairs. Each
+sample result covers every target view selected by the configured sampler and
+records per-view metrics. The sample metric is their arithmetic mean. Signed
+change, degradation, and absolute change are separate fields. The maximum
+degradation statement in the paper must not be interpreted as a maximum
+absolute deviation.
 
-| Model | Dataset | Baseline PSNR | SCARF PSNR | Δ PSNR |
-|-------|---------|---------------|------------|--------|
-| TranSplat | Re10K | 28.08 | 28.07 | −0.04% |
-| TranSplat | ACID  | 29.58 | 29.60 | +0.07% |
-| TranSplat | DL3DV | 25.08 | 25.07 | −0.04% |
-| MVSplat   | Re10K | 30.22 | 30.23 | +0.03% |
-| MVSplat   | ACID  | 32.08 | 32.06 | −0.06% |
-| MVSplat   | DL3DV | 28.02 | 28.05 | +0.11% |
-| DepthSplat| Re10K | 28.43 | 28.42 | −0.04% |
-| DepthSplat| ACID  | 29.43 | 29.44 | +0.03% |
-| DepthSplat| DL3DV | 26.93 | 26.98 | +0.19% |
+### Figure 8: End-to-End Speedup
 
-### Figure 5 — End-to-End Speedup
+Current state: `NOT_CLAIMED_NO_ORIN_EVIDENCE`. The command below is retained
+for a future evidence-bearing Orin run and produces no current claim work.
 
 ```bash
-bash scripts/run_ae.sh speedup
+bash scripts/run_ae.sh speedup --num-samples N
 ```
 
-Expected: geometric-mean speedup ≥ 2.8× (paper: 2.94×).
-Minor variance (±3%) is expected from GPU scheduling.
+Simulator cycles are deterministic. The GPU baseline uses archived measurements
+from the documented Jetson Orin NX state. The AE path does not estimate Orin
+latency from the peak TFLOPS of another GPU.
 
-### Figure 6 — FSDR / SAES Ablation
+Figure 8 uses the 1 GHz architectural clock target in the paper. The public ASAP7
+flow reports achieved timing independently. A routed ASAP7 result that misses
+1 GHz remains a visible timing failure and does not validate the unavailable
+commercial TSMC28 implementation.
+
+### Figure 11 and Tables 2-3: Ablation and Mechanisms
 
 ```bash
 bash scripts/run_ae.sh ablation
 ```
 
-Expected: FSDR-only and SAES-only contributions visible;
-combined bar matches paper values within run-to-run variance.
+The output includes FSDR-only, SAES-only, combined, and no-optimization results,
+plus guided-rate, Top-1 coverage, L0/L1, Gaussian, and memory statistics. The
+six Re10K and ACID Tables 2-3 rows are claimed. Figure 11 is not claimed because
+its paper target is the geometric mean over all nine pairs.
 
-### Figure 7 — Sensitivity Sweep
+### Figures 13-16: Sensitivity
 
-```bash
-bash scripts/run_ae.sh sensitivity
-```
-
-Expected: monotone PSNR trends for cache size (64→1024) and
-Hamming threshold (1→5) as described in Section 5.3.
-
-### All experiments at once
+Current state: `NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX`. The trace-and-replay
+implementation remains available, but the current claim does not run it.
 
 ```bash
-bash scripts/run_ae.sh all     # ~3 h on GPU
+bash scripts/run_ae.sh sensitivity --num-samples N
 ```
 
----
+The configured grids include cache sizes 8-128, Hamming thresholds 1-5, the
+feature and depth thresholds from the paper, and tile sizes 2-32. Every grid point runs
+all protocol samples and produces a strict dataset aggregate before plotting.
 
-## RTL Validation (Optional — ~8 h)
-
-The `Zircon-SCARF/` directory contains the fully synthesizable
-Chisel/Verilator RTL implementation used to validate the data path.
-
-Requirements: Scala 2.13, sbt 1.9+, Chisel 6.6, Verilator 5.029+.
+### All Software Claims
 
 ```bash
-cd Zircon-SCARF
-# Verify Stage-A RTL chain: full pipeline PSNR drop ≤ 0.5 dB
-make audit_stage_a_current
-# Expected output: stage_a_current_audit_ok=True
+bash scripts/run_ae.sh all
+bash scripts/run_ae.sh validate
 ```
 
-Full end-to-end RTL simulation (~8 h):
+`all` runs one six-pair Re10K and ACID matrix. Each result contains quality,
+four ablation configurations, and FSDR and SAES mechanism statistics, so the
+model forward pass is not duplicated. It skips Orin, DL3DV, Figure 11
+aggregation, and sensitivity according to the machine-readable claim status.
+It then runs RTL, the public DRAM proxy,
+physical design, scaling, report generation, and validation. `validate`
+returns nonzero when a claimed result is missing, structurally invalid, outside
+its tolerance, or based on an unfinalized sample protocol.
+
+## RTL Validation
 
 ```bash
-bash golden/run_chain_full_e2e.sh
+bash scripts/run_ae.sh rtl
 ```
 
----
+This runs Chisel tests, emits SystemVerilog, and invokes Verilator lint. The
+generated RTL and reports include source commit provenance.
 
-## Directory Structure
+## Public DRAM Functional Proxy
 
-```
-SCARF/
-├── encoder/               # Hardware unit simulators
-├── fsdr/                  # FSDR implementation
-├── saes/                  # SAES implementation
-├── adapters/              # Model adapters (MVSplat, TranSplat, DepthSplat)
-├── integration/           # Model loader and data bundle
-├── ggu/                   # Gaussian Generation Unit simulator
-├── scripts/
-│   ├── demo.py            # Single experiment entry point
-│   ├── run_ae.sh          # AE reproduction master script
-│   └── sensitivity_sweep.py
-├── data/                  # Dataset download scripts
-├── outputs/               # Experiment results (generated)
-├── Zircon-SCARF/          # Full RTL implementation (optional)
-├── requirements.txt
-├── install.sh
-└── ARTIFACT_EVALUATION.md  # This file
+```bash
+export RAMULATOR_ROOT=/path/to/ramulator2-v2.1.0
+export DRAMPOWER_ROOT=/path/to/DRAMPower-v6.0.2
+bash scripts/run_ae.sh dram
 ```
 
----
+This mode runs a labeled representative smoke trace through pinned Ramulator 2
+and DRAMPower. It proves that the public timing and energy chain functions. It
+uses LPDDR5 and does not reproduce the LPDDR4X workload result in the paper.
+Full workload runs can pass measured address events directly to
+`hardware/dram/run.sh`.
+
+## ASAP7 Physical Proxy
+
+```bash
+export IFLOW_ROOT=/path/to/clean/iFlow
+
+bash hardware/iflow/run.sh \
+  --platform asap7 \
+  --stage all \
+  --output-dir outputs/physical/asap7
+```
+
+The required iFlow commit is `04b4d98`. Use `--dry-run` first to verify the
+external checkout and commands without running physical design.
+
+The overlay loads the pinned ASAP7 layer resistance and capacitance table in
+global placement, resize, clock-tree synthesis, global routing, and final PPA
+reporting. Stage validation requires VDD/VSS special nets and macro-grid
+insertion evidence for all four SRAM proxies. `physical_valid=true` still
+requires routing, GDS, complete timing and power reports, and zero reported DRC
+violations from the detailed router. This route check is not foundry signoff DRC.
+
+ASAP7 is a predictive 7 nm research PDK. The public result is not described as
+a TSMC 28 nm measurement. SRAM proxies are reported separately. LPDDR PHY and
+pads are excluded. The public hardware scope document defines the boundary.
+
+## DeepScaleTool Normalization
+
+```bash
+python hardware/scaling/deepscale.py \
+  --source-node 7 \
+  --target-node 28 \
+  --input outputs/physical/asap7/ppa.json \
+  --output outputs/physical/asap7/ppa_28nm_estimated.json
+```
+
+The output retains every raw ASAP7 metric and records each scaling factor. It is
+labeled `28nm_equivalent_estimate`, not `TSMC28_postlayout`.
+
+## Output Layout
+
+```text
+outputs/ae/
+|-- manifest-<mode>.json
+|-- quick/<model>_<dataset>/samples/sample_00000/results.json
+|-- quality/<model>_<dataset>/samples/sample_NNNNN/results.json
+|-- quality/<model>_<dataset>/results.json
+|-- speedup/<model>_<dataset>/samples/sample_NNNNN/orin-evidence/
+|-- speedup/<model>_<dataset>/results.json
+|-- ablation/<model>_<dataset>/results.json
+|-- sensitivity/results.json
+|-- rtl/results.json
+|-- dram/results.json
+|-- physical/asap7/ppa.json
+|-- physical/asap7/ppa_28nm_estimated.json
+`-- reports/reproduction_report.md
+```
+
+Every numeric result must be traceable to a raw record. Plotting code cannot use
+manuscript constants as experimental input.
+Each pair saves the full GT, baseline, SCARF, and four-configuration ablation
+image set for its first executed sample. Pass `--image-output-policy all` to
+`demo.py` only when per-sample image files are required.
 
 ## Troubleshooting
 
-**CUDA out of memory**: reduce batch size with `--num-samples 1`, or use
-`--device cpu`.
+- **Submodule is empty:** run `git submodule update --init --recursive`.
+- **Wrong model environment:** activate the profile named in the experiment
+  manifest. Do not resolve incompatible packages by silently upgrading them.
+- **Missing data/checkpoint:** run the exact download command printed by the
+  driver and verify the configured hash.
+- **CUDA out of memory:** use the documented lower-memory quick profile. Do not
+  change the full-claim batch or resolution without marking the result custom.
+- **Physical flow rejected:** verify `IFLOW_ROOT`, the pinned commit, a clean
+  worktree, and ASAP7 collateral hashes.
+- **Full mode rejects the sample count:** recompile the finalized upstream
+  protocol or pass `--num-samples N` for a non-final diagnostic run.
+- **Validation fails:** inspect `reports/reproduction_report.md`. Never edit generated
+  results to match the paper.
 
-**Dataset not found**: ensure `data/download_*.sh` completed successfully,
-or use the pre-packaged `testvecs.tar.gz` from Zenodo.
+## Archival Release
 
-**Checkpoint not found**: re-run `bash data/download_checkpoints.sh` and
-verify checksums printed at the end.
+Before entering the DOI in HotCRP:
 
-**Run-to-run variance**: GPU timing variance of ±2–3% is normal and does
-not affect Table 2 conclusions (quality metrics are deterministic given
-fixed inputs).
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
----
-
-## Citation
-
-```bibtex
-@inproceedings{scarf2026micro,
-  title     = {{SCARF}: A Scene-Adaptive Depth-Guided {G-3DGS} Encoder
-               Accelerator with Semantic Reuse and Fused Dataflow},
-  booktitle = {Proceedings of the 59th IEEE/ACM International Symposium
-               on Microarchitecture (MICRO)},
-  year      = {2026},
-}
+```bash
+python scripts/stage_reference_results.py --input outputs/ae_final
+python scripts/build_archive.py --output-dir release --version v1.0.0 --require-doi
+python scripts/check_release.py --archive release/SCARF-AE-source-v1.0.0.tar.gz --require-doi
+python scripts/check_release.py --archive release/SCARF-AE-evidence-v1.0.0.tar.zst --require-doi
+sha256sum -c release/SHA256SUMS
 ```
+
+Upload only an archive that passes this check. Download the DOI archive into a
+new directory and rerun `quick` and `validate`. Complete every item in
+[`artifact/CHECKLIST.md`](artifact/CHECKLIST.md) before marking HotCRP ready.
+The staged evidence payload is intentionally excluded from Git history; its
+tracked manifest binds every payload file included in the evidence archive.
+Build final archives outside the repository so release files do not make the
+source worktree dirty.

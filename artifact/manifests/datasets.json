@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "datasets": {
+    "acid": {
+      "prepared_source": "http://schadenfreude.csail.mit.edu:8000/acid_test_only.zip",
+      "prepared_source_revision": "archive-sha256:c9f0685175bda403991493332b5cc10785678a51fbd5c497401d92d176a1a4ac",
+      "expected_tree_sha256": "0e21d05f448675e160529881d583701a2d03f19dbaae1af7941f37137688c187",
+      "license": {
+        "status": "verified_no_redistribution",
+        "identifier": "No redistribution license is claimed by this artifact",
+        "terms_url": "https://infinite-nature.github.io/",
+        "reviewed_on": "2026-07-13",
+        "redistribution_in_zenodo": false
+      }
+    },
+    "dl3dv": {
+      "prepared_source": "https://huggingface.co/datasets/DL3DV/DL3DV-Benchmark",
+      "prepared_source_revision": "9684e8382278c5e18173c1e72bd246daf2874539",
+      "representations": {
+        "native": {
+          "path": "datasets/dl3dv/native",
+          "schema": "depthsplat-native-270x480-v1",
+          "expected_tree_sha256": null
+        },
+        "re10k": {
+          "path": "datasets/dl3dv/re10k",
+          "schema": "re10k-compatible-360x640-v1",
+          "expected_tree_sha256": null
+        }
+      },
+      "license": {
+        "status": "verified_no_redistribution",
+        "identifier": "Gated source access does not grant redistribution rights",
+        "terms_url": "https://huggingface.co/datasets/DL3DV/DL3DV-Benchmark",
+        "reviewed_on": "2026-07-13",
+        "redistribution_in_zenodo": false
+      }
+    },
+    "re10k": {
+      "prepared_source": "http://schadenfreude.csail.mit.edu:8000/re10k_test_only.zip",
+      "prepared_source_revision": "archive-sha256:ce351771c966fb25ef41efc561a313ef40607c9aa8ea904ed8d582b361408097",
+      "expected_tree_sha256": "2866634245989caa455fb46e5991d4e4b51e643c3f3e024e8793ff2b664fadd4",
+      "license": {
+        "status": "verified_no_redistribution",
+        "identifier": "No redistribution license is claimed by this artifact",
+        "terms_url": "https://google.github.io/realestate10k/",
+        "reviewed_on": "2026-07-13",
+        "redistribution_in_zenodo": false
+      }
+    }
+  }
+}

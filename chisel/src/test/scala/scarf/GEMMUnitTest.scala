@@ -89,20 +89,23 @@ class GEMMUnitTest extends AnyFlatSpec with ChiselScalatestTester {
     }
   }
 
-  behavior of "GEMMUnit"
+  behavior of "MMCU"
 
-  it should "start idle and complete a small matmul" in {
-    test(new GEMMUnit(arraySize = 2)) { dut =>
+  it should "start idle and complete a small GEMM" in {
+    test(new MMCU(arraySize = 2)) { dut =>
       dut.io.busy.expect(false.B)
       dut.io.done.expect(false.B)
 
-      // 2×2 × 2×2 matmul
+      dut.io.mode.poke(MMCUMode.mGEMM)
       dut.io.M.poke(2.U)
       dut.io.K.poke(2.U)
       dut.io.N.poke(2.U)
       dut.io.useBias.poke(false.B)
+      dut.io.kernelSize.poke(1.U)
+      dut.io.stride.poke(1.U)
+      dut.io.inChannels.poke(2.U)
+      dut.io.outChannels.poke(2.U)
 
-      // Provide dummy data
       for (i <- 0 until 2) {
         dut.io.aData(i).poke(1.U)
         dut.io.bData(i).poke(1.U)
@@ -120,7 +123,8 @@ class GEMMUnitTest extends AnyFlatSpec with ChiselScalatestTester {
         dut.clock.step(1)
         cycles += 1
       }
-      assert(cycles < 50, s"GEMMUnit did not finish within 50 cycles (ran $cycles)")
+      assert(cycles < 50, s"MMCU did not finish within 50 cycles (ran $cycles)")
+      dut.io.done.expect(true.B)
     }
   }
 }

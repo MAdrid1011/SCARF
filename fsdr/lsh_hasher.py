@@ -107,24 +107,18 @@ class LSHHasher:
             - Can be parallelized with N hash units
             - Or processed sequentially with 1 hash unit
         """
-        N = features.shape[0]
-        
         # Normalize features
         features_norm = features / (torch.norm(features, dim=1, keepdim=True) + 1e-8)
         
         # Batch projection
-        projections = features_norm @ self.projection.T  # [N, K]
+        projection = self.projection.to(device=features.device, dtype=features.dtype)
+        projections = features_norm @ projection.T  # [N, K]
         
-        # Extract signs as bits
-        signatures = torch.zeros(N, dtype=torch.int64)
-        for i in range(N):
-            sig = 0
-            for j in range(self.lsh_dim):
-                if projections[i, j] >= 0:
-                    sig |= (1 << j)
-            signatures[i] = sig
-        
-        return signatures
+        # Pack all sign bits without per-feature device synchronization.
+        bit_weights = 1 << torch.arange(
+            self.lsh_dim, device=features.device, dtype=torch.int64
+        )
+        return ((projections >= 0).to(torch.int64) * bit_weights).sum(dim=1)
     
     def get_projection_matrix(self) -> torch.Tensor:
         """

@@ -77,11 +77,13 @@ class FSDRSimulator:
                  hamming_threshold: int = 4,
                  reuse_hamming: int = 3, reuse_spatial: int = 12,
                  reuse_confidence: float = 0.80,
-                 num_depth_candidates: int = 128):
+                 num_depth_candidates: int = 128,
+                 seed: int = 0):
         self.config = FSDRConfig(
             cache_size=cache_size,
             feature_dim=feature_dim,
             hamming_threshold=hamming_threshold,
+            seed=seed,
         )
         self.hasher = LSHHasher(self.config)
         self.cache = CacheTable(self.config)
@@ -127,9 +129,13 @@ class FSDRSimulator:
         """Check cached depth consistency with local region (ASIC register file)."""
         nearby = []
         r, c = position
-        for (pr, pc), d in self.recent_depths.items():
-            if abs(pr - r) + abs(pc - c) <= self.recent_depth_radius:
-                nearby.append(d)
+        radius = self.recent_depth_radius
+        for row_offset in range(-radius, radius + 1):
+            column_radius = radius - abs(row_offset)
+            for column_offset in range(-column_radius, column_radius + 1):
+                depth = self.recent_depths.get((r + row_offset, c + column_offset))
+                if depth is not None:
+                    nearby.append(depth)
         if len(nearby) < 3:
             return True
         mean_d = sum(nearby) / len(nearby)
@@ -164,10 +170,20 @@ class FSDRSimulator:
             (path, num_searches, output_depth)
             num_searches: 32 for guided, num_depth_candidates for full
         """
-        self.stats['total_pixels'] += 1
-
         feature_cpu = feature.cpu() if feature.is_cuda else feature
         signature = self.hasher.hash(feature_cpu)
+        return self.process_signature(signature, actual_depth, position, pixel_idx)
+
+    def process_signature(
+        self,
+        signature: int,
+        actual_depth: float,
+        position: Tuple[int, int],
+        pixel_idx: int,
+    ) -> Tuple[str, int, float]:
+        """Process one precomputed hardware LSH signature."""
+        self.stats['total_pixels'] += 1
+
         sig_key = tuple(signature.tolist()) if hasattr(signature, 'tolist') else str(signature)
         entry, hamming_dist = self.cache.lookup(signature)
 
@@ -254,6 +270,29 @@ class FSDRSimulator:
             self._update_recent_depths(position, float(actual_depth))
 
             return 'full_compute', self.num_depth_candidates, actual_depth
+
+    def process_frame(
+        self,
+        features: torch.Tensor,
+        depths: torch.Tensor,
+        width: int,
+    ) -> List[str]:
+        """Process a raster-ordered frame with one batched LSH projection."""
+        if features.dim() != 2 or features.shape[1] != self.config.feature_dim:
+            raise ValueError("features must have shape [pixels, feature_dim]")
+        flat_depths = depths.detach().reshape(-1)
+        if flat_depths.numel() != features.shape[0] or width <= 0:
+            raise ValueError("depth count and frame width must match the feature frame")
+        signatures = self.hasher.hash_batch(features).detach().cpu().tolist()
+        depth_values = flat_depths.cpu().tolist()
+        paths = []
+        for pixel_idx, (signature, depth) in enumerate(zip(signatures, depth_values)):
+            y, x = divmod(pixel_idx, width)
+            path, _, _ = self.process_signature(
+                int(signature), float(depth), (y, x), pixel_idx
+            )
+            paths.append(path)
+        return paths
 
     def get_reuse_ratio(self) -> float:
         """Fraction of pixels with guided (narrowed) S2 search."""
