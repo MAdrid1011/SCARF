@@ -2463,7 +2463,7 @@ def main(argv=None):
             scarf_gaussians_full = baseline_gaussians
     
     if args.saes_feature_source == 'pipeline':
-        features = pipeline_features
+        saes_features = pipeline_features
     else:
         if pipeline_saes_features is None:
             raise RuntimeError(
@@ -2475,10 +2475,11 @@ def main(argv=None):
             raise RuntimeError("Gaussian-head SAES features do not cover every view")
         if tuple(pipeline_saes_features.shape[-2:]) != (h, w):
             raise RuntimeError("Gaussian-head SAES features are not full resolution")
-        features = pipeline_saes_features
+        saes_features = pipeline_saes_features
     print(
         f"    SAES feature source: {args.saes_feature_source} "
-        f"({features.shape[2]} channels, {features.shape[-2]}x{features.shape[-1]})"
+        f"({saes_features.shape[2]} channels, "
+        f"{saes_features.shape[-2]}x{saes_features.shape[-1]})"
     )
     depths = pipeline_depths
     densities = pipeline_densities
@@ -2498,7 +2499,7 @@ def main(argv=None):
         best_saes_th, best_fsdr_tol, _, _ = tune_thresholds(
             scarf_gaussians_full, model, tgt_ext, tgt_int, target, h, w, device,
             gt_image_tune, baseline_psnr_tune,
-            features=features, depths=pipeline_depths,
+            features=saes_features, depths=pipeline_depths,
         )
         
         # Apply tuned thresholds (already written to CONFIG inside tune_thresholds)
@@ -2562,7 +2563,7 @@ def main(argv=None):
             studies=STUDIES,
             config=CONFIG,
             gaussians=scarf_gaussians_full,
-            features=features,
+            features=saes_features,
             depths=depths,
             target_images=target['image'][0, :V_tgt],
             render=_sensitivity_render,
@@ -2654,7 +2655,7 @@ def main(argv=None):
             saes_gaussians, h, w, CONFIG.tile_size, gpp=1,
             feature_var_threshold=CONFIG.feature_var_threshold,
             depth_std_threshold=CONFIG.depth_std_threshold,
-            features=features,
+            features=saes_features,
             depths=depths,
             cross_check_threshold=CONFIG.saes_cross_check,
             view_count=V_ctx,
@@ -2664,10 +2665,10 @@ def main(argv=None):
         saes_stats['feature_source'] = args.saes_feature_source
 
         # Print feature variance distribution for threshold calibration
-        if features is not None:
+        if saes_features is not None:
             import numpy as np
             _tv, _ = ProgressiveSAES.classify_tiles_by_features(
-                features, h, w, CONFIG.tile_size, threshold=1.0)
+                saes_features, h, w, CONFIG.tile_size, threshold=1.0)
             _vals = sorted(_tv.values())
             _arr = np.array(_vals)
             _p = [1, 2, 5, 8, 10, 15, 20, 30, 50]
@@ -2725,7 +2726,7 @@ def main(argv=None):
                 primitives_per_pixel=primitives_per_pixel,
             )
             saes_diagnostic_record = decision_statistics(
-                features,
+                saes_features,
                 depths,
                 height=h,
                 width=w,
@@ -2759,9 +2760,9 @@ def main(argv=None):
     else:
         print("  [4c] FSDR (Realistic ASIC: cache hit → use cached Gaussians)...")
         
-        has_features = (features is not None and
-                       not isinstance(features, str) and
-                       hasattr(features, 'shape'))
+        has_features = (fsdr_features is not None and
+                       not isinstance(fsdr_features, str) and
+                       hasattr(fsdr_features, 'shape'))
         
         if has_features and len(all_pixels) > 0:
             from scripts.fsdr_trace import prepare_fsdr_frame, tile_probe_pixel_order
@@ -2769,7 +2770,7 @@ def main(argv=None):
             if depths is None:
                 raise RuntimeError("FSDR requires a real depth frame")
             feature_frame, frame_depths = prepare_fsdr_frame(
-                features,
+                fsdr_features,
                 depths,
                 height=h,
                 width=w,

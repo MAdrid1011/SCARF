@@ -222,6 +222,19 @@ def test_gaussian_head_saes_feature_source_forces_non_claim_result():
     assert "args.saes_feature_source != 'pipeline'" in source
 
 
+def test_gaussian_head_saes_diagnostic_does_not_replace_fsdr_features():
+    source = DEMO.read_text(encoding="utf-8")
+    fsdr_runtime = source.split(
+        "# ---- Step 4c: FSDR (Feature-Similarity Gaussian Reuse)", maxsplit=1
+    )[1]
+    fsdr_runtime = fsdr_runtime.split(
+        "# ---- Step 4d: Build 4 Ablation Gaussian Configs", maxsplit=1
+    )[0]
+
+    assert "has_features = (fsdr_features is not None" in fsdr_runtime
+    assert "prepare_fsdr_frame(\n                fsdr_features," in fsdr_runtime
+
+
 def test_fsdr_only_is_an_isolated_claim_mode():
     from scripts.demo_cli import parse_args
 
