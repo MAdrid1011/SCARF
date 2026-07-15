@@ -35,7 +35,10 @@ def _view_indices(scene: str, label: str, value: Any) -> list[int]:
 
 
 def canonicalize_index(
-    path: Path, expected_sha256: str
+    path: Path,
+    expected_sha256: str,
+    *,
+    execution_scene_order: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     path = Path(path)
     actual_sha256 = sha256_file(path)
@@ -78,6 +81,27 @@ def canonicalize_index(
     canonical = json.dumps(
         canonical_rows, sort_keys=True, separators=(",", ":")
     ).encode()
+    if execution_scene_order is not None:
+        if (
+            not isinstance(execution_scene_order, list)
+            or len(execution_scene_order) != len(set(execution_scene_order))
+            or not all(
+                isinstance(scene, str) and scene for scene in execution_scene_order
+            )
+        ):
+            raise ValueError("dataset execution scene order is invalid")
+        by_scene = {row["scene"]: row for row in rows}
+        if set(execution_scene_order) != set(by_scene):
+            missing = sorted(set(by_scene) - set(execution_scene_order))
+            extra = sorted(set(execution_scene_order) - set(by_scene))
+            raise ValueError(
+                "dataset execution scene order does not match the source index: "
+                f"missing={missing[:3]}, extra={extra[:3]}"
+            )
+        rows = [
+            {**by_scene[scene], "execution_index": execution_index}
+            for execution_index, scene in enumerate(execution_scene_order)
+        ]
     return rows, {
         "source_entry_count": len(source),
         "null_entry_count": null_count,

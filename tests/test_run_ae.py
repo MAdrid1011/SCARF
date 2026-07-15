@@ -43,6 +43,10 @@ def test_quality_dry_run_contains_all_claimed_dataset_aware_commands(tmp_path):
         command = item["command"]
         assert command[1].endswith("scripts/run_pair.py")
         assert command[command.index("--evaluation-index") + 1] == item["evaluation_index"]
+        pair_separator = command.index("--")
+        pair_dataset_root = command.index("--dataset-root")
+        assert pair_dataset_root < pair_separator
+        assert command[pair_dataset_root + 1] == item["dataset_root"]
         demo = command[command.index("--") + 1 :]
         assert command[0] == demo[0]
         assert demo[demo.index("--model") + 1] == item["model"]

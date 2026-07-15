@@ -30,6 +30,8 @@
 - [x] Every sampler-selected target view is recorded and included in sample quality.
 - [x] Sensitivity uses one model trace per sample and replays all paper grids.
 - [x] Upstream sample/view protocol is recovered, finalized, and hashed.
+- [x] Stable source ordinals and prepared-chunk execution ordinals are both
+  recorded without changing the canonical selection identity.
 - [x] Re10K and ACID sources, terms, archive revisions, prepared tree hashes,
   and all protocol-selected scene/view bounds are verified.
 - [x] All six claimed model and dataset pairs complete a strict one-sample
@@ -108,6 +110,10 @@ Verified on 2026-07-15:
 - The first formal quality attempt correctly rejected sample 1 when a concurrent
   RTL emitter temporarily changed the worktree identity. No mismatched sample
   was accepted; the clean rerun resumes from canonical sample boundaries.
+- The second formal quality attempt exposed that source-file order is not the
+  upstream dataloader's chunk traversal order. The runner now keeps source-file
+  order for the stable selection hash and executes in sorted chunk order, with
+  both ordinals retained in every sample's provenance.
 - `cd chisel && sbt test`: all 8 tests passed.
 - Python compilation, shell syntax, Markdown style, and `git diff --check`
   passed.

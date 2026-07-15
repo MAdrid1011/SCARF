@@ -73,6 +73,37 @@ def test_protocol_compiler_preserves_source_and_execution_ordinals(tmp_path: Pat
     assert rows[0]["execution_index"] == 0
 
 
+def test_canonicalizer_separates_stable_source_order_from_dataset_execution_order(
+    tmp_path: Path,
+):
+    from scripts.compile_protocol import canonicalize_index
+
+    path = tmp_path / "index.json"
+    path.write_text(
+        json.dumps(
+            {
+                "scene-a": {"context": [0, 2], "target": [1]},
+                "scene-b": {"context": [3, 5], "target": [4]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    source_rows, source_summary = canonicalize_index(path, digest)
+    execution_rows, execution_summary = canonicalize_index(
+        path,
+        digest,
+        execution_scene_order=["scene-b", "scene-a"],
+    )
+
+    assert [row["scene"] for row in source_rows] == ["scene-a", "scene-b"]
+    assert [row["scene"] for row in execution_rows] == ["scene-b", "scene-a"]
+    assert [row["sample_index"] for row in execution_rows] == [1, 0]
+    assert [row["execution_index"] for row in execution_rows] == [0, 1]
+    assert execution_summary == source_summary
+
+
 def test_protocol_dataset_bounds_reject_missing_scene_and_view_overflow():
     from scripts.compile_protocol import validate_dataset_bounds
 

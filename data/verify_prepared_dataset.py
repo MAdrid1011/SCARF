@@ -116,6 +116,26 @@ def scene_view_counts(root: Path, scenes: set[str]) -> dict[str, int]:
     return counts
 
 
+def prepared_scene_order(root: Path, scenes: set[str]) -> list[str]:
+    """Return the exact scene order used by the upstream chunk dataloader."""
+    test_root = Path(root).resolve() / "test"
+    index = json.loads((test_root / "index.json").read_text(encoding="utf-8"))
+    missing = sorted(scenes - set(index))
+    if missing:
+        raise ValueError(f"prepared dataset is missing protocol scene {missing[0]}")
+
+    # The prepared index is emitted by walking each chunk's list in order.
+    # Preserve that per-chunk insertion order, while matching DatasetRE10k's
+    # lexicographically sorted chunk traversal.
+    by_chunk: dict[Path, list[str]] = {}
+    for scene, chunk_value in index.items():
+        if scene not in scenes:
+            continue
+        path = _safe_chunk_path(test_root, chunk_value)
+        by_chunk.setdefault(path, []).append(scene)
+    return [scene for path in sorted(by_chunk) for scene in by_chunk[path]]
+
+
 def verify_prepared_dataset(
     root: Path,
     manifest_path: Path,

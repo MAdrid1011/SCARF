@@ -168,6 +168,8 @@ def build_software_plan(
             str(selection.index_path),
             "--source-index-sha256",
             selection.source_index_sha256,
+            "--dataset-root",
+            str(dataset_root),
             "--output-dir",
             str(output_dir),
             "--num-samples",

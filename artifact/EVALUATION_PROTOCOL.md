@@ -7,10 +7,15 @@
 - Primary quality metrics: PSNR, SSIM, and LPIPS.
 - Performance metric: measured Orin NX encoder latency divided by SCARF
   architectural cycles at the 1 GHz target in the paper.
-- Selection rule: deterministic file order over the non-null entries in the
-  committed upstream evaluation index. Each sample uses the context and target
-  indices in that entry. Per-view metrics and their arithmetic mean are
-  recorded. Every sample-level result is hashed into the dataset aggregate.
+- Selection identity: deterministic source-file order over the non-null entries
+  in the committed upstream evaluation index. Each sample uses the context and
+  target indices in that entry. This order defines `sample_index` and the
+  stable ordered-selection SHA256.
+- Execution order: sorted prepared chunk filename, then insertion order within
+  each chunk, exactly matching the upstream dataset loader. This order defines
+  `execution_index`; both ordinals are recorded in provenance. Per-view metrics
+  and their arithmetic mean are recorded, and every sample-level result is
+  hashed into the dataset aggregate.
 
 ## Evidence
 
@@ -50,8 +55,10 @@ representations remain evidence gates because gated data is not available.
 
 Full commands use the executable counts. A one-sample smoke run is Functional
 evidence only and cannot reproduce a dataset-level paper table. Every aggregate
-stores the ordered scene and view-selection records. The final protocol records
-the SHA256 of that canonical list.
+stores the source-ordered scene and view-selection records and records the
+runtime execution ordinal separately. The final protocol records the SHA256 of
+the source-ordered canonical list, so repacking prepared chunks cannot silently
+change protocol identity.
 
 ## Hardware Interpretation
 

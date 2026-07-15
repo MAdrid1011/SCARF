@@ -28,9 +28,11 @@
 - Comparability risks: unavailable ACID/DL3DV payloads and checkpoints,
   incompatible model environments, absent Orin measurements, absent iFlow
   reports, SRAM abstraction differences, and commercial TSMC28 exclusions.
-- Recovered protocol: non-null entries from the committed upstream indices in
-  file order. Re10K has 6,474 executable samples, ACID has 1,595, and DL3DV has
-  140.
+- Recovered protocol identity: non-null entries from the committed upstream
+  indices in source-file order. Re10K has 6,474 executable samples, ACID has
+  1,595, and DL3DV has 140. Execution follows the prepared dataloader's sorted
+  chunk traversal and preserves both the stable source ordinal and the runtime
+  execution ordinal in provenance.
 
 ## 3. Code Translation Plan
 
@@ -119,3 +121,4 @@
 | 2026-07-15 | Complete DepthSplat multi-scale S2 and traced S3 cycles | Remove one-scale assumptions and zero Gaussian cycles exposed by strict pilots |
 | 2026-07-15 | Serialize the RTL emitter and software claim runner | A concurrent emitter correctly triggered the dirty-worktree evidence guard; no invalid sample was accepted |
 | 2026-07-15 | Discover pinned DRAM tools from the repository install tree | Keep the public `run_ae.sh dram` entry functional without hidden environment variables |
+| 2026-07-15 | Separate stable protocol identity from prepared-data execution order | Preserve the published selection hash while matching the upstream chunk dataloader exactly |

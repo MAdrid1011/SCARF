@@ -77,3 +77,35 @@ def test_contract_finalizer_accepts_only_passing_representation_validation(tmp_p
         for pair, record in updated_protocol["pairs"].items()
         if pair.endswith("/re10k")
     )
+
+
+def test_prepared_scene_order_matches_sorted_chunks_and_in_chunk_order(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    from data.verify_prepared_dataset import prepared_scene_order
+
+    test_root = tmp_path / "test"
+    test_root.mkdir()
+    torch.save(
+        [{"key": "scene-b"}, {"key": "not-selected"}],
+        test_root / "000001.torch",
+    )
+    torch.save(
+        [{"key": "scene-a"}, {"key": "scene-c"}],
+        test_root / "000002.torch",
+    )
+    (test_root / "index.json").write_text(
+        json.dumps(
+            {
+                "scene-a": "000002.torch",
+                "scene-b": "000001.torch",
+                "scene-c": "000002.torch",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert prepared_scene_order(tmp_path, {"scene-a", "scene-b", "scene-c"}) == [
+        "scene-b",
+        "scene-a",
+        "scene-c",
+    ]

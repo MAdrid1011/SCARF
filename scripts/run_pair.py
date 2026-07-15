@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 from scripts.compile_protocol import canonicalize_index
 from scripts.result_record import source_identity
 from scripts.validate_result import validate
+from data.verify_prepared_dataset import prepared_scene_order
 
 
 class SampleSession(Protocol):
@@ -213,6 +214,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evaluation-index", type=Path, required=True)
     parser.add_argument("--source-index-sha256", required=True)
+    parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--num-samples", type=int)
     parser.add_argument("--resume", action="store_true")
@@ -230,8 +232,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        selections, summary = canonicalize_index(
+        source_selections, _ = canonicalize_index(
             args.evaluation_index.resolve(), args.source_index_sha256
+        )
+        execution_order = prepared_scene_order(
+            args.dataset_root.resolve(),
+            {selection["scene"] for selection in source_selections},
+        )
+        selections, summary = canonicalize_index(
+            args.evaluation_index.resolve(),
+            args.source_index_sha256,
+            execution_scene_order=execution_order,
         )
         if args.num_samples is not None:
             selections = selections[: args.num_samples]

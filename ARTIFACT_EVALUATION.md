@@ -112,6 +112,13 @@ is resized from the higher-resolution `images_4` source with a fixed conversion
 recipe. The experiment mapping rejects a representation that does not match the
 selected model.
 
+The committed evaluation index has two deliberately distinct ordinals. Its
+non-null source-file order defines the stable `sample_index` and selection
+SHA256. Actual evaluation follows the prepared dataset loader's sorted chunk
+traversal and records that position as `execution_index`. Keeping both values
+allows the reviewer to verify the unchanged scene/view contract while the
+runner consumes samples in exactly the order produced by the upstream loader.
+
 The pinned DL3DV benchmark is a gated Hugging Face dataset. Before running its
 download command, accept the dataset access terms and authenticate with
 `hf auth login`. The script downloads only the required `nerfstudio` metadata
