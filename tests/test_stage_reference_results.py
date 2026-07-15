@@ -66,6 +66,46 @@ def test_rtl_emission_and_execution_manifests_are_selected(tmp_path):
     }
 
 
+def test_execution_manifest_archival_copy_normalizes_local_paths(tmp_path):
+    from scripts.stage_reference_results import portable_execution_manifest
+
+    root = tmp_path / "author/repo"
+    manifest = tmp_path / "manifest-quick.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "root": str(root),
+                "experiments": [
+                    {
+                        "environment_profile": "classic",
+                        "command": [
+                            "/opt/author/envs/classic/bin/python",
+                            str(root / "scripts/demo.py"),
+                        ],
+                        "aggregate_command": [
+                            "/opt/author/envs/classic/bin/python3",
+                            str(root / "scripts/aggregate_results.py"),
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    portable = portable_execution_manifest(
+        manifest,
+        repository_root=root,
+        orchestrator_python=Path("/opt/author/driver/bin/python3"),
+    ).decode()
+
+    assert str(root) not in portable
+    assert "/opt/author" not in portable
+    assert "$SCARF_ROOT/scripts/demo.py" in portable
+    assert "$SCARF_PYTHON_CLASSIC" in portable
+    assert '"applied": true' in portable
+
+
 def test_prepared_dataset_validations_are_selected_for_staging(tmp_path):
     from scripts.stage_reference_results import selected_files
 

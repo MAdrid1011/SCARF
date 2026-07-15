@@ -64,6 +64,57 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def portable_execution_manifest(
+    path: Path,
+    *,
+    repository_root: Path = ROOT,
+    orchestrator_python: Path = Path(sys.executable),
+) -> bytes:
+    """Return a path-normalized archival copy of a workflow manifest."""
+    record = json.loads(path.read_text(encoding="utf-8"))
+    replacements = {
+        str(repository_root.resolve()): "$SCARF_ROOT",
+        str(orchestrator_python.resolve()): "$PYTHON",
+        str(orchestrator_python): "$PYTHON",
+    }
+    profiles = set()
+    for experiment in record.get("experiments", []):
+        if not isinstance(experiment, dict):
+            continue
+        profile = experiment.get("environment_profile")
+        command = experiment.get("command")
+        if not isinstance(profile, str) or not isinstance(command, list) or not command:
+            continue
+        interpreter = Path(str(command[0]))
+        variable = f"$SCARF_PYTHON_{profile.upper()}"
+        profiles.add(profile)
+        for name in ("python", "python3"):
+            replacements[str(interpreter.parent / name)] = variable
+
+    ordered = sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True)
+
+    def normalize(value):
+        if isinstance(value, dict):
+            return {key: normalize(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if isinstance(value, str):
+            for source, target in ordered:
+                value = value.replace(source, target)
+        return value
+
+    portable = normalize(record)
+    portable["archival_path_normalization"] = {
+        "applied": True,
+        "repository_root": "$SCARF_ROOT",
+        "orchestrator_python": "$PYTHON",
+        "profile_interpreters": [
+            f"$SCARF_PYTHON_{profile.upper()}" for profile in sorted(profiles)
+        ],
+    }
+    return (json.dumps(portable, indent=2, sort_keys=True) + "\n").encode()
+
+
 def selected_files(source: Path) -> dict[Path, Path]:
     patterns = (
         "manifest-*.json",
@@ -162,7 +213,10 @@ def stage(source: Path, destination: Path = DESTINATION) -> dict:
     for path, relative in sorted(files.items(), key=lambda item: str(item[1])):
         target = evidence / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
+        if len(relative.parts) == 1 and relative.name.startswith("manifest-"):
+            target.write_bytes(portable_execution_manifest(path))
+        else:
+            shutil.copy2(path, target)
         records[str(Path("evidence") / relative)] = {
             "size": target.stat().st_size,
             "sha256": sha256_file(target),
