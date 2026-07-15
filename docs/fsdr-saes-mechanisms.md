@@ -128,6 +128,15 @@ The simulator reports cycle counts, path statistics, cache hit rates, Gaussian
 counts, and image-quality metrics. These counters are used by the paper to
 attribute speedup to hardware execution, FSDR, and SAES.
 
+### 4.1 Artifact claim boundary
+
+The current artifact does not claim the sparse-SAES Table 1 or Tables 2--3
+rows. Corrected real-model probes keep the no-optimization and FSDR paths
+numerically aligned, but representative sparsification exceeds the declared
+quality tolerance and produces no L1 tiles for the tested TranSplat/MVSplat
+Re10K samples. A separately guarded dense interpolation diagnostic retains all
+Gaussians; it is useful for failure analysis but is not pruning evidence.
+
 ## 5. Related Documentation
 
 - [Architecture Overview](architecture.md)

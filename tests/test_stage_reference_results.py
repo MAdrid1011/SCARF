@@ -12,7 +12,8 @@ def test_environment_and_dataset_records_are_required_release_categories():
 
     assert "environments" in required_categories()
     assert "datasets" in required_categories()
-    assert required_environment_profiles() == {"classic", "depthsplat"}
+    assert "quick" in required_categories()
+    assert required_environment_profiles() == {"classic"}
 
 
 def test_staging_rejects_nonpassing_or_incomplete_result_tree(tmp_path):

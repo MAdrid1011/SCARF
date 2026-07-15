@@ -4,8 +4,9 @@
 
 - Run ID: `micro2026-ae-reconstruction`
 - Objective: turn the accepted SCARF paper repository into an independently
-  executable, provenance-preserving artifact for the Available, Functional,
-  and Results Reproduced badges.
+  executable, provenance-preserving artifact for the Available and Functional
+  badges. Results Reproduced remains a future gate because current real
+  sparse-SAES probes refute the paper-result contract.
 - Non-negotiable boundary: public physical evidence is ASAP7 predictive 7 nm.
   DeepScale output is a 28 nm-equivalent estimate and must never be presented
   as the TSMC 28 nm post-layout measurement reported by the paper.
@@ -18,11 +19,13 @@
 
 - Baseline: numbers and configurations in `micro59-submit/320.pdf`, mapped in
   `artifact/CLAIMS.md`.
-- Active claim matrix: TranSplat, MVSplat, and DepthSplat on Re10K and ACID.
-  DL3DV mappings remain executable but are not claimed without gated data.
-- Required software metrics: PSNR, SSIM, LPIPS, positive simulator cycles, and
-  FSDR/SAES mechanism statistics. Orin timing and sensitivity figures are not
-  in the active claim set.
+- Active software claim matrix: none. Real sparse-SAES probes do not satisfy
+  the paper quality or L1-rate contracts. The Re10K/ACID workflows remain
+  executable diagnostics; DL3DV remains unavailable without gated data.
+- Required Functional software evidence: numerically equivalent S1/S2/GGU,
+  positive simulator cycles, FSDR evidence, strict sparse-SAES failure records,
+  and a claim guard that rejects the dense diagnostic. Orin timing and
+  sensitivity figures are not in the active claim set.
 - Required hardware metrics: routed ASAP7 area, delay/frequency, dynamic and
   leakage power, utilization, route/DRC status, plus deterministic scaling.
 - Comparability risks: unavailable ACID/DL3DV payloads and checkpoints,
@@ -71,7 +74,9 @@
 - Do not run `scripts/run_rtl.sh` concurrently with a clean claim pair. The RTL
   emitter temporarily recreates `chisel/generated`, so formal RTL and software
   evidence runs are serialized to keep Git identity stable.
-- Full software: `bash scripts/run_ae.sh all`.
+- Declared workflow: `bash scripts/run_ae.sh all`. With the current claim
+  status it explicitly skips paper-result software pairs and continues through
+  RTL, DRAM, physical/scaling, report generation, and validation.
 - Full mode reuses the embedded ablation and mechanism records from each quality run
   instead of repeating the same model and sample matrix.
 - Hardware: `bash scripts/run_ae.sh rtl`, `bash scripts/run_ae.sh physical`,
@@ -122,3 +127,6 @@
 | 2026-07-15 | Serialize the RTL emitter and software claim runner | A concurrent emitter correctly triggered the dirty-worktree evidence guard; no invalid sample was accepted |
 | 2026-07-15 | Discover pinned DRAM tools from the repository install tree | Keep the public `run_ae.sh dram` entry functional without hidden environment variables |
 | 2026-07-15 | Separate stable protocol identity from prepared-data execution order | Preserve the published selection hash while matching the upstream chunk dataloader exactly |
+| 2026-07-15 | Stop the full matrix after four systematic SAES quality failures | Avoid spending weeks on a non-comparable run and preserve every raw result |
+| 2026-07-15 | Pair reference numerics with executed hardware cycle traces | Remove approximate-weight quality drift while retaining positive S1/S2/S3/GGU evidence |
+| 2026-07-15 | Suspend C1/C4 sparse-SAES claims | TranSplat and MVSplat real probes exceed quality tolerance and produce zero L1 tiles; dense interpolation is not accepted as pruning evidence |

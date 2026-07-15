@@ -34,10 +34,13 @@
   recorded without changing the canonical selection identity.
 - [x] Re10K and ACID sources, terms, archive revisions, prepared tree hashes,
   and all protocol-selected scene/view bounds are verified.
-- [x] All six claimed model and dataset pairs complete a strict one-sample
+- [x] All six accessible model and dataset pairs completed a historical strict one-sample
   pilot with three target views, full checkpoint coverage, and positive S1,
   S2, S3, and GGU cycles.
-- [ ] Full claimed Re10K and ACID runs are complete.
+- [x] The invalid full Re10K/ACID run was stopped after four complete samples,
+  archived, and classified as an SAES implementation mismatch.
+- [x] Table 1 and Tables 2--3 were removed from the claim set instead of using
+  dense interpolation, edited results, or relaxed tolerances.
 - [x] DL3DV and Orin results are explicitly outside the current claim.
 
 ## RTL And Hardware
@@ -62,22 +65,22 @@
 
 ## Current Frontier
 
-The strict quick path and all six Re10K/ACID one-sample pilots pass. Complete
-the full six-pair quality run from the clean delivery commit. Do not run the RTL
-emitter concurrently with a claim pair because its temporary `chisel/generated`
-tree changes the live Git identity; formal RTL evidence is already complete.
-The single quality run for each pair also emits the complete ablation and
-mechanism record. Software may run while an unrelated Vivado job is active, but
-the corrected iFlow overlay still requires that every Vivado process has exited
-and that at least 48 GiB is available. Do not mark routed PPA, clean-room, or DOI
-evidence complete from dry runs, smoke vectors, or fixtures.
+The strict quick path and all six historical one-sample pilots are executable,
+but the pilot gate originally checked schema rather than paper tolerance. A
+corrected formal run and focused TranSplat/MVSplat diagnostics prove that
+sparse SAES does not meet Table 1 or Tables 2--3. C1/C4 are suspended and the
+dense diagnostic is forbidden in claim runs. Formal RTL/DRAM evidence remains
+complete. The corrected iFlow overlay still requires that every Vivado process
+has exited and that at least 48 GiB is available. Do not mark routed PPA,
+clean-room, DOI, or Results Reproduced evidence complete from diagnostics.
 
 ## Latest Local Verification
 
 Verified on 2026-07-15:
 
-- Base `pytest -q`: 185 passed and 6 skipped. The skipped tests require PyTorch.
-- Locked classic profile: all 198 tests pass. Both classic and DepthSplat
+- Base `pytest -q`: 189 passed and 9 skipped. The skipped tests require optional
+  PyTorch or external toolchains.
+- Locked classic profile: all 210 tests pass. Both classic and DepthSplat
   environment checkers pass with CUDA 12.1 on the declared compiler path.
 - Strict quick passed on the RTX 3060 with the pinned classic profile. It loaded
   MVSplat once, selected all three declared target views, emitted positive

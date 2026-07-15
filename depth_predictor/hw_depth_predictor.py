@@ -1851,6 +1851,22 @@ class HWDepthPredictor:
     def set_use_original(self, use_original: bool):
         """Set whether to use original model for computation (preserves accuracy)."""
         self._use_original_computation = use_original
+
+    def _reference_model_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Filter model-specific arguments for the pinned reference predictor."""
+        allowed = {
+            "cnn_features",
+            "extra_info",
+            "gaussians_per_pixel",
+            "deterministic",
+        }
+        if self.model_type == self.MODEL_TRANSPLAT:
+            allowed.update({"da_depth", "dino_feature"})
+        return {
+            key: value
+            for key, value in kwargs.items()
+            if key in allowed and value is not None
+        }
     
     def forward(
         self,
@@ -1926,15 +1942,36 @@ class HWDepthPredictor:
         # Run original model
         with torch.no_grad():
             # Build kwargs for original model
-            model_kwargs = {k: v for k, v in kwargs.items() 
-                          if k in ['da_depth', 'dino_feature', 'cnn_features', 'extra_info',
-                                  'gaussians_per_pixel', 'deterministic']}
+            model_kwargs = self._reference_model_kwargs(kwargs)
             model_kwargs.setdefault('gaussians_per_pixel', 1)
             model_kwargs.setdefault('deterministic', True)
             
-            output = self._original_depth_predictor(
-                features, intrinsics, extrinsics, near, far, **model_kwargs
-            )
+            gaussian_modules = [
+                getattr(self._original_depth_predictor, name)
+                for name in (
+                    "upsampler",
+                    "proj_feature",
+                    "refine_unet",
+                    "to_gaussians",
+                )
+                if hasattr(self._original_depth_predictor, name)
+            ]
+            if gaussian_modules:
+                from .module_cycle_trace import run_callable_with_module_cycle_trace
+
+                gaussian_trace = run_callable_with_module_cycle_trace(
+                    lambda: self._original_depth_predictor(
+                        features, intrinsics, extrinsics, near, far, **model_kwargs
+                    ),
+                    gaussian_modules,
+                )
+                output = gaussian_trace.output
+                gaussian_head_cycles = gaussian_trace.total_cycles
+            else:
+                output = self._original_depth_predictor(
+                    features, intrinsics, extrinsics, near, far, **model_kwargs
+                )
+                gaussian_head_cycles = 0
         
         # Parse output
         if isinstance(output, tuple):
@@ -1955,6 +1992,7 @@ class HWDepthPredictor:
             unet_refinement=unet_cycles,
             depth_head=depth_head_cycles,
             softmax_regression=regression_cycles,
+            gaussian_head=gaussian_head_cycles,
         )
         
         return DepthPredictorOutput(

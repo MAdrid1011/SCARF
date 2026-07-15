@@ -4,6 +4,11 @@ This file is copy-ready except for the DOI URL and measured clean-room resource
 figures. Do not mark the HotCRP submission ready until every item in the final
 checklist is complete.
 
+Current badge scope is **Artifact Available** and **Artifact Functional**.
+Do not request **Results Reproduced** unless a later sparse-SAES implementation
+passes C1/C4 and the machine-readable claim status is restored with real
+aggregate evidence.
+
 ## Blocking Abstract Correction
 
 The current HotCRP draft screenshot says the design is a fabricated chip. The
@@ -19,16 +24,15 @@ Zenodo, and that DOI must resolve to the exact release validated by
 
 ## Key Results to be Reproduced
 
-1. **Table 1, rendering quality.** Reproduce PSNR, SSIM, and LPIPS for
-   TranSplat, MVSplat, and DepthSplat on Re10K and ACID with
-   `bash scripts/run_ae.sh quality`.
-2. **Tables 2-3.** Reproduce FSDR and SAES mechanism statistics for the six
-   Re10K and ACID pairs with
-   `bash scripts/run_ae.sh ablation`.
-3. **RTL and public physical proxy.** Validate the Chisel RTL and reproduce the
+1. **RTL and public physical proxy.** Validate the Chisel RTL and reproduce the
    public iFlow/ASAP7 physical-design reports and deterministic DeepScaleTool
    7-to-28 nm normalization with `bash scripts/run_ae.sh rtl`, `physical`, and
    `scale`.
+
+Table 1 and Tables 2--3 must not be listed as reproduced in the present
+submission. Real sparse-SAES probes exceed the quality tolerance and do not
+reproduce the paper's L1 rates. The closer dense-interpolation diagnostic
+retains every Gaussian and is explicitly rejected by claim runs.
 
 All dataset-level claims use the ordered protocol recovered from the committed
 upstream evaluation indices. Source index hashes, prepared tree hashes, and
@@ -73,7 +77,7 @@ and are therefore also outside the claim.
 
 ## Data Dependencies
 
-The claimed experiments use Re10K and ACID evaluation data plus official
+The diagnostic experiments use Re10K and ACID evaluation data plus official
 pretrained checkpoints for the three models. DL3DV download and conversion
 remain available as an unclaimed gated workflow. `artifact/manifests/` records the
 source, license status, expected SHA256, and model/dataset mapping. The final

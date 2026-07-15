@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DESTINATION = ROOT / "artifact/reference_results"
 BASE_CATEGORIES = {
-    "quality",
+    "quick",
     "datasets",
     "rtl",
     "dram",
@@ -27,6 +27,10 @@ BASE_CATEGORIES = {
 def required_categories() -> set[str]:
     claims = json.loads((ROOT / "artifact/claim_status.json").read_text(encoding="utf-8"))
     categories = set(BASE_CATEGORIES)
+    if any(state == "CLAIMED" for state in claims.get("software_pairs", {}).values()):
+        categories.add("quality")
+    if any(state == "CLAIMED" for state in claims.get("mechanism_pairs", {}).values()):
+        categories.add("ablation")
     if claims.get("figure8") == "CLAIMED":
         categories.add("speedup")
     if claims.get("sensitivity") == "CLAIMED":
@@ -43,7 +47,8 @@ def required_environment_profiles() -> set[str]:
         for pair, state in claims.get("software_pairs", {}).items()
         if state == "CLAIMED"
     }
-    profiles = set()
+    # The strict Functional quick run always exercises MVSplat in classic.
+    profiles = {"classic"}
     if claimed_models & {"transplat", "mvsplat"}:
         profiles.add("classic")
     if "depthsplat" in claimed_models:
@@ -61,6 +66,10 @@ def sha256_file(path: Path) -> str:
 
 def selected_files(source: Path) -> dict[Path, Path]:
     patterns = (
+        "quick/*/results.json",
+        "quick/*/pair-execution.json",
+        "quick/*/progress.jsonl",
+        "quick/*/samples/*/results.json",
         "quality/*/results.json",
         "quality/*/pair-execution.json",
         "quality/*/progress.jsonl",
@@ -100,7 +109,7 @@ def selected_files(source: Path) -> dict[Path, Path]:
         for path in source.glob(pattern):
             if path.is_file():
                 selected[path] = path.relative_to(source)
-    for category in ("quality", "ablation"):
+    for category in ("quick", "quality", "ablation"):
         category_root = source / category
         if not category_root.is_dir():
             continue

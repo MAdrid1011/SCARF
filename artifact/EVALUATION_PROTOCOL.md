@@ -50,7 +50,7 @@ The mapping is machine readable in `artifact/manifests/checkpoints.json` and
 Before a dataset result can pass, its record must contain the source index
 SHA256, the ordered selection SHA256, the prepared dataset tree SHA256, and the
 model-compatible representation. The protocol selection is finalized. Dataset
-tree hashes for the claimed Re10K and ACID pairs are finalized. The two DL3DV
+tree hashes for the prepared Re10K and ACID pairs are finalized. The two DL3DV
 representations remain evidence gates because gated data is not available.
 
 Full commands use the executable counts. A one-sample smoke run is Functional

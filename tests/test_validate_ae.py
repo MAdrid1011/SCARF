@@ -8,7 +8,7 @@ def test_complete_validator_rejects_missing_evidence(tmp_path: Path):
     from scripts.validate_ae import validate_complete
 
     expected = Path(__file__).resolve().parents[1] / "artifact/expected_results.json"
-    with pytest.raises(FileNotFoundError, match="transplat/re10k"):
+    with pytest.raises(FileNotFoundError, match="quick/mvsplat_re10k/results.json"):
         validate_complete(tmp_path, expected)
 
 

@@ -49,6 +49,53 @@ def test_demo_source_contains_no_orin_or_tsmc_heuristics():
     assert "depth_predictor_sim.set_strict_mode(strict_run)" in source
 
 
+def test_claim_pipeline_preserves_reference_numerics_while_counting_cycles():
+    source = DEMO.read_text(encoding="utf-8")
+
+    assert "set_accurate_mode(False)" not in source
+    assert "set_accurate_mode(True)" in source
+    assert "capture_torch_rng_state" in source
+    assert "restore_torch_rng_state" in source
+
+
+def test_torch_rng_state_can_replay_a_probabilistic_sample():
+    torch = pytest.importorskip("torch")
+
+    from scripts.reproducibility import (
+        capture_torch_rng_state,
+        restore_torch_rng_state,
+    )
+
+    torch.manual_seed(37)
+    state = capture_torch_rng_state()
+    first = torch.rand(8)
+    restore_torch_rng_state(state)
+    second = torch.rand(8)
+
+    assert torch.equal(first, second)
+
+
+def test_transplat_camera_encoding_matches_encoder_formula():
+    torch = pytest.importorskip("torch")
+
+    from feature_extractor.transplat_extractor import transplat_image_to_world
+
+    extrinsics = torch.eye(4).reshape(1, 1, 4, 4)
+    extrinsics[..., 0, 3] = 2.0
+    intrinsics = torch.tensor(
+        [[[[0.5, 0.0, 0.5], [0.0, 0.25, 0.5], [0.0, 0.0, 1.0]]]]
+    )
+    actual = transplat_image_to_world(extrinsics, intrinsics, 100, 200)
+
+    pixels = torch.eye(4).reshape(1, 1, 4, 4)
+    pixels[:, :, :3, :3] = intrinsics
+    pixels[:, :, 0, :] *= 200
+    pixels[:, :, 1, :] *= 100
+    expected = extrinsics @ torch.linalg.inv(pixels)
+
+    assert torch.allclose(actual, expected)
+
+
 def test_depthsplat_s3_cycles_are_traced_from_executed_modules():
     source = DEMO.read_text(encoding="utf-8")
 
@@ -91,5 +138,20 @@ def test_functional_run_has_the_same_strict_stage_contract():
                 "--evaluation-index",
                 "index.json",
                 "--baseline-only",
+            ]
+        )
+
+
+def test_claim_run_rejects_dense_saes_diagnostic():
+    from scripts.demo_cli import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--claim-run",
+                "--evaluation-index",
+                "index.json",
+                "--saes-materialization",
+                "dense-diagnostic",
             ]
         )

@@ -133,11 +133,25 @@ def build_tables(
                 }
             )
 
-    write_csv(report_dir / "table1_quality.csv", list(quality_rows[0]), quality_rows)
+    quality_fields = [
+        "pair",
+        "sample_count",
+        *(f"{variant}_{metric}" for variant in ("baseline", "scarf") for metric in METRICS),
+    ]
+    ablation_fields = ["pair", "fsdr_speedup", "saes_speedup", "combined_speedup"]
+    fsdr_fields = ["pair", "guided_rate", "top1_coverage"]
+    saes_fields = [
+        "pair",
+        "level0_rate",
+        "level1_rate",
+        "low_variance_agreement",
+        "gaussians_saved",
+    ]
+    write_csv(report_dir / "table1_quality.csv", quality_fields, quality_rows)
     write_csv(report_dir / "figure8_speedup.csv", ["pair", "speedup"], speedup_rows)
-    write_csv(report_dir / "figure11_ablation.csv", list(ablation_rows[0]), ablation_rows)
-    write_csv(report_dir / "table2_fsdr.csv", list(fsdr_rows[0]), fsdr_rows)
-    write_csv(report_dir / "table3_saes.csv", list(saes_rows[0]), saes_rows)
+    write_csv(report_dir / "figure11_ablation.csv", ablation_fields, ablation_rows)
+    write_csv(report_dir / "table2_fsdr.csv", fsdr_fields, fsdr_rows)
+    write_csv(report_dir / "table3_saes.csv", saes_fields, saes_rows)
     return {
         "quality": quality_rows,
         "speedup": speedup_rows,
@@ -371,7 +385,7 @@ def write_markdown(
         f"- Figure 8: {claims['figure8']}",
         f"- Figure 11: {claims['figure11']}",
         f"- Figures 13-16: {claims['sensitivity']}",
-        "- Claimed Table 1 and Tables 2-3 rows are exported as CSV.",
+        "- Table 1 and Tables 2-3 exports follow the machine-readable claim status; header-only files mean no row is claimed.",
         "",
         "## Hardware Scope",
         "",

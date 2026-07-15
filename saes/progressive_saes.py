@@ -5,10 +5,8 @@ Progressive Adaptive Early Sparsification for SCARF with 2-level tile classifica
 aligned with the SCARF Dataflow specification (L0 + L1 only):
 
   Level 0 (Feature Pre-Filter): Tiles with low feature variance after S1.
-    Process K(T) probes through S2+S3; keep probe Gaussian parameters unchanged;
-    expand probe covariances to cover assigned spatial territory (space+feature
-    weights; covariance spread computed from 2-D pixel offsets only — no non-probe
-    Stage-3 data accessed).  Set non-probe opacity=0.
+    Process K(T) probes through S2+S3 and merge assigned non-probe Gaussians
+    with first/second-moment matching. Set non-probe opacity=0.
     Effective Gaussian count reduced to K(T).
 
   Level 1 (Depth-Based): Tiles that pass L0 but have uniform probe depths.
@@ -17,9 +15,11 @@ aligned with the SCARF Dataflow specification (L0 + L1 only):
 
   Full: Tiles that fail both checks — no SAES savings.
 
-NOTE: non-probe Stage-3 outputs (covariances, harmonics, opacities, 3-D means)
-are NEVER read by this module; they are not computed by real hardware for
-early-stopped tiles.  Only probe Stage-3 outputs and S1 features are used.
+NOTE: the representative quality simulator reads the complete pretrained
+Gaussian tile to evaluate the paper's moment-matching equation. This is not
+equivalent to proving that early hardware can obtain those non-probe attributes.
+The public claim contract therefore does not claim the current sparse-SAES
+Table 1 or mechanism rows. The dense diagnostic is explicitly non-claiming.
 
 K(T) probe count formula (Spec §Stage 3):
     K(T) = 4 + ceil(2·log₂(T/4))   for T ≥ 4
@@ -114,6 +114,9 @@ class ProgressiveSAES:
         feature_var_threshold: float = None,
         depth_std_threshold: float = None,
         cross_check_threshold: float = 0.02,
+        view_count: int = 1,
+        primitives_per_pixel: int = 1,
+        materialization: str = "representative",
     ):
         self.H = H
         self.W = W
@@ -127,6 +130,13 @@ class ProgressiveSAES:
                                     if depth_std_threshold is not None
                                     else 0.04)
         self.cross_check_threshold = cross_check_threshold
+        if view_count < 1 or primitives_per_pixel < 1:
+            raise ValueError("view_count and primitives_per_pixel must be positive")
+        self.view_count = view_count
+        self.primitives_per_pixel = primitives_per_pixel
+        if materialization not in ("representative", "dense-diagnostic"):
+            raise ValueError(f"unsupported SAES materialization: {materialization}")
+        self.materialization = materialization
 
         # --- Adaptive probe positions (K(T) formula) ---
         T = initial_tile_size
@@ -166,6 +176,7 @@ class ProgressiveSAES:
         w: int,
         tile_size: int,
         threshold: float = 0.02,
+        per_view: bool = False,
     ) -> Tuple[Dict[Tuple[int, int], float], 'torch.Tensor']:
         """
         Classify tiles by feature variance from S1 feature maps.
@@ -181,34 +192,42 @@ class ProgressiveSAES:
         else:
             return {}, None
 
-        feat = feat.mean(dim=0)  # [C, H_feat, W_feat]
+        if not per_view:
+            feat = feat.mean(dim=0, keepdim=True)
         feat_up = F.interpolate(
-            feat.unsqueeze(0), size=(h, w), mode='bilinear', align_corners=False
-        )[0]  # [C, H, W]
-        feat_norm = feat_up / (feat_up.norm(dim=0, keepdim=True) + 1e-8)
+            feat, size=(h, w), mode='bilinear', align_corners=False
+        )  # [V, C, H, W] or [1, C, H, W]
+        feat_norm = feat_up / (feat_up.norm(dim=1, keepdim=True) + 1e-8)
 
         tiles_h = h // tile_size
         tiles_w = w // tile_size
         tiled = (
-            feat_norm[:, : tiles_h * tile_size, : tiles_w * tile_size]
-            .unfold(1, tile_size, tile_size)
+            feat_norm[:, :, : tiles_h * tile_size, : tiles_w * tile_size]
             .unfold(2, tile_size, tile_size)
+            .unfold(3, tile_size, tile_size)
             .contiguous()
         )
         values = (
-            tiled.reshape(tiled.shape[0], tiles_h, tiles_w, -1)
+            tiled.reshape(tiled.shape[0], tiled.shape[1], tiles_h, tiles_w, -1)
             .std(dim=-1)
-            .mean(dim=0)
+            .mean(dim=1)
             .detach()
             .cpu()
         )
+        if per_view:
+            tile_variances = {
+                (view, th, tw): float(values[view, th, tw])
+                for view in range(values.shape[0])
+                for th in range(tiles_h)
+                for tw in range(tiles_w)
+            }
+            return tile_variances, feat_norm
         tile_variances = {
-            (th, tw): float(values[th, tw])
+            (th, tw): float(values[0, th, tw])
             for th in range(tiles_h)
             for tw in range(tiles_w)
         }
-
-        return tile_variances, feat_norm
+        return tile_variances, feat_norm[0]
 
     @staticmethod
     def check_depth_uniformity(
@@ -220,6 +239,8 @@ class ProgressiveSAES:
         w: int,
         threshold: float = 0.03,
         probe_positions: List[Tuple[int, int]] = None,
+        view_index: int = 0,
+        primitive_slot: int = 0,
     ) -> bool:
         """
         Check if probe pixel depths within a tile are uniform.
@@ -241,9 +262,12 @@ class ProgressiveSAES:
                 return False
             if depths.dim() == 5:
                 pixel_idx = gy * w + gx
-                d = depths[0, 0, pixel_idx, 0, 0].item()
+                values = depths[0, view_index, pixel_idx].reshape(-1)
+                if primitive_slot >= values.numel():
+                    return False
+                d = values[primitive_slot].item()
             elif depths.dim() == 4:
-                d = depths[0, 0, gy, gx].item()
+                d = depths[0, view_index, gy, gx].item()
             else:
                 return False
             probe_depths.append(d)
@@ -378,141 +402,182 @@ class ProgressiveSAES:
         level: str,
         tile_y: int,
         tile_x: int,
+        view_index: int = 0,
+        primitive_slot: int = 0,
+        feature_variance: float = 0.0,
     ):
         """
-        Hardware-honest probe covariance expansion.
+        Merge non-probe Gaussians into probe representatives.
 
-        Does NOT read non-probe Stage-3 outputs (covariances, harmonics,
-        opacities, 3-D means).  Real hardware never computes these for
-        early-stopped tiles.  Only probe Stage-3 outputs and S1 features
-        are used.
-
-        For each non-probe pixel i, compute soft assignment weights using
-        2-D pixel positions and S1 features (both always available):
-
-            r_{i→k}^(L0) ∝ exp(-‖x_i-x_k‖²/σ_s²) · exp(-‖f_i-f_k‖²/σ_f²)
-            r_{i→k}^(L1) ∝ r_{i→k}^(L0) · exp(-|d̄_T - d_k|/β_d)
-
-        Covariance expansion: for each probe k, accumulate the 3-D spread
-        from its assigned non-probe territory using 2-D pixel offsets scaled
-        by probe depth (probe depth is from Stage 2, always available):
-
-            Δ3D_i ≈ (Δx_pix · d_k/W,  Δy_pix · d_k/H,  0)
-            Σ_k' = Σ_k + (Σ_i r_{i→k} · outer(Δ3D_i, Δ3D_i)) / Σ_i r_{i→k}
-
-        Probe means, harmonics, and opacities are NOT modified.
-        After this call the caller zeroes non-probe opacities.
+        The assignment is the paper's joint spatial/feature kernel. L1 also
+        applies the depth reliability factor. Each representative is then
+        updated with the weighted first moment and the law of total covariance;
+        SH and opacity use range-constrained weighted averages. Source tensors
+        are cloned before any in-place update so every representative observes
+        the same pre-merge tile.
         """
         T = self.initial_tile_size
-        σ_s_sq = (T / 2.0) ** 2          # spatial bandwidth² (pixels²)
-        σ_f_sq = 0.09                     # feature bandwidth² (normalised)
-        β_d    = 0.1                      # depth bandwidth for L1
+        # The paper's x_i is tile-normalized. Keeping pixel coordinates here
+        # makes the spatial kernel about two orders of magnitude too broad and
+        # collapses all representatives toward the tile centre.
+        beta_x_sq = 0.05 ** 2
+        beta_f_sq = 0.09
+        beta_d = 1.0
 
         device = gaussians_full.means.device
         K = len(probe_indices)
+        if K < 1:
+            return
 
-        # Only probe Stage-3 outputs are accessed (probes have run S2+S3).
-        # Non-probe covariances / harmonics / opacities / 3-D means are NEVER
-        # read — real hardware never computes them for early-stopped tiles.
-        means = gaussians_full.means[0]       # probe means (read-only except spread)
-        covs  = gaussians_full.covariances[0] # probe covs  (expanded in-place)
-        # harmo and opacs: NOT modified — probe keeps its own Stage-3 values.
+        means = gaussians_full.means[0]
+        covs = gaussians_full.covariances[0]
+        harmonics = gaussians_full.harmonics[0]
+        opacities = gaussians_full.opacities[0]
 
-        # Probe 2-D pixel coordinates, S1 features, and Stage-2 depths
-        probe_gy = [pid // self.W for pid in probe_indices]
-        probe_gx = [pid % self.W  for pid in probe_indices]
+        # Flat Gaussian indices contain the view and primitive slot, so spatial
+        # probe coordinates must be recovered from tile-local positions.
+        probe_gy = [tile_y + local_y for local_y, _ in self.probe_positions[:K]]
+        probe_gx = [tile_x + local_x for _, local_x in self.probe_positions[:K]]
 
         probe_feats = []
-        probe_d     = []
-        for k, pid in enumerate(probe_indices):
+        probe_depths = []
+        view_features = None
+        if feat_norm is not None:
+            view_features = feat_norm[view_index] if feat_norm.dim() == 4 else feat_norm
+        for k in range(K):
             gy, gx = probe_gy[k], probe_gx[k]
             probe_feats.append(
-                feat_norm[:, gy, gx]
-                if (feat_norm is not None
-                    and gy < feat_norm.shape[1]
-                    and gx < feat_norm.shape[2])
+                view_features[:, gy, gx]
+                if (view_features is not None
+                    and gy < view_features.shape[1]
+                    and gx < view_features.shape[2])
                 else None
             )
             if depths is not None:
                 if depths.dim() == 5:
-                    probe_d.append(depths[0, 0, pid, 0, 0].item())
+                    pixel_index = gy * self.W + gx
+                    values = depths[0, view_index, pixel_index].reshape(-1)
+                    slot = min(primitive_slot, values.numel() - 1)
+                    probe_depths.append(values[slot].item())
                 elif depths.dim() == 4:
-                    probe_d.append(depths[0, 0, gy, gx].item())
+                    probe_depths.append(depths[0, view_index, gy, gx].item())
                 else:
-                    probe_d.append(1.0)
+                    probe_depths.append(1.0)
             else:
-                probe_d.append(1.0)
+                probe_depths.append(1.0)
 
-        # Accumulate covariance-spread term from 2-D pixel offsets only.
-        # For non-probe pixel i assigned to probe k with weight w_{i→k}:
-        #   Δpix = (gx_i − gx_k, gy_i − gy_k)
-        #   scale = d_p / max(W, H)   (depth × angular_size_per_pixel)
-        #   delta_3d ≈ (Δx·scale, Δy·scale, 0)
-        #   spread_acc[k] += w_{i→k} · outer(delta_3d, delta_3d)
-        # This gives the 3-D covariance contribution from the territory assigned
-        # to each probe without reading any non-probe Stage-3 tensor.
-        spread_acc = [torch.zeros(3, 3, device=device, dtype=means.dtype)
-                      for _ in range(K)]
-        w_total    = [0.0 for _ in range(K)]
-
-        img_dim = float(max(self.W, self.H, 1))
-
-        for (local_y, local_x), flat_idx in non_probe_map.items():
+        non_probe_items = list(non_probe_map.items())
+        assignments = []
+        depth_mean = sum(probe_depths) / K
+        depth_std = (
+            sum((depth - depth_mean) ** 2 for depth in probe_depths) / K
+        ) ** 0.5
+        for (local_y, local_x), _ in non_probe_items:
             gy = tile_y + local_y
             gx = tile_x + local_x
-
-            fi = (feat_norm[:, gy, gx]
-                  if feat_norm is not None
-                  and gy < feat_norm.shape[1]
-                  and gx < feat_norm.shape[2]
+            feature_i = (view_features[:, gy, gx]
+                  if view_features is not None
+                  and gy < view_features.shape[1]
+                  and gx < view_features.shape[2]
                   else None)
-
-            # Assignment weights r_{i→k} — uses only 2-D positions and S1 features
-            raw_w = []
+            logits = []
             for k in range(K):
                 qy, qx = probe_gy[k], probe_gx[k]
-                sp = math.exp(-((gy - qy) ** 2 + (gx - qx) ** 2) / (σ_s_sq + 1e-8))
-                fp = probe_feats[k]
-                if fi is not None and fp is not None and fi.shape == fp.shape:
-                    fd = (fi - fp).norm().item() ** 2
-                    ft = math.exp(-fd / (σ_f_sq + 1e-8))
-                else:
-                    ft = 1.0
-                w = sp * ft
+                coordinate_scale = max(T - 1, 1)
+                spatial = feature_variance * (
+                    ((gy - qy) / coordinate_scale) ** 2
+                    + ((gx - qx) / coordinate_scale) ** 2
+                ) / (beta_x_sq + 1e-8)
+                feature = 0.0
+                probe_feature = probe_feats[k]
+                if (
+                    feature_i is not None
+                    and probe_feature is not None
+                    and feature_i.shape == probe_feature.shape
+                ):
+                    feature = (feature_i - probe_feature).square().sum().item()
+                    feature /= beta_f_sq + 1e-8
+                log_weight = -(spatial + feature)
                 if level == 'L1':
-                    dp = probe_d[k]
-                    d_est = sum(probe_d) / K
-                    w *= math.exp(-abs(d_est - dp) / (β_d + 1e-8))
-                raw_w.append(w)
+                    log_weight -= abs(probe_depths[k] - depth_mean) / (
+                        beta_d * depth_std + 1e-8
+                    )
+                logits.append(log_weight)
+            assignments.append(
+                torch.softmax(
+                    torch.tensor(logits, device=device, dtype=means.dtype), dim=0
+                )
+            )
 
-            w_sum = sum(raw_w) + 1e-8
-            norm_w = [w / w_sum for w in raw_w]
+        assignment_matrix = (
+            torch.stack(assignments, dim=0)
+            if assignments
+            else torch.empty(0, K, device=device, dtype=means.dtype)
+        )
+        non_probe_indices = [flat_idx for _, flat_idx in non_probe_items]
+        source_indices = probe_indices + non_probe_indices
+        source_means = means[source_indices].clone()
+        source_covs = covs[source_indices].clone()
+        source_harmonics = harmonics[source_indices].clone()
+        source_opacities = opacities[source_indices].clone()
 
-            # Accumulate 2-D-pixel-based spread (no non-probe S3 data read)
-            for k in range(K):
-                wk = norm_w[k]
-                if wk < 1e-6:
-                    continue
-                d_p = max(probe_d[k], 1e-4)
-                scale = d_p / img_dim
-                dx = float(gx - probe_gx[k]) * scale
-                dy = float(gy - probe_gy[k]) * scale
-                delta = torch.tensor([dx, dy, 0.0],
-                                     device=device, dtype=means.dtype)
-                spread_acc[k] = spread_acc[k] + wk * torch.outer(delta, delta)
-                w_total[k]   += wk
+        for probe_offset, probe_index in enumerate(probe_indices):
+            weights = torch.cat(
+                (
+                    torch.ones(1, device=device, dtype=means.dtype),
+                    assignment_matrix[:, probe_offset],
+                )
+            )
+            contributor_indices = [probe_offset] + list(range(K, len(source_indices)))
+            contributor = torch.tensor(
+                contributor_indices, device=device, dtype=torch.long
+            )
+            contributor_means = source_means[contributor]
+            contributor_opacities = source_opacities[contributor]
+            opacity_flat = contributor_opacities.reshape(len(weights), -1).mean(dim=1)
+            moment_weights = weights * opacity_flat.clamp_min(1e-6)
+            normalized = moment_weights / moment_weights.sum().clamp_min(1e-8)
+            merged_mean = torch.einsum("n,ni->i", normalized, contributor_means)
+            centered = contributor_means - merged_mean
+            second_moment = source_covs[contributor] + torch.einsum(
+                "ni,nj->nij", centered, centered
+            )
+            merged_covariance = torch.einsum(
+                "n,nij->ij", normalized, second_moment
+            )
+            merged_covariance = (
+                merged_covariance + merged_covariance.mT
+            ) * 0.5
 
-        # Expand probe covariances to cover their assigned spatial territory.
-        # Probe means, harmonics, and opacities are NOT modified.
-        for k, pidx in enumerate(probe_indices):
-            tw = w_total[k]
-            if tw < 1e-8:
-                continue
-            spread = spread_acc[k] / tw
-            spread = (spread + spread.mT) / 2          # symmetrise
-            spread = spread + torch.eye(3, device=device,
-                                        dtype=means.dtype) * 1e-6
-            covs[pidx] = covs[pidx] + spread
+            contributor_harmonics = source_harmonics[contributor]
+            harmonic_shape = contributor_harmonics.shape[1:]
+            merged_harmonics = torch.einsum(
+                "n,nk->k", normalized, contributor_harmonics.reshape(len(weights), -1)
+            ).reshape(harmonic_shape)
+            merged_harmonics = torch.maximum(
+                torch.minimum(
+                    merged_harmonics, contributor_harmonics.amax(dim=0)
+                ),
+                contributor_harmonics.amin(dim=0),
+            )
+
+            opacity_shape = contributor_opacities.shape[1:]
+            bounded_opacity = contributor_opacities.reshape(len(weights), -1).clamp(
+                0.0, 1.0 - 1e-6
+            )
+            merged_opacity = (
+                1.0
+                - torch.exp(
+                    torch.einsum(
+                        "n,nk->k", weights, torch.log1p(-bounded_opacity)
+                    )
+                )
+            ).reshape(opacity_shape)
+
+            means[probe_index] = merged_mean
+            covs[probe_index] = merged_covariance
+            harmonics[probe_index] = merged_harmonics
+            opacities[probe_index] = merged_opacity
 
 
     # ------------------------------------------------------------------ #
@@ -532,6 +597,51 @@ class ProgressiveSAES:
             covs[0, idx]  = p_cov * 1.02
             harmo[0, idx] = p_harm
             opacs[0, idx] = p_opac
+
+    def _dense_interpolate_non_probes(
+        self,
+        gaussians_full,
+        probe_indices: List[int],
+        non_probe_map: Dict[Tuple[int, int], int],
+    ) -> None:
+        """Historical dense interpolation retained only for failure analysis."""
+        if self.initial_tile_size != 4 or len(probe_indices) != 4:
+            raise ValueError("dense diagnostic supports the default 4x4 tile only")
+        covariances = gaussians_full.covariances[0]
+        harmonics = gaussians_full.harmonics[0]
+        opacities = gaussians_full.opacities[0]
+        probe_covariances = covariances[probe_indices].clone()
+        probe_harmonics = harmonics[probe_indices].clone()
+        probe_opacities = opacities[probe_indices].clone()
+        opacity_min = probe_opacities.amin(dim=0)
+        opacity_max = probe_opacities.amax(dim=0)
+        harmonic_norm = probe_harmonics.reshape(4, -1).norm(dim=1).mean()
+
+        for (local_y, local_x), index in non_probe_map.items():
+            y = local_y / 3.0
+            x = local_x / 3.0
+            weights = torch.tensor(
+                [(1-y)*(1-x), (1-y)*x, y*(1-x), y*x],
+                device=covariances.device,
+                dtype=covariances.dtype,
+            )
+            covariances[index] = torch.einsum(
+                "n,nij->ij", weights, probe_covariances
+            )
+            merged_harmonics = torch.einsum(
+                "n,nk->k", weights, probe_harmonics.reshape(4, -1)
+            ).reshape(probe_harmonics.shape[1:])
+            merged_norm = merged_harmonics.norm().clamp_min(1e-8)
+            merged_harmonics *= torch.clamp(
+                harmonic_norm / merged_norm, 0.9, 1.1
+            )
+            harmonics[index] = merged_harmonics
+            merged_opacity = torch.einsum(
+                "n,nk->k", weights, probe_opacities.reshape(4, -1)
+            ).reshape(probe_opacities.shape[1:])
+            opacities[index] = torch.maximum(
+                torch.minimum(merged_opacity, opacity_max), opacity_min
+            )
 
     # ------------------------------------------------------------------ #
     # Main tile processing loop                                             #
@@ -561,129 +671,156 @@ class ProgressiveSAES:
             modified_mask: bool tensor, True for pixels modified (L0/L1)
             stats:         per-level statistics including effective_gaussians
         """
-        N = gaussians_full.means.shape[1]
+        gaussian_count = gaussians_full.means.shape[1]
         device = gaussians_full.means.device
+        position_count = self.view_count * self.H * self.W
+        expected_gaussians = position_count * self.primitives_per_pixel
+        if gaussian_count != expected_gaussians:
+            raise ValueError(
+                "flattened Gaussian count does not match view/pixel layout: "
+                f"got {gaussian_count}, expected {expected_gaussians}"
+            )
 
-        modified_mask = torch.zeros(N, dtype=torch.bool, device=device)
-        pixel_level   = torch.full((N,), -1, dtype=torch.int8, device=device)
+        modified_mask = torch.zeros(
+            gaussian_count, dtype=torch.bool, device=device
+        )
+        for key in self.stats:
+            self.stats[key] = 0
 
-        # Reset stats
-        for k in self.stats:
-            self.stats[k] = 0
-
-        tiles_h   = self.H // self.initial_tile_size
-        tiles_w   = self.W // self.initial_tile_size
+        tiles_h = self.H // self.initial_tile_size
+        tiles_w = self.W // self.initial_tile_size
         tile_size = self.initial_tile_size
-
         total_zeroed = 0
 
-        for th in range(tiles_h):
-            for tw in range(tiles_w):
-                self.stats['total_tiles_processed'] += 1
-                tile_y = th * tile_size
-                tile_x = tw * tile_size
+        def flat_index(view: int, pixel: int, primitive_slot: int) -> int:
+            return (
+                (view * self.H * self.W + pixel) * self.primitives_per_pixel
+                + primitive_slot
+            )
 
-                # Helper: build probe flat indices for this tile
-                def _get_probe_indices():
-                    idxs = []
-                    for (ly, lx) in self.probe_positions:
-                        gy, gx = tile_y + ly, tile_x + lx
-                        pidx = gy * self.W + gx
-                        if pidx < N:
-                            idxs.append(pidx)
-                    return idxs
+        for view in range(self.view_count):
+            for th in range(tiles_h):
+                for tw in range(tiles_w):
+                    self.stats['total_tiles_processed'] += 1
+                    tile_y = th * tile_size
+                    tile_x = tw * tile_size
 
-                # Helper: build non-probe map (local_pos -> flat_idx)
-                def _get_non_probe_map():
-                    npm = {}
-                    for (ly, lx) in self.non_probe_positions:
-                        gy, gx = tile_y + ly, tile_x + lx
-                        pidx = gy * self.W + gx
-                        if pidx < N:
-                            npm[(ly, lx)] = pidx
-                    return npm
+                    def probe_indices(slot: int) -> List[int]:
+                        return [
+                            flat_index(
+                                view,
+                                (tile_y + local_y) * self.W + tile_x + local_x,
+                                slot,
+                            )
+                            for local_y, local_x in self.probe_positions
+                        ]
 
-                # Helper: zero non-probe opacity and update stats
-                def _zero_non_probe_opacity(non_probe_map):
-                    nonlocal total_zeroed
-                    for flat_idx in non_probe_map.values():
-                        gaussians_full.opacities[0, flat_idx] = (
-                            gaussians_full.opacities[0, flat_idx] * 0.0)
-                    total_zeroed += len(non_probe_map)
+                    def non_probe_map(slot: int) -> Dict[Tuple[int, int], int]:
+                        return {
+                            (local_y, local_x): flat_index(
+                                view,
+                                (tile_y + local_y) * self.W + tile_x + local_x,
+                                slot,
+                            )
+                            for local_y, local_x in self.non_probe_positions
+                        }
 
-                # ---- Level 0: Feature Pre-Filter ----
-                if tile_variances is not None and (th, tw) in tile_variances:
-                    feat_var = tile_variances[(th, tw)]
-                    if feat_var < self.feature_var_threshold:
-                        probe_indices = _get_probe_indices()
-                        K = len(probe_indices)
-                        if K >= 2:
-                            if self.probe_cross_check(gaussians_full, probe_indices):
-                                non_probe_map = _get_non_probe_map()
-                                # Weighted moment matching (L0: space+feature)
-                                self._weighted_moment_match(
-                                    gaussians_full, probe_indices, non_probe_map,
-                                    feat_norm, depths, 'L0', tile_y, tile_x)
-                                # Zero non-probe opacities
-                                _zero_non_probe_opacity(non_probe_map)
-                                for idx in non_probe_map.values():
-                                    modified_mask[idx] = True
-                                    pixel_level[idx] = 0
-                                self.stats['level0_tiles']  += 1
-                                self.stats['level0_pixels'] += len(non_probe_map)
-                                self.stats['pixels_original'] += K
-                                continue
+                    first_probes = probe_indices(0)
+                    feature_key = (view, th, tw)
+                    feature_variance = (
+                        tile_variances.get(
+                            feature_key, tile_variances.get((th, tw), float('inf'))
+                        )
+                        if tile_variances is not None
+                        else float('inf')
+                    )
 
-                # ---- Level 1: Depth-Based ----
-                if depths is not None:
-                    depth_uniform = self.check_depth_uniformity(
-                        depths, th, tw, tile_size, self.H, self.W,
+                    selected_level = None
+                    if (
+                        feature_variance < self.feature_var_threshold
+                        and self.probe_cross_check(gaussians_full, first_probes)
+                    ):
+                        selected_level = 'L0'
+                    elif depths is not None and self.check_depth_uniformity(
+                        depths,
+                        th,
+                        tw,
+                        tile_size,
+                        self.H,
+                        self.W,
                         self.depth_std_threshold,
-                        probe_positions=self.probe_positions)
-                    if depth_uniform:
-                        probe_indices = _get_probe_indices()
-                        K = len(probe_indices)
-                        if K >= 2:
-                            probe_sim = self.compute_tile_similarity(
-                                gaussians_full, probe_indices,
-                                include_position=False)
-                            # L1: depth already verified uniform; probe_sim gates quality.
-                            # 0.90 keeps only tiles where all corner probes are nearly
-                            # identical — these are the safest to early-stop with
-                            # opacity zeroing (low per-tile quality loss).
-                            if probe_sim >= 0.90:
-                                if self.probe_cross_check(gaussians_full, probe_indices):
-                                    non_probe_map = _get_non_probe_map()
-                                    # Weighted moment matching (L1: space+feature+depth)
-                                    self._weighted_moment_match(
-                                        gaussians_full, probe_indices, non_probe_map,
-                                        feat_norm, depths, 'L1', tile_y, tile_x)
-                                    _zero_non_probe_opacity(non_probe_map)
-                                    for idx in non_probe_map.values():
-                                        modified_mask[idx] = True
-                                        pixel_level[idx] = 1
-                                    self.stats['level1_tiles']  += 1
-                                    self.stats['level1_pixels'] += len(non_probe_map)
-                                    self.stats['pixels_original'] += K
-                                    continue
+                        probe_positions=self.probe_positions,
+                        view_index=view,
+                    ):
+                        probe_similarity = self.compute_tile_similarity(
+                            gaussians_full, first_probes, include_position=False
+                        )
+                        if (
+                            probe_similarity >= 0.90
+                            and self.probe_cross_check(
+                                gaussians_full, first_probes
+                            )
+                        ):
+                            selected_level = 'L1'
 
-                # ---- Full processing ----
-                self.stats['full_tiles']      += 1
-                self.stats['pixels_original'] += tile_size * tile_size
+                    if selected_level is not None:
+                        for slot in range(self.primitives_per_pixel):
+                            probes = probe_indices(slot)
+                            non_probes = non_probe_map(slot)
+                            if self.materialization == "representative":
+                                self._weighted_moment_match(
+                                    gaussians_full,
+                                    probes,
+                                    non_probes,
+                                    feat_norm,
+                                    depths,
+                                    selected_level,
+                                    tile_y,
+                                    tile_x,
+                                    view_index=view,
+                                    primitive_slot=slot,
+                                    feature_variance=feature_variance,
+                                )
+                            else:
+                                self._dense_interpolate_non_probes(
+                                    gaussians_full, probes, non_probes
+                                )
+                            for index in non_probes.values():
+                                if self.materialization == "representative":
+                                    gaussians_full.opacities[0, index] *= 0.0
+                                modified_mask[index] = True
+                            if self.materialization == "representative":
+                                total_zeroed += len(non_probes)
 
-        # Finalize stats
+                        pixel_count = len(self.non_probe_positions)
+                        if selected_level == 'L0':
+                            self.stats['level0_tiles'] += 1
+                            self.stats['level0_pixels'] += pixel_count
+                        else:
+                            self.stats['level1_tiles'] += 1
+                            self.stats['level1_pixels'] += pixel_count
+                        self.stats['pixels_original'] += len(self.probe_positions)
+                        continue
+
+                    self.stats['full_tiles'] += 1
+                    self.stats['pixels_original'] += tile_size * tile_size
+
         total_tiles = max(1, self.stats['total_tiles_processed'])
-        self.stats['total_modified_pixels'] = (self.stats['level0_pixels'] +
-                                               self.stats['level1_pixels'])
-        self.stats['zeroed_gaussians']   = total_zeroed
-        self.stats['effective_gaussians'] = max(0, N - total_zeroed)
+        self.stats['total_modified_pixels'] = (
+            self.stats['level0_pixels'] + self.stats['level1_pixels']
+        )
+        self.stats['zeroed_gaussians'] = total_zeroed
+        self.stats['effective_gaussians'] = max(0, gaussian_count - total_zeroed)
 
-        self.stats['level0_ratio']     = self.stats['level0_tiles'] / total_tiles
-        self.stats['level1_ratio']     = self.stats['level1_tiles'] / total_tiles
-        self.stats['full_ratio']       = self.stats['full_tiles']   / total_tiles
+        self.stats['level0_ratio'] = self.stats['level0_tiles'] / total_tiles
+        self.stats['level1_ratio'] = self.stats['level1_tiles'] / total_tiles
+        self.stats['full_ratio'] = self.stats['full_tiles'] / total_tiles
         self.stats['early_stop_ratio'] = 1.0 - self.stats['full_ratio']
         self.stats['modification_ratio'] = (
-            self.stats['total_modified_pixels'] / N if N > 0 else 0.0)
+            self.stats['total_modified_pixels'] / position_count
+            if position_count > 0
+            else 0.0
+        )
 
         # Backward-compatible keys
         self.stats['early_stop_phase1'] = (self.stats['level0_tiles'] +
@@ -713,6 +850,8 @@ def apply_progressive_saes(
     cross_check_threshold: float = 0.015,
     feat_norm=None,            # pre-computed [C, H, W]; computed internally if None
     collect_continue_pixels: bool = False,
+    view_count: int = None,
+    materialization: str = "representative",
 ) -> Tuple['torch.Tensor', Dict, List]:
     """
     Apply progressive SAES v4 (Dataflow-aligned, L0+L1) to Gaussians.
@@ -731,10 +870,26 @@ def apply_progressive_saes(
         feat_norm: pre-normalised features [C, H, W] (optional)
 
     Returns:
-        modified_mask:   bool tensor (True = pixel was modified / opacity zeroed)
+        modified_mask:   bool tensor (True = primitive was changed or removed)
         stats:           per-level statistics (incl. effective_gaussians)
         continue_pixels: list of (y, x, pixel_idx) for unmodified pixels
     """
+    gaussian_count = gaussians_full.means.shape[1]
+    if view_count is None:
+        if features is not None and hasattr(features, 'dim') and features.dim() == 5:
+            view_count = int(features.shape[1])
+        elif depths is not None and hasattr(depths, 'dim') and depths.dim() >= 4:
+            view_count = int(depths.shape[1])
+        else:
+            view_count = 1
+    position_count = view_count * H * W
+    if gaussian_count % position_count != 0:
+        raise ValueError(
+            "Gaussian count is not divisible by view_count * H * W: "
+            f"{gaussian_count} vs {position_count}"
+        )
+    primitives_per_pixel = gaussian_count // position_count
+
     tile_variances = None
     _feat_norm = feat_norm  # use caller-supplied if available
 
@@ -742,7 +897,9 @@ def apply_progressive_saes(
         _tv, _fn = ProgressiveSAES.classify_tiles_by_features(
             features, H, W, tile_size,
             threshold=(feature_var_threshold
-                       if feature_var_threshold is not None else 0.012))
+                       if feature_var_threshold is not None else 0.012),
+            per_view=True,
+        )
         tile_variances = _tv
         if _feat_norm is None:
             _feat_norm = _fn
@@ -752,6 +909,9 @@ def apply_progressive_saes(
         feature_var_threshold=feature_var_threshold,
         depth_std_threshold=depth_std_threshold,
         cross_check_threshold=cross_check_threshold,
+        view_count=view_count,
+        primitives_per_pixel=primitives_per_pixel,
+        materialization=materialization,
     )
     modified_mask, stats = saes.process_all_tiles(
         gaussians_full, gpp,
@@ -764,9 +924,10 @@ def apply_progressive_saes(
     if collect_continue_pixels:
         indices = torch.nonzero(~modified_mask, as_tuple=False).flatten().cpu().tolist()
         for idx in indices:
-            pixel_idx = idx // gpp
+            pixel_idx = idx // primitives_per_pixel
             y, x = divmod(pixel_idx, W)
-            if y < H and x < W:
+            y %= H
+            if x < W:
                 continue_pixels.append((y, x, pixel_idx))
 
     return modified_mask, stats, continue_pixels

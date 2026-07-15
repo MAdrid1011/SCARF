@@ -4,18 +4,21 @@ This document is the source of truth for the results claimed during MICRO 2026
 artifact evaluation. A result is reproduced only when the command below
 finishes successfully and `scripts/run_ae.py validate` reports `PASS`.
 
-The active claim set is recorded in `artifact/claim_status.json`. Re10K and
-ACID are included after their prepared tree hashes pass validation. DL3DV is
-not claimed because the current environment has no gated-data credential.
-Figure 8 is not claimed because no real Orin NX evidence is available. These
-states never fall back to manuscript numbers.
+The active claim set is recorded in `artifact/claim_status.json`. Dataset and
+checkpoint recovery succeeded, but real TranSplat and MVSplat probes showed
+that the paper's sparse SAES quality/protocol contract is not reproduced by the
+available implementation. Table 1 and Tables 2--3 are therefore not claimed.
+DL3DV is additionally unavailable, and Figure 8 has no real Orin NX evidence.
+These states never fall back to manuscript numbers or to the dense diagnostic.
 
-## Claimed Results
+## Declared Functional Checks
+
+These checks validate public artifact components. They are not presented as a
+reproduction of the paper's unavailable sparse-SAES or commercial-TSMC28
+results and do not support a Results Reproduced badge request by themselves.
 
 | ID | Paper result | Command | Acceptance criterion |
 |---|---|---|---|
-| C1 | Table 1: Re10K and ACID rendering quality | `bash scripts/run_ae.sh quality` | Six model and dataset aggregates emit PSNR, SSIM, and LPIPS over every selected target view. Differences from the paper are at most 0.15 dB PSNR, 0.005 SSIM, and 0.005 LPIPS. |
-| C4 | Tables 2-3: Re10K and ACID mechanism statistics | `bash scripts/run_ae.sh ablation` | The six claimed pairs reproduce guided rate, Top-1 coverage, L0/L1 rates, and Gaussian savings within 2 percentage points. |
 | C6 | RTL functionality | `bash scripts/run_ae.sh rtl` | Chisel tests, SystemVerilog emission, and Verilator lint complete without errors. |
 | C7 | Public physical-design proxy | `bash scripts/run_ae.sh physical` | iFlow completes routing and GDS generation with pinned ASAP7 RC data. It emits provenance, timing, area, vectorless logic power, zero-DRC status, and route reports. Timing failure at the 1 GHz target is reported rather than hidden. |
 | C8 | Technology normalization | `bash scripts/run_ae.sh scale` | DeepScaleTool factors and the 7-to-28 nm calculation match the pinned reference tables exactly. |
@@ -23,6 +26,15 @@ states never fall back to manuscript numbers.
 ## Explicitly Not Claimed
 
 - DL3DV Table 1 and Tables 2-3 rows are `NOT_CLAIMED_GATED_DATA`.
+- Re10K and ACID Table 1 rows are
+  `NOT_CLAIMED_SAES_SPARSE_QUALITY_MISMATCH`. The corrected no-optimization
+  path is numerically identical to the pinned model and FSDR remains within the
+  sample quality budget, but sparse SAES exceeds the declared tolerance.
+- Re10K and ACID Tables 2--3 rows are
+  `NOT_CLAIMED_SAES_PROTOCOL_MISMATCH`: real probes produced zero L1 tiles
+  where the paper target requires nonzero L1 rates.
+- `--saes-materialization dense-diagnostic` retains every Gaussian and is
+  rejected by claim runs. It cannot be used as evidence for sparse SAES.
 - Figure 8 is `NOT_CLAIMED_NO_ORIN_EVIDENCE`.
 - Figure 11 and Figures 13-16 are
   `NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX`.

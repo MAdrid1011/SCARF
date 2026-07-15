@@ -29,6 +29,7 @@ from scripts.compile_protocol import canonicalize_index
 
 
 SOFTWARE_MODES = {"quick", "quality", "speedup", "ablation", "orin"}
+CLAIM_ONLY_SOFTWARE_MODES = {"quality", "speedup", "ablation", "orin"}
 MODES = tuple(
     sorted(
         SOFTWARE_MODES
@@ -291,6 +292,15 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "experiments": experiments,
         "claim_status": load_claim_status(),
     }
+    plan["software_claim_scope"] = {
+        "status": (
+            "NO_CLAIMED_PAIRS"
+            if args.mode in CLAIM_ONLY_SOFTWARE_MODES | {"all"} and not experiments
+            else "ACTIVE"
+        ),
+        "pair_count": len(experiments),
+        "diagnostic_results_are_claim_evidence": False,
+    }
     plan["dataset_commands"] = build_dataset_validation_commands(
         experiments, args.output_root
     )
@@ -352,6 +362,12 @@ def execute_plan(plan: dict[str, Any], output_root: Path) -> int:
     (output_root / f"manifest-{plan['mode']}.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
+    if plan.get("software_claim_scope", {}).get("status") == "NO_CLAIMED_PAIRS":
+        print(
+            "notice: no software pairs are currently claimed; "
+            "skipping claim-only software execution",
+            flush=True,
+        )
     profile_pythons: dict[str, str] = {}
     for item in plan["experiments"]:
         profile = item["environment_profile"]

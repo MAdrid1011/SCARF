@@ -86,6 +86,7 @@ from integration import create_model_loader, ModelBundle, DataBundle
 from ggu import GGUProcessor, GGUConfig
 from fsdr import FSDRSimulator
 from saes import ProgressiveSAES, apply_progressive_saes
+from scripts.reproducibility import capture_torch_rng_state, restore_torch_rng_state
 from scripts.result_record import strict_stage_error
 
 # SCARF hardware clock frequency (MHz) — default 1 GHz, overridable via --freq
@@ -546,7 +547,7 @@ class SavingsTracker:
         HW_SCALE_C = CONFIG.hw_scale_compute  # 2.0x for compute-bound
         HW_SCALE_M = CONFIG.hw_scale_memory   # 1.5x for memory-bound
         
-        # SAES v4 ratios (fraction of total pixels with opacity zeroed)
+        # SAES v4 ratios (fraction of pixel materializations bypassed)
         # L0 + L1: both skip full S2+S3 for non-probe pixels.
         l0_ratio = self.level0_ratio()   # Feature-uniform: saves S2+S3 for non-probe px
         l1_ratio = self.level1_ratio()   # Depth-uniform:   saves S2+S3 for non-probe px
@@ -1012,6 +1013,7 @@ def compute_saes_low_var_agreement(
     w: int,
     tile_size: int,
     threshold: float = 0.90,
+    view_count: int = 1,
 ) -> Dict[str, float]:
     """
     Check whether SAES early materialization is applied to tiles whose full
@@ -1037,6 +1039,10 @@ def compute_saes_low_var_agreement(
     harmo = gaussians_full.harmonics[0]
     opacs = gaussians_full.opacities[0].reshape(-1)
     n_gauss = means.shape[0]
+    position_count = view_count * h * w
+    if n_gauss % position_count != 0:
+        raise ValueError("Gaussian layout is incompatible with SAES view count")
+    primitives_per_pixel = n_gauss // position_count
 
     def _mean_pair_cos(x: torch.Tensor) -> float:
         x = x.reshape(x.shape[0], -1).float()
@@ -1074,25 +1080,28 @@ def compute_saes_low_var_agreement(
 
     tiles_h = h // tile_size
     tiles_w = w // tile_size
-    for th in range(tiles_h):
-        for tw in range(tiles_w):
-            tile_indices = []
-            for ly in range(tile_size):
-                for lx in range(tile_size):
-                    idx = (th * tile_size + ly) * w + (tw * tile_size + lx)
-                    if idx < n_gauss:
-                        tile_indices.append(idx)
-            if not tile_indices:
-                continue
-            idx_tensor = torch.tensor(tile_indices, dtype=torch.long, device=modified_mask.device)
-            if not bool(modified_mask[idx_tensor].any().item()):
-                continue
+    for view in range(view_count):
+        for th in range(tiles_h):
+            for tw in range(tiles_w):
+                tile_indices = []
+                for ly in range(tile_size):
+                    for lx in range(tile_size):
+                        pixel = (th * tile_size + ly) * w + (tw * tile_size + lx)
+                        for slot in range(primitives_per_pixel):
+                            tile_indices.append(
+                                (view * h * w + pixel) * primitives_per_pixel + slot
+                            )
+                idx_tensor = torch.tensor(
+                    tile_indices, dtype=torch.long, device=modified_mask.device
+                )
+                if not bool(modified_mask[idx_tensor].any().item()):
+                    continue
 
-            early_tiles += 1
-            sim = _tile_similarity(idx_tensor)
-            sims.append(sim)
-            if sim >= threshold:
-                low_var_tiles += 1
+                early_tiles += 1
+                sim = _tile_similarity(idx_tensor)
+                sims.append(sim)
+                if sim >= threshold:
+                    low_var_tiles += 1
 
     mean_similarity = float(sum(sims) / len(sims)) if sims else 0.0
     low_var_agree = low_var_tiles / early_tiles if early_tiles > 0 else 0.0
@@ -1232,7 +1241,7 @@ def main(argv=None):
     print()
     print(f"[Config] SAES v2:")
     print(f"  tile={CONFIG.tile_size}, feat_var={CONFIG.feature_var_threshold}, depth_std={CONFIG.depth_std_threshold}")
-    print(f"  L0+L1 two-level progressive early-stopping (opacity-zero model)")
+    print(f"  L0+L1 probe-anchored Gaussian moment matching")
     print(f"[Config] FSDR (realistic ASIC):")
     print(f"  cache_size={CONFIG.fsdr_cache_size}, hamming_threshold={CONFIG.fsdr_hamming_threshold}")
     print(f"  reuse_hamming={CONFIG.fsdr_reuse_hamming}, reuse_spatial={CONFIG.fsdr_reuse_spatial}")
@@ -1293,8 +1302,9 @@ def main(argv=None):
     print(f"  GPU: {gpu_name} @ {gpu_freq_mhz} MHz (max SM clock)")
     
     # --- One forward pass to get outputs (for downstream use) ---
+    paired_rng_state = capture_torch_rng_state()
     with torch.no_grad():
-        encoder_output = model.encoder(context, False)
+        encoder_output = model.encoder(context, False, deterministic=False)
         
         # Handle different encoder output formats
         # DepthSplat may return dict with 'gaussians' key when return_depth=True
@@ -1315,7 +1325,7 @@ def main(argv=None):
     
     # --- Precise GPU timing (encoder only) via CUDA events ---
     def _baseline_encoder():
-        return model.encoder(context, False)
+        return model.encoder(context, False, deterministic=False)
     
     if args.sensitivity_trace:
         # Sensitivity uses the already-produced baseline tensors and replays
@@ -1538,8 +1548,16 @@ def main(argv=None):
                 print(f"    ✓ Features: {pipeline_features.shape}")
             elif hasattr(model.encoder, 'backbone'):
                 if args.model == 'transplat':
-                    extrinsics = context['extrinsics']
-                    img2world = torch.inverse(extrinsics).contiguous()
+                    from feature_extractor.transplat_extractor import (
+                        transplat_image_to_world,
+                    )
+
+                    img2world = transplat_image_to_world(
+                        context['extrinsics'],
+                        context['intrinsics'],
+                        h,
+                        w,
+                    ).contiguous()
                     pipeline_features, pipeline_cnn_features = model.encoder.backbone(
                         context['image'],
                         attn_splits=2,
@@ -1624,10 +1642,11 @@ def main(argv=None):
             if args.model == 'transplat':
                 depth_predictor_sim = TransplatDepthPredictorSim(device=device)
                 depth_predictor_sim.load_from_model(model.encoder)
-                depth_predictor_sim.set_accurate_mode(False)  # TRUE HW simulation
+                depth_predictor_sim.set_accurate_mode(True)
             elif args.model == 'mvsplat':
                 depth_predictor_sim = MVSplatDepthPredictorSim(device=device)
                 depth_predictor_sim.load_from_model(model.encoder)
+                depth_predictor_sim.set_accurate_mode(True)
             elif args.model == 'depthsplat':
                 depth_predictor_sim = DepthSplatDepthPredictorSim(device=device)
                 depth_predictor_sim.load_from_model(model.encoder)
@@ -1642,6 +1661,10 @@ def main(argv=None):
                 extra_info = {'images': rearrange(context['image'], 'b v c h w -> (v b) c h w')}
                 
                 with torch.no_grad():
+                    # The paper evaluates probabilistic Gaussian sampling. Replay the
+                    # exact stream used by the baseline so the hardware cycle model
+                    # changes execution cost, not the sampled neural result.
+                    restore_torch_rng_state(paired_rng_state)
                     dp_output = depth_predictor_sim.forward(
                         pipeline_features,  # Input from Stage 1
                         context['intrinsics'],
@@ -1653,6 +1676,7 @@ def main(argv=None):
                         dino_feature=dp_dino_feature,
                         cnn_features=pipeline_cnn_features,
                         extra_info=extra_info,
+                        deterministic=False,
                     )
                 
                 cycle_breakdown = dp_output.cycle_breakdown.to_dict()
@@ -1839,6 +1863,7 @@ def main(argv=None):
             extra_info = {'images': rearrange(context['image'], 'b v c h w -> (v b) c h w')}
             
             with torch.no_grad():
+                restore_torch_rng_state(paired_rng_state)
                 if args.model == 'transplat':
                     pipeline_depths, pipeline_densities, pipeline_raw_gaussians = model.encoder.depth_predictor(
                         pipeline_features,
@@ -1847,7 +1872,7 @@ def main(argv=None):
                         near,
                         far,
                         gaussians_per_pixel=1,
-                        deterministic=True,
+                        deterministic=False,
                         extra_info=extra_info,
                         cnn_features=pipeline_cnn_features,
                         da_depth=dp_da_depth,
@@ -1861,7 +1886,7 @@ def main(argv=None):
                         near,
                         far,
                         gaussians_per_pixel=1,
-                        deterministic=True,
+                        deterministic=False,
                         extra_info=extra_info,
                         cnn_features=pipeline_cnn_features,
                     )
@@ -2367,7 +2392,7 @@ def main(argv=None):
         }
         all_pixels = [(y, x, y * w + x) for y in range(h) for x in range(w)]
     else:
-        print("  [4b] Progressive SAES v4 (L0+L1: feature + depth uniformity, opacity-zero)...")
+        print("  [4b] Progressive SAES v4 (L0+L1 probe moment matching)...")
 
         # SAES works on a clone so we preserve originals for ablation
         saes_gaussians = Gaussians(
@@ -2384,6 +2409,8 @@ def main(argv=None):
             features=features,
             depths=depths,
             cross_check_threshold=CONFIG.saes_cross_check,
+            view_count=V_ctx,
+            materialization=args.saes_materialization,
         )
 
         # Print feature variance distribution for threshold calibration
@@ -2415,12 +2442,19 @@ def main(argv=None):
         print(f"    Level 0 (feature-uniform):  {l0_t} ({l0_t/max(1,total_tiles)*100:.1f}%)")
         print(f"    Level 1 (depth-uniform):    {l1_t} ({l1_t/max(1,total_tiles)*100:.1f}%)")
         print(f"    Full (no skip):             {f_t}  ({f_t/max(1,total_tiles)*100:.1f}%)")
-        print(f"  ✓ Modified pixels (opacity→0): {modified_pixels:,}/{h*w:,} "
-              f"({modified_pixels/(h*w)*100:.1f}%)")
+        total_positions = V_ctx * h * w
+        print(f"  ✓ Absorbed non-probe pixels: {modified_pixels:,}/{total_positions:,} "
+              f"({modified_pixels/total_positions*100:.1f}%)")
         print(f"    (Realistic: no post-hoc validation, thresholds ensure quality)")
 
         saes_low_var_stats = compute_saes_low_var_agreement(
-            scarf_gaussians_full, modified_mask, h, w, CONFIG.tile_size)
+            scarf_gaussians_full,
+            modified_mask,
+            h,
+            w,
+            CONFIG.tile_size,
+            view_count=V_ctx,
+        )
         print(f"    Low-Var. Agree.: {saes_low_var_stats['low_var_agree']*100:.1f}% "
               f"({saes_low_var_stats['low_var_tiles']}/{saes_low_var_stats['early_tiles']} early tiles, "
               f"mean sim={saes_low_var_stats['mean_similarity']:.3f})")
@@ -2428,7 +2462,7 @@ def main(argv=None):
     # Record SAES v4 savings for cycle model
     # Use h*w (pixel positions) as base, not N (total Gaussians incl. surfaces)
     # because ASIC processes per pixel position - skipping a position skips all surfaces
-    savings.record_saes(total_pixels=h*w, saes_stats=saes_stats)
+    savings.record_saes(total_pixels=V_ctx*h*w, saes_stats=saes_stats)
     
     # ---- Step 4c: FSDR (Feature-Similarity Gaussian Reuse) — Realistic ASIC ----
     if args.no_fsdr:
@@ -2523,7 +2557,7 @@ def main(argv=None):
     
     # Config 3: +SAES only (SAES-interpolated appearance, no post-hoc validation)
     if not args.no_saes:
-        print("  [3/4] Rendering: +SAES only (direct interpolation, no oracle validation)...")
+        print("  [3/4] Rendering: +SAES only (probe moment matching)...")
         ablation_renders['asic_saes'] = _render(saes_gaussians)
     else:
         ablation_renders['asic_saes'] = ablation_renders['asic']
@@ -2571,13 +2605,13 @@ def main(argv=None):
     fsdr_reused = fsdr.stats['total_reuse'] if not args.no_fsdr else 0
     gaussian_stats = {
         'gaussians_baseline': N,
-        'gaussians_output': N,
+        'gaussians_output': saes_stats.get('effective_gaussians', N),
         'pixels_modified': saes_stats.get('total_modified_pixels', 0),
         'fsdr_reused': fsdr_reused,
     }
     
     print(f"  ✓ 4-config rendering complete ({scarf_time:.2f}s total)")
-    print(f"  ✓ SAES modified {gaussian_stats['pixels_modified']:,} pixels (interpolation)")
+    print(f"  ✓ SAES absorbed {gaussian_stats['pixels_modified']:,} non-probe pixels")
     print(f"  ✓ FSDR guided {fsdr_reused:,} pixels (narrowed search, {CONFIG.fsdr_narrowed_candidates}/{CONFIG.num_depth_candidates} candidates)")
     
     # --------------------------------------------------------

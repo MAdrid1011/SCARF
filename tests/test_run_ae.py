@@ -27,9 +27,42 @@ def dry_run(tmp_path: Path, mode: str, *extra: str):
     return json.loads(result.stdout)
 
 
-def test_quality_dry_run_contains_all_claimed_dataset_aware_commands(tmp_path):
+def test_quality_dry_run_explicitly_skips_unclaimed_software_pairs(tmp_path):
     plan = dry_run(tmp_path, "quality", "--num-samples", "2")
     assert plan["mode"] == "quality"
+    assert not plan["experiments"]
+    assert not plan["dataset_commands"]
+    assert plan["software_claim_scope"] == {
+        "status": "NO_CLAIMED_PAIRS",
+        "pair_count": 0,
+        "diagnostic_results_are_claim_evidence": False,
+    }
+
+
+def test_quality_plan_contains_all_dataset_aware_commands_when_claimed(
+    tmp_path, monkeypatch
+):
+    import scripts.run_ae as runner
+
+    status = runner.load_claim_status()
+    for pair in status["software_pairs"]:
+        if not pair.endswith("/dl3dv"):
+            status["software_pairs"][pair] = "CLAIMED"
+    monkeypatch.setattr(runner, "load_claim_status", lambda: status)
+    plan = runner.build_plan(
+        type(
+            "Args",
+            (),
+            {
+                "mode": "quality",
+                "output_root": tmp_path,
+                "python": None,
+                "num_samples": 2,
+            },
+        )()
+    )
+
+    assert plan["software_claim_scope"]["status"] == "ACTIVE"
     assert len(plan["experiments"]) == 6
     pairs = {(item["model"], item["dataset"]) for item in plan["experiments"]}
     assert len(pairs) == 6
@@ -79,13 +112,9 @@ def test_quick_dry_run_is_small_and_re10k_based(tmp_path):
 def test_all_reuses_quality_runs_for_embedded_ablation_and_validation(tmp_path):
     plan = dry_run(tmp_path, "all", "--num-samples", "2")
 
-    assert len(plan["experiments"]) == 6
-    assert {item["workflow"] for item in plan["experiments"]} == {"quality"}
-    assert sum(item["workflow"] == "quality" for item in plan["experiments"]) == 6
-    assert len(plan["dataset_commands"]) == 2
-    for item in plan["experiments"]:
-        assert len(item["commands"]) == 1
-        assert all("--ablation" not in command for command in item["commands"])
+    assert not plan["experiments"]
+    assert not plan["dataset_commands"]
+    assert plan["software_claim_scope"]["status"] == "NO_CLAIMED_PAIRS"
     command_text = [" ".join(command) for command in plan["commands"]]
     assert any("hardware/dram/run.sh" in command for command in command_text)
     assert command_text[-1].endswith(f"validate_ae.py --input {tmp_path}")
@@ -105,8 +134,26 @@ def test_dry_run_does_not_create_output_tree(tmp_path):
     assert not (tmp_path / "not-created").exists()
 
 
-def test_full_mode_uses_recovered_executable_sample_counts(tmp_path):
-    plan = dry_run(tmp_path, "quality")
+def test_full_mode_uses_recovered_executable_sample_counts(tmp_path, monkeypatch):
+    import scripts.run_ae as runner
+
+    status = runner.load_claim_status()
+    for pair in status["software_pairs"]:
+        if not pair.endswith("/dl3dv"):
+            status["software_pairs"][pair] = "CLAIMED"
+    monkeypatch.setattr(runner, "load_claim_status", lambda: status)
+    plan = runner.build_plan(
+        type(
+            "Args",
+            (),
+            {
+                "mode": "quality",
+                "output_root": tmp_path,
+                "python": None,
+                "num_samples": None,
+            },
+        )()
+    )
     counts = {
         item["dataset"]: item["sample_count"] for item in plan["experiments"]
     }

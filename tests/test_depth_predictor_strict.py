@@ -68,6 +68,25 @@ def test_depthsplat_regressor_channels_follow_each_model_scale():
     assert HWDepthPredictor._depthsplat_regressor_output_channels(model, 1) == 64
 
 
+def test_reference_depth_kwargs_are_model_specific():
+    from depth_predictor.hw_depth_predictor import HWDepthPredictor
+
+    common = {
+        "da_depth": object(),
+        "dino_feature": object(),
+        "cnn_features": object(),
+        "extra_info": {},
+        "deterministic": False,
+    }
+    transplat = HWDepthPredictor(device=torch.device("cpu"), model_type="transplat")
+    mvsplat = HWDepthPredictor(device=torch.device("cpu"), model_type="mvsplat")
+
+    assert "da_depth" in transplat._reference_model_kwargs(common)
+    assert "dino_feature" in transplat._reference_model_kwargs(common)
+    assert "da_depth" not in mvsplat._reference_model_kwargs(common)
+    assert "dino_feature" not in mvsplat._reference_model_kwargs(common)
+
+
 def test_module_cycle_trace_uses_executed_layer_shapes():
     from torch import nn
 
@@ -87,3 +106,24 @@ def test_module_cycle_trace_uses_executed_layer_shapes():
     assert traced.breakdown["conv2d"] > 0
     assert traced.breakdown["conv_transpose2d"] > 0
     assert traced.breakdown["gelu"] > 0
+
+
+def test_callable_cycle_trace_counts_only_selected_executed_modules():
+    from torch import nn
+
+    from depth_predictor.module_cycle_trace import (
+        run_callable_with_module_cycle_trace,
+    )
+
+    selected = nn.Sequential(nn.Conv2d(3, 4, 3, padding=1), nn.GELU())
+    excluded = nn.Conv2d(4, 5, 1)
+    input_tensor = torch.randn(1, 3, 8, 8)
+
+    trace = run_callable_with_module_cycle_trace(
+        lambda: excluded(selected(input_tensor)), [selected]
+    )
+
+    assert trace.output.shape == (1, 5, 8, 8)
+    assert trace.total_cycles == sum(trace.breakdown.values())
+    assert trace.breakdown["conv2d"] > 0
+    assert trace.breakdown["gelu"] > 0

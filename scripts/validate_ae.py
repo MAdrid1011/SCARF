@@ -412,9 +412,41 @@ def validate_complete(output: Path, expected_path: Path) -> dict[str, Any]:
         for pair, state in claim_status["mechanism_pairs"].items()
         if state == "CLAIMED"
     }
-    if not quality_pairs:
-        raise ValueError("claim contract has no reproduced software result")
     checks = [protocol_check(protocol, quality_pairs)]
+    quick_path = output / "quick/mvsplat_re10k/results.json"
+    quick = load(quick_path)
+    validate(quick)
+    require_aggregate(quick, "quick/mvsplat/re10k")
+    checks.extend(
+        (
+            clean_source_check(quick, "mvsplat/re10k", "quick"),
+            environment_provenance_check(quick, "mvsplat/re10k", output),
+            {
+                "claim": "functional:quick_fixture_not_paper_evidence",
+                "pass": quick["provenance"]["dataset"].get("functional_fixture")
+                is True
+                and quick["provenance"]["dataset"].get("paper_result_eligible")
+                is False,
+            },
+        )
+    )
+    if not quality_pairs:
+        software_states = {
+            pair: state
+            for pair, state in claim_status["software_pairs"].items()
+            if not pair.endswith("/dl3dv")
+        }
+        checks.append(
+            {
+                "claim": "table1:not_claimed_sparse_quality_mismatch",
+                "actual": software_states,
+                "pass": bool(software_states)
+                and all(
+                    str(state).startswith("NOT_CLAIMED")
+                    for state in software_states.values()
+                ),
+            }
+        )
     quality_results = {}
     for pair in (item for item in expected["table1"] if item in quality_pairs):
         targets = expected["table1"][pair]

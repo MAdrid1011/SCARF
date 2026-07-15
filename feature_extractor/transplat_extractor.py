@@ -26,6 +26,25 @@ from .transformer_simulator import TransformerSimulator
 from .types import CNNConfig, TransformerConfig
 
 
+def transplat_image_to_world(
+    extrinsics: torch.Tensor,
+    intrinsics: torch.Tensor,
+    height: int,
+    width: int,
+) -> torch.Tensor:
+    """Match ``EncoderTrans.forward`` camera encoding exactly."""
+    intrinsics_pixels = intrinsics[:, :, :3, :3].clone().detach()
+    intrinsics_pixels[:, :, 0, :] *= float(width)
+    intrinsics_pixels[:, :, 1, :] *= float(height)
+    camera_matrix = torch.eye(
+        4, device=intrinsics.device, dtype=intrinsics.dtype
+    ).reshape(1, 1, 4, 4).repeat(
+        intrinsics.shape[0], intrinsics.shape[1], 1, 1
+    )
+    camera_matrix[:, :, :3, :3] = intrinsics_pixels
+    return extrinsics @ torch.linalg.inv(camera_matrix)
+
+
 @dataclass
 class TransplatFeatureOutput:
     """Output from TranSplat feature extraction."""
@@ -166,8 +185,14 @@ class TransplatFeatureExtractor:
                 features_list = list(torch.unbind(features_per_view, dim=1))
                 
                 # Add camera parameter encoding (matches backbone.forward)
-                if hasattr(self.backbone, 'cam_param_encoder') and extrinsics is not None:
-                    img2world = torch.inverse(extrinsics).contiguous()
+                if (
+                    hasattr(self.backbone, 'cam_param_encoder')
+                    and extrinsics is not None
+                    and intrinsics is not None
+                ):
+                    img2world = transplat_image_to_world(
+                        extrinsics, intrinsics, h, w
+                    ).contiguous()
                     feature_list_with_cam = []
                     for v_id, cur_features in enumerate(features_list):
                         feature_list_with_cam.append(
@@ -205,6 +230,22 @@ class TransplatFeatureExtractor:
                     trans_features = features_per_view
                     transformer_cycles = 0
         
+        # The cycle simulators above establish hardware work from executed
+        # tensor shapes. Claim quality uses the pinned network's exact numeric
+        # output so approximate simulator weights cannot change Table 1.
+        with torch.no_grad():
+            img2world = (
+                transplat_image_to_world(extrinsics, intrinsics, h, w)
+                if extrinsics is not None and intrinsics is not None
+                else None
+            )
+            trans_features, cnn_features_bvchw = self.backbone(
+                images,
+                attn_splits=attn_splits,
+                return_cnn_features=True,
+                img2world=img2world,
+            )
+
         cycle_breakdown = {
             'cnn': cnn_cycles,
             'transformer': transformer_cycles,

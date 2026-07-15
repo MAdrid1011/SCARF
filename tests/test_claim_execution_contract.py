@@ -51,11 +51,19 @@ def test_all_model_loaders_accept_an_evaluation_index(monkeypatch):
         sys.modules.pop("integration", None)
 
 
-def test_full_claim_dry_run_passes_index_to_pair_worker(tmp_path: Path):
+def test_full_claim_dry_run_passes_index_to_pair_worker(
+    tmp_path: Path, monkeypatch
+):
     from argparse import Namespace
-    from scripts.run_ae import build_plan
+    import scripts.run_ae as runner
 
-    plan = build_plan(
+    status = runner.load_claim_status()
+    for pair in status["software_pairs"]:
+        if not pair.endswith("/dl3dv"):
+            status["software_pairs"][pair] = "CLAIMED"
+    monkeypatch.setattr(runner, "load_claim_status", lambda: status)
+
+    plan = runner.build_plan(
         Namespace(mode="quality", output_root=tmp_path, python=None, num_samples=None)
     )
     assert len(plan["experiments"]) == 6

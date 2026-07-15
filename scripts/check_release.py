@@ -124,9 +124,13 @@ def check_dataset_sources(path: Path | None = None) -> list[str]:
         for pair, status in claim_status["software_pairs"].items()
         if status == "CLAIMED"
     }
+    # Re10K and ACID are locally prepared, release-checked Functional inputs even
+    # when their paper-result rows are suspended.  DL3DV remains optional while
+    # gated and is required only if a corresponding result is claimed.
+    verified_datasets = {"re10k", "acid"} | claimed_datasets
     for name, item in datasets.items():
         revision = item.get("prepared_source_revision")
-        if name in claimed_datasets:
+        if name in verified_datasets:
             revision_valid = (
                 bool(re.fullmatch(r"archive-sha256:[0-9a-f]{64}", str(revision)))
                 if name in {"re10k", "acid"}
@@ -146,7 +150,7 @@ def check_dataset_sources(path: Path | None = None) -> list[str]:
                         )
                         continue
                     tree_hash = prepared.get("expected_tree_sha256")
-                    if name in claimed_datasets and (not isinstance(tree_hash, str) or not re.fullmatch(
+                    if name in verified_datasets and (not isinstance(tree_hash, str) or not re.fullmatch(
                         r"[0-9a-f]{64}", tree_hash
                     )):
                         failures.append(
@@ -158,7 +162,7 @@ def check_dataset_sources(path: Path | None = None) -> list[str]:
                         )
         else:
             tree_hash = item.get("expected_tree_sha256")
-            if name in claimed_datasets and (not isinstance(tree_hash, str) or not re.fullmatch(
+            if name in verified_datasets and (not isinstance(tree_hash, str) or not re.fullmatch(
                 r"[0-9a-f]{64}", tree_hash
             )):
                 failures.append(f"{name} has no verified dataset tree SHA256")
@@ -387,17 +391,26 @@ def check_claim_status(path: Path | None = None) -> list[str]:
         for dataset in ("re10k", "acid", "dl3dv")
     }
     failures = []
-    allowed_pair_states = {"CLAIMED", "NOT_CLAIMED_GATED_DATA"}
+    allowed_pair_states = {
+        "software_pairs": {
+            "CLAIMED",
+            "NOT_CLAIMED_GATED_DATA",
+            "NOT_CLAIMED_SAES_SPARSE_QUALITY_MISMATCH",
+        },
+        "mechanism_pairs": {
+            "CLAIMED",
+            "NOT_CLAIMED_GATED_DATA",
+            "NOT_CLAIMED_SAES_PROTOCOL_MISMATCH",
+        },
+    }
     for field in ("software_pairs", "mechanism_pairs"):
         states = record.get(field)
         if not isinstance(states, dict) or set(states) != expected_pairs:
             failures.append(f"claim status {field} does not cover all nine pairs")
             continue
-        invalid = sorted(set(states.values()) - allowed_pair_states)
+        invalid = sorted(set(states.values()) - allowed_pair_states[field])
         if invalid:
             failures.append(f"claim status {field} has invalid states: {invalid}")
-        if not any(state == "CLAIMED" for state in states.values()):
-            failures.append(f"claim status {field} has no claimed result")
     aggregate_states = {
         "figure8": {"CLAIMED", "NOT_CLAIMED_NO_ORIN_EVIDENCE"},
         "figure11": {"CLAIMED", "NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX"},

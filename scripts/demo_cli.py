@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--saes-fv", type=float)
     parser.add_argument("--saes-ds", type=float)
     parser.add_argument("--saes-cc", type=float)
+    parser.add_argument(
+        "--saes-materialization",
+        choices=("representative", "dense-diagnostic"),
+        default="representative",
+        help="Use the paper-faithful sparse path or a non-claim dense diagnostic",
+    )
     parser.add_argument("--tile-size", type=positive_int)
     parser.add_argument("--fsdr-cache-size", type=positive_int)
     parser.add_argument("--fsdr-hamming", type=nonnegative_int)
@@ -94,5 +100,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if strict_run and disabled:
         build_parser().error(
             f"{mode} forbids disabled stages: " + ", ".join(disabled)
+        )
+    if strict_run and args.saes_materialization != "representative":
+        build_parser().error(
+            f"{mode} requires --saes-materialization representative"
         )
     return args

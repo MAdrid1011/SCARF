@@ -3,8 +3,9 @@
 **Paper:** SCARF: A Scene-Adaptive Depth-Guided G-3DGS Encoder
 Accelerator with Semantic Reuse and Fused Dataflow
 
-**Badges requested:** Artifacts Available, Artifacts Evaluated (Functional),
-and Results Reproduced.
+**Badges requested:** Artifacts Available and Artifacts Evaluated (Functional).
+Results Reproduced is not requested because the real sparse-SAES probes do not
+meet the paper's Table 1 and Tables 2--3 contracts.
 
 The exact claim scope, commands, and tolerances are defined in
 [`artifact/CLAIMS.md`](artifact/CLAIMS.md). The final archival DOI must be added
@@ -56,7 +57,7 @@ for a paper-result claim. Full quality runs require the real prepared datasets.
 |---|---|
 | Quick strict inference | NVIDIA CUDA GPU with 8 GB VRAM, 16 GB RAM, 20 GB free disk |
 | CPU schema smoke | Ubuntu 22.04, x86-64 CPU, 8 GB RAM |
-| Full quality matrix | NVIDIA CUDA GPU with 24 GB VRAM, 32 GB RAM |
+| Optional diagnostic quality matrix | NVIDIA CUDA GPU with 24 GB VRAM, 32 GB RAM |
 | Orin baseline | Jetson Orin NX 16 GB, documented JetPack and MAXN state |
 | RTL validation | JDK 11+, sbt 1.9+, Verilator 5+ |
 | ASAP7 physical proxy | x86-64 Linux, 128 GB RAM recommended, 100 GB free disk, pinned iFlow checkout |
@@ -161,7 +162,7 @@ recorded. Claim runs use these exact context and target views through the
 evaluation sampler. A one-sample run remains Functional evidence only. See the
 evaluation protocol document.
 
-## Claimed Experiments
+## Experiment Status
 
 ### Table 1: Rendering Quality
 
@@ -169,12 +170,21 @@ evaluation protocol document.
 bash scripts/run_ae.sh quality
 ```
 
-This evaluates PSNR, SSIM, and LPIPS for all claimed model/dataset pairs. Each
+Current state: `NOT_CLAIMED_SAES_SPARSE_QUALITY_MISMATCH`. The claim-aware
+command records an explicit `NO_CLAIMED_PAIRS` no-op; focused diagnosis can run
+`scripts/demo.py` directly, but its sparse-SAES result is not part of the badge
+claim. Corrected TranSplat and MVSplat probes keep the no-optimization path
+numerically identical to the pinned model and preserve FSDR quality, while
+sparse SAES exceeds the Table 1 tolerances. Each
 sample result covers every target view selected by the configured sampler and
 records per-view metrics. The sample metric is their arithmetic mean. Signed
 change, degradation, and absolute change are separate fields. The maximum
 degradation statement in the paper must not be interpreted as a maximum
 absolute deviation.
+
+The optional `--saes-materialization dense-diagnostic` path retains every
+Gaussian and is rejected by claim/Functional runs. Its closer image quality is
+not accepted as evidence for sparse Gaussian pruning.
 
 ### Figure 8: End-to-End Speedup
 
@@ -200,10 +210,12 @@ commercial TSMC28 implementation.
 bash scripts/run_ae.sh ablation
 ```
 
-The output includes FSDR-only, SAES-only, combined, and no-optimization results,
-plus guided-rate, Top-1 coverage, L0/L1, Gaussian, and memory statistics. The
-six Re10K and ACID Tables 2-3 rows are claimed. Figure 11 is not claimed because
-its paper target is the geometric mean over all nine pairs.
+When rows are claimed, the output includes FSDR-only, SAES-only, combined, and
+no-optimization results, plus guided-rate, Top-1 coverage, L0/L1, Gaussian, and
+memory statistics. Current state: `NOT_CLAIMED_SAES_PROTOCOL_MISMATCH`; the
+claim-aware command is therefore an explicit no-op. Real probes produced zero
+L1 tiles instead of the nonzero paper targets, so Tables 2--3 and Figure 11 are
+not claimed.
 
 ### Figures 13-16: Sensitivity
 
@@ -218,19 +230,18 @@ The configured grids include cache sizes 8-128, Hamming thresholds 1-5, the
 feature and depth thresholds from the paper, and tile sizes 2-32. Every grid point runs
 all protocol samples and produces a strict dataset aggregate before plotting.
 
-### All Software Claims
+### Complete Declared Workflow
 
 ```bash
 bash scripts/run_ae.sh all
 bash scripts/run_ae.sh validate
 ```
 
-`all` runs one six-pair Re10K and ACID matrix. Each result contains quality,
-four ablation configurations, and FSDR and SAES mechanism statistics, so the
-model forward pass is not duplicated. It skips Orin, DL3DV, Figure 11
-aggregation, and sensitivity according to the machine-readable claim status.
-It then runs RTL, the public DRAM proxy,
-physical design, scaling, report generation, and validation. `validate`
+`all` follows the machine-readable claim status. The six-pair software matrix
+is currently diagnostic rather than required claim work; it must not be used to
+turn the dense path into sparse evidence. The declared workflow runs RTL, the
+public DRAM proxy, physical design, scaling, report generation, and validation.
+`validate`
 returns nonzero when a claimed result is missing, structurally invalid, outside
 its tolerance, or based on an unfinalized sample protocol.
 
