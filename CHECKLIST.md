@@ -199,18 +199,24 @@ diagnostics, and repeat the clean-room checks on the final DOI-bound bundles.
   strict-run rejection, and non-claim result eligibility.
 - [x] Implement the diagnostic feature source without changing the default
   pipeline feature path.
-- [ ] Run one clean fixed sample and record feature statistics, L0/L1/Full
+- [x] Run one clean fixed sample and record feature statistics, L0/L1/Full
   rates, and unchanged PSNR/SSIM/LPIPS deltas.
-- [ ] Promote only if all provenance and quality gates pass; otherwise keep the
+- [x] Reject promotion because every quality gate failed; keep the
   full six-pair matrix stopped.
+- [x] Preserve v1/v2 implementation failures, add regression tests for SAES/FSDR
+  tensor isolation and retention-boundary selection, and complete v3 at clean
+  commit `5cee926` without fallback.
+- [x] Record the v3 contradiction: L0/L1/Full was 29.2%/0.0%/70.8%, SAES-only
+  deltas were -0.8090 dB PSNR, -0.027802 SSIM, and +0.066505 LPIPS, and even
+  the 4.2969% retention slice failed LPIPS at +0.019034.
 
 ## Latest Local Verification
 
 Verified on 2026-07-16:
 
-- Base `pytest -q`: 256 passed after the probe-vector first-hit diagnostic was
-  isolated from claim and Functional runs.
-- Locked classic profile: all 256 tests pass. Both classic and DepthSplat
+- Base `pytest -q`: 262 passed after isolating diagnostic SAES and FSDR feature
+  tensors and binding the retention audit to the selected SAES tensor.
+- Locked classic profile: all 262 tests pass. Both classic and DepthSplat
   environment checkers pass with CUDA 12.1 on the declared compiler path.
 - Strict quick passed on the RTX 3060 with the pinned classic profile. It loaded
   MVSplat once, selected all three declared target views, emitted positive
@@ -227,6 +233,11 @@ Verified on 2026-07-16:
   L0/L1/Full=3.796%/86.267%/9.937% and quality deltas of -3.1708 dB PSNR,
   -0.103587 SSIM, and +0.180455 LPIPS. Its result and run log validate but are
   explicitly non-claim evidence; the interpretation is not promoted.
+- The Gaussian-head feature audit at clean commit `5cee926` captured the real
+  `[1,2,163,256,256]` head input but still produced
+  L0/L1/Full=29.2%/0.0%/70.8%. SAES-only deltas were -0.8090 dB PSNR,
+  -0.027802 SSIM, and +0.066505 LPIPS. The complete v3 result validates and is
+  explicitly non-claim evidence; six-pair quality execution remains stopped.
 - A fresh post-fix strict quick run also passed under `outputs/ae_regression`.
 - Release clean-room testing found that the source bundle omitted the synthetic
   quick dataset because all of `datasets/` was excluded. The archive now

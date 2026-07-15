@@ -453,3 +453,25 @@
 - Strongest alternative: if the head input still fails, the mismatch lies in
   sparse materialization or unpublished feature normalization rather than the
   selected tensor alone.
+- Result: refuted at clean commit `5cee926`. The captured tensor was the
+  authentic full-resolution `[1,2,163,256,256]` Gaussian-head input, and the
+  schema-valid diagnostic preserved scene `5aca87f95a9412c6`, context views
+  `[58,133]`, target views `[84,102,129]`, and no simulator fallback. The
+  executed current decision still produced L0/L1/Full rates of
+  29.2%/0.0%/70.8% because all 8,192 channel-standard-deviation scores were
+  below `tau_f=0.2` and the Gaussian cross-check remained the effective L0
+  gate.
+- Quality result: SAES-only changed PSNR by -0.8090 dB, SSIM by -0.027802,
+  and LPIPS by +0.066505. At the smallest target-free retained fraction,
+  4.2969%, PSNR and SSIM were within tolerance but LPIPS still changed by
+  +0.019034. Every coverage, component-attribution, and retention-boundary
+  variant failed at least one unchanged tolerance.
+- Failure recovery: v1 exposed FSDR reading the diagnostic SAES tensor, and v2
+  exposed one stale retention-boundary variable. Both failures have dedicated
+  regression tests; v1/v2 logs remain preserved, while the complete v3 result
+  is under
+  `outputs/ae_failures/diagnostics/transplat-re10k-saes-gaussian-head-feature-v3/`.
+- Decision: do not promote the Gaussian-head source and do not resume the six
+  quality pilots. The full-resolution source changes the raw feature
+  distribution but does not recover either the paper path split or sparse
+  quality, so the remaining mismatch is not feature-source selection alone.
