@@ -103,6 +103,7 @@ def test_probe_vector_first_hit_routes_l1_without_unpublished_gaussian_gate():
     assert stats["level0_tiles"] == 0
     assert stats["level1_tiles"] == 1
     assert stats["full_tiles"] == 0
+    assert stats["decision_semantics"] == "probe-vector-first-hit"
 
 
 def test_probe_cross_check_exposes_the_continuous_error():

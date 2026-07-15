@@ -728,7 +728,8 @@ class ProgressiveSAES:
             gaussian_count, dtype=torch.bool, device=device
         )
         for key in self.stats:
-            self.stats[key] = 0
+            if key != 'decision_semantics':
+                self.stats[key] = 0
 
         tiles_h = self.H // self.initial_tile_size
         tiles_w = self.W // self.initial_tile_size
