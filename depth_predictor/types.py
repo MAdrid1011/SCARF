@@ -10,6 +10,40 @@ from enum import Enum
 import torch
 
 
+def align_view_major_features(
+    features: torch.Tensor,
+    *,
+    batch_size: int,
+    view_count: int,
+) -> torch.Tensor:
+    """Convert an executed `(view batch)` tensor to `[B,V,C,H,W]`."""
+    if features.dim() != 4:
+        raise ValueError("SAES features must have shape [V*B,C,H,W]")
+    if batch_size < 1 or view_count < 1:
+        raise ValueError("batch_size and view_count must be positive")
+    if features.shape[0] != batch_size * view_count:
+        raise ValueError("SAES feature rows must equal batch_size * view_count")
+    return features.reshape(
+        view_count, batch_size, *features.shape[1:]
+    ).permute(1, 0, 2, 3, 4).contiguous()
+
+
+def align_batch_major_features(
+    features: torch.Tensor,
+    *,
+    batch_size: int,
+    view_count: int,
+) -> torch.Tensor:
+    """Convert an executed `(batch view)` tensor to `[B,V,C,H,W]`."""
+    if features.dim() != 4:
+        raise ValueError("SAES features must have shape [B*V,C,H,W]")
+    if batch_size < 1 or view_count < 1:
+        raise ValueError("batch_size and view_count must be positive")
+    if features.shape[0] != batch_size * view_count:
+        raise ValueError("SAES feature rows must equal batch_size * view_count")
+    return features.reshape(batch_size, view_count, *features.shape[1:]).contiguous()
+
+
 class CostVolumeType(Enum):
     """Cost volume construction method."""
     CORRELATION = "correlation"      # Direct correlation (MVSplat, DepthSplat)
@@ -135,6 +169,7 @@ class DepthPredictorOutput:
     depths: torch.Tensor               # [B, V, H, W] or [B, V, H*W, srf, gpp]
     densities: Optional[torch.Tensor]  # [B, V, H, W] or [B, V, H*W, srf, gpp]
     raw_gaussians: Optional[torch.Tensor]  # [B, V, H*W, d_in]
+    saes_features: Optional[torch.Tensor] = None  # [B, V, C, H, W]
     
     # Intermediate outputs (for debugging/comparison)
     depth_probs: Optional[torch.Tensor] = None  # [B, V, D, H, W] - softmax probs

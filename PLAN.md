@@ -423,3 +423,33 @@
   pilots. The available paper text does not define a route that simultaneously
   recovers its path rates and sparse quality without an unpublished
   normalization, gate, or materialization/recovery procedure.
+
+## 14. SAES Gaussian-Head Feature Audit
+
+- Run ID: `saes-gaussian-head-feature-v1`.
+- Research question: does SAES currently measure the wrong executed feature
+  tensor? The implementation uses the 1/4-resolution matching feature, while
+  all three upstream encoders regress Gaussian attributes from a distinct
+  full-resolution head input containing refined and upsampled encoder features.
+- Paper basis: Section 2 states that predicted depth and encoder features are
+  regressed into per-pixel Gaussian attributes; Sections 3--4 place the SAES
+  decision and parameter prediction in S3. The input to the executed Gaussian
+  head is therefore a source-derived candidate and requires no table-fitted
+  constant.
+- Fixed conditions: canonical TranSplat/Re10K sample 0, seed 0, checkpoint,
+  context/target views, `tau_f=0.2`, `tau_d=0.1`, tile size 4, materialization,
+  FSDR, renderer, and all quality metrics remain unchanged.
+- One-factor change: capture the real `to_gaussians` pre-hook input and select
+  it only through a diagnostic `--saes-feature-source` option. The public
+  default remains `pipeline`; claim and Functional runs must reject the
+  diagnostic source and generated evidence must set
+  `paper_result_eligible=false`.
+- First gate: the captured tensor must be full resolution, have a recorded
+  channel count/source, cover every context view, and yield finite raw/unit
+  probe-vector statistics without fallback.
+- Promotion gate: the fixed sample must pass PSNR <= 0.15 dB, SSIM <= 0.005,
+  and LPIPS <= 0.005 with a non-degenerate first-hit split. Otherwise preserve
+  the result and do not launch six-pair pilots.
+- Strongest alternative: if the head input still fails, the mismatch lies in
+  sparse materialization or unpublished feature normalization rather than the
+  selected tensor alone.

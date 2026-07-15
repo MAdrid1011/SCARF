@@ -191,6 +191,19 @@ diagnostics, and repeat the clean-room checks on the final DOI-bound bundles.
 - [x] Reject promotion: L1 reached 86.267%, while PSNR, SSIM, and LPIPS missed
   the unchanged gates by large margins. Keep six-pair pilots stopped.
 
+### SAES Gaussian-Head Feature Audit
+
+- [x] Bind the audit to the canonical TranSplat/Re10K sample and identify the
+  authentic full-resolution Gaussian-head input in the upstream source.
+- [x] Add failure-first tests for pre-hook capture, `[B,V,C,H,W]` alignment,
+  strict-run rejection, and non-claim result eligibility.
+- [x] Implement the diagnostic feature source without changing the default
+  pipeline feature path.
+- [ ] Run one clean fixed sample and record feature statistics, L0/L1/Full
+  rates, and unchanged PSNR/SSIM/LPIPS deltas.
+- [ ] Promote only if all provenance and quality gates pass; otherwise keep the
+  full six-pair matrix stopped.
+
 ## Latest Local Verification
 
 Verified on 2026-07-16:

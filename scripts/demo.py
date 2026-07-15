@@ -1448,6 +1448,7 @@ def main(argv=None):
     pipeline_features = None
     pipeline_cnn_features = None
     pipeline_mono_features = None
+    pipeline_saes_features = None
     depthsplat_results = None  # Store DepthSplat results_dict for S3
     
     use_feature_sim = not args.no_feature
@@ -1749,6 +1750,7 @@ def main(argv=None):
                 pipeline_depths = dp_output.depths
                 pipeline_densities = dp_output.densities
                 pipeline_raw_gaussians = dp_output.raw_gaussians
+                pipeline_saes_features = dp_output.saes_features
                 fsdr_depth_probs = dp_output.depth_probs
                 fsdr_depth_candidates = dp_output.depth_candidates
                 fsdr_candidate_domain = dp_output.candidate_domain
@@ -1835,6 +1837,13 @@ def main(argv=None):
                                 features_upsampled,
                                 match_prob_max,
                             ], dim=1)
+                            from depth_predictor.types import align_batch_major_features
+
+                            pipeline_saes_features = align_batch_major_features(
+                                gaussian_head_input,
+                                batch_size=b_ds,
+                                view_count=v_ds,
+                            )
                             
                             gaussian_head_trace = run_module_with_cycle_trace(
                                 model.encoder.gaussian_head, gaussian_head_input
@@ -2453,8 +2462,24 @@ def main(argv=None):
             print(f"    ⚠ Using baseline gaussians (no pipeline inputs)")
             scarf_gaussians_full = baseline_gaussians
     
-    # Store pipeline features for FSDR
-    features = pipeline_features
+    if args.saes_feature_source == 'pipeline':
+        features = pipeline_features
+    else:
+        if pipeline_saes_features is None:
+            raise RuntimeError(
+                "Gaussian-head SAES feature source was requested but not captured"
+            )
+        if pipeline_saes_features.dim() != 5:
+            raise RuntimeError("Gaussian-head SAES features are not [B,V,C,H,W]")
+        if tuple(pipeline_saes_features.shape[:2]) != (B, V_ctx):
+            raise RuntimeError("Gaussian-head SAES features do not cover every view")
+        if tuple(pipeline_saes_features.shape[-2:]) != (h, w):
+            raise RuntimeError("Gaussian-head SAES features are not full resolution")
+        features = pipeline_saes_features
+    print(
+        f"    SAES feature source: {args.saes_feature_source} "
+        f"({features.shape[2]} channels, {features.shape[-2]}x{features.shape[-1]})"
+    )
     depths = pipeline_depths
     densities = pipeline_densities
     raw_gaussians_captured = pipeline_raw_gaussians
@@ -2473,7 +2498,7 @@ def main(argv=None):
         best_saes_th, best_fsdr_tol, _, _ = tune_thresholds(
             scarf_gaussians_full, model, tgt_ext, tgt_int, target, h, w, device,
             gt_image_tune, baseline_psnr_tune,
-            features=pipeline_features, depths=pipeline_depths,
+            features=features, depths=pipeline_depths,
         )
         
         # Apply tuned thresholds (already written to CONFIG inside tune_thresholds)
@@ -2636,6 +2661,7 @@ def main(argv=None):
             materialization=args.saes_materialization,
             decision_semantics=args.saes_decision_semantics,
         )
+        saes_stats['feature_source'] = args.saes_feature_source
 
         # Print feature variance distribution for threshold calibration
         if features is not None:
@@ -2713,6 +2739,7 @@ def main(argv=None):
                 {
                     'model': args.model,
                     'dataset': args.dataset,
+                    'feature_source': args.saes_feature_source,
                     'sample_index': args.sample_index,
                     'representative_count': int(saes_representatives.numel()),
                     'coverage_sweep': [],
@@ -3511,7 +3538,12 @@ def main(argv=None):
         ),
         fallback_stages=fallback_stages,
         paper_result_eligible=(
-            False if args.saes_decision_semantics != 'current' else None
+            False
+            if (
+                args.saes_decision_semantics != 'current'
+                or args.saes_feature_source != 'pipeline'
+            )
+            else None
         ),
     )
     if strict_run:

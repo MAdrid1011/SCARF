@@ -127,3 +127,35 @@ def test_callable_cycle_trace_counts_only_selected_executed_modules():
     assert trace.total_cycles == sum(trace.breakdown.values())
     assert trace.breakdown["conv2d"] > 0
     assert trace.breakdown["gelu"] > 0
+
+
+def test_gaussian_head_pre_hook_capture_is_removed_and_view_aligned():
+    from torch import nn
+
+    from depth_predictor.hw_depth_predictor import capture_first_tensor_input
+    from depth_predictor.types import align_view_major_features
+
+    head = nn.Conv2d(3, 2, kernel_size=1)
+    view_major = torch.arange(4 * 3 * 2 * 2, dtype=torch.float32).reshape(
+        4, 3, 2, 2
+    )
+    with capture_first_tensor_input(head) as captured:
+        head(view_major)
+    head(torch.zeros_like(view_major))
+
+    assert len(captured) == 1
+    aligned = align_view_major_features(captured[0], batch_size=2, view_count=2)
+    assert aligned.shape == (2, 2, 3, 2, 2)
+    assert torch.equal(aligned[0, 0], view_major[0])
+    assert torch.equal(aligned[0, 1], view_major[2])
+    assert torch.equal(aligned[1, 0], view_major[1])
+    assert torch.equal(aligned[1, 1], view_major[3])
+
+
+def test_gaussian_head_feature_alignment_rejects_incomplete_views():
+    from depth_predictor.types import align_view_major_features
+
+    with pytest.raises(ValueError, match=r"batch_size \* view_count"):
+        align_view_major_features(
+            torch.zeros(3, 4, 2, 2), batch_size=2, view_count=2
+        )

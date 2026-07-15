@@ -77,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run a non-claim decision-statistic and sparse-coverage sweep",
     )
+    parser.add_argument(
+        "--saes-feature-source",
+        choices=("pipeline", "gaussian-head-input"),
+        default="pipeline",
+        help="Select a non-claiming executed feature tensor for SAES diagnostics",
+    )
 
     parser.add_argument("--saes-fv", type=float)
     parser.add_argument("--saes-ds", type=float)
@@ -133,6 +139,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         build_parser().error(
             f"{mode} forbids non-default --saes-decision-semantics"
         )
+    if strict_run and args.saes_feature_source != "pipeline":
+        build_parser().error(f"{mode} forbids non-default --saes-feature-source")
     if args.fsdr_only and not args.claim_run:
         build_parser().error("--fsdr-only requires --claim-run")
     if args.fsdr_only and any(

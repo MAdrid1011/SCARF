@@ -16,6 +16,7 @@ NO PyTorch high-level operations - everything goes through hardware units.
 
 import logging
 import math
+from contextlib import contextmanager, nullcontext
 
 import torch
 import torch.nn as nn
@@ -34,13 +35,35 @@ from encoder import (
     CycleStats, ActivationType, NormType, EncoderConfig,
     SoftmaxUnit, SoftmaxConfig,
 )
-from .types import DepthPredictorConfig, DepthPredictorOutput, CycleBreakdown
+from .types import (
+    CycleBreakdown,
+    DepthPredictorConfig,
+    DepthPredictorOutput,
+    align_view_major_features,
+)
 
 # ---- Hardware parallelism constants ----
 # Derived from encoder/types.py ConvConfig(pe_array_size=32) → 32×32 = 1024 MACs/cycle
 MAC_PAR = 1024       # MACs per cycle: 32×32 systolic array (ConvEngine / GEMMUnit)
 VEC_ALU = 64         # Vector ALU width: element-wise ops, norms, activations
 BILINEAR_PAR = 32    # BilinearUnit parallel channels (from BilinearConfig.parallel_channels)
+
+
+@contextmanager
+def capture_first_tensor_input(module: nn.Module):
+    """Capture executed tensor inputs and always remove the temporary hook."""
+    captured: List[torch.Tensor] = []
+
+    def capture(_module, inputs):
+        if not inputs or not isinstance(inputs[0], torch.Tensor):
+            raise RuntimeError("Gaussian head did not receive a tensor input")
+        captured.append(inputs[0].detach())
+
+    handle = module.register_forward_pre_hook(capture)
+    try:
+        yield captured
+    finally:
+        handle.remove()
 
 
 class HWUNetUnit:
@@ -1945,10 +1968,18 @@ class HWDepthPredictor:
             hook = depth_head.register_forward_hook(
                 lambda _module, _inputs, output: captured_logits.append(output.detach())
             )
+        gaussian_head = getattr(
+            self._original_depth_predictor, "to_gaussians", None
+        )
+        capture_context = (
+            capture_first_tensor_input(gaussian_head)
+            if isinstance(gaussian_head, nn.Module)
+            else nullcontext([])
+        )
         
         # Run original model
         try:
-            with torch.no_grad():
+            with capture_context as captured_saes_features, torch.no_grad():
                 # Build kwargs for original model
                 model_kwargs = self._reference_model_kwargs(kwargs)
                 model_kwargs.setdefault('gaussians_per_pixel', 1)
@@ -1991,6 +2022,15 @@ class HWDepthPredictor:
             depths = output
             densities = None
             raw_gaussians = None
+        saes_features = None
+        if captured_saes_features:
+            if len(captured_saes_features) != 1:
+                raise RuntimeError(
+                    "Gaussian head input capture must execute exactly once"
+                )
+            saes_features = align_view_major_features(
+                captured_saes_features[0], batch_size=B, view_count=V
+            )
         
         # Estimate hardware cycles based on actual computation performed
         cost_volume_cycles = self._estimate_cost_volume_cycles(B, V, C, H, W, D)
@@ -2049,6 +2089,7 @@ class HWDepthPredictor:
             depths=depths,
             densities=densities,
             raw_gaussians=raw_gaussians,
+            saes_features=saes_features,
             depth_probs=depth_probs,
             depth_candidates=depth_candidates_evidence,
             candidate_domain="inverse_depth" if depth_probs is not None else None,

@@ -26,6 +26,7 @@ def test_demo_help_exposes_public_ae_arguments():
         "--image-output-policy",
         "--fsdr-only",
         "--fsdr-feature-source",
+        "--saes-feature-source",
     ):
         assert option in result.stdout
 
@@ -193,6 +194,32 @@ def test_probe_vector_first_hit_is_non_claiming_only():
                     "probe-vector-first-hit",
                 ]
             )
+
+
+def test_gaussian_head_saes_feature_source_is_non_claiming_only():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(["--saes-feature-source", "gaussian-head-input"])
+    assert args.saes_feature_source == "gaussian-head-input"
+
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--saes-feature-source",
+                    "gaussian-head-input",
+                ]
+            )
+
+
+def test_gaussian_head_saes_feature_source_forces_non_claim_result():
+    source = DEMO.read_text(encoding="utf-8")
+
+    assert "dp_output.saes_features" in source
+    assert "args.saes_feature_source != 'pipeline'" in source
 
 
 def test_fsdr_only_is_an_isolated_claim_mode():
