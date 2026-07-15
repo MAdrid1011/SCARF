@@ -64,22 +64,28 @@ def release_files() -> list[Path]:
     return sorted(ROOT / name for name in names if name and (ROOT / name).is_file())
 
 
+def include_in_source_release(relative: Path) -> bool:
+    """Return whether one tracked path belongs in the public source bundle."""
+    if relative.parts[:1] == ("outputs",):
+        return False
+    if (
+        relative.parts[:1] == ("datasets",)
+        and relative.parts[:2] != ("datasets", "quick-re10k")
+    ):
+        return False
+    if "checkpoints" in relative.parts:
+        return False
+    if relative.parts[:3] == ("artifact", "reference_results", "evidence"):
+        return False
+    return True
+
+
 def source_release_files() -> list[Path]:
     selected = []
     for path in release_files():
         relative = path.relative_to(ROOT)
-        if relative.parts[:1] == ("outputs",):
-            continue
-        if (
-            relative.parts[:1] == ("datasets",)
-            and relative.parts[:2] != ("datasets", "quick-re10k")
-        ):
-            continue
-        if "checkpoints" in relative.parts:
-            continue
-        if relative.parts[:3] == ("artifact", "reference_results", "evidence"):
-            continue
-        selected.append(path)
+        if include_in_source_release(relative):
+            selected.append(path)
     return selected
 
 

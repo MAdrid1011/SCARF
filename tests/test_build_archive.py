@@ -13,11 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_source_bundle_includes_only_synthetic_quick_dataset():
-    from scripts.build_archive import source_release_files
+    from scripts.build_archive import include_in_source_release
 
-    relative_files = {
-        path.relative_to(ROOT).as_posix() for path in source_release_files()
-    }
     fixture_files = {
         "datasets/quick-re10k/.scarf-manifest.json",
         "datasets/quick-re10k/.scarf-source.json",
@@ -25,12 +22,11 @@ def test_source_bundle_includes_only_synthetic_quick_dataset():
         "datasets/quick-re10k/test/index.json",
     }
 
-    assert fixture_files <= relative_files
-    assert all(
-        not relative.startswith("datasets/")
-        or relative.startswith("datasets/quick-re10k/")
-        for relative in relative_files
-    )
+    assert all((ROOT / relative).is_file() for relative in fixture_files)
+    assert all(include_in_source_release(Path(relative)) for relative in fixture_files)
+    assert not include_in_source_release(Path("datasets/re10k/test/000000.torch"))
+    assert not include_in_source_release(Path("outputs/ae/validation.json"))
+    assert not include_in_source_release(Path("mvsplat/checkpoints/re10k.ckpt"))
 
 
 def test_build_archive_cli_resolves_repository_modules():
