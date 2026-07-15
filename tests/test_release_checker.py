@@ -177,13 +177,11 @@ def test_orin_contract_is_release_checked():
     assert check_orin_contract() == []
 
 
-def test_protocol_is_ready_but_reference_evidence_blocks_premature_release():
+def test_protocol_and_staged_reference_evidence_are_release_ready():
     from scripts.check_release import check_evaluation_protocol, check_reference_results
 
     assert check_evaluation_protocol() == []
-    assert check_reference_results() == [
-        "reference evidence has not been staged from a passing validation run"
-    ]
+    assert check_reference_results() == []
 
 
 def test_claim_status_is_complete_and_release_checked():
