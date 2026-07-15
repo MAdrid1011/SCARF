@@ -372,17 +372,25 @@ image set for its first executed sample. Pass `--image-output-policy all` to
 Before entering the DOI in HotCRP:
 
 ```bash
-python scripts/stage_reference_results.py --input outputs/ae_final
-python scripts/build_archive.py --output-dir release --version v1.0.0 --require-doi
-python scripts/check_release.py --archive release/SCARF-AE-source-v1.0.0.tar.gz --require-doi
-python scripts/check_release.py --archive release/SCARF-AE-evidence-v1.0.0.tar.zst --require-doi
-sha256sum -c release/SHA256SUMS
+export RELEASE_ROOT=/path/to/SCARF-AE-release
+export STAGED_REFERENCE_RESULTS="$RELEASE_ROOT/reference_results"
+python scripts/stage_reference_results.py \
+  --input outputs/ae_final --destination "$STAGED_REFERENCE_RESULTS"
+python scripts/build_archive.py \
+  --output-dir "$RELEASE_ROOT/v1.0.0" --version v1.0.0 --require-doi \
+  --reference-results "$STAGED_REFERENCE_RESULTS"
+python scripts/check_release.py \
+  --archive "$RELEASE_ROOT/v1.0.0/SCARF-AE-source-v1.0.0.tar.gz" --require-doi
+python scripts/check_release.py \
+  --archive "$RELEASE_ROOT/v1.0.0/SCARF-AE-evidence-v1.0.0.tar.zst" --require-doi
+(cd "$RELEASE_ROOT/v1.0.0" && sha256sum -c SHA256SUMS)
 ```
 
 Upload only an archive that passes this check. Download the DOI archive into a
 new directory and rerun `quick` and `validate`. Complete every item in
 [`artifact/CHECKLIST.md`](artifact/CHECKLIST.md) before marking HotCRP ready.
-The staged evidence payload is intentionally excluded from Git history; its
-tracked manifest binds every payload file included in the evidence archive.
-Build final archives outside the repository so release files do not make the
-source worktree dirty.
+The staged evidence payload is intentionally excluded from Git history. Its
+packaged manifest binds every payload file, while `--reference-results` lets a
+clean source commit consume that separately staged tree without a self-
+referential manifest commit. Build final archives outside the repository so
+release files do not make the source worktree dirty.

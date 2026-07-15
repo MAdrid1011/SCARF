@@ -456,10 +456,17 @@ def check_claim_status(path: Path | None = None) -> list[str]:
     return failures
 
 
-def check_reference_results(root: Path = ROOT) -> list[str]:
+def check_reference_results(
+    root: Path = ROOT, *, reference_results: Path | None = None
+) -> list[str]:
     from scripts.stage_reference_results import required_categories
 
-    manifest_path = root / "artifact/reference_results/manifest.json"
+    reference_root = (
+        Path(reference_results).resolve()
+        if reference_results is not None
+        else root / "artifact/reference_results"
+    )
+    manifest_path = reference_root / "manifest.json"
     if not manifest_path.is_file():
         return ["reference evidence manifest is missing"]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -477,7 +484,7 @@ def check_reference_results(root: Path = ROOT) -> list[str]:
         if pure.is_absolute() or ".." in pure.parts or pure.parts[:1] != ("evidence",):
             failures.append(f"unsafe reference evidence path: {relative}")
             continue
-        path = root / "artifact/reference_results" / pure
+        path = reference_root / pure
         if not isinstance(record, dict):
             failures.append(f"invalid reference evidence record: {relative}")
             continue
@@ -507,7 +514,9 @@ def check_doi() -> tuple[str | None, list[str]]:
     return doi, []
 
 
-def build_manifest(require_doi: bool = False) -> dict[str, Any]:
+def build_manifest(
+    require_doi: bool = False, *, reference_results: Path | None = None
+) -> dict[str, Any]:
     files = archive_files()
     submodules, failures = submodule_record()
     failures.extend(check_local_paths(files))
@@ -519,7 +528,7 @@ def build_manifest(require_doi: bool = False) -> dict[str, Any]:
     failures.extend(check_orin_contract())
     failures.extend(check_claim_status())
     failures.extend(check_evaluation_protocol())
-    failures.extend(check_reference_results())
+    failures.extend(check_reference_results(reference_results=reference_results))
     doi = None
     if require_doi:
         doi, doi_failures = check_doi()

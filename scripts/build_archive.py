@@ -89,8 +89,14 @@ def source_release_files() -> list[Path]:
     return selected
 
 
-def evidence_release_files(root: Path = ROOT) -> dict[str, Path]:
-    reference_root = root / "artifact/reference_results"
+def evidence_release_files(
+    root: Path = ROOT, *, reference_results: Path | None = None
+) -> dict[str, Path]:
+    reference_root = (
+        Path(reference_results).resolve()
+        if reference_results is not None
+        else root / "artifact/reference_results"
+    )
     manifest_path = reference_root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("status") != "complete" or manifest.get("validation_status") != "PASS":
@@ -206,14 +212,20 @@ def _build_from_mapping(
     return verified
 
 
-def build(output: Path, prefix: str, require_doi: bool = False) -> dict[str, Any]:
+def build(
+    output: Path,
+    prefix: str,
+    require_doi: bool = False,
+    *,
+    reference_results: Path | None = None,
+) -> dict[str, Any]:
     if git("status", "--porcelain"):
         raise ValueError("release archive requires a clean worktree")
     if not prefix or PurePosixPath(prefix).name != prefix or prefix in {".", ".."}:
         raise ValueError("archive prefix must be one safe path component")
     from scripts.check_release import build_manifest
 
-    manifest = build_manifest(require_doi)
+    manifest = build_manifest(require_doi, reference_results=reference_results)
     if not manifest["validation"]["pass"]:
         raise ValueError("release checks failed: " + "; ".join(manifest["validation"]["failures"]))
     files = {
@@ -223,7 +235,11 @@ def build(output: Path, prefix: str, require_doi: bool = False) -> dict[str, Any
 
 
 def build_bundles(
-    output_dir: Path, version: str, *, require_doi: bool = False
+    output_dir: Path,
+    version: str,
+    *,
+    require_doi: bool = False,
+    reference_results: Path | None = None,
 ) -> dict[str, Any]:
     if not VERSION_RE.fullmatch(version):
         raise ValueError("release version must have the form vMAJOR.MINOR.PATCH")
@@ -231,7 +247,7 @@ def build_bundles(
         raise ValueError("release bundles require a clean worktree")
     from scripts.check_release import build_manifest
 
-    identity = build_manifest(require_doi)
+    identity = build_manifest(require_doi, reference_results=reference_results)
     if not identity["validation"]["pass"]:
         raise ValueError(
             "release checks failed: " + "; ".join(identity["validation"]["failures"])
@@ -257,7 +273,7 @@ def build_bundles(
         evidence_path,
         f"SCARF-AE-evidence-{version}",
         evidence_manifest,
-        evidence_release_files(),
+        evidence_release_files(reference_results=reference_results),
         "tar.zst",
     )
     validate_bundle_binding(source, evidence)
@@ -349,17 +365,40 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--version", default="v1.0.0")
     parser.add_argument("--require-doi", action="store_true")
+    parser.add_argument(
+        "--reference-results",
+        type=Path,
+        help="Use a separately staged, hash-verified reference-results directory",
+    )
     args = parser.parse_args()
     if sum(bool(value) for value in (args.output, args.verify, args.output_dir)) != 1:
         parser.error("specify exactly one of --output, --output-dir, or --verify")
     try:
         if args.output_dir:
             result = build_bundles(
-                args.output_dir.resolve(), args.version, require_doi=args.require_doi
+                args.output_dir.resolve(),
+                args.version,
+                require_doi=args.require_doi,
+                reference_results=(
+                    args.reference_results.resolve()
+                    if args.reference_results
+                    else None
+                ),
             )
         elif args.output:
-            result = build(args.output.resolve(), args.prefix, args.require_doi)
+            result = build(
+                args.output.resolve(),
+                args.prefix,
+                args.require_doi,
+                reference_results=(
+                    args.reference_results.resolve()
+                    if args.reference_results
+                    else None
+                ),
+            )
         else:
+            if args.reference_results:
+                raise ValueError("--reference-results is not used with --verify")
             result = verify(args.verify.resolve())
     except (OSError, RuntimeError, tarfile.TarError, json.JSONDecodeError, KeyError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

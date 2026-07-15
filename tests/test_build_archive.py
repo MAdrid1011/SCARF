@@ -39,6 +39,7 @@ def test_build_archive_cli_resolves_repository_modules():
 
     assert result.returncode == 0, result.stderr
     assert "Build and verify a deterministic SCARF AE source archive" in result.stdout
+    assert "--reference-results" in result.stdout
 
 
 def make_archive(path, *, extra=False, unsafe=False):
@@ -101,7 +102,7 @@ def test_verify_release_evidence_tar_zst(tmp_path):
 def test_evidence_file_set_is_curated_and_hash_checked(tmp_path):
     from scripts.build_archive import evidence_release_files
 
-    reference = tmp_path / "artifact/reference_results"
+    reference = tmp_path / "external-reference-results"
     evidence = reference / "evidence/result.json"
     evidence.parent.mkdir(parents=True)
     evidence.write_text('{"status":"PASS"}\n', encoding="utf-8")
@@ -136,7 +137,7 @@ def test_evidence_file_set_is_curated_and_hash_checked(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-    files = evidence_release_files(tmp_path)
+    files = evidence_release_files(tmp_path, reference_results=reference)
     assert "evidence/result.json" in files
     assert "contracts/evaluation_protocol.json" in files
     assert "contracts/checkpoints.json" in files
