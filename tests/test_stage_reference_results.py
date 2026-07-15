@@ -106,6 +106,38 @@ def test_execution_manifest_archival_copy_normalizes_local_paths(tmp_path):
     assert '"applied": true' in portable
 
 
+def test_execution_manifest_normalizes_top_level_orchestrator_commands(tmp_path):
+    from scripts.stage_reference_results import portable_execution_manifest
+
+    root = tmp_path / "author/repo"
+    manifest = tmp_path / "manifest-report.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "root": str(root),
+                "commands": [
+                    [
+                        "/opt/author/miniconda/bin/python3",
+                        str(root / "scripts/generate_report.py"),
+                    ]
+                ],
+                "dataset_commands": [],
+                "experiments": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    portable = portable_execution_manifest(
+        manifest,
+        repository_root=root,
+        orchestrator_python=Path("/different/staging/env/bin/python"),
+    ).decode()
+
+    assert "/opt/author" not in portable
+    assert "$PYTHON" in portable
+
+
 def test_prepared_dataset_validations_are_selected_for_staging(tmp_path):
     from scripts.stage_reference_results import selected_files
 

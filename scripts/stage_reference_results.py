@@ -77,6 +77,25 @@ def portable_execution_manifest(
         str(orchestrator_python.resolve()): "$PYTHON",
         str(orchestrator_python): "$PYTHON",
     }
+
+    def command_lists(value):
+        if not isinstance(value, list) or not value:
+            return []
+        if all(isinstance(item, str) for item in value):
+            return [value]
+        return [
+            command
+            for command in value
+            if isinstance(command, list)
+            and command
+            and all(isinstance(item, str) for item in command)
+        ]
+
+    for field in ("commands", "dataset_commands"):
+        for command in command_lists(record.get(field)):
+            executable = Path(command[0])
+            if executable.name in {"python", "python3"}:
+                replacements[str(executable)] = "$PYTHON"
     profiles = set()
     for experiment in record.get("experiments", []):
         if not isinstance(experiment, dict):
