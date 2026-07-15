@@ -11,6 +11,13 @@ import sys
 from pathlib import Path
 
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.result_record import source_identity
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -46,9 +53,16 @@ def collect(output_dir: Path) -> dict:
         for value in values
     ):
         raise ValueError("DRAM evidence contains missing, zero, or non-finite metrics")
+    source = source_identity()
     return {
         "schema_version": "1.0",
         "status": "PASS",
+        "provenance": {
+            "git_commit": source["git_commit"],
+            "git_dirty": source["git_dirty"],
+            "source_identity": source["source"],
+            "submodules": source["submodules"],
+        },
         "evidence_type": "public_memory_system_proxy",
         "paper_lpddr4x_reproduced": False,
         "metrics": {

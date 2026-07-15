@@ -126,6 +126,31 @@ def clean_source_check(
     }
 
 
+def source_binding_check(
+    result: dict[str, Any], reference: dict[str, Any], component: str
+) -> dict[str, Any]:
+    """Require functional evidence to share the quick run's clean source identity."""
+    provenance = result.get("provenance", {})
+    actual = {
+        "git_commit": provenance.get("git_commit"),
+        "git_dirty": provenance.get("git_dirty"),
+        "source_identity": provenance.get("source_identity"),
+        "submodules": provenance.get("submodules"),
+    }
+    target = {
+        "git_commit": reference.get("git_commit"),
+        "git_dirty": False,
+        "source_identity": reference.get("source_identity"),
+        "submodules": reference.get("submodules"),
+    }
+    return {
+        "claim": f"provenance:{component}:matches_quick_source",
+        "actual": actual,
+        "target": target,
+        "pass": actual == target,
+    }
+
+
 def environment_provenance_check(
     result: dict[str, Any], pair: str, output: Path
 ) -> dict[str, Any]:
@@ -646,6 +671,7 @@ def validate_complete(output: Path, expected_path: Path) -> dict[str, Any]:
 
     rtl = load(output / "rtl/results.json")
     checks.append({"claim": "rtl:functional", "pass": rtl.get("status") == "PASS"})
+    checks.append(source_binding_check(rtl, quick["provenance"], "rtl"))
 
     if claim_status["sensitivity"] == "CLAIMED":
         sensitivity = load(output / "sensitivity/results.json")
@@ -698,6 +724,7 @@ def validate_complete(output: Path, expected_path: Path) -> dict[str, Any]:
             and float(dram.get("metrics", {}).get("drampower_offchip_energy_j", 0)) > 0,
         }
     )
+    checks.append(source_binding_check(dram, quick["provenance"], "dram"))
 
     checks.extend(hardware_claim_checks(output, claim_status))
     report = output / "reports/reproduction_report.md"

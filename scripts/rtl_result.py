@@ -51,12 +51,16 @@ def build_result(output_dir: Path) -> dict:
     if errors:
         raise ValueError(f"Verilator reported {errors} errors")
     warnings = len(re.findall(r"^%Warning", lint_text, flags=re.MULTILINE))
+    source = source_identity(ROOT)
     return {
         "schema_version": "1.0",
         "kind": "rtl_validation",
         "status": "PASS",
         "provenance": {
-            "git_commit": git_commit(),
+            "git_commit": source["git_commit"],
+            "git_dirty": source["git_dirty"],
+            "source_identity": source["source"],
+            "submodules": source["submodules"],
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "commands": [
                 "sbt test",

@@ -45,6 +45,27 @@ def test_clean_source_check_rejects_dirty_or_invalid_commits():
     assert not clean_source_check(invalid, "mvsplat/re10k", "quality")["pass"]
 
 
+def test_source_binding_check_requires_matching_clean_commit_and_submodules():
+    from scripts.validate_ae import source_binding_check
+
+    reference = {
+        "git_commit": "a" * 40,
+        "git_dirty": False,
+        "submodules": {
+            "transplat": "b" * 40,
+            "mvsplat": "c" * 40,
+            "depthsplat": "d" * 40,
+        },
+    }
+    record = {"provenance": dict(reference)}
+
+    assert source_binding_check(record, reference, "rtl")["pass"]
+    record["provenance"]["git_commit"] = "e" * 40
+    assert not source_binding_check(record, reference, "rtl")["pass"]
+    record["provenance"] = {**reference, "git_dirty": True}
+    assert not source_binding_check(record, reference, "rtl")["pass"]
+
+
 def test_hardware_claim_checks_allow_an_evidence_backed_resource_downgrade(tmp_path):
     from scripts.validate_ae import hardware_claim_checks
 

@@ -150,3 +150,47 @@ def test_dram_runner_discovers_installed_pinned_tools_by_default():
 
     assert 'RAMULATOR_ROOT="${RAMULATOR_ROOT:-${ROOT}/downloads/tools/ramulator2}"' in source
     assert 'DRAMPOWER_ROOT="${DRAMPOWER_ROOT:-${ROOT}/downloads/tools/DRAMPower}"' in source
+
+
+def test_dram_collector_binds_evidence_to_source_identity(tmp_path, monkeypatch):
+    import hardware.dram.collect as collector
+
+    (tmp_path / "trace-manifest.json").write_text(
+        json.dumps({"request_count": 8}) + "\n", encoding="utf-8"
+    )
+    (tmp_path / "ramulator.json").write_text(
+        json.dumps(
+            {
+                "metrics": {
+                    "memory_cycles": 121,
+                    "average_read_latency_cycles": 55.0,
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "drampower.json").write_text(
+        json.dumps({"metrics": {"offchip_energy_j": 7.2e-9}}) + "\n",
+        encoding="utf-8",
+    )
+    identity = {
+        "git_commit": "a" * 40,
+        "git_dirty": False,
+        "source": "git",
+        "submodules": {
+            "transplat": "b" * 40,
+            "mvsplat": "c" * 40,
+            "depthsplat": "d" * 40,
+        },
+    }
+    monkeypatch.setattr(collector, "source_identity", lambda: identity)
+
+    record = collector.collect(tmp_path)
+
+    assert record["provenance"] == {
+        "git_commit": identity["git_commit"],
+        "git_dirty": False,
+        "source_identity": "git",
+        "submodules": identity["submodules"],
+    }
