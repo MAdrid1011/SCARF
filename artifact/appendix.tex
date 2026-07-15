@@ -29,7 +29,7 @@ host did not satisfy the fixed no-Vivado/48\,GiB resource gate.
 \paragraph{Data and models.}
 The artifact records download sources, licenses, formats, and SHA256 values for
 Re10K, ACID, DL3DV, and the official pretrained checkpoints. Re10K and ACID
-remain executable diagnostics; their sparse-SAES paper rows are not claimed.
+remain executable diagnostics. Their sparse-SAES paper rows are not claimed.
 DL3DV remains an unclaimed gated workflow.
 Full datasets are downloaded separately. The final archive records the ordered sample indices,
 dataset tree hashes, and context and target view rule used for every reported
@@ -44,7 +44,7 @@ contains 6,474 Re10K samples, 1,595 ACID samples, and 140 DL3DV samples.
 \paragraph{Workflow and key results.}
 After installation, \texttt{run\_ae.sh quick} validates the setup.
 The claim-aware \texttt{quality} and \texttt{ablation} modes explicitly skip
-unclaimed rows; focused diagnostics remain available through the experiment
+unclaimed rows. Focused diagnostics remain available through the experiment
 driver. Table~1 and Tables~2--3 are not claimed: real sparse-SAES probes exceed
 the quality tolerance and do not reproduce the reported L1 rates.
 A dense interpolation diagnostic retains every Gaussian and is forbidden in
@@ -58,17 +58,20 @@ explicit \texttt{PASS}, \texttt{FAIL}, \texttt{NOT\_RUN}, or
 Figure~8 uses the 1\,GHz architectural target in the paper. It is not in the
 current reproduced claim because raw Orin NX timing is unavailable. A completed
 public physical run would report ASAP7 timing independently and preserve any
-negative slack; no routed run is claimed in this release.
+negative slack. No routed run is claimed in this release.
 
 \paragraph{Public hardware proxy.}
 The commercial TSMC 28\,nm PDK, memory compiler, and Liberty collateral cannot
 be redistributed. We therefore include a fully public predictive-PDK workflow:
 the Chisel RTL can be implemented with iFlow/ASAP7, after which the paper-cited
 DeepScaleTool model can produce a 28\,nm-equivalent estimate. In the current
-release, routed ASAP7 PPA is \texttt{NOT\_CLAIMED\_RESOURCE\_LIMIT} and scaling
-is \texttt{NOT\_CLAIMED\_NO\_PHYSICAL\_INPUT}; only the pinned preflight and
-deterministic scaling tests are Functional evidence. No estimate is described
-as a foundry-specific TSMC 28\,nm post-layout measurement.
+release, routed ASAP7 PPA is
+\texttt{NOT\_CLAIMED\_\allowbreak RESOURCE\_\allowbreak LIMIT}.
+Scaling is
+\texttt{NOT\_CLAIMED\_\allowbreak NO\_\allowbreak PHYSICAL\_\allowbreak INPUT}.
+Only the pinned preflight and deterministic scaling tests are Functional
+evidence. No estimate is described as a foundry-specific TSMC 28\,nm post-layout
+measurement.
 
 \paragraph{Expected variation.}
 Quality tolerances are 0.15\,dB PSNR, 0.005 SSIM, and 0.005 LPIPS. Optional Orin

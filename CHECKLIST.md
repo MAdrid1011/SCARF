@@ -147,8 +147,9 @@ Verified on 2026-07-15:
   dry-run are retained under `outputs/ae_failures/physical/`.
 - Source-archive runs verify every file against `release-manifest.json` and no
   longer require Git metadata after Zenodo extraction.
-- The paper and one-page Artifact Appendix build successfully as a 15-page PDF
-  with no LaTeX errors, undefined references, or undefined citations.
+- The paper builds successfully as a 15-page PDF. The Artifact Appendix occupies
+  portions of pages 13--14, remains within the two-page limit, and has no LaTeX
+  errors, undefined references, undefined citations, or status-name overflows.
 - Staged reference payloads live under the ignored
   `artifact/reference_results/evidence/` tree and enter the evidence archive,
   not Git history. The compact manifest remains tracked.
