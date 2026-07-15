@@ -41,7 +41,7 @@ tile slice failed LPIPS at +0.019034. The complete record is retained under
 - Extracted source CUDA quick: passed with release-manifest provenance.
 - Extracted evidence validation: 15/15 checks passed.
 - The authoritative pre-release hashes are stored in the latest external
-  `/home/madrid/SCARF-AE-release/v1.0.0-<commit>/SHA256SUMS`.
+  `SCARF-AE-release/v1.0.0-<commit>/SHA256SUMS` release directory.
 
 ## Resume Packet
 
