@@ -8,6 +8,47 @@ import torch.nn.functional as F
 from saes.progressive_saes import ProgressiveSAES
 
 
+def runtime_fsdr_feature_dim(features: torch.Tensor) -> int:
+    """Return the executed FSDR channel count from a view-aligned tensor."""
+    if features.dim() != 5 or features.shape[0] <= 0 or features.shape[1] <= 0:
+        raise ValueError("FSDR feature tensor must have shape [B,V,C,H,W]")
+    feature_dim = int(features.shape[2])
+    if feature_dim <= 0 or min(features.shape[-2:]) <= 0:
+        raise ValueError("FSDR feature tensor dimensions must be positive")
+    return feature_dim
+
+
+def select_fsdr_feature_tensor(
+    *,
+    model: str,
+    source: str,
+    pipeline_features: torch.Tensor,
+    mono_features: torch.Tensor | None,
+) -> tuple[torch.Tensor, str]:
+    """Select a declared FSDR input without guessing model-specific layouts."""
+    runtime_fsdr_feature_dim(pipeline_features)
+    if source == "pipeline":
+        return pipeline_features, source
+    if source != "depthsplat-mono":
+        raise ValueError(f"unsupported FSDR feature source: {source}")
+    if model != "depthsplat":
+        raise ValueError("depthsplat-mono is only valid for DepthSplat")
+    if mono_features is None or mono_features.dim() != 4:
+        raise ValueError("DepthSplat mono features must have shape [BV,C,H,W]")
+    batch, views = pipeline_features.shape[:2]
+    if mono_features.shape[0] != batch * views:
+        raise ValueError("DepthSplat mono feature views do not match the pipeline")
+    selected = mono_features.reshape(
+        batch,
+        views,
+        mono_features.shape[1],
+        mono_features.shape[2],
+        mono_features.shape[3],
+    )
+    runtime_fsdr_feature_dim(selected)
+    return selected, source
+
+
 def depthsplat_global_candidate_tensors(
     match_probs: list[torch.Tensor],
     *,

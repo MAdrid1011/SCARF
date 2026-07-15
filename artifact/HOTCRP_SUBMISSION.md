@@ -34,13 +34,14 @@ Functional; no 28 nm estimate is reported without routed ASAP7 input.
 
 Table 1 and Tables 2--3 must not be listed as reproduced in the present
 submission. Real sparse-SAES probes exceed the quality tolerance and do not
-reproduce the paper's L1 rates. Six FSDR-only pilots also fail the Guided Rate
-targets; the public RTL contains an all-zero LSH projection ROM rather than the
-hyperplanes needed to reproduce the paper's guided set. Exact discrete Top-1
-evidence is retained as a diagnostic but is not claimed independently because
-its denominator depends on that unrecoverable guided set. The closer
-dense-interpolation diagnostic retains every Gaussian and is explicitly
-rejected by claim runs.
+reproduce the paper's L1 rates. The six 32-sample FSDR prefixes also fail the
+Guided Rate and exact Top-1 targets over 262,144 pixels per pair. The public RTL
+contains an all-zero LSH projection ROM and an unsigned MAC that is not
+equivalent to the paper's signed random-hyperplane projection. Hashing the
+authentic DepthSplat ViT-L mono tensor was tested independently and failed more
+severely. These diagnostics are retained but not claimed. The closer dense-
+interpolation diagnostic retains every Gaussian and is explicitly rejected by
+claim runs.
 
 All dataset-level claims use the ordered protocol recovered from the committed
 upstream evaluation indices. Source index hashes, prepared tree hashes, and

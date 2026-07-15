@@ -47,8 +47,10 @@ The claim-aware \texttt{quality} and \texttt{ablation} modes explicitly skip
 unclaimed rows. Focused diagnostics remain available through the experiment
 driver. Table~1 and Tables~2--3 are not claimed: real sparse-SAES probes exceed
 the quality tolerance and do not reproduce the reported L1 rates, while six
-FSDR pilots miss the Guided Rate targets and the public RTL has no populated
-LSH projection ROM.
+32-sample FSDR prefixes miss the Guided Rate and exact Top-1 targets, while the
+public RTL has no populated LSH projection ROM or equivalent signed projection
+MAC. A separate DepthSplat ViT-L feature diagnostic also fails and is not
+promoted.
 A dense interpolation diagnostic retains every Gaussian and is forbidden in
 claim runs. Figure~8, Figure~11, the DL3DV rows, and Figures~13--16 are also
 not claimed. Each run emits structured results

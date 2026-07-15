@@ -217,7 +217,11 @@ memory statistics. Current state: `NOT_CLAIMED_SAES_PROTOCOL_MISMATCH`; the
 claim-aware command is therefore an explicit no-op. Real probes produced zero
 L1 tiles instead of the nonzero paper targets. Separately, all six FSDR pilots
 miss the Guided Rate targets and the tracked RTL projection ROM is all zero;
-the software's seed-0 hyperplanes are not paper collateral. Tables 2--3 and
+the software's seed-0 hyperplanes are not paper collateral. The RTL MAC also
+interprets its 16-bit operands as unsigned values, so populating the ROM alone
+would not establish signed random-hyperplane equivalence. Six fixed 32-sample
+prefixes and a separate DepthSplat ViT-L feature diagnostic fail the unchanged
+mechanism checks. Tables 2--3 and
 Figure 11 are therefore not claimed.
 
 ### Figures 13-16: Sensitivity

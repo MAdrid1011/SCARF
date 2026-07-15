@@ -165,8 +165,14 @@ diagnostics, and repeat the clean-room checks on the final DOI-bound bundles.
   frames; 90.36% Guided Rate and 96.812% Top-1 Coverage still fail.
 - [x] Rerun the six bounded FSDR pilots with authentic probabilities and
   candidate tensors from every context frame.
-- [ ] Run a fixed 32-sample canonical-prefix aggregate for all six pairs to
-  distinguish sample variance from a systematic projection/feature mismatch.
+- [x] Run a fixed 32-sample canonical-prefix aggregate for all six pairs. Every
+  row failed over 262,144 authentic pixels, confirming a systematic
+  projection/feature mismatch; preserve `outputs/ae_pilot_fsdr_v3_32/`.
+- [x] Add failure-first tests for model-specific FSDR feature-source selection
+  and runtime feature dimension without changing the default feature path.
+- [x] Run one diagnostic-only canonical DepthSplat sample using its authentic
+  1,024-channel DINOv2 mono tensor. Guided Rate was 99.976% and exact Top-1
+  Coverage was 68.791%; preserve the failed evidence and reject promotion.
 - [ ] Promote a routing or projection fix only if it is derived independently
   of the paper result values and passes the unchanged fixed-sample gates.
 - [ ] Resume six quality pilots and full matrices only after the corresponding
@@ -176,9 +182,9 @@ diagnostics, and repeat the clean-room checks on the final DOI-bound bundles.
 
 Verified on 2026-07-16:
 
-- Base `pytest -q`: 247 passed after the V3 candidate-coordinate and all-context
-  FSDR evidence changes.
-- Locked classic profile: all 247 tests pass. Both classic and DepthSplat
+- Base `pytest -q`: 251 passed after the model-specific FSDR feature-source and
+  runtime-dimension diagnostics.
+- Locked classic profile: all 251 tests pass. Both classic and DepthSplat
   environment checkers pass with CUDA 12.1 on the declared compiler path.
 - Strict quick passed on the RTX 3060 with the pinned classic profile. It loaded
   MVSplat once, selected all three declared target views, emitted positive
@@ -187,6 +193,10 @@ Verified on 2026-07-16:
   was 96.694/99.244%, 96.129/98.789%, and 96.706/100.000% for
   TranSplat, MVSplat, and DepthSplat on Re10K/ACID respectively. All six Guided
   Rates failed, and no row is promoted because the RTL projection ROM is empty.
+- The corrected 32-sample prefix covers 262,144 pixels per pair and every row
+  still fails. Directly hashing DepthSplat's authentic 1,024-channel ViT-L mono
+  tensor also fails at 99.976% Guided Rate and 68.791% Top-1 Coverage, so the
+  model-specific DINO hypothesis is not promoted.
 - A fresh post-fix strict quick run also passed under `outputs/ae_regression`.
 - Release clean-room testing found that the source bundle omitted the synthetic
   quick dataset because all of `datasets/` was excluded. The archive now

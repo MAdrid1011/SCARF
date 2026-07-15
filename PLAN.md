@@ -357,3 +357,32 @@
   single-sample diagnostics compared with dataset aggregates, C2-D3b measures a
   fixed 32-sample prefix before deciding whether a full run has information
   value. Evidence is under `outputs/ae_pilot_fsdr_v3/`.
+- C2-D3b result: all six 32-sample canonical-prefix rows completed cleanly at
+  commit `6853691`, covering 262,144 authentic pixels per row. Guided Rate was
+  91.121/92.888% for TranSplat, 86.551/87.259% for MVSplat, and
+  94.845/94.408% for DepthSplat on Re10K/ACID, versus paper targets
+  72.1/76.0%, 66.2/71.0%, and 83.0/87.0%. Exact Top-1 Coverage was
+  94.786/96.920%, 95.994/94.818%, and 98.637/99.304%, versus
+  99.91/99.93%, 99.90/99.87%, and 99.89/99.95%. Every unchanged validator row
+  failed, so the mismatch is systematic rather than one-sample variance. The
+  evidence is preserved under `outputs/ae_pilot_fsdr_v3_32/`; no full FSDR
+  protocol is launched from this result.
+- Next bounded slice: test the model feature contract without changing the
+  seed, cache, thresholds, schedule, candidates, or selection. DepthSplat
+  exposes both 128-channel multi-view matching features and a separate DINOv2
+  mono feature tensor, while the current FSDR path always hashes the former.
+  Add a diagnostic-only selector that records its feature source and derives
+  the hash input dimension from the executed tensor, then run one canonical
+  DepthSplat sample with the authentic mono tensor. Promotion is allowed only
+  if the paper supports the selected source and all fixed mechanism gates pass;
+  otherwise preserve the null result and continue to projection semantics.
+- DepthSplat mono-feature result: refuted. The official ViT-L execution exposed
+  a 1,024-channel mono tensor (not the adapter's stale 384-channel default).
+  On the canonical Re10K sample, hashing that authentic tensor yielded
+  99.976% Guided Rate and 68.791% exact Top-1 Coverage, versus 83.0% and
+  99.89%. Both unchanged checks failed, and Top-1 Coverage was substantially
+  worse than the 128-channel pipeline-feature diagnostic. Preserve
+  `outputs/ae_failures/diagnostics/depthsplat-re10k-fsdr-dino-v4/` and do not
+  promote direct mono-feature hashing. Continue with a source-level audit of
+  projection collateral and RTL/software signature equivalence without seed
+  search or paper-target fitting.

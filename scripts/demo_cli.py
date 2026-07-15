@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit target-free FSDR Table 2 evidence without SAES or rendering",
     )
     parser.add_argument(
+        "--fsdr-feature-source",
+        choices=("pipeline", "depthsplat-mono"),
+        default="pipeline",
+        help="Select the executed feature tensor hashed by an FSDR-only diagnostic",
+    )
+    parser.add_argument(
         "--saes-diagnostic-sweep",
         action="store_true",
         help="Run a non-claim decision-statistic and sparse-coverage sweep",
@@ -129,6 +135,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     ):
         build_parser().error("--fsdr-only cannot be combined with other run modes")
+    if args.fsdr_feature_source != "pipeline" and (
+        not args.fsdr_only or args.model != "depthsplat"
+    ):
+        build_parser().error(
+            "--fsdr-feature-source depthsplat-mono requires "
+            "--model depthsplat --fsdr-only"
+        )
     if args.saes_diagnostic_sweep and (
         args.no_saes
         or args.baseline_only

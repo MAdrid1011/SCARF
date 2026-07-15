@@ -30,11 +30,15 @@ results and do not support a Results Reproduced badge request by themselves.
   sample quality budget, but sparse SAES exceeds the declared tolerance.
 - Re10K and ACID Tables 2--3 rows are
   `NOT_CLAIMED_FSDR_LSH_AND_SAES_PROTOCOL_MISMATCH`. For Table 2, all six
-  one-sample Guided Rates miss the paper targets, and the tracked RTL initializes
-  the complete LSH projection ROM to zero while the software uses untracked
-  seed-0 Gaussian hyperplanes. The authentic discrete full-search Top-1 check
-  also misses the fixed tolerance on all three Re10K pilots. For Table 3, real
-  probes produce zero L1 tiles where the paper requires nonzero L1 rates.
+  32-sample Guided Rates miss the paper targets over 262,144 pixels per pair.
+  The tracked RTL initializes the complete LSH projection ROM to zero and its
+  current `UInt` multiply-accumulate is not equivalent to signed random-
+  hyperplane projection, while the software uses untracked seed-0 Gaussian
+  hyperplanes. The authentic discrete full-search Top-1 check also misses the
+  fixed tolerance. Directly hashing DepthSplat's authentic 1,024-channel DINO
+  tensor worsens Top-1 Coverage to 68.791%, so it is retained only as a failed
+  diagnostic. For Table 3, real probes produce zero L1 tiles where the paper
+  requires nonzero L1 rates.
 - The ACID Top-1 pilot values happen to fall within the numeric tolerance, but
   they are diagnostic only: Top-1 Coverage is conditioned on the guided pixel
   set, which cannot be tied to the paper or RTL without the missing projection

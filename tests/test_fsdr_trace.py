@@ -94,3 +94,61 @@ def test_candidate_frames_cover_every_context_view():
     assert torch.equal(frames[1][0], torch.full_like(frames[1][0], 9.0))
     assert torch.equal(frames[0][2], torch.ones(4, dtype=torch.long))
     assert torch.equal(frames[1][2], torch.full((4,), 3, dtype=torch.long))
+
+
+def test_fsdr_feature_source_keeps_pipeline_features_for_classic_models():
+    from scripts.fsdr_trace import select_fsdr_feature_tensor
+
+    pipeline = torch.zeros(1, 2, 128, 8, 8)
+
+    selected, source = select_fsdr_feature_tensor(
+        model="mvsplat",
+        source="pipeline",
+        pipeline_features=pipeline,
+        mono_features=None,
+    )
+
+    assert selected is pipeline
+    assert source == "pipeline"
+
+
+def test_fsdr_feature_source_reshapes_authentic_depthsplat_mono_features():
+    from scripts.fsdr_trace import select_fsdr_feature_tensor
+
+    pipeline = torch.zeros(1, 2, 128, 16, 16)
+    mono = torch.arange(2 * 1024 * 8 * 8, dtype=torch.float32).reshape(
+        2, 1024, 8, 8
+    )
+
+    selected, source = select_fsdr_feature_tensor(
+        model="depthsplat",
+        source="depthsplat-mono",
+        pipeline_features=pipeline,
+        mono_features=mono,
+    )
+
+    assert selected.shape == (1, 2, 1024, 8, 8)
+    assert torch.equal(selected[0, 0], mono[0])
+    assert torch.equal(selected[0, 1], mono[1])
+    assert source == "depthsplat-mono"
+
+
+def test_fsdr_feature_source_rejects_mono_features_for_other_models():
+    from scripts.fsdr_trace import select_fsdr_feature_tensor
+
+    with pytest.raises(ValueError, match="only valid for DepthSplat"):
+        select_fsdr_feature_tensor(
+            model="transplat",
+            source="depthsplat-mono",
+            pipeline_features=torch.zeros(1, 2, 128, 8, 8),
+            mono_features=torch.zeros(2, 384, 8, 8),
+        )
+
+
+def test_runtime_fsdr_feature_dim_uses_executed_tensor_channels():
+    from scripts.fsdr_trace import runtime_fsdr_feature_dim
+
+    assert runtime_fsdr_feature_dim(torch.zeros(1, 2, 1024, 8, 8)) == 1024
+
+    with pytest.raises(ValueError, match="feature tensor"):
+        runtime_fsdr_feature_dim(torch.zeros(2, 1024, 8, 8))

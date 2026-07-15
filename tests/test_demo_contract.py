@@ -25,6 +25,7 @@ def test_demo_help_exposes_public_ae_arguments():
         "--functional-run",
         "--image-output-policy",
         "--fsdr-only",
+        "--fsdr-feature-source",
     ):
         assert option in result.stdout
 
@@ -183,8 +184,35 @@ def test_fsdr_only_is_an_isolated_claim_mode():
     )
     assert args.fsdr_only is True
 
+    mono = parse_args(
+        [
+            "--model",
+            "depthsplat",
+            "--claim-run",
+            "--evaluation-index",
+            "index.json",
+            "--fsdr-only",
+            "--fsdr-feature-source",
+            "depthsplat-mono",
+        ]
+    )
+    assert mono.fsdr_feature_source == "depthsplat-mono"
+
     with pytest.raises(SystemExit):
         parse_args(["--fsdr-only"])
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--model",
+                "mvsplat",
+                "--claim-run",
+                "--evaluation-index",
+                "index.json",
+                "--fsdr-only",
+                "--fsdr-feature-source",
+                "depthsplat-mono",
+            ]
+        )
     with pytest.raises(SystemExit):
         parse_args(
             [

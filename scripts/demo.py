@@ -1429,17 +1429,6 @@ def main(argv=None):
     cost_volume_cycles = 0  # cost_volume portion of dp_core (for bandwidth modeling)
     gauss_gen_cycles = 0  # Gaussian Gen: refine_unet + to_gaussians (full-res)
     
-    # Initialize FSDR (Feature-Similarity Gaussian Reuse) — realistic ASIC model
-    fsdr = FSDRSimulator(
-        feature_dim=CONFIG.feature_dim,
-        cache_size=CONFIG.fsdr_cache_size,
-        hamming_threshold=CONFIG.fsdr_hamming_threshold,
-        reuse_hamming=CONFIG.fsdr_reuse_hamming,
-        reuse_spatial=CONFIG.fsdr_reuse_spatial,
-        reuse_confidence=CONFIG.fsdr_reuse_confidence,
-        num_depth_candidates=CONFIG.num_depth_candidates,
-    )
-    
     # ============================================================
     # Common depth range (needed by DepthSplat paths in both S1 and S2)
     # ============================================================
@@ -1458,6 +1447,7 @@ def main(argv=None):
     # Pipeline variables for Stage 1 output
     pipeline_features = None
     pipeline_cnn_features = None
+    pipeline_mono_features = None
     depthsplat_results = None  # Store DepthSplat results_dict for S3
     
     use_feature_sim = not args.no_feature
@@ -1515,6 +1505,9 @@ def main(argv=None):
                 _cnn = getattr(fe_output, 'cnn_features', None)
                 if _cnn is not None:
                     pipeline_cnn_features = _cnn
+                _mono = getattr(fe_output, 'mono_features', None)
+                if _mono is not None:
+                    pipeline_mono_features = _mono
                 
                 print(f"    ✓ Features: {pipeline_features.shape if pipeline_features is not None else 'None'}")
         except Exception as e:
@@ -1974,9 +1967,39 @@ def main(argv=None):
             d_flat = pipeline_depths.reshape(-1)
             print(f"      Depth stats: min={d_flat.min():.4f}, max={d_flat.max():.4f}, mean={d_flat.mean():.4f}")
 
+    fsdr_feature_source = 'pipeline'
+    fsdr_features = pipeline_features
+    fsdr_feature_dim = CONFIG.feature_dim
+    if pipeline_features is not None:
+        from scripts.fsdr_trace import (
+            runtime_fsdr_feature_dim,
+            select_fsdr_feature_tensor,
+        )
+
+        fsdr_features, fsdr_feature_source = select_fsdr_feature_tensor(
+            model=args.model,
+            source=args.fsdr_feature_source,
+            pipeline_features=pipeline_features,
+            mono_features=pipeline_mono_features,
+        )
+        fsdr_feature_dim = runtime_fsdr_feature_dim(fsdr_features)
+    fsdr = FSDRSimulator(
+        feature_dim=fsdr_feature_dim,
+        cache_size=CONFIG.fsdr_cache_size,
+        hamming_threshold=CONFIG.fsdr_hamming_threshold,
+        reuse_hamming=CONFIG.fsdr_reuse_hamming,
+        reuse_spatial=CONFIG.fsdr_reuse_spatial,
+        reuse_confidence=CONFIG.fsdr_reuse_confidence,
+        num_depth_candidates=CONFIG.num_depth_candidates,
+    )
+    print(
+        f"    FSDR feature source: {fsdr_feature_source} "
+        f"({fsdr_feature_dim} channels)"
+    )
+
     if args.fsdr_only:
         if (
-            pipeline_features is None
+            fsdr_features is None
             or fsdr_depth_probs is None
             or fsdr_depth_candidates is None
             or fsdr_candidate_domain != 'inverse_depth'
@@ -1991,7 +2014,7 @@ def main(argv=None):
         )
 
         fsdr_frames = prepare_fsdr_candidate_frames(
-            pipeline_features,
+            fsdr_features,
             fsdr_depth_probs,
             fsdr_depth_candidates,
         )
@@ -2080,6 +2103,10 @@ def main(argv=None):
                     ]
                 ),
                 'seed': args.seed,
+                'fsdr_feature': {
+                    'source': fsdr_feature_source,
+                    'dimension': fsdr_feature_dim,
+                },
                 'device': {
                     'type': device.type,
                     'name': (
@@ -2455,7 +2482,7 @@ def main(argv=None):
         
         # Re-create FSDR with tuned config
         fsdr = FSDRSimulator(
-            feature_dim=CONFIG.feature_dim,
+            feature_dim=fsdr_feature_dim,
             cache_size=CONFIG.fsdr_cache_size,
             hamming_threshold=CONFIG.fsdr_hamming_threshold,
             reuse_hamming=CONFIG.fsdr_reuse_hamming,
