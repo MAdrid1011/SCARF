@@ -235,6 +235,12 @@ def test_gaussian_head_saes_diagnostic_does_not_replace_fsdr_features():
     assert "prepare_fsdr_frame(\n                fsdr_features," in fsdr_runtime
 
 
+def test_gaussian_head_retention_boundary_uses_selected_saes_features():
+    source = DEMO.read_text(encoding="utf-8")
+
+    assert "tile_scores = probe_feature_variances(\n            saes_features," in source
+
+
 def test_fsdr_only_is_an_isolated_claim_mode():
     from scripts.demo_cli import parse_args
 

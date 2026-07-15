@@ -3118,7 +3118,7 @@ def main(argv=None):
             args.dataset,
         )
         tile_scores = probe_feature_variances(
-            features,
+            saes_features,
             height=h,
             width=w,
             tile_size=CONFIG.tile_size,
