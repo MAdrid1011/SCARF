@@ -636,3 +636,19 @@ Verified on 2026-07-16 and 2026-07-17:
   trained surrogate cannot support the submitted SAES reproduction claim.
 - [ ] Rerun the three strict one-sample DL3DV diagnostics in fresh directories.
 - [ ] Run the official 140-scene DL3DV protocol only after those gates pass.
+- [x] Implement same-weight selected-output replay for the TranSplat/MVSplat
+  two-convolution Gaussian head and prove it on clean DL3DV sample 0 without
+  target RGB or rendering. The first-convolution closure is dense; only the
+  final convolution is selected-output work, so global S2/S3 savings remain
+  zero.
+- [x] Run the one predeclared TranSplat/DL3DV quality gate for conditional
+  optical-density materialization. It fails the unchanged quality tolerances
+  by a wide margin (`34.8381 -> 7.8144` dB PSNR); preserve
+  `transplat_sample0_conditional_optical_mass_quality_v1/` and do not expand
+  the result.
+- [x] Add the no-parameter covariance range Full fallback and verify on clean
+  target-free DL3DV sample 0 that it routes all 8,192 unsafe L0 tiles to Full,
+  with no skipped S2/S3 work. This is a correct fail-closed outcome, not a
+  sparse SAES reproduction result.
+- [ ] Do not launch 8/32/140 DL3DV SAES quality runs until a target-free,
+  nonzero sparse candidate passes the same sample-0 gate.

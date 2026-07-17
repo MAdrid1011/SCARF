@@ -1236,3 +1236,30 @@
   The remaining source requirement is specifically author-provided model code
   and weights, or an exact training artifact that is demonstrably compatible
   with the paper's existing S1/L0/L1/Full mechanism.
+
+## 32. Same-Weight Replay And Optical-Mass Gate
+
+- Same-weight selected-output replay is implemented for the classic
+  `Conv3x3 -> GELU -> Conv3x3` Gaussian heads. Clean DL3DV sample-0 audits
+  prove that the repeated T=4 corner pattern requires a dense first-convolution
+  closure, while the second convolution executes exactly the retained outputs.
+  The TranSplat and MVSplat records are target-free, stop before rendering,
+  and report a head-only MAC reduction of 25.5061%; they do not permit S2 or
+  global S3 savings.
+- Conditional optical-density moment transport uses one `r_i,p` per receiving
+  anchor, C2W ray transport, `tau * sqrt(det(cov + eps I))` mass, PSD checks,
+  and a Full fallback. Its clean target-free TranSplat/DL3DV audit preserves
+  retained attributes under a skipped-descriptor poison test and has maximum
+  mass error `3.8147e-6`.
+- Quality gate: the one fixed, predeclared sample-0 quality run at commit
+  `a382ea0` failed decisively (baseline/SAES PSNR `34.8381/7.8144`, SSIM
+  `0.97360/0.25523`, LPIPS `0.03276/0.70274`). The record is non-claiming and
+  must not be expanded to 8, 32, or 140 scenes.
+- Root cause and conservative repair: the target-free range diagnostic found
+  all L0 tiles expanded covariance beyond their selected-anchor determinant
+  envelope. The no-parameter range fallback at commit `93cba9f` correctly
+  sends all `8,192/8,192` tiles to Full and executes all `131,072/131,072` S2
+  evaluations. This removes the unsupported sparse result but supplies zero
+  SAES benefit, so it cannot support Results Reproduced. Any future reopen
+  needs a paper-compatible sparse producer or a distinct target-free mechanism
+  correction that preserves nonzero sparse work before another quality run.
