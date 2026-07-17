@@ -394,6 +394,7 @@ class ProgressiveSAES:
             'conditional_mass_conservation_error_max': 0.0,
             'conditional_assignment_uses': 0,
             'conditional_mass_fallback_tiles': 0,
+            'conditional_range_fallback_tiles': 0,
         }
 
     def _build_camera_rays(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1353,6 +1354,7 @@ class ProgressiveSAES:
         ):
             return True
         source_scales = torch.sqrt(source_determinants)
+        source_determinant_max = source_determinants.max()
         source_alpha = source_opacities.reshape(count, 1)
         if not bool(torch.isfinite(source_alpha).all()) or bool(
             ((source_alpha < 0.0) | (source_alpha >= 1.0)).any()
@@ -1411,6 +1413,16 @@ class ProgressiveSAES:
             merged_covariance = eigenvectors @ torch.diag(eigenvalues.clamp_min(eps)) @ eigenvectors.mT
             merged_determinant = torch.linalg.det(merged_covariance + eps * eye)
             if not bool(torch.isfinite(merged_determinant)) or bool(merged_determinant <= 0.0):
+                return True
+            # The range constraint is a fail-closed tile safeguard, not a
+            # fourth routing decision.  A moment merge may expand covariance
+            # through transported mean dispersion, but it may not create a
+            # support determinant larger than every native selected anchor.
+            # Returning Full preserves the exact dense descriptor instead of
+            # introducing a tunable covariance cap or target-side quality gate.
+            range_tolerance = source_determinant_max * 1e-6 + eps
+            if bool(merged_determinant > source_determinant_max + range_tolerance):
+                self.stats['conditional_range_fallback_tiles'] += 1
                 return True
             merged_scale = torch.sqrt(merged_determinant)
             merged_tau = total_mass / merged_scale

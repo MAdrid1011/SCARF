@@ -722,6 +722,47 @@ def test_conditional_optical_mass_falls_back_to_full_on_non_psd_anchor_input():
     torch.testing.assert_close(gaussians.opacities, before)
 
 
+def test_conditional_optical_mass_falls_back_on_source_covariance_range_escape(monkeypatch):
+    from saes.progressive_saes import ProgressiveSAES
+
+    gaussians = _gaussians()
+    gaussians.covariances[:] = torch.eye(3) * 0.25
+    gaussians.opacities.fill_(0.25)
+    probes = [0, 3, 12, 15]
+    non_probe_items = [
+        ((row, column), row * 4 + column)
+        for row in range(4)
+        for column in range(4)
+        if row * 4 + column not in probes
+    ]
+    saes = ProgressiveSAES(4, 4)
+
+    def transported(source_mean, _depth, _position, target_positions, *, view_index):
+        del view_index
+        return source_mean.expand(len(target_positions), -1) + torch.tensor((10.0, 0.0, 0.0))
+
+    monkeypatch.setattr(saes, "_anchor_conditioned_transport_means", transported)
+    fallback = saes._conditional_optical_mass_merge(
+        means=gaussians.means[0],
+        covariances=gaussians.covariances[0],
+        harmonics=gaussians.harmonics[0],
+        opacities=gaussians.opacities[0],
+        source_means=gaussians.means[0, probes].clone(),
+        source_covariances=gaussians.covariances[0, probes].clone(),
+        source_harmonics=gaussians.harmonics[0, probes].clone(),
+        source_opacities=gaussians.opacities[0, probes].clone(),
+        probe_indices=probes,
+        probe_depths=torch.ones(4),
+        probe_positions=[(0, 0), (0, 3), (3, 0), (3, 3)],
+        non_probe_items=non_probe_items,
+        assignment_matrix=torch.full((len(non_probe_items), len(probes)), 0.25),
+        view_index=0,
+    )
+
+    assert fallback is True
+    assert saes.stats["conditional_range_fallback_tiles"] == 1
+
+
 def test_target_free_materialization_helpers_clone_and_poison_only_skipped_rows():
     from scripts.saes_target_free_materialization_audit import (
         _clone_gaussians,
