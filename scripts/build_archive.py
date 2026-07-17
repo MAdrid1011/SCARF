@@ -225,13 +225,14 @@ def build(
         raise ValueError("archive prefix must be one safe path component")
     from scripts.check_release import build_manifest
 
-    manifest = build_manifest(require_doi, reference_results=reference_results)
-    if not manifest["validation"]["pass"]:
-        raise ValueError("release checks failed: " + "; ".join(manifest["validation"]["failures"]))
+    identity = build_manifest(require_doi, reference_results=reference_results)
+    if not identity["validation"]["pass"]:
+        raise ValueError("release checks failed: " + "; ".join(identity["validation"]["failures"]))
     files = {
         path.relative_to(ROOT).as_posix(): path for path in source_release_files()
     }
-    return _build_from_mapping(output, prefix, manifest, files, "tar.gz")
+    source_manifest = {**identity, "bundle_kind": "source"}
+    return _build_from_mapping(output, prefix, source_manifest, files, "tar.gz")
 
 
 def build_bundles(

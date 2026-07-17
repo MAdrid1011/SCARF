@@ -42,6 +42,40 @@ def test_build_archive_cli_resolves_repository_modules():
     assert "--reference-results" in result.stdout
 
 
+def test_single_source_archive_identifies_itself_as_a_release_source(
+    tmp_path, monkeypatch
+):
+    import scripts.build_archive as archive
+    import scripts.check_release as release
+
+    source = tmp_path / "README.md"
+    source.write_text("portable\n", encoding="utf-8")
+    monkeypatch.setattr(archive, "ROOT", tmp_path)
+    monkeypatch.setattr(archive, "git", lambda *_args: "")
+    monkeypatch.setattr(archive, "source_release_files", lambda: [source])
+    monkeypatch.setattr(
+        release,
+        "build_manifest",
+        lambda *_args, **_kwargs: {
+            "schema_version": "1.0",
+            "git_commit": "a" * 40,
+            "submodules": {
+                "transplat": "b" * 40,
+                "mvsplat": "c" * 40,
+                "depthsplat": "d" * 40,
+            },
+            "zenodo_doi": None,
+            "validation": {"pass": True, "failures": []},
+        },
+    )
+
+    output = tmp_path / "source.tar.gz"
+    result = archive.build(output, "SCARF-AE")
+
+    assert result["status"] == "PASS"
+    assert result["bundle_kind"] == "source"
+
+
 def make_archive(path, *, extra=False, unsafe=False):
     payload = b"artifact\n"
     manifest = {
