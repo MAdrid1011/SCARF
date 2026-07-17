@@ -257,6 +257,25 @@ def test_conditional_anchor_transport_is_diagnostic_only():
             )
 
 
+def test_conditional_optical_mass_is_diagnostic_only():
+    from scripts.demo_cli import parse_args
+
+    materialization = "conditional-optical-mass-diagnostic"
+    args = parse_args(["--saes-materialization", materialization])
+    assert args.saes_materialization == materialization
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--saes-materialization",
+                    materialization,
+                ]
+            )
+
+
 def test_probe_spread_materialization_forces_non_claim_result():
     source = DEMO.read_text(encoding="utf-8")
 

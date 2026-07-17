@@ -1,10 +1,11 @@
-"""Fail-closed execution-dependency contracts for SAES S2/S3 accounting.
+"""Fail-closed, stage-specific SAES execution contracts.
 
-Tile routing statistics alone do not prove that a model can avoid dense S2/S3
-work.  Each supported encoder needs target-free evidence that retained outputs
-are independent of every skipped position before a SAES route may reduce the
-S2/S3 cycle model.  Until then the route counters remain useful diagnostic and
-control/merge-ledger inputs, but their executable bypass fraction is zero.
+Route counters do not prove a whole encoder can skip every non-probe position.
+The contracts below therefore distinguish dense shared work from the only
+currently executable sparse primitive: same-weight selected outputs of the
+classic two-convolution Gaussian head.  The primitive does not authorize a
+global S2/S3 saving until a quality pipeline has actually bound and recorded
+its selected-output events.
 """
 
 from __future__ import annotations
@@ -13,97 +14,154 @@ from copy import deepcopy
 from typing import Any
 
 
-CONTRACT_VERSION = "saes-s2s3-execution-dependency-v1"
+CONTRACT_VERSION = "saes-stage-specific-execution-dependency-v2"
 
-# These are architecture contracts, not quality results.  A later positive
-# result must include a target-free dependency audit and a reconciled sparse
-# implementation before this table can permit a nonzero cycle saving.
+
+def _dense_stage(reason: str, *, evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "execution": "dense_required",
+        "savings_permitted": False,
+        "reason": reason,
+        "evidence": evidence,
+    }
+
+
+def _classic_contract(
+    model: str, *, results_path: str, results_sha256: str
+) -> dict[str, Any]:
+    dense_evidence = {
+        "kind": "saes_s2s3_dense_dependency_audit",
+        "dataset": "dl3dv",
+        "sample_index": 0,
+        "results_path": results_path,
+        "results_sha256": results_sha256,
+    }
+    return {
+        "model": model,
+        "s2_s3_sparse_execution_verified": False,
+        "status": "stage_specific_partial_replay",
+        "stages": {
+            "dense_shared_trunk": _dense_stage(
+                "the raw-head masking audit changed retained values when "
+                "non-probe refinement activations were zeroed; S1, cost-volume, "
+                "refinement, and the first Gaussian-head convolution remain dense",
+                evidence=dense_evidence,
+            ),
+            "s2_candidate_search": _dense_stage(
+                "no probe-only candidate-search implementation has yet completed "
+                "a target-free equivalence and quality-pipeline audit"
+            ),
+            "selected_output_head": {
+                "execution": "same_weight_replay_available_audit_required",
+                "savings_permitted": False,
+                "head_structure": "Conv3x3->GELU->Conv3x3",
+                "first_conv_closure": "dense_for_repeated_T4_corner_selection",
+                "second_conv": "selected_outputs_only",
+                "implementation": "saes.selected_output_replay",
+                "audit_entrypoint": "scripts/saes_selected_output_replay_audit.py",
+                "reason": (
+                    "the standalone primitive is not yet bound into a quality "
+                    "pipeline record with its actual selected-output event trace"
+                ),
+            },
+            "s3_retained_descriptor": _dense_stage(
+                "representative materialization has not passed the quality gate; "
+                "descriptor merge work remains separately charged"
+            ),
+            "s4_conversion": _dense_stage(
+                "GaussianAdapter conversion is not a zero-cost consequence of "
+                "selected raw-head replay"
+            ),
+        },
+        "reason": (
+            "only a bounded selected-output replay primitive is available; no "
+            "whole-encoder S2/S3 bypass is currently claimed"
+        ),
+    }
+
+
 _MODEL_CONTRACTS: dict[str, dict[str, Any]] = {
-    "transplat": {
-        "model": "transplat",
-        "s2_s3_sparse_execution_verified": False,
-        "status": "dense_dependency_detected",
-        "evidence": {
-            "kind": "saes_s2s3_dense_dependency_audit",
-            "dataset": "dl3dv",
-            "sample_index": 0,
-            "results_path": (
-                "outputs/ae_dl3dv_repair_diagnostics/"
-                "transplat_sample0_s2s3_dependency_audit_v2/results.json"
-            ),
-            "results_sha256": (
-                "8a73027989cfaafce2145b6370d2209450725eb33dfbd7c9afa0e5c5ead82679"
-            ),
-        },
-        "reason": (
-            "zeroing non-probe refinement activations changed retained raw "
-            "Gaussian-head values, so the unmodified dense path cannot "
-            "directly bypass non-probe S2/S3 work"
+    "transplat": _classic_contract(
+        "transplat",
+        results_path=(
+            "outputs/ae_dl3dv_repair_diagnostics/"
+            "transplat_sample0_s2s3_dependency_audit_v2/results.json"
         ),
-    },
-    "mvsplat": {
-        "model": "mvsplat",
-        "s2_s3_sparse_execution_verified": False,
-        "status": "dense_dependency_detected",
-        "evidence": {
-            "kind": "saes_s2s3_dense_dependency_audit",
-            "dataset": "dl3dv",
-            "sample_index": 0,
-            "results_path": (
-                "outputs/ae_dl3dv_repair_diagnostics/"
-                "mvsplat_sample0_s2s3_dependency_audit_v1/results.json"
-            ),
-            "results_sha256": (
-                "ac5610772240887f7f5004c050fbc0ad08261337dd18b02f3430c7cf00174ea5"
-            ),
-        },
-        "reason": (
-            "zeroing non-probe refinement activations changed retained raw "
-            "Gaussian-head values, so the unmodified dense path cannot "
-            "directly bypass non-probe S2/S3 work"
+        results_sha256="8a73027989cfaafce2145b6370d2209450725eb33dfbd7c9afa0e5c5ead82679",
+    ),
+    "mvsplat": _classic_contract(
+        "mvsplat",
+        results_path=(
+            "outputs/ae_dl3dv_repair_diagnostics/"
+            "mvsplat_sample0_s2s3_dependency_audit_v1/results.json"
         ),
-    },
+        results_sha256="ac5610772240887f7f5004c050fbc0ad08261337dd18b02f3430c7cf00174ea5",
+    ),
     "depthsplat": {
         "model": "depthsplat",
         "s2_s3_sparse_execution_verified": False,
-        "status": "dense_dependency_detected",
-        "evidence": {
-            "kind": "saes_s2s3_dense_dependency_audit",
-            "dataset": "dl3dv",
-            "sample_index": 0,
-            "results_path": (
-                "outputs/ae_dl3dv_repair_diagnostics/"
-                "depthsplat_sample0_s2s3_dependency_audit_v1/results.json"
+        "status": "stage_specific_dense_closure",
+        "stages": {
+            "dense_shared_trunk": _dense_stage(
+                "the Gaussian-regressor masking audit changed retained raw-head "
+                "values; all upstream feature, S2, and regressor work remains dense",
+                evidence={
+                    "kind": "saes_s2s3_dense_dependency_audit",
+                    "dataset": "dl3dv",
+                    "sample_index": 0,
+                    "results_path": (
+                        "outputs/ae_dl3dv_repair_diagnostics/"
+                        "depthsplat_sample0_s2s3_dependency_audit_v1/results.json"
+                    ),
+                    "results_sha256": (
+                        "893747ecb7d3336f90b9f7afdf052cd3d946d8728b37ec5ebf558533a4befd76"
+                    ),
+                },
             ),
-            "results_sha256": (
-                "893747ecb7d3336f90b9f7afdf052cd3d946d8728b37ec5ebf558533a4befd76"
+            "s2_candidate_search": _dense_stage(
+                "no probe-only candidate-search implementation has passed an audit"
+            ),
+            "selected_output_head": {
+                "execution": "last_conv_replay_not_implemented",
+                "savings_permitted": False,
+                "first_three_conv_closure": "dense_for_repeated_T4_selection",
+                "footprint_reference": "saes.depthsplat_s3_footprint",
+                "reason": (
+                    "the four-convolution adaptor needs an explicit same-weight "
+                    "final-convolution replay before selected head work can be counted"
+                ),
+            },
+            "s3_retained_descriptor": _dense_stage(
+                "representative materialization has not passed the quality gate"
+            ),
+            "s4_conversion": _dense_stage(
+                "GaussianAdapter conversion has no sparse replay evidence"
             ),
         },
-        "reason": (
-            "zeroing non-probe Gaussian-regressor activations changed retained "
-            "raw Gaussian-head values, so the unmodified dense path cannot "
-            "directly bypass non-probe S2/S3 work"
-        ),
+        "reason": "DepthSplat has only the audited dense-closure footprint today",
     },
 }
 
 
 def resolve_s2_s3_execution_contract(model_type: str | None) -> dict[str, Any]:
-    """Return a copy of the model-specific SAES sparse-execution contract.
-
-    Missing model identity is intentionally accepted as an explicit unknown
-    contract.  That keeps diagnostic callers executable while forcing their
-    S2/S3 SAES savings to zero.  A misspelled nonempty model is an error rather
-    than silently inheriting a different model's evidence.
-    """
+    """Return a copy of the model-specific, fail-closed execution contract."""
     if model_type is None:
         return {
             "contract_version": CONTRACT_VERSION,
             "model": None,
             "s2_s3_sparse_execution_verified": False,
             "status": "model_identity_missing",
-            "evidence": None,
-            "reason": "no model-specific sparse S2/S3 execution contract was supplied",
+            "stages": {
+                name: _dense_stage("no model-specific execution contract was supplied")
+                for name in (
+                    "dense_shared_trunk",
+                    "s2_candidate_search",
+                    "selected_output_head",
+                    "s3_retained_descriptor",
+                    "s4_conversion",
+                )
+            },
+            "reason": "no model-specific sparse execution contract was supplied",
         }
     if not isinstance(model_type, str) or not model_type.strip():
         raise ValueError("model_type must be a nonempty string or None")
@@ -122,7 +180,11 @@ def resolve_s2_s3_execution_contract(model_type: str | None) -> dict[str, Any]:
 def s2_s3_saving_ratio(
     requested_ratio: float, execution_contract: dict[str, Any]
 ) -> float:
-    """Gate a requested SAES S2/S3 bypass ratio on verified execution evidence."""
+    """Gate a global S2/S3 bypass ratio on a full pipeline proof.
+
+    A selected-head primitive is intentionally insufficient here: the caller's
+    ``gauss_gen`` total also includes dense refinement and S4-adjacent work.
+    """
     if isinstance(requested_ratio, bool) or not isinstance(requested_ratio, (int, float)):
         raise ValueError("requested SAES saving ratio must be numeric")
     ratio = float(requested_ratio)

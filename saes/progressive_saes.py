@@ -261,6 +261,7 @@ class ProgressiveSAES:
             "virtual-reconstruction-diagnostic",
             "l1-primary-depth-reference-diagnostic",
             "conditional-anchor-transport-diagnostic",
+            "conditional-optical-mass-diagnostic",
         ):
             raise ValueError(f"unsupported SAES materialization: {materialization}")
         self.materialization = materialization
@@ -271,6 +272,9 @@ class ProgressiveSAES:
         # transports each selected anchor conditionally to its assigned target
         # position, avoiding an undocumented r_i,p * r_i,q cross-anchor term.
         self.merge_semantics = (
+            "conditional-optical-mass"
+            if materialization == "conditional-optical-mass-diagnostic"
+            else
             "conditional-anchor-transport"
             if materialization == "conditional-anchor-transport-diagnostic"
             else "assignment-mixture"
@@ -384,6 +388,12 @@ class ProgressiveSAES:
             # interpolation rather than an S3 network evaluation.
             'virtual_reconstructed_gaussians': 0,
             'covariance_psd_violations': 0,
+            # Conditional optical-density transport is diagnostic until it
+            # passes the target-free and image-quality gates.  These counters
+            # make its mass accounting and any Full fallback explicit.
+            'conditional_mass_conservation_error_max': 0.0,
+            'conditional_assignment_uses': 0,
+            'conditional_mass_fallback_tiles': 0,
         }
 
     def _build_camera_rays(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -904,6 +914,7 @@ class ProgressiveSAES:
         if merge_semantics not in (
             "assignment-mixture",
             "conditional-anchor-transport",
+            "conditional-optical-mass",
         ):
             raise ValueError(f"unsupported SAES merge semantics: {merge_semantics}")
         if (
@@ -1027,6 +1038,24 @@ class ProgressiveSAES:
             )
             self.stats['assignment_weight_sum_error_max'] = max(
                 self.stats['assignment_weight_sum_error_max'], error
+            )
+
+        if merge_semantics == "conditional-optical-mass":
+            return self._conditional_optical_mass_merge(
+                means=means,
+                covariances=covs,
+                harmonics=harmonics,
+                opacities=opacities,
+                source_means=source_means,
+                source_covariances=source_covs,
+                source_harmonics=source_harmonics,
+                source_opacities=source_opacities,
+                probe_indices=probe_indices,
+                probe_depths=probe_depth_tensor,
+                probe_positions=list(zip(probe_gy, probe_gx)),
+                non_probe_items=non_probe_items,
+                assignment_matrix=assignment_matrix,
+                view_index=view_index,
             )
 
         flat_harmonics = source_harmonics.reshape(K, -1)
@@ -1269,6 +1298,154 @@ class ProgressiveSAES:
         self.stats['opacity_transmittance_error_max'] = max(
             self.stats['opacity_transmittance_error_max'], residual_error
         )
+        return False
+
+    def _conditional_optical_mass_merge(
+        self,
+        *,
+        means: torch.Tensor,
+        covariances: torch.Tensor,
+        harmonics: torch.Tensor,
+        opacities: torch.Tensor,
+        source_means: torch.Tensor,
+        source_covariances: torch.Tensor,
+        source_harmonics: torch.Tensor,
+        source_opacities: torch.Tensor,
+        probe_indices: List[int],
+        probe_depths: torch.Tensor,
+        probe_positions: List[Tuple[int, int]],
+        non_probe_items: List[Tuple[Tuple[int, int], int]],
+        assignment_matrix: torch.Tensor,
+        view_index: int,
+    ) -> bool:
+        """Merge each pseudo descriptor into only its assigned anchor.
+
+        A skipped position ``i`` is represented once for each receiving anchor
+        ``p`` with its one existing paper assignment ``r_i,p``.  Its descriptor
+        is transported from ``p`` alone, rather than first mixing all anchors
+        and then multiplying by ``r_i,p`` a second time.  Optical-density mass
+        is ``tau * sqrt(det(Sigma + eps I))``.  All candidate updates are held
+        locally; a non-finite, non-PSD, out-of-range, or non-conserving result
+        returns ``True`` so the caller keeps the tile on the Full path.
+        """
+        if source_opacities[0].numel() != 1:
+            # The submitted models use one opacity per primitive.  Do not
+            # silently choose a component-wise mass rule for another layout.
+            return True
+        dtype = source_means.dtype
+        device = source_means.device
+        count = len(probe_indices)
+        if assignment_matrix.shape != (len(non_probe_items), count):
+            return True
+        eye = torch.eye(3, device=device, dtype=dtype)
+        eps = torch.as_tensor(1e-8, device=device, dtype=dtype)
+        source_covariances = (
+            source_covariances + source_covariances.mT
+        ) * 0.5
+        source_eigenvalues = torch.linalg.eigvalsh(source_covariances)
+        if not bool(torch.isfinite(source_eigenvalues).all()) or bool(
+            (source_eigenvalues < -1e-7).any()
+        ):
+            return True
+        source_determinants = torch.linalg.det(source_covariances + eps * eye)
+        if not bool(torch.isfinite(source_determinants).all()) or bool(
+            (source_determinants <= 0.0).any()
+        ):
+            return True
+        source_scales = torch.sqrt(source_determinants)
+        source_alpha = source_opacities.reshape(count, 1)
+        if not bool(torch.isfinite(source_alpha).all()) or bool(
+            ((source_alpha < 0.0) | (source_alpha >= 1.0)).any()
+        ):
+            return True
+        source_tau = -torch.log1p(-source_alpha)
+        source_mass = source_tau[:, 0] * source_scales
+        if not bool(torch.isfinite(source_mass).all()) or bool((source_mass < 0.0).any()):
+            return True
+
+        target_positions = [
+            (local_y, local_x) for (local_y, local_x), _ in non_probe_items
+        ]
+        candidate_updates = []
+        mass_error_max = 0.0
+        for probe_offset, probe_index in enumerate(probe_indices):
+            assignment = assignment_matrix[:, probe_offset]
+            if not bool(torch.isfinite(assignment).all()) or bool((assignment < 0.0).any()):
+                return True
+            conditional_means = self._anchor_conditioned_transport_means(
+                source_means[probe_offset],
+                probe_depths[probe_offset],
+                probe_positions[probe_offset],
+                target_positions,
+                view_index=view_index,
+            )
+            mass_weights = torch.cat(
+                (
+                    source_mass[probe_offset].reshape(1),
+                    assignment * source_mass[probe_offset],
+                )
+            )
+            total_mass = mass_weights.sum()
+            if not bool(torch.isfinite(total_mass)) or bool(total_mass <= 0.0):
+                return True
+            normalized = mass_weights / total_mass
+            contributor_means = torch.cat(
+                (source_means[probe_offset].unsqueeze(0), conditional_means), dim=0
+            )
+            contributor_covariances = source_covariances[probe_offset].unsqueeze(0).expand(
+                contributor_means.shape[0], -1, -1
+            )
+            merged_mean = torch.einsum("n,ni->i", normalized, contributor_means)
+            centered = contributor_means - merged_mean
+            merged_covariance = torch.einsum(
+                "n,nij->ij",
+                normalized,
+                contributor_covariances + torch.einsum("ni,nj->nij", centered, centered),
+            )
+            merged_covariance = (merged_covariance + merged_covariance.mT) * 0.5
+            eigenvalues, eigenvectors = torch.linalg.eigh(merged_covariance)
+            if not bool(torch.isfinite(eigenvalues).all()) or bool(
+                (eigenvalues < -1e-7).any()
+            ):
+                return True
+            merged_covariance = eigenvectors @ torch.diag(eigenvalues.clamp_min(eps)) @ eigenvectors.mT
+            merged_determinant = torch.linalg.det(merged_covariance + eps * eye)
+            if not bool(torch.isfinite(merged_determinant)) or bool(merged_determinant <= 0.0):
+                return True
+            merged_scale = torch.sqrt(merged_determinant)
+            merged_tau = total_mass / merged_scale
+            merged_alpha = -torch.expm1(-merged_tau)
+            if not bool(torch.isfinite(merged_alpha)) or bool(
+                (merged_alpha < 0.0) | (merged_alpha >= 1.0)
+            ):
+                return True
+            observed_mass = merged_tau * merged_scale
+            mass_error = float((observed_mass - total_mass).abs().item())
+            mass_tolerance = float(
+                (1e-6 + 1e-5 * total_mass.detach().abs()).item()
+            )
+            if mass_error > mass_tolerance:
+                return True
+            mass_error_max = max(mass_error_max, mass_error)
+            harmonic = source_harmonics[probe_offset]
+            harmonic = torch.maximum(
+                torch.minimum(harmonic, source_harmonics.amax(dim=0)),
+                source_harmonics.amin(dim=0),
+            )
+            candidate_updates.append(
+                (probe_index, merged_mean, merged_covariance, harmonic, merged_alpha)
+            )
+
+        for probe_index, mean, covariance, harmonic, alpha in candidate_updates:
+            means[probe_index] = mean
+            covariances[probe_index] = covariance
+            harmonics[probe_index] = harmonic
+            opacities[probe_index] = alpha.reshape_as(opacities[probe_index])
+        self.stats['conditional_assignment_uses'] += int(assignment_matrix.numel())
+        self.stats['conditional_mass_conservation_error_max'] = max(
+            self.stats['conditional_mass_conservation_error_max'], mass_error_max
+        )
+        return False
 
     def _spread_probe_covariances(
         self,
@@ -1606,11 +1783,26 @@ class ProgressiveSAES:
                             selected_level = 'L1'
 
                     if selected_level is not None:
+                        if (
+                            self.materialization == "conditional-optical-mass-diagnostic"
+                            and self.primitives_per_pixel != 1
+                        ):
+                            # The mass rule is defined only for the submitted
+                            # one-opacity-per-primitive layout.  Preserve the
+                            # tile as Full instead of inventing a vector-alpha rule.
+                            self.stats['conditional_mass_fallback_tiles'] += 1
+                            self.stats['full_tiles'] += 1
+                            self.stats['full_stage3_gaussians'] += (
+                                tile_size * tile_size * self.primitives_per_pixel
+                            )
+                            self.stats['pixels_original'] += tile_size * tile_size
+                            continue
                         retained_positions = (
                             self.probe_positions
                             if selected_level == 'L0'
                             else self.lightweight_positions
                         )
+                        fallback_to_full = False
                         for slot in range(self.primitives_per_pixel):
                             if self.materialization == "dense-diagnostic":
                                 materialized_positions = self.probe_positions
@@ -1624,12 +1816,13 @@ class ProgressiveSAES:
                                 "virtual-reconstruction-diagnostic",
                                 "l1-primary-depth-reference-diagnostic",
                                 "conditional-anchor-transport-diagnostic",
+                                "conditional-optical-mass-diagnostic",
                             ):
                                 # L1 routing uses only primary probes. After it
                                 # succeeds, its deterministic 2K positions are
                                 # charged native S2/S3 outputs; only the rest
                                 # of the tile is skipped.
-                                self._weighted_moment_match(
+                                fallback_to_full = self._weighted_moment_match(
                                     gaussians_full,
                                     probes,
                                     non_probes,
@@ -1655,6 +1848,8 @@ class ProgressiveSAES:
                                     ),
                                     merge_semantics=self.merge_semantics,
                                 )
+                                if fallback_to_full:
+                                    break
                             elif self.materialization == "probe-spread-diagnostic":
                                 self._spread_probe_covariances(
                                     gaussians_full,
@@ -1683,6 +1878,14 @@ class ProgressiveSAES:
                                 modified_mask[index] = True
                             if not preserves_virtual_outputs:
                                 total_zeroed += len(non_probes)
+                        if fallback_to_full:
+                            self.stats['conditional_mass_fallback_tiles'] += 1
+                            self.stats['full_tiles'] += 1
+                            self.stats['full_stage3_gaussians'] += (
+                                tile_size * tile_size * self.primitives_per_pixel
+                            )
+                            self.stats['pixels_original'] += tile_size * tile_size
+                            continue
 
                         pixel_count = tile_size * tile_size - len(retained_positions)
                         if selected_level == 'L0':

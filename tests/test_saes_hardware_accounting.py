@@ -161,19 +161,38 @@ def test_ablation_refuses_zero_cost_saes_and_charges_the_event_ledger():
         demo.CONFIG = previous_config
 
 
-def test_model_execution_dependency_contracts_fail_closed_without_sparse_proof():
+def test_model_execution_dependency_contracts_split_dense_and_selected_head_boundaries():
     from saes.execution_dependency import resolve_s2_s3_execution_contract
 
-    expected_hashes = {
-        "transplat": "8a73027989cfaafce2145b6370d2209450725eb33dfbd7c9afa0e5c5ead82679",
-        "mvsplat": "ac5610772240887f7f5004c050fbc0ad08261337dd18b02f3430c7cf00174ea5",
-        "depthsplat": "893747ecb7d3336f90b9f7afdf052cd3d946d8728b37ec5ebf558533a4befd76",
-    }
-    for model, expected_hash in expected_hashes.items():
+    for model in ("transplat", "mvsplat", "depthsplat"):
         contract = resolve_s2_s3_execution_contract(model)
         assert contract["s2_s3_sparse_execution_verified"] is False
-        assert contract["status"] == "dense_dependency_detected"
-        assert contract["evidence"]["results_sha256"] == expected_hash
+        assert contract["status"].startswith("stage_specific_")
+        assert set(contract["stages"]) == {
+            "dense_shared_trunk",
+            "s2_candidate_search",
+            "selected_output_head",
+            "s3_retained_descriptor",
+            "s4_conversion",
+        }
+        assert contract["stages"]["dense_shared_trunk"]["savings_permitted"] is False
+        assert contract["stages"]["s2_candidate_search"]["savings_permitted"] is False
+        assert contract["stages"]["selected_output_head"]["savings_permitted"] is False
+
+    transplat = resolve_s2_s3_execution_contract("transplat")
+    assert transplat["stages"]["selected_output_head"] == {
+        "execution": "same_weight_replay_available_audit_required",
+        "savings_permitted": False,
+        "head_structure": "Conv3x3->GELU->Conv3x3",
+        "first_conv_closure": "dense_for_repeated_T4_corner_selection",
+        "second_conv": "selected_outputs_only",
+        "implementation": "saes.selected_output_replay",
+        "audit_entrypoint": "scripts/saes_selected_output_replay_audit.py",
+        "reason": (
+            "the standalone primitive is not yet bound into a quality "
+            "pipeline record with its actual selected-output event trace"
+        ),
+    }
 
 
 def test_execution_dependency_contract_imports_without_torch():
@@ -189,7 +208,7 @@ def import_without_torch(name, *args, **kwargs):
 
 builtins.__import__ = import_without_torch
 from saes.execution_dependency import resolve_s2_s3_execution_contract
-assert resolve_s2_s3_execution_contract('mvsplat')['status'] == 'dense_dependency_detected'
+assert resolve_s2_s3_execution_contract('mvsplat')['status'] == 'stage_specific_partial_replay'
 """
     completed = subprocess.run(
         [sys.executable, "-c", code],

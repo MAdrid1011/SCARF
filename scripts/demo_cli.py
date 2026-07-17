@@ -133,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
             "virtual-reconstruction-diagnostic",
             "l1-primary-depth-reference-diagnostic",
             "conditional-anchor-transport-diagnostic",
+            "conditional-optical-mass-diagnostic",
         ),
         default="representative",
         help="Use the paper-faithful sparse path or a non-claim materialization diagnostic",

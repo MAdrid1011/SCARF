@@ -589,6 +589,159 @@ def test_conditional_anchor_transport_avoids_cross_anchor_attribute_leakage():
     assert not torch.allclose(mixture.opacities[0, probes], original["opacities"])
 
 
+def test_conditional_optical_mass_is_single_assignment_psd_and_target_free():
+    from saes.progressive_saes import apply_progressive_saes
+
+    baseline = _gaussians()
+    poisoned = _gaussians()
+    probes = torch.tensor([0, 3, 12, 15])
+    non_probes = torch.tensor([i for i in range(16) if i not in probes.tolist()])
+    for gaussians in (baseline, poisoned):
+        gaussians.means.fill_(1.5)
+        gaussians.covariances[:] = torch.eye(3) * 0.25
+        gaussians.harmonics.fill_(0.375)
+        gaussians.opacities.fill_(0.25)
+    poisoned.means[0, non_probes] = 1e4
+    poisoned.covariances[0, non_probes] = -1e4
+    poisoned.harmonics[0, non_probes] = 1e4
+    poisoned.opacities[0, non_probes] = 0.99
+    features = torch.ones(1, 1, 2, 4, 4)
+    depths = torch.ones(1, 1, 16, 1, 1)
+
+    expected_mass = 16 * (
+        -torch.log1p(torch.tensor(-0.25)) * torch.sqrt(torch.tensor(0.25**3))
+    )
+    for gaussians in (baseline, poisoned):
+        mask, stats, _ = apply_progressive_saes(
+            gaussians,
+            4,
+            4,
+            feature_var_threshold=1.0,
+            depth_std_threshold=1.0,
+            features=features,
+            depths=depths,
+            materialization="conditional-optical-mass-diagnostic",
+        )
+        assert stats["merge_semantics"] == "conditional-optical-mass"
+        assert stats["conditional_mass_fallback_tiles"] == 0
+        assert stats["conditional_assignment_uses"] == 12 * 4
+        assert stats["conditional_mass_conservation_error_max"] <= 1e-6
+        assert mask[non_probes].all()
+        assert torch.count_nonzero(gaussians.opacities[0, non_probes]) == 0
+        assert torch.all(torch.linalg.eigvalsh(gaussians.covariances[0, probes]) >= -1e-7)
+        observed_mass = (
+            -torch.log1p(-gaussians.opacities[0, probes])
+            * torch.sqrt(torch.linalg.det(gaussians.covariances[0, probes] + torch.eye(3) * 1e-8))
+        ).sum()
+        torch.testing.assert_close(observed_mass, expected_mass, rtol=1e-5, atol=1e-6)
+
+    # Poisoning withheld descriptors cannot alter retained anchor attributes.
+    for name in ("means", "covariances", "harmonics", "opacities"):
+        torch.testing.assert_close(
+            getattr(baseline, name)[0, probes], getattr(poisoned, name)[0, probes]
+        )
+
+
+def test_conditional_optical_mass_one_hot_assignment_only_updates_receiving_anchor():
+    from saes.progressive_saes import ProgressiveSAES
+
+    gaussians = _gaussians()
+    gaussians.covariances[:] = torch.eye(3) * 0.25
+    gaussians.opacities.fill_(0.25)
+    probes = [0, 3, 12, 15]
+    non_probe_items = [
+        ((row, column), row * 4 + column)
+        for row in range(4)
+        for column in range(4)
+        if row * 4 + column not in probes
+    ]
+    original = {name: getattr(gaussians, name)[0, probes].clone() for name in (
+        "means", "covariances", "harmonics", "opacities"
+    )}
+    assignments = torch.zeros(len(non_probe_items), len(probes))
+    assignments[:, 0] = 1.0
+    saes = ProgressiveSAES(4, 4)
+    fallback = saes._conditional_optical_mass_merge(
+        means=gaussians.means[0],
+        covariances=gaussians.covariances[0],
+        harmonics=gaussians.harmonics[0],
+        opacities=gaussians.opacities[0],
+        source_means=original["means"],
+        source_covariances=original["covariances"],
+        source_harmonics=original["harmonics"],
+        source_opacities=original["opacities"],
+        probe_indices=probes,
+        probe_depths=torch.ones(4),
+        probe_positions=[(0, 0), (0, 3), (3, 0), (3, 3)],
+        non_probe_items=non_probe_items,
+        assignment_matrix=assignments,
+        view_index=0,
+    )
+
+    assert fallback is False
+    assert saes.stats["conditional_assignment_uses"] == 12 * 4
+    torch.testing.assert_close(gaussians.means[0, probes[1:]], original["means"][1:])
+    torch.testing.assert_close(
+        gaussians.covariances[0, probes[1:]], original["covariances"][1:]
+    )
+    torch.testing.assert_close(
+        gaussians.harmonics[0, probes[1:]], original["harmonics"][1:]
+    )
+    torch.testing.assert_close(
+        gaussians.opacities[0, probes[1:]], original["opacities"][1:]
+    )
+    expected_alpha = 1.0 - (1.0 - 0.25) ** 13
+    assert gaussians.opacities[0, probes[0]].item() == pytest.approx(expected_alpha)
+
+
+def test_conditional_optical_mass_falls_back_to_full_on_non_psd_anchor_input():
+    from saes.progressive_saes import apply_progressive_saes
+
+    gaussians = _gaussians()
+    probes = torch.tensor([0, 3, 12, 15])
+    before = gaussians.opacities.clone()
+    gaussians.covariances[0, probes] = -torch.eye(3)
+    features = torch.ones(1, 1, 2, 4, 4)
+    depths = torch.ones(1, 1, 16, 1, 1)
+
+    mask, stats, _ = apply_progressive_saes(
+        gaussians,
+        4,
+        4,
+        feature_var_threshold=1.0,
+        depth_std_threshold=1.0,
+        features=features,
+        depths=depths,
+        materialization="conditional-optical-mass-diagnostic",
+    )
+
+    assert stats["conditional_mass_fallback_tiles"] == 1
+    assert stats["level0_tiles"] == 0
+    assert stats["full_tiles"] == 1
+    assert not bool(mask.any())
+    torch.testing.assert_close(gaussians.opacities, before)
+
+
+def test_target_free_materialization_helpers_clone_and_poison_only_skipped_rows():
+    from scripts.saes_target_free_materialization_audit import (
+        _clone_gaussians,
+        _gaussians_on_cpu,
+        _poison_skipped_descriptors,
+    )
+
+    source = _gaussians()
+    clone = _clone_gaussians(source)
+    cpu_clone = _gaussians_on_cpu(source)
+    skipped = torch.tensor([1, 5, 9])
+    retained = torch.tensor([0, 2, 3])
+    _poison_skipped_descriptors(clone, skipped)
+
+    for name in ("means", "covariances", "harmonics", "opacities"):
+        torch.testing.assert_close(getattr(source, name)[0, retained], getattr(clone, name)[0, retained])
+        assert getattr(cpu_clone, name).device.type == "cpu"
+    assert not torch.equal(source.means[0, skipped], clone.means[0, skipped])
+
+
 def test_anchor_conditioned_transport_preserves_one_anchor_camera_residual():
     from saes.progressive_saes import ProgressiveSAES
 
