@@ -742,6 +742,40 @@ def test_target_free_materialization_helpers_clone_and_poison_only_skipped_rows(
     assert not torch.equal(source.means[0, skipped], clone.means[0, skipped])
 
 
+def test_l0_range_envelope_diagnostic_reports_excursions_without_changing_route():
+    from scripts.saes_target_free_materialization_audit import (
+        _clone_gaussians,
+        _l0_range_envelope_summary,
+    )
+
+    source = _gaussians()
+    materialized = _clone_gaussians(source)
+    anchors = torch.tensor([0, 3, 12, 15])
+    materialized.covariances[0, anchors] *= 10.0
+    materialized.opacities[0, anchors] = 0.99
+    mask = torch.ones(16, dtype=torch.bool)
+    mask[anchors] = False
+
+    report = _l0_range_envelope_summary(
+        source,
+        materialized,
+        mask,
+        height=4,
+        width=4,
+        views=1,
+        stats={"level1_tiles": 0, "full_tiles": 0},
+    )
+
+    assert report == {
+        "applicable": True,
+        "tile_count": 1,
+        "determinant_above_selected_anchor_max_tiles": 1,
+        "determinant_above_selected_anchor_max_rate": 1.0,
+        "opacity_outside_selected_anchor_range_tiles": 1,
+        "opacity_outside_selected_anchor_range_rate": 1.0,
+    }
+
+
 def test_anchor_conditioned_transport_preserves_one_anchor_camera_residual():
     from saes.progressive_saes import ProgressiveSAES
 

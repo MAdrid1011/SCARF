@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from saes.progressive_saes import apply_progressive_saes
+from saes.progressive_saes import ProgressiveSAES, apply_progressive_saes
 from scripts.saes_dependency_audit import _context_on_device, remove_target_rgb
 
 
@@ -104,6 +104,83 @@ def _mask_sha256(mask: torch.Tensor) -> str:
     ).hexdigest()
 
 
+def _routing_statistic_summary(
+    features: torch.Tensor, *, height: int, width: int
+) -> dict[str, dict[str, float | int]]:
+    """Record fixed paper/current probe-statistic distributions without routing by them."""
+    summary: dict[str, dict[str, float | int]] = {}
+    for statistic in (
+        "raw-probe-vector-variance",
+        "raw-probe-mean-channel-variance",
+        "normalized-probe-total-variance",
+        "normalized-probe-vector-standard-deviation",
+    ):
+        values, _ = ProgressiveSAES.classify_tiles_by_features(
+            features, height, width, 4, per_view=True, statistic=statistic
+        )
+        series = torch.tensor(list(values.values()), dtype=torch.float64)
+        summary[statistic] = {
+            "count": int(series.numel()),
+            "rate_below_tau_f_0_2": float((series < 0.2).double().mean().item()),
+            "minimum": float(series.min().item()),
+            "p50": float(torch.quantile(series, 0.50).item()),
+            "p95": float(torch.quantile(series, 0.95).item()),
+            "maximum": float(series.max().item()),
+        }
+    return summary
+
+
+def _l0_range_envelope_summary(
+    source: Any,
+    materialized: Any,
+    mask: torch.Tensor,
+    *,
+    height: int,
+    width: int,
+    views: int,
+    stats: dict[str, Any],
+) -> dict[str, Any]:
+    """Measure, but do not enforce, source-envelope excursions for all-L0 output."""
+    if stats["level1_tiles"] or stats["full_tiles"]:
+        return {"applicable": False, "reason": "audit route is not all-L0"}
+    source_determinants = torch.linalg.det(source.covariances[0])
+    output_determinants = torch.linalg.det(materialized.covariances[0])
+    source_opacities = source.opacities[0]
+    output_opacities = materialized.opacities[0]
+    determinant_violations = 0
+    opacity_violations = 0
+    for view in range(views):
+        for tile_y in range(0, height, 4):
+            for tile_x in range(0, width, 4):
+                anchors = torch.tensor(
+                    [
+                        view * height * width + (tile_y + row) * width + tile_x + column
+                        for row, column in ((0, 0), (0, 3), (3, 0), (3, 3))
+                    ],
+                    dtype=torch.long,
+                )
+                if bool(mask[anchors].any()):
+                    raise RuntimeError("all-L0 range audit found a skipped primary probe")
+                if bool((output_determinants[anchors] > source_determinants[anchors].max()).any()):
+                    determinant_violations += 1
+                if bool(
+                    (
+                        (output_opacities[anchors] < source_opacities[anchors].min())
+                        | (output_opacities[anchors] > source_opacities[anchors].max())
+                    ).any()
+                ):
+                    opacity_violations += 1
+    tile_count = views * (height // 4) * (width // 4)
+    return {
+        "applicable": True,
+        "tile_count": tile_count,
+        "determinant_above_selected_anchor_max_tiles": determinant_violations,
+        "determinant_above_selected_anchor_max_rate": determinant_violations / tile_count,
+        "opacity_outside_selected_anchor_range_tiles": opacity_violations,
+        "opacity_outside_selected_anchor_range_rate": opacity_violations / tile_count,
+    }
+
+
 def collect_materialization_audit(
     *, model_name: str, sample_index: int, device: torch.device
 ) -> dict[str, Any]:
@@ -161,6 +238,18 @@ def collect_materialization_audit(
         materialization="conditional-optical-mass-diagnostic",
         context_extrinsics=audit_extrinsics,
         context_intrinsics=audit_intrinsics,
+    )
+    routing_statistics = _routing_statistic_summary(
+        features, height=height, width=width
+    )
+    range_envelope = _l0_range_envelope_summary(
+        source_gaussians,
+        materialized,
+        mask,
+        height=height,
+        width=width,
+        views=views,
+        stats=stats,
     )
     skipped = mask.nonzero(as_tuple=False).flatten()
     retained = (~mask).nonzero(as_tuple=False).flatten()
@@ -225,6 +314,8 @@ def collect_materialization_audit(
             "skipped_mask_sha256": _mask_sha256(mask),
         },
         "saes_stats": stats,
+        "routing_statistic_diagnostics": routing_statistics,
+        "l0_range_envelope_diagnostic": range_envelope,
         "skipped_descriptor_poison_audit": {
             "poison_value": 1.0e4,
             "route_identical": True,
