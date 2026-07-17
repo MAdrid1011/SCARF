@@ -64,14 +64,24 @@ def test_result_record_is_schema_valid_and_preserves_all_sections(tmp_path):
     validate(record)
     assert set(record) == {
         "schema_version",
+        "evidence_class",
         "provenance",
         "quality",
         "performance",
+        "events",
+        "energy",
         "ablation",
         "fsdr_saes",
         "hardware",
         "validation",
     }
+    assert record["schema_version"] == "2.1"
+    assert record["evidence_class"] == "deterministic_execution"
+    assert set(record["performance"]["stages"]) == {"s1", "s2", "s3", "s4"}
+    assert record["events"]["fsdr"]["total_pixels"] == 0
+    assert record["events"]["fsdr"]["discrete_top1_available"] is False
+    assert record["events"]["saes"]["total_tiles"] == 0
+    assert record["energy"]["available"] is False
     assert record["provenance"]["checkpoint"]["path"].startswith("<external>/")
     output = tmp_path / "results.json"
     write_result(record, output)
@@ -88,6 +98,141 @@ def test_result_record_reports_signed_degradation_and_absolute_change(tmp_path):
     assert quality["change"]["psnr_signed_pct"] == -5.0
     assert quality["change"]["psnr_degradation_pct"] == 5.0
     assert quality["change"]["psnr_absolute_pct"] == 5.0
+
+
+def test_result_record_preserves_explicit_v2_stage_and_event_evidence(tmp_path):
+    from scripts.result_record import build_result_record
+    from scripts.validate_result import validate
+
+    checkpoint = tmp_path / "model.ckpt"
+    checkpoint.write_bytes(b"checkpoint")
+    dataset_manifest = tmp_path / "dataset.manifest.json"
+    dataset_manifest.write_text("{}\n", encoding="utf-8")
+    view = {
+        "target_index": 0,
+        "baseline": {"psnr_db": 28.0, "ssim": 0.9, "lpips": 0.1},
+        "scarf": {"psnr_db": 27.9, "ssim": 0.9, "lpips": 0.1},
+    }
+    stages = {
+        f"s{index}": {
+            "cycles": index * 10,
+            "useful_mmcu_slots": index * 7,
+            "scheduled_mmcu_slots": index * 8,
+            "mmcu_slots_available": True,
+            "source": "event_simulator",
+        }
+        for index in range(1, 5)
+    }
+    events = {
+        "fsdr": {
+            "total_pixels": 100,
+            "cache_hits": 80,
+            "guided_pixels": 70,
+            "guided_top1_covered": 69,
+            "guided_top1_missed": 1,
+            "discrete_top1_available": True,
+            "full_depth_evaluations": 6400,
+            "executed_depth_evaluations": 2200,
+            "depth_evaluations_available": True,
+            "feature_buffer_bytes_baseline": 1024,
+            "feature_buffer_bytes_actual": 512,
+            "feature_buffer_bytes_available": True,
+            "source": "event_simulator",
+        },
+        "saes": {
+            "total_tiles": 10,
+            "level0_tiles": 2,
+            "level1_tiles": 3,
+            "full_tiles": 5,
+            "tile_path_available": True,
+            "baseline_gaussians": 100,
+            "actual_gaussians": 70,
+            "gaussian_counts_available": True,
+            "full_s2_evaluations": 6400,
+            "executed_s2_evaluations": 4000,
+            "s2_evaluations_available": True,
+            "source": "event_simulator",
+        },
+    }
+
+    record = build_result_record(
+        model="mvsplat",
+        dataset="re10k",
+        checkpoint=checkpoint,
+        checkpoint_load={
+            "matched_tensors": 10,
+            "matched_checkpoint_numel_fraction": 0.99,
+        },
+        environment={"profile": "classic", "digest_sha256": "c" * 64},
+        dataset_manifest=dataset_manifest,
+        dataset_representation="re10k-native",
+        dataset_tree_sha256="a" * 64,
+        device={"type": "cuda", "name": "test"},
+        seed=0,
+        quality={"baseline": view["baseline"], "scarf": view["scarf"]},
+        quality_views=[view],
+        baseline_cycles=100,
+        cycles={"feature": 10, "depth": 20, "gaussian": 30, "ggu": 40},
+        cycle_source="scarf_simulator",
+        ablation={},
+        fsdr_saes={},
+        command=["python", "scripts/demo.py"],
+        runtime_assets={"VGG16": {"sha256": "b" * 64}},
+        sample_identity={
+            "scene": "scene",
+            "context_indices": [0, 1],
+            "target_indices": [0],
+        },
+        stage_records=stages,
+        event_records=events,
+    )
+
+    validate(record)
+    assert record["performance"]["stages"] == stages
+    for namespace, values in events.items():
+        for field, value in values.items():
+            assert record["events"][namespace][field] == value
+    assert record["events"]["fsdr"]["hamming_hits"] == 80
+    assert record["events"]["fsdr"]["local_valid_hits"] == 70
+    assert record["events"]["fsdr"]["local_invalid_fallbacks"] == 10
+    assert record["events"]["saes"]["l0_representatives"] == 8
+    assert record["events"]["saes"]["l1_lightweight_anchors"] == 24
+
+
+def test_default_saes_events_count_executed_tile_paths():
+    from scripts.result_record import _default_event_records
+    from saes.hardware_accounting import build_saes_event_ledger
+
+    saes_stats = {
+        "total_tiles_processed": 10,
+        "level0_tiles": 2,
+        "level1_tiles": 3,
+        "full_tiles": 5,
+        "l0_representatives": 8,
+        "l1_lightweight_anchors": 24,
+        "full_stage3_gaussians": 80,
+        "full_s2_evaluations": 1280,
+        "executed_s2_evaluations": 640,
+        "s2_evaluations_available": True,
+    }
+    saes_stats["hardware_accounting"] = build_saes_event_ledger(
+        saes_stats, feature_dim=128, tile_size=4, sh_degree=4
+    )
+
+    events = _default_event_records(
+        {
+            "saes": saes_stats
+        }
+    )
+
+    assert events["saes"]["full_s2_evaluations"] == 1280
+    assert events["saes"]["executed_s2_evaluations"] == 640
+    assert events["saes"]["s2_evaluations_available"] is True
+    assert (
+        events["saes"]["hardware_accounting"]["cycles"]
+        ["serialized_accounting_cycles"]
+        > 0
+    )
 
 
 def test_target_view_quality_mean_is_computed_from_per_view_records():
@@ -231,7 +376,9 @@ def test_source_identity_uses_release_manifest_without_git(tmp_path):
         "git_dirty": False,
         "submodules": manifest["submodules"],
         "source": "release_manifest",
+        "source_tree_sha256": identity["source_tree_sha256"],
     }
+    assert len(identity["source_tree_sha256"]) == 64
 
 
 def test_source_identity_rejects_modified_release_files(tmp_path):
@@ -271,3 +418,39 @@ def test_cached_file_hash_invalidates_when_the_file_changes(tmp_path):
     second = sha256_file(path)
 
     assert first != second
+
+
+def test_worktree_source_digest_changes_for_tracked_and_untracked_source(tmp_path):
+    import subprocess
+    from scripts.result_record import _worktree_source_sha256
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "ae@example.invalid"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "AE Test"], cwd=tmp_path, check=True
+    )
+    tracked = tmp_path / "source.py"
+    tracked.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "source.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=tmp_path, check=True)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    submodules = {"transplat": "b" * 40, "mvsplat": "c" * 40, "depthsplat": "d" * 40}
+
+    clean = _worktree_source_sha256(tmp_path, commit, submodules)
+    tracked.write_text("value = 2\n", encoding="utf-8")
+    tracked_dirty = _worktree_source_sha256(tmp_path, commit, submodules)
+    (tmp_path / "new_source.py").write_text("value = 3\n", encoding="utf-8")
+    untracked_dirty = _worktree_source_sha256(tmp_path, commit, submodules)
+
+    assert clean != tracked_dirty
+    assert tracked_dirty != untracked_dirty

@@ -3,10 +3,11 @@
 **Paper:** SCARF: A Scene-Adaptive Depth-Guided G-3DGS Encoder
 Accelerator with Semantic Reuse and Fused Dataflow
 
-**Badges requested:** Artifacts Available and Artifacts Evaluated (Functional).
-Results Reproduced is not requested because the real sparse-SAES probes do not
-meet the paper's Table 1/Table 3 contracts and the public FSDR implementation
-cannot reproduce Table 2's LSH-guided set.
+**Badges requested:** Artifact Available, Artifacts Evaluated (Functional), and
+Results Reproduced. Figure 8 is a mandatory key result and requires an
+independent run on a real Jetson Orin NX. Listing a result in the submission
+contract does not mark it complete: every key result remains `NOT_RUN` or
+`BLOCKED` until its raw evidence passes strict validation.
 
 The exact claim scope, commands, and tolerances are defined in
 [`artifact/CLAIMS.md`](artifact/CLAIMS.md). The final archival DOI must be added
@@ -58,8 +59,8 @@ for a paper-result claim. Full quality runs require the real prepared datasets.
 |---|---|
 | Quick strict inference | NVIDIA CUDA GPU with 8 GB VRAM, 16 GB RAM, 20 GB free disk |
 | CPU schema smoke | Ubuntu 22.04, x86-64 CPU, 8 GB RAM |
-| Optional diagnostic quality matrix | NVIDIA CUDA GPU with 24 GB VRAM, 32 GB RAM |
-| Orin baseline | Jetson Orin NX 16 GB, documented JetPack and MAXN state |
+| Full quality/mechanism matrix | NVIDIA CUDA GPU with 24 GB VRAM, 32 GB RAM |
+| Mandatory Figure 8 baseline | Jetson Orin NX 16 GB, documented JetPack, MAXN, and 918 MHz state |
 | RTL validation | JDK 11+, sbt 1.9+, Verilator 5+ |
 | ASAP7 physical proxy | x86-64 Linux, 128 GB RAM recommended, 100 GB free disk, pinned iFlow checkout |
 
@@ -69,8 +70,10 @@ workflow, and workstation CUDA timing is not a substitute for archived Orin NX
 performance evidence.
 
 Software and CUDA evaluation do not depend on the physical-flow resource gate.
-The ASAP7 workflow alone refuses to start while any Vivado process is active or
-while less than 48 GiB of host memory is available.
+The ASAP7 workflow always refuses to start while any Vivado process is active.
+Its default full-run preflight requires 48 GiB of `MemAvailable`; an explicit
+`--allow-low-memory-attempt` runs the unchanged flow below that recommendation
+and records resource/swap snapshots without promoting incomplete reports.
 
 ## Environments
 
@@ -93,6 +96,8 @@ orchestrator automatically uses `.venv/classic/bin/python` and
 `SCARF_PYTHON_CLASSIC` and `SCARF_PYTHON_DEPTHSPLAT` to their Python
 interpreters. Before loading a model, every real workflow validates the profile
 and saves its environment record below `outputs/ae/environments/`.
+Set `SCARF_NVCC=/path/to/nvcc` only when automatic discovery cannot locate the
+compiler matching the locked CUDA release; a mismatched compiler is rejected.
 
 ## Data and Checkpoints
 
@@ -107,12 +112,18 @@ bash data/download_dl3dv.sh
 ```
 
 DL3DV preparation creates two hash-manifested representations. DepthSplat uses
-`datasets/dl3dv/native`, which keeps the native 270 by 480 test images.
+`datasets/dl3dv/native`, which keeps the native 270 by 480 test images. At the
+pinned `DL3DV-10K-Benchmark` revision, scene source resolutions
+vary. The download first reads each pinned `transforms.json`, then emits a
+scene-level source plan: native uses the unique 270 by 480 tree (`images_8`
+for 2160p scenes and `images_4` for the one 1080p scene). This preserves the
+official target pixels without an extra resize.
 TranSplat and MVSplat use `datasets/dl3dv/re10k`, which contains deterministic
 360 by 640 images for their Re10K-compatible loaders. The second representation
-is resized from the higher-resolution `images_4` source with a fixed conversion
-recipe. The experiment mapping rejects a representation that does not match the
-selected model.
+is resized from the unique 540 by 960 tree (`images_4` for 2160p scenes and
+`images_2` for the one 1080p scene) with a fixed conversion recipe. The
+conversion record embeds and hashes the same source plan, and the experiment
+mapping rejects a representation that does not match the selected model.
 
 The committed evaluation index has two deliberately distinct ordinals. Its
 non-null source-file order defines the stable `sample_index` and selection
@@ -124,7 +135,7 @@ runner consumes samples in exactly the order produced by the upstream loader.
 The pinned DL3DV benchmark is a gated Hugging Face dataset. Before running its
 download command, accept the dataset access terms and authenticate with
 `hf auth login`. The script downloads only the required `nerfstudio` metadata
-and `images_4` and `images_8` trees. Dataset terms are not inferred from access
+and per-scene image trees named by that source plan. Dataset terms are not inferred from access
 approval. The manifest records the reviewed terms URL and explicitly forbids
 redistribution in the Zenodo package. Gated access is never bypassed.
 
@@ -163,6 +174,55 @@ recorded. Claim runs use these exact context and target views through the
 evaluation sampler. A one-sample run remains Functional evidence only. See the
 evaluation protocol document.
 
+### Calibration and Reviewer Profiles
+
+The unresolved engineering constants are selected once under the isolated
+contract in [`artifact/CALIBRATION.md`](artifact/CALIBRATION.md). Calibration
+uses 32 official training scenes from Re10K and 32 from ACID, selected by a
+domain-separated SHA256 ordering. It is disjoint from every evaluation
+scene/view and cannot read target RGB, ground truth, manuscript tables,
+`artifact/expected_results.json`, or completed evaluation outputs. One global
+configuration is frozen for all nine pairs before evaluation begins.
+
+Calibration is a pre-submission, author-side provenance operation, not a
+reviewer setup step. The official full training archives are large (currently
+about 554 GB for Re10K and 174 GB for ACID) because they contain the complete
+upstream training releases. They are neither redistributed nor required by
+`quick`, `pilot`, `all-eval --profile reviewer`, or `all-eval --profile full`.
+Those workflows consume only the SHA256-bound frozen
+`artifact/mechanism_config.json`; the evidence package records the calibration
+manifest and candidate-record digests so the selected configuration remains
+auditable without redistributing training data.
+
+The `full` evidence profile consumes every executable upstream index entry. The
+`reviewer` profile uses 512 hash-selected Re10K entries, 512 ACID entries, and
+all 140 DL3DV entries while preserving the exact scene/view records. Reviewer
+selection is compiled before mechanism evaluation and cannot be changed in
+response to results. Both profiles emit the same schema and figure/table
+catalog; only `full` is used for the complete author-side evidence set.
+
+Author-side calibration, run once before evidence collection:
+
+```bash
+SCARF_PYTHON_CLASSIC=/path/to/classic/bin/python \
+  bash scripts/run_ae.sh calibrate --output-root outputs/calibration
+```
+
+Reviewer and evaluation evidence paths, which never invoke calibration:
+
+```bash
+bash scripts/run_ae.sh pilot --pairs all --output-root outputs/ae_pilot
+bash scripts/run_ae.sh all-eval --profile reviewer --output-root outputs/ae_reviewer
+bash scripts/run_ae.sh all-eval --profile full --output-root outputs/ae
+```
+
+FSDR calibration may qualify a Hamming hit using depth evidence already
+available from the paper's probe-first tile schedule. SAES calibration may set
+the bandwidths used by the published bilateral assignment and depth-reliability
+equations. It may not add another SAES routing signal, search a projection seed,
+or select pair-specific parameters. These paths remain implementation-in-
+progress until their unchanged evaluation gates pass.
+
 ## Experiment Status
 
 ### Table 1: Rendering Quality
@@ -171,12 +231,11 @@ evaluation protocol document.
 bash scripts/run_ae.sh quality
 ```
 
-Current state: `NOT_CLAIMED_SAES_SPARSE_QUALITY_MISMATCH`. The claim-aware
-command records an explicit `NO_CLAIMED_PAIRS` no-op; focused diagnosis can run
-`scripts/demo.py` directly, but its sparse-SAES result is not part of the badge
-claim. Corrected TranSplat and MVSplat probes keep the no-optimization path
-numerically identical to the pinned model and preserve FSDR quality, while
-sparse SAES exceeds the Table 1 tolerances. Each
+Target state: mandatory Results Reproduced evidence for all nine pairs. Current
+state remains implementation-in-progress while the published FSDR/SAES
+semantics and full data matrix are restored. Existing failed sparse-SAES and
+LSH pilots remain diagnostic evidence; they are not overwritten or promoted.
+Each
 sample result covers every target view selected by the configured sampler and
 records per-view metrics. The sample metric is their arithmetic mean. Signed
 change, degradation, and absolute change are separate fields. The maximum
@@ -189,48 +248,85 @@ not accepted as evidence for sparse Gaussian pruning.
 
 ### Figure 8: End-to-End Speedup
 
-Current state: `NOT_CLAIMED_NO_ORIN_EVIDENCE`. The command below is retained
-for a future evidence-bearing Orin run and produces no current claim work.
+Target state: mandatory key result. Current state:
+`BLOCKED_UNTIL_REAL_ORIN_REVIEWER_RUN`. The command must run on a real Jetson
+Orin NX; an RTX run, calculated baseline, or manuscript constant is rejected.
 
 ```bash
-bash scripts/run_ae.sh speedup --num-samples N
+bash scripts/run_ae.sh performance --device orin --output-root outputs/ae
 ```
 
-Simulator cycles are deterministic. The GPU baseline uses archived measurements
-from the documented Jetson Orin NX state. The AE path does not estimate Orin
-latency from the peak TFLOPS of another GPU.
+Simulator cycles are deterministic. The GPU baseline and SCARF-Dataflow paths
+use CUDA events on the evaluator's documented Orin state. Every pair also
+archives Nsight Systems, thermal, clock, power-mode, environment, and selection
+evidence. The AE path never estimates Orin latency from another GPU.
+
+The MICRO reviewer guidance says evaluators bid using the declared hardware and
+software dependencies. If no assigned evaluator owns an Orin NX, the AE FAQ
+allows chairs to broker exceptional remote-machine access for rare hardware.
+A script alone is Functional evidence; Figure 8 passes only after an independent
+evaluator obtains the result.
 
 Figure 8 uses the 1 GHz architectural clock target in the paper. When executed,
 the public ASAP7 flow reports achieved timing independently. A routed ASAP7
 result that misses 1 GHz remains a visible timing failure and does not validate
 the unavailable commercial TSMC28 implementation.
 
+### Figure 10: Worst-Case Error Analysis
+
+```bash
+bash scripts/run_ae.sh worstcase --output-root outputs/ae
+```
+
+The generator ranks every target view from the completed nine-pair quality
+matrix. It selects the worst FSDR-only PSNR loss and SAES-only LPIPS loss using
+a deterministic tie-break, then binds the loss trace, stage cycles, source
+images, and RGB error map to that same sample/view. Existing plotting metadata
+and transformed display values are comparison material only.
+
 ### Figure 11 and Tables 2-3: Ablation and Mechanisms
 
 ```bash
-bash scripts/run_ae.sh ablation
+bash scripts/run_ae.sh mechanisms --output-root outputs/ae
 ```
 
-When rows are claimed, the output includes FSDR-only, SAES-only, combined, and
-no-optimization results, plus guided-rate, Top-1 coverage, L0/L1, Gaussian, and
-memory statistics. Current state: `NOT_CLAIMED_SAES_PROTOCOL_MISMATCH`; the
-claim-aware command is therefore an explicit no-op. Real probes produced zero
-L1 tiles instead of the nonzero paper targets. Separately, all six FSDR pilots
-miss the Guided Rate targets and the tracked RTL projection ROM is all zero;
-the software's seed-0 hyperplanes are not paper collateral. The RTL MAC also
-interprets its 16-bit operands as unsigned values, so populating the ROM alone
-would not establish signed random-hyperplane equivalence. Six fixed 32-sample
-prefixes and a separate DepthSplat ViT-L feature diagnostic fail the unchanged
-mechanism checks. Tables 2--3 and
-Figure 11 are therefore not claimed.
+For a bounded reviewer shard or a legally available dataset subset, retain the
+same mode and canonical protocol but select explicit pairs:
+
+```bash
+bash scripts/run_ae.sh mechanisms \
+  --pairs transplat/re10k,mvsplat/acid,depthsplat/re10k \
+  --num-samples 1 --output-root outputs/ae-pilot
+```
+
+`--pairs` never changes an evaluation index or target view. Unknown and
+duplicate pairs fail before execution, and omitting it preserves the complete
+nine-pair matrix.
+
+The output includes FSDR-only, SAES-only, combined, and no-optimization cycles.
+Table 2 uses discrete full-search Top-1 counts, not `in_window_rate`, and derives
+depth evaluations and feature-buffer bytes from events. Table 3 derives tile
+paths, low-variance agreement, Gaussian savings, and S2 evaluations from the
+same event stream. Historical failing pilots remain visible until new complete
+aggregates pass the unchanged gates.
+
+### Figure 12: MMCU Utilization
+
+```bash
+bash scripts/run_ae.sh utilization --output-root outputs/ae
+```
+
+Utilization is `useful_mmcu_slots / scheduled_mmcu_slots` for S1-S3. It cannot
+be supplied as a percentage constant or inferred from the manuscript CSV.
 
 ### Figures 13-16: Sensitivity
 
-Current state: `NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX`. The trace-and-replay
-implementation remains available, but the current claim does not run it.
+Target state: mandatory full nine-pair trace-and-replay evidence. A model runs
+once per sample trace; the five parameter values replay deterministic feature,
+depth, Gaussian, cycle, and mechanism inputs.
 
 ```bash
-bash scripts/run_ae.sh sensitivity --num-samples N
+bash scripts/run_ae.sh sensitivity --output-root outputs/ae
 ```
 
 The configured grids include cache sizes 8-128, Hamming thresholds 1-5, the
@@ -240,19 +336,16 @@ all protocol samples and produces a strict dataset aggregate before plotting.
 ### Complete Declared Workflow
 
 ```bash
-bash scripts/run_ae.sh all
-bash scripts/run_ae.sh validate
+bash scripts/run_ae.sh all-eval --profile full --output-root outputs/ae
+bash scripts/run_ae.sh figures --figures all --output-root outputs/ae
+bash scripts/run_ae.sh validate --require-key-results --output-root outputs/ae
 ```
 
-`all` follows the machine-readable claim status. The six-pair software matrix
-is currently diagnostic rather than required claim work; it must not be used to
-turn the dense path into sparse evidence. The declared workflow runs RTL, the
-public DRAM proxy, report generation, and validation. Physical design and
-scaling are also skipped because their machine-readable states are
-`NOT_CLAIMED_RESOURCE_LIMIT` and `NOT_CLAIMED_NO_PHYSICAL_INPUT`.
-`validate`
-returns nonzero when a claimed result is missing, structurally invalid, outside
-its tolerance, or based on an unfinalized sample protocol.
+`all-eval` schedules the complete paper matrix except workflows blocked by a
+declared external hardware/account gate. `validate --require-key-results`
+returns nonzero for every missing, structurally invalid, out-of-tolerance,
+wrong-class, or unfinalized key result. It cannot pass merely because a result
+is marked not claimed.
 
 ## RTL Validation
 
@@ -280,10 +373,12 @@ Full workload runs can pass measured address events directly to
 ## ASAP7 Physical Proxy
 
 Current state: `NOT_CLAIMED_RESOURCE_LIMIT`. The pinned clean-worktree,
-container, command, and collateral-hash dry-run passed, but a concurrent
-180-design Vivado sweep left less than the required 48 GiB available memory.
-No routed PPA is included or claimed. The command below remains the documented
-workflow for a sufficiently provisioned host.
+container, command, and collateral-hash dry-run passed. A clean unchanged
+low-memory attempt completed synthesis through filler and reached global
+routing, then was stopped after verified persistent swap thrashing. Its hashed
+attempt outcome is diagnostic evidence only; no routed PPA is included or
+claimed. The default command below is for a sufficiently provisioned host;
+the explicitly labeled low-memory attempt is documented in `hardware/README.md`.
 
 ```bash
 export IFLOW_ROOT=/path/to/clean/iFlow
@@ -334,14 +429,17 @@ outputs/ae/
 |-- quick/<model>_<dataset>/samples/sample_00000/results.json
 |-- quality/<model>_<dataset>/samples/sample_NNNNN/results.json
 |-- quality/<model>_<dataset>/results.json
-|-- speedup/<model>_<dataset>/samples/sample_NNNNN/orin-evidence/
-|-- speedup/<model>_<dataset>/results.json
-|-- ablation/<model>_<dataset>/results.json
+|-- performance/<model>_<dataset>/samples/sample_NNNNN/orin-evidence/
+|-- performance/<model>_<dataset>/results.json
+|-- mechanisms/<model>_<dataset>/results.json
+|-- utilization/<model>_<dataset>/results.json
+|-- worstcase/results.json
 |-- sensitivity/results.json
 |-- rtl/results.json
 |-- dram/results.json
 |-- physical/asap7/ppa.json
 |-- physical/asap7/ppa_28nm_estimated.json
+|-- reports/figure_catalog.json
 `-- reports/reproduction_report.md
 ```
 

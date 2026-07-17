@@ -36,7 +36,7 @@
     },
     "depthsplat/dl3dv": {
       "dataset_representation": "depthsplat-native-270x480-v1",
-      "dataset_tree_sha256": null,
+      "dataset_tree_sha256": "7ce97805b7b445dc3571d145a15a2efc3336dc05b88fc2fa26c6322511d7529a",
       "index_path": "depthsplat/assets/dl3dv_start_0_distance_10_ctx_2v_tgt_4v.json",
       "null_entry_count": 0,
       "sample_count": 140,
@@ -66,7 +66,7 @@
     },
     "mvsplat/dl3dv": {
       "dataset_representation": "re10k-compatible-360x640-v1",
-      "dataset_tree_sha256": null,
+      "dataset_tree_sha256": "4ea2b8a5794ffac079c986a2a3c94756f27bc90aa287524022fd866c4b6c6ef9",
       "index_path": "depthsplat/assets/dl3dv_start_0_distance_10_ctx_2v_tgt_4v.json",
       "null_entry_count": 0,
       "sample_count": 140,
@@ -96,7 +96,7 @@
     },
     "transplat/dl3dv": {
       "dataset_representation": "re10k-compatible-360x640-v1",
-      "dataset_tree_sha256": null,
+      "dataset_tree_sha256": "4ea2b8a5794ffac079c986a2a3c94756f27bc90aa287524022fd866c4b6c6ef9",
       "index_path": "depthsplat/assets/dl3dv_start_0_distance_10_ctx_2v_tgt_4v.json",
       "null_entry_count": 0,
       "sample_count": 140,

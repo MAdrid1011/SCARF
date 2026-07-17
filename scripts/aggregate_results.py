@@ -23,6 +23,38 @@ from scripts.validate_result import validate
 
 
 QUALITY_METRICS = ("psnr_db", "ssim", "lpips")
+FSDR_EVENT_COUNTS = (
+    "total_pixels",
+    "cache_hits",
+    "guided_pixels",
+    "guided_top1_covered",
+    "guided_top1_missed",
+    "full_depth_evaluations",
+    "executed_depth_evaluations",
+    "feature_buffer_bytes_baseline",
+    "feature_buffer_bytes_actual",
+    "hamming_hits",
+    "local_valid_hits",
+    "local_invalid_fallbacks",
+)
+SAES_EVENT_COUNTS = (
+    "total_tiles",
+    "level0_tiles",
+    "level1_tiles",
+    "full_tiles",
+    "baseline_gaussians",
+    "actual_gaussians",
+    "full_s2_evaluations",
+    "executed_s2_evaluations",
+    "l0_representatives",
+    "l1_lightweight_anchors",
+    "full_stage3_gaussians",
+    "covariance_psd_violations",
+)
+SAES_EVENT_MAXIMA = (
+    "assignment_weight_sum_error_max",
+    "opacity_transmittance_error_max",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -77,6 +109,134 @@ def _dispersion(records: list[dict[str, Any]], path: tuple[str, ...]) -> dict[st
         "mean": statistics.fmean(values),
         "population_stddev": statistics.pstdev(values),
     }
+
+
+def _invariant(records: list[dict[str, Any]], path: tuple[str, ...]) -> Any:
+    values = []
+    for record in records:
+        value: Any = record
+        for key in path:
+            value = value[key]
+        values.append(value)
+    if any(value != values[0] for value in values[1:]):
+        raise ValueError(f"sample evidence mismatch: {'.'.join(path)}")
+    return copy.deepcopy(values[0])
+
+
+def _sum_count(records: list[dict[str, Any]], path: tuple[str, ...]) -> int | float:
+    values = []
+    for record in records:
+        value: Any = record
+        for key in path:
+            value = value[key]
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError(f"{'.'.join(path)} must be a nonnegative finite count")
+        values.append(value)
+    total = sum(values)
+    return int(total) if all(isinstance(value, int) for value in values) else float(total)
+
+
+def _max_count(records: list[dict[str, Any]], path: tuple[str, ...]) -> int | float:
+    values = []
+    for record in records:
+        value: Any = record
+        for key in path:
+            value = value[key]
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError(f"{'.'.join(path)} must be finite and nonnegative")
+        values.append(value)
+    maximum = max(values)
+    return int(maximum) if all(isinstance(value, int) for value in values) else float(maximum)
+
+
+def _aggregate_v2_evidence(records: list[dict[str, Any]]) -> dict[str, Any]:
+    stages: dict[str, Any] = {}
+    for stage in ("s1", "s2", "s3", "s4"):
+        stages[stage] = {
+            "cycles": _mean(records, ("performance", "stages", stage, "cycles")),
+            "useful_mmcu_slots": _sum_count(
+                records, ("performance", "stages", stage, "useful_mmcu_slots")
+            ),
+            "scheduled_mmcu_slots": _sum_count(
+                records, ("performance", "stages", stage, "scheduled_mmcu_slots")
+            ),
+            "mmcu_slots_available": _invariant(
+                records, ("performance", "stages", stage, "mmcu_slots_available")
+            ),
+            "source": _invariant(
+                records, ("performance", "stages", stage, "source")
+            ),
+        }
+
+    events: dict[str, Any] = {}
+    schema_version = records[0]["schema_version"]
+    v21 = schema_version == "2.1"
+    for namespace, counts, flags in (
+        (
+            "fsdr",
+            FSDR_EVENT_COUNTS,
+            (
+                "discrete_top1_available",
+                "depth_evaluations_available",
+                "feature_buffer_bytes_available",
+            ),
+        ),
+        (
+            "saes",
+            SAES_EVENT_COUNTS,
+            (
+                "tile_path_available",
+                "gaussian_counts_available",
+                "s2_evaluations_available",
+            ),
+        ),
+    ):
+        if not v21:
+            if namespace == "fsdr":
+                counts = counts[:9]
+            else:
+                counts = counts[:8]
+        events[namespace] = {
+            field: _sum_count(records, ("events", namespace, field))
+            for field in counts
+        }
+        events[namespace].update(
+            {
+                flag: _invariant(records, ("events", namespace, flag))
+                for flag in flags
+            }
+        )
+        events[namespace]["source"] = _invariant(
+            records, ("events", namespace, "source")
+        )
+        if namespace == "saes" and v21:
+            events[namespace].update(
+                {
+                    field: _max_count(records, ("events", namespace, field))
+                    for field in SAES_EVENT_MAXIMA
+                }
+            )
+            # The sparse-execution contract is model-scoped and must be
+            # identical for every sample.  The measured saving fractions may
+            # vary by sample, so preserve their dataset mean explicitly.
+            events[namespace]["execution_dependency"] = _invariant(
+                records, ("events", namespace, "execution_dependency")
+            )
+            events[namespace]["s2_s3_saving"] = {
+                stage: _mean(records, ("events", namespace, "s2_s3_saving", stage))
+                for stage in ("s2", "s3")
+            }
+    return {"stages": stages, "events": events}
 
 
 def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
@@ -143,6 +303,14 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
     selection_sha256 = hashlib.sha256(selection_bytes).hexdigest()
 
     first = records[0]
+    schema_version = first["schema_version"]
+    if any(record["schema_version"] != schema_version for record in records[1:]):
+        raise ValueError("sample provenance mismatch: schema_version")
+    if schema_version in {"2.0", "2.1"} and any(
+        record.get("evidence_class") != first.get("evidence_class")
+        for record in records[1:]
+    ):
+        raise ValueError("sample provenance mismatch: evidence_class")
     invariants = (
         ("model", lambda item: item["provenance"]["model"]),
         ("dataset", lambda item: item["provenance"]["dataset"]),
@@ -150,12 +318,27 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
         ("git_commit", lambda item: item["provenance"]["git_commit"]),
         ("git_dirty", lambda item: item["provenance"]["git_dirty"]),
         ("source_identity", lambda item: item["provenance"]["source_identity"]),
+        (
+            "source_tree_sha256",
+            lambda item: item["provenance"]["source_tree_sha256"],
+        ),
         ("submodules", lambda item: item["provenance"]["submodules"]),
         ("runtime_assets", lambda item: item["provenance"]["runtime_assets"]),
         ("environment", lambda item: item["provenance"]["environment"]),
         ("cycle_source", lambda item: item["performance"]["cycle_source"]),
         ("baseline_source", lambda item: item["performance"]["baseline_source"]),
     )
+    if schema_version == "2.1":
+        invariants = (*invariants,
+            (
+                "mechanism_config_sha256",
+                lambda item: item["provenance"]["mechanism_config_sha256"],
+            ),
+            (
+                "calibration_provenance",
+                lambda item: item["provenance"]["calibration_provenance"],
+            ),
+        )
     for label, getter in invariants:
         expected = getter(first)
         if any(getter(record) != expected for record in records[1:]):
@@ -187,7 +370,7 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
         "sample_results": sorted(evidence, key=lambda item: item["sample_index"]),
     }
     record = {
-        "schema_version": "1.0",
+        "schema_version": schema_version,
         "provenance": provenance,
         "quality": build_quality_record(baseline_quality, scarf_quality),
         "performance": {
@@ -213,6 +396,12 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
             },
         },
     }
+    if schema_version in {"2.0", "2.1"}:
+        evidence = _aggregate_v2_evidence(records)
+        record["evidence_class"] = first["evidence_class"]
+        record["performance"]["stages"] = evidence["stages"]
+        record["events"] = evidence["events"]
+        record["energy"] = _mean_tree([item["energy"] for item in records])
     validate(record)
     return record
 

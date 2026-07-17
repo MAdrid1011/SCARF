@@ -12,6 +12,29 @@ def test_complete_validator_rejects_missing_evidence(tmp_path: Path):
         validate_complete(tmp_path, expected)
 
 
+def test_key_result_catalog_gate_rejects_not_run_and_accepts_complete_pass(tmp_path):
+    from scripts.validate_ae import validate_result_catalog
+
+    root = Path(__file__).resolve().parents[1]
+    contract = json.loads((root / "artifact/evaluation_catalog.json").read_text())
+    rows = [
+        {
+            "id": item["id"],
+            "evidence_class": item["required_evidence_class"],
+            "status": "PASS",
+            "source_data": [{"path": "raw.json", "sha256": "a" * 64}],
+            "exports": ["result.pdf"],
+        }
+        for item in contract["results"]
+    ]
+    catalog = {"schema_version": "2.0", "results": rows}
+
+    validate_result_catalog(catalog, require_key_results=True)
+    rows[0]["status"] = "NOT_RUN"
+    with pytest.raises(ValueError, match="mandatory key result"):
+        validate_result_catalog(catalog, require_key_results=True)
+
+
 def test_expected_table_has_all_nine_pairs():
     root = Path(__file__).resolve().parents[1]
     expected = json.loads((root / "artifact/expected_results.json").read_text())
@@ -25,6 +48,7 @@ def test_unfinalized_sample_protocol_is_a_failed_claim():
     root = Path(__file__).resolve().parents[1]
     protocol = json.loads((root / "artifact/evaluation_protocol.json").read_text())
     expected = json.loads((root / "artifact/expected_results.json").read_text())
+    protocol["pairs"]["depthsplat/dl3dv"]["dataset_tree_sha256"] = None
 
     check = protocol_check(protocol, set(expected["table1"]))
 

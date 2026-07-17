@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +25,111 @@ from data.verify_prepared_dataset import prepared_scene_order
 
 class SampleSession(Protocol):
     def run_sample(self, selection: dict[str, Any], output_dir: Path) -> dict[str, Any]: ...
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def update_worstcase_evidence(
+    pair_dir: Path, result_path: Path, record: dict[str, Any]
+) -> None:
+    """Keep the strongest FSDR and SAES view while discarding other PNGs."""
+    ablation = record.get("ablation")
+    evaluation = record.get("provenance", {}).get("evaluation", {})
+    if not isinstance(ablation, dict) or not isinstance(evaluation, dict):
+        return
+    configs = {}
+    for name in ("asic", "asic_fsdr", "asic_saes"):
+        views = ablation.get(name, {}).get("quality", {}).get("quality_views")
+        if not isinstance(views, list) or not views:
+            return
+        configs[name] = views
+    target_indices = evaluation.get("target_indices")
+    if not isinstance(target_indices, list) or any(
+        [view.get("target_index") for view in configs[name]] != target_indices
+        for name in configs
+    ):
+        raise ValueError("ablation quality views do not match target indices")
+
+    sample_dir = result_path.parent
+    source_prefixes = ("gt", "ablation_asic", "ablation_asic_fsdr", "ablation_asic_saes")
+    required = [
+        sample_dir / f"{prefix}_{view_index:02d}.png"
+        for view_index in range(len(target_indices))
+        for prefix in source_prefixes
+    ]
+    if not all(path.is_file() for path in required):
+        return
+
+    candidates = {
+        "fsdr": [
+            float(reference["psnr_db"]) - float(optimized["psnr_db"])
+            for reference, optimized in zip(configs["asic"], configs["asic_fsdr"])
+        ],
+        "saes": [
+            float(optimized["lpips"]) - float(reference["lpips"])
+            for reference, optimized in zip(configs["asic"], configs["asic_saes"])
+        ],
+    }
+    metrics = {"fsdr": "psnr_loss_db", "saes": "lpips_increase"}
+    for kind, values in candidates.items():
+        view_index = max(range(len(values)), key=values.__getitem__)
+        destination = pair_dir / "worstcase" / kind
+        manifest_path = destination / "manifest.json"
+        previous = (
+            json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest_path.is_file()
+            else None
+        )
+        if previous is not None and float(
+            previous.get("loss_value", float("-inf"))
+        ) >= values[view_index]:
+            continue
+        destination.mkdir(parents=True, exist_ok=True)
+        for path in destination.glob("*.png"):
+            path.unlink()
+        selected_sources = {
+            "ground_truth": sample_dir / f"gt_{view_index:02d}.png",
+            "reference": sample_dir / f"ablation_asic_{view_index:02d}.png",
+            "optimized": sample_dir
+            / f"ablation_{'asic_fsdr' if kind == 'fsdr' else 'asic_saes'}_{view_index:02d}.png",
+        }
+        artifacts = {}
+        for label, source in selected_sources.items():
+            target = destination / f"{label}.png"
+            shutil.copy2(source, target)
+            artifacts[label] = {
+                "path": target.relative_to(destination).as_posix(),
+                "sha256": _sha256_file(target),
+            }
+        manifest = {
+            "schema_version": "1.0",
+            "kind": f"{kind}_worstcase_view",
+            "loss_metric": metrics[kind],
+            "loss_value": values[view_index],
+            "sample_index": evaluation.get("sample_index"),
+            "scene": evaluation.get("scene"),
+            "target_index": target_indices[view_index],
+            "view_ordinal": view_index,
+            "source_result": {
+                "path": result_path.relative_to(pair_dir).as_posix(),
+                "sha256": _sha256_file(result_path),
+            },
+            "artifacts": artifacts,
+        }
+        temporary = manifest_path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        temporary.replace(manifest_path)
+
+    for path in sample_dir.glob("*.png"):
+        path.unlink()
 
 
 def _validate_record(record: dict[str, Any]) -> None:
@@ -87,6 +194,8 @@ def _complete_sample(
         if (
             provenance.get("git_commit") != identity["git_commit"]
             or provenance.get("git_dirty") is not identity["git_dirty"]
+            or provenance.get("source_tree_sha256")
+            != identity["source_tree_sha256"]
         ):
             return False
     return _selection_from_result(record) == _stable_selection(selection)
@@ -106,9 +215,10 @@ def execute_pair(
     resumed = 0
     for selection in selections:
         sample_dir = samples_root / f"sample_{selection['sample_index']:05d}"
-        if resume and _complete_sample(
-            sample_dir / "results.json", selection, identity
-        ):
+        result_path = sample_dir / "results.json"
+        if resume and _complete_sample(result_path, selection, identity):
+            record = json.loads(result_path.read_text(encoding="utf-8"))
+            update_worstcase_evidence(output_dir, result_path, record)
             resumed += 1
         else:
             pending.append((selection, sample_dir))
@@ -136,7 +246,7 @@ def execute_pair(
             {"event": "sample_start", "selection": stable_selection},
         )
         try:
-            session.run_sample(selection, sample_dir)
+            sample_record = session.run_sample(selection, sample_dir)
         except Exception as exc:
             _append_progress(
                 output_dir,
@@ -161,6 +271,9 @@ def execute_pair(
             raise RuntimeError(
                 f"sample {selection['sample_index']} did not produce matching evidence"
             )
+        update_worstcase_evidence(
+            output_dir, sample_dir / "results.json", sample_record
+        )
         executed += 1
         _append_progress(
             output_dir,

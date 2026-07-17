@@ -8,8 +8,20 @@ import hashlib
 import json
 import math
 import re
+import sys
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from hardware.iflow.paper_table4 import (
+    BUFFER_PROXY_COMPONENTS,
+    REQUIRED_REPORT_COMPONENTS,
+    TABLE4_AGGREGATES,
+    TABLE4_COMPONENTS,
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -38,12 +50,13 @@ def report_time_unit(text: str) -> str:
 
 
 def parse_ppa_report(text: str, clock_period_ns: float = 1.0) -> dict[str, float | None]:
+    aggregate_text = text.split("SCARF_HIER_AREA", 1)[0]
     area = last_float(
         (
             r"Design area\s+([0-9.eE+-]+)",
             r"Total cell area:\s*([0-9.eE+-]+)",
         ),
-        text,
+        aggregate_text,
     )
     utilization = last_float((r"([0-9.eE+-]+)%\s+utilization",), text)
     wns = last_float(
@@ -63,7 +76,7 @@ def parse_ppa_report(text: str, clock_period_ns: float = 1.0) -> dict[str, float
     )
     power_row = re.findall(
         r"^Total\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s*$",
-        text,
+        aggregate_text,
         flags=re.IGNORECASE | re.MULTILINE,
     )
     dynamic_power = static_power = None
@@ -87,6 +100,136 @@ def parse_ppa_report(text: str, clock_period_ns: float = 1.0) -> dict[str, float
         "dynamic_power_w": dynamic_power,
         "static_power_w": static_power,
     }
+
+
+def parse_hierarchy_report(text: str) -> dict[str, dict[str, float]]:
+    areas = {
+        name: float(value) / 1_000_000.0
+        for name, value in re.findall(
+            r"^SCARF_HIER_AREA\s+(\S+)\s+([0-9.eE+-]+)\s*$",
+            text,
+            flags=re.MULTILINE,
+        )
+    }
+    powers = {}
+    for name, block in re.findall(
+        r"^SCARF_HIER_POWER_BEGIN\s+(\S+)\s*$\n(.*?)^SCARF_HIER_POWER_END\s+\1\s*$",
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    ):
+        rows = re.findall(
+            r"^Total\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s*$",
+            block,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        if rows:
+            internal, switching, leakage, total = map(float, rows[-1])
+            powers[name] = {
+                "dynamic_power_w": internal + switching,
+                "static_power_w": leakage,
+                "total_power_w": total,
+            }
+    return {
+        name: {"area_mm2": areas[name], **powers[name]}
+        for name in REQUIRED_REPORT_COMPONENTS
+        if name in areas and name in powers
+    }
+
+
+def parse_hierarchy_instance_counts(text: str) -> dict[str, int]:
+    """Read the routed leaf-instance bindings for each named paper component."""
+    counts = {
+        name: int(value)
+        for name, value in re.findall(
+            r"^SCARF_HIER_INSTANCE_COUNT\s+(\S+)\s+(\d+)\s*$",
+            text,
+            flags=re.MULTILINE,
+        )
+    }
+    return {
+        name: counts[name]
+        for name in REQUIRED_REPORT_COMPONENTS
+        if name in counts
+    }
+
+
+def parse_def_die_area_mm2(text: str) -> float | None:
+    """Return the routed DEF die area in mm^2, or None for an invalid DEF."""
+    units = re.findall(
+        r"^\s*UNITS\s+DISTANCE\s+MICRONS\s+(\d+)\s*;",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    dieareas = re.findall(
+        r"^\s*DIEAREA\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*"
+        r"\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*;",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if not units or not dieareas:
+        return None
+    dbu = int(units[-1])
+    x0, y0, x1, y1 = map(int, dieareas[-1])
+    area_dbu2 = abs(x1 - x0) * abs(y1 - y0)
+    if dbu <= 0 or area_dbu2 <= 0:
+        return None
+    return area_dbu2 / float(dbu * dbu * 1_000_000.0)
+
+
+def _blank_component() -> dict[str, None]:
+    return {
+        "area_mm2": None,
+        "dynamic_power_w": None,
+        "static_power_w": None,
+        "total_power_w": None,
+    }
+
+
+def _finite_component(component: dict[str, Any]) -> bool:
+    return all(
+        isinstance(component.get(field), (int, float))
+        and math.isfinite(float(component[field]))
+        and float(component[field]) >= 0
+        for field in ("area_mm2", "dynamic_power_w", "static_power_w", "total_power_w")
+    )
+
+
+def _sum_components(
+    components: dict[str, dict[str, float | None]], names: tuple[str, ...]
+) -> dict[str, float]:
+    fields = ("area_mm2", "dynamic_power_w", "static_power_w", "total_power_w")
+    result: dict[str, float] = {}
+    for field in fields:
+        values = [components[name].get(field) for name in names]
+        if not all(isinstance(value, (int, float)) for value in values):
+            raise ValueError(f"cannot aggregate incomplete Table 4 field: {field}")
+        result[field] = sum(float(value) for value in values)
+    return result
+
+
+def _proxy_components(proxy_record: dict[str, Any] | None) -> dict[str, dict[str, float | None]]:
+    components = {
+        component: _blank_component() for component in BUFFER_PROXY_COMPONENTS.values()
+    }
+    if not isinstance(proxy_record, dict):
+        return components
+    for macro in proxy_record.get("macros", []):
+        if not isinstance(macro, dict):
+            continue
+        component = BUFFER_PROXY_COMPONENTS.get(macro.get("name"))
+        if component is None:
+            continue
+        per_instance = macro.get("area_per_instance_mm2")
+        instances = macro.get("instances")
+        if not isinstance(per_instance, (int, float)) or not isinstance(instances, int):
+            continue
+        components[component] = {
+            "area_mm2": float(per_instance) * instances,
+            "dynamic_power_w": None,
+            "static_power_w": None,
+            "total_power_w": None,
+        }
+    return components
 
 
 def parse_drc(text: str) -> int | None:
@@ -121,10 +264,19 @@ def build_record(runtime: Path, manifest_path: Path) -> dict[str, Any]:
     gds = find_last(runtime, "result/ScarfTop.layout.*/ScarfTop.gds")
     proxy_manifest = runtime / "rtl/ScarfTop/sram-proxies.json"
     iflow_log = runtime.parent.parent / "iflow.log"
+    resource_validation = output_dir / "resource-validation.json"
 
     report_text = report.read_text(encoding="utf-8", errors="replace") if report.is_file() else ""
     log_text = iflow_log.read_text(encoding="utf-8", errors="replace") if iflow_log.is_file() else ""
+    routed_def_text = (
+        routed_def.read_text(encoding="utf-8", errors="replace")
+        if routed_def is not None
+        else ""
+    )
     metrics = parse_ppa_report(report_text)
+    hierarchy = parse_hierarchy_report(report_text)
+    hierarchy_bindings = parse_hierarchy_instance_counts(report_text)
+    die_area_mm2 = parse_def_die_area_mm2(routed_def_text)
     route_drc_text = (
         route_drc_report.read_text(encoding="utf-8", errors="replace")
         if route_drc_report is not None
@@ -152,15 +304,113 @@ def build_record(runtime: Path, manifest_path: Path) -> dict[str, Any]:
         else None
     )
     proxy_area_mm2 = proxy_record.get("total_proxy_area_mm2") if proxy_record else None
-    total_area_mm2 = metrics.get("area_um2")
-    if total_area_mm2 is not None:
-        total_area_mm2 /= 1_000_000.0
+    cell_area_mm2 = metrics.get("area_um2")
+    if cell_area_mm2 is not None:
+        cell_area_mm2 /= 1_000_000.0
     logic_area_mm2 = (
-        total_area_mm2 - proxy_area_mm2
-        if total_area_mm2 is not None and proxy_area_mm2 is not None
+        cell_area_mm2 - proxy_area_mm2
+        if cell_area_mm2 is not None and proxy_area_mm2 is not None
         else None
     )
-    area_partition_valid = logic_area_mm2 is not None and logic_area_mm2 > 0
+    routing_filler_area_mm2 = (
+        die_area_mm2 - cell_area_mm2
+        if die_area_mm2 is not None and cell_area_mm2 is not None
+        else None
+    )
+    reported_hierarchy_complete = (
+        set(hierarchy) == set(REQUIRED_REPORT_COMPONENTS)
+        and all(_finite_component(component) for component in hierarchy.values())
+    )
+    hierarchy_bindings_complete = (
+        set(hierarchy_bindings) == set(REQUIRED_REPORT_COMPONENTS)
+        and all(count > 0 for count in hierarchy_bindings.values())
+    )
+    table_hierarchy: dict[str, dict[str, float | None]] = {}
+    proxy_components = _proxy_components(proxy_record)
+    proxy_component_areas = [
+        component["area_mm2"] for component in proxy_components.values()
+    ]
+    proxy_components_complete = all(
+        isinstance(value, (int, float)) and value > 0
+        for value in proxy_component_areas
+    )
+    proxy_area_valid = (
+        isinstance(proxy_area_mm2, (int, float))
+        and proxy_components_complete
+        and math.isclose(
+            float(proxy_area_mm2),
+            sum(float(value) for value in proxy_component_areas),
+            rel_tol=1e-6,
+            abs_tol=1e-9,
+        )
+    )
+    area_partition_valid = (
+        isinstance(logic_area_mm2, (int, float))
+        and logic_area_mm2 > 0
+        and proxy_area_valid
+        and isinstance(die_area_mm2, (int, float))
+        and die_area_mm2 > 0
+        and isinstance(routing_filler_area_mm2, (int, float))
+        and routing_filler_area_mm2 >= 0
+    )
+    hierarchy_complete = False
+    if (
+        reported_hierarchy_complete
+        and hierarchy_bindings_complete
+        and area_partition_valid
+        and complete_metrics
+    ):
+        table_hierarchy = {
+            name: dict(hierarchy[name]) for name in REQUIRED_REPORT_COMPONENTS
+        }
+        for aggregate, children in TABLE4_AGGREGATES.items():
+            if aggregate != "on_chip_buffers":
+                table_hierarchy[aggregate] = _sum_components(table_hierarchy, children)
+        table_hierarchy.update(proxy_components)
+        table_hierarchy["on_chip_buffers"] = {
+            "area_mm2": float(proxy_area_mm2),
+            "dynamic_power_w": None,
+            "static_power_w": None,
+            "total_power_w": None,
+        }
+        aggregate_names = ("mvu", "ggu_array", "fsdr_subsystem")
+        known_area = sum(float(table_hierarchy[name]["area_mm2"]) for name in aggregate_names)
+        known_dynamic = sum(
+            float(table_hierarchy[name]["dynamic_power_w"]) for name in aggregate_names
+        )
+        known_static = sum(
+            float(table_hierarchy[name]["static_power_w"]) for name in aggregate_names
+        )
+        control_area = float(logic_area_mm2) - known_area
+        control_dynamic = float(metrics["dynamic_power_w"]) - known_dynamic
+        control_static = float(metrics["static_power_w"]) - known_static
+        if min(control_area, control_dynamic, control_static) >= 0:
+            # Residual synthesized logic is exactly the paper's Control +
+            # Interconnect row.  There is no separately synthesizable PLL
+            # or commercial PHY in the public ASAP7 collateral.
+            table_hierarchy["control_interconnect"] = {
+                "area_mm2": control_area,
+                "dynamic_power_w": control_dynamic,
+                "static_power_w": control_static,
+                "total_power_w": control_dynamic + control_static,
+            }
+            table_hierarchy["control_and_clock"] = _blank_component()
+            table_hierarchy["pll_clock_tree"] = _blank_component()
+            table_hierarchy["io_phy"] = _blank_component()
+            table_hierarchy["io_lpddr4x_phy"] = _blank_component()
+            table_hierarchy["routing_filler"] = {
+                "area_mm2": float(routing_filler_area_mm2),
+                "dynamic_power_w": None,
+                "static_power_w": None,
+                "total_power_w": None,
+            }
+            table_hierarchy["total_die"] = {
+                "area_mm2": float(die_area_mm2),
+                "dynamic_power_w": None,
+                "static_power_w": None,
+                "total_power_w": float(metrics["total_power_w"]),
+            }
+            hierarchy_complete = set(table_hierarchy) == set(TABLE4_COMPONENTS)
     physical_valid = bool(
         manifest.get("stages") and manifest["stages"][-1] == "layout"
         and complete_metrics
@@ -168,6 +418,8 @@ def build_record(runtime: Path, manifest_path: Path) -> dict[str, Any]:
         and route_drc_report is not None
         and proxy_manifest.is_file()
         and area_partition_valid
+        and hierarchy_bindings_complete
+        and hierarchy_complete
         and drc == 0
     )
     artifacts = {}
@@ -178,6 +430,7 @@ def build_record(runtime: Path, manifest_path: Path) -> dict[str, Any]:
         ("route_drc_report", route_drc_report),
         ("ppa_report", report if report.is_file() else None),
         ("sram_proxy_manifest", proxy_manifest if proxy_manifest.is_file() else None),
+        ("resource_validation", resource_validation if resource_validation.is_file() else None),
     ):
         if path is not None:
             artifacts[label] = {
@@ -186,15 +439,30 @@ def build_record(runtime: Path, manifest_path: Path) -> dict[str, Any]:
                 "sha256": sha256_file(path),
             }
     metrics.pop("area_um2")
+    host_resources = (
+        json.loads(resource_validation.read_text(encoding="utf-8"))
+        if resource_validation.is_file()
+        else None
+    )
+    provenance = dict(manifest)
+    if host_resources is not None:
+        provenance["host_resources"] = host_resources
     return {
         "schema_version": "1.0",
         "evidence_type": "asap7_predictive_postroute",
         "physical_valid": physical_valid,
         "process": {"name": "ASAP7", "node_nm": 7, "predictive": True},
+        "hierarchy_bindings": {
+            "source": "routed DEF leaf-instance names matched by the Table 4 mapping",
+            "instance_counts": hierarchy_bindings,
+        },
         "metrics": {
-            "area_mm2": total_area_mm2,
+            "area_mm2": die_area_mm2,
+            "cell_area_mm2": cell_area_mm2,
             "logic_area_mm2": logic_area_mm2,
             "sram_proxy_area_mm2": proxy_area_mm2,
+            "routing_filler_area_mm2": routing_filler_area_mm2,
+            "hierarchy": table_hierarchy,
             **metrics,
             "drc_violations": drc,
         },
@@ -204,6 +472,9 @@ def build_record(runtime: Path, manifest_path: Path) -> dict[str, Any]:
             "io_phy_included": False,
             "power_activity": "vectorless logic only",
             "sram_proxy_power_modeled": False,
+            "pll_clock_tree_separately_modeled": False,
+            "total_area_basis": "routed DEF DIEAREA; excludes commercial I/O/PHY macro",
+            "routing_filler_area_basis": "routed DEF DIEAREA minus reported placed-cell area",
             "drc_scope": "OpenROAD detailed-routing violations; not foundry signoff DRC",
         },
         "units": {
@@ -219,8 +490,13 @@ def build_record(runtime: Path, manifest_path: Path) -> dict[str, Any]:
             "zero_drc": drc == 0,
             "route_drc_report_present": route_drc_report is not None,
             "area_partition_valid": area_partition_valid,
+            "proxy_area_partition_valid": proxy_area_valid,
+            "die_area_present": die_area_mm2 is not None,
+            "reported_hierarchy_complete": reported_hierarchy_complete,
+            "hierarchy_bindings_complete": hierarchy_bindings_complete,
+            "hierarchy_complete": hierarchy_complete,
         },
-        "provenance": manifest,
+        "provenance": provenance,
     }
 
 

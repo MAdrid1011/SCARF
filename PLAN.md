@@ -2,11 +2,12 @@
 
 ## 1. Objective
 
-- Run ID: `micro2026-ae-reconstruction`
+- Run ID: `micro2026-three-badge-closure`
 - Objective: turn the accepted SCARF paper repository into an independently
-  executable, provenance-preserving artifact for the Available and Functional
-  badges. Results Reproduced remains a future gate because current real
-  sparse-SAES probes refute the paper-result contract.
+  executable, provenance-preserving artifact for Artifact Available,
+  Artifacts Evaluated - Functional, and Results Reproduced. The third badge is
+  an active submission intent, not a completed result: only a calibrated global
+  mechanism configuration and independent evaluator evidence may promote it.
 - Non-negotiable boundary: public physical evidence is ASAP7 predictive 7 nm.
   DeepScale output is a 28 nm-equivalent estimate and must never be presented
   as the TSMC 28 nm post-layout measurement reported by the paper.
@@ -19,18 +20,23 @@
 
 - Baseline: numbers and configurations in `micro59-submit/320.pdf`, mapped in
   `artifact/CLAIMS.md`.
-- Active software claim matrix: none. Real sparse-SAES probes do not satisfy
-  the paper quality or L1-rate contracts. The Re10K/ACID workflows remain
-  executable diagnostics; DL3DV remains unavailable without gated data.
+- Active software claim matrix: all nine model/dataset pairs are retained in
+  the claim contract. Existing Re10K/ACID probes remain negative diagnostic
+  evidence until the new disjoint calibration and mechanism gates succeed;
+  DL3DV's official gated data is prepared and re-verified, but it remains
+  non-claiming until those same global calibration and mechanism gates succeed.
 - Required Functional software evidence: numerically equivalent S1/S2/GGU,
   positive simulator cycles, FSDR evidence, strict sparse-SAES failure records,
   and a claim guard that rejects the dense diagnostic. Orin timing and
   sensitivity figures are not in the active claim set.
 - Optional physical metrics: routed ASAP7 area, delay/frequency, dynamic and
   leakage power, utilization, route/DRC status, plus deterministic scaling.
-  They are currently outside the claim because the 48 GiB/no-Vivado resource
-  gate is not met; DeepScale table/formula tests remain Functional evidence.
-- Comparability risks: unavailable ACID/DL3DV payloads and checkpoints,
+  They are currently outside the claim because no complete routed evidence
+  exists. The default flow recommends 48 GiB/no-Vivado; an explicit audited
+  low-memory attempt may run the unchanged design. DeepScale table/formula
+  tests remain Functional evidence.
+- Comparability risks: reviewer-side gated DL3DV access, checkpoint
+  availability,
   incompatible model environments, absent Orin measurements, absent iFlow
   reports, SRAM abstraction differences, and commercial TSMC28 exclusions.
 - Recovered protocol identity: non-null entries from the committed upstream
@@ -57,13 +63,14 @@
 
 - Minimal pilot: unit tests, orchestrator dry runs, result-schema validation,
   DeepScale examples, and RTL dry run.
-- Full run: `bash scripts/run_ae.sh all`, then `physical`, `scale`, and
-  `validate` using the declared hardware environments.
+- Full run: `bash scripts/run_ae.sh calibrate`, bounded diagnostic pilot,
+  reviewer profile, full profile, then `all-eval`, `physical`, `scale`, and
+  `validate --require-key-results` using the declared hardware environments.
 - Stop condition: all claimed rows are PASS and the clean-room package can
   reproduce them without author-local paths or undistributed commercial data.
-- Abandonment condition for a claim: narrow the claim when a required legal
-  input or physical machine is unavailable before the deadline. Do not
-  fabricate evidence.
+- A result is removed from the submission only when its legal input or real
+  hardware evidence remains unavailable; do not fabricate evidence, edit
+  generated records, or relax a tolerance.
 - Output root: `outputs/`.
 - Permanent manifests and expected values: `artifact/`.
 
@@ -84,7 +91,9 @@
 - Hardware: `bash scripts/run_ae.sh rtl`, `bash scripts/run_ae.sh physical`,
   and `bash scripts/run_ae.sh scale`.
 - The physical flow is stricter than software execution: no Vivado process may
-  be active and `/proc/meminfo` must report at least 48 GiB available memory.
+  be active. Its default path requires 48 GiB `MemAvailable`; its explicit
+  low-memory attempt retains resource/swap snapshots and cannot bypass report
+  validation.
 - Final gate: `bash scripts/run_ae.sh validate` and archive clean-room checks.
 - Long GPU/Orin/iFlow runs must retain commands, environment snapshots, logs,
   hashes, timestamps, and explicit failure status under their output directory.
@@ -142,6 +151,12 @@
 | 2026-07-16 | Remove FSDR Guided Rate from the reproduction frontier | All six real one-sample rows differ materially from Table 2, and the RTL LSH projection ROM contains only zero initialization rather than the hyperplanes needed to reproduce the software signatures |
 | 2026-07-16 | Replace continuous-depth Top-1 approximation with discrete candidate evidence | Table 2 defines coverage over the full-search argmax candidate and retained candidate subset; a +/-25% continuous-depth window is not that metric |
 | 2026-07-16 | Isolate the remaining SAES vector-variance interpretation | Test raw probe-vector total variance and threshold-only first-hit routing as an explicitly non-claiming mode; do not change the default simulator unless the fixed sample passes every unchanged quality gate |
+| 2026-07-16 | Add an explicit protocol-pair subset to the public runner | Let reviewers run legal/gated subsets without changing the default nine-pair claim matrix or bypassing canonical indices |
+| 2026-07-16 | Stop full execution after the seed-42 six-pair mechanism pilot | All six schema-valid runs fail unchanged Table 1/Table 2/Table 3 gates; preserve the same-source outputs and diagnose SAES/FSDR semantics before spending full-protocol compute |
+| 2026-07-16 | Add audited low-memory ASAP7 attempt mode | The 48 GiB threshold is a conservative host-preflight recommendation, not a substitute for real completion evidence; preserve no-Vivado exclusion and all routed-report gates while allowing the unchanged flow to be attempted. |
+| 2026-07-16 | Add C2W-ray-aware SAES moment construction | Non-probe Stage-3 attributes remain unread; pseudo 3D means now use only static camera geometry, assignment weights, and probe depths, and the path is bound into calibration/sensitivity provenance. |
+| 2026-07-16 | Materialize target-free calibration sidecars | Calibration replay now reads only selected context-image bytes plus target camera geometry; compiler and runner reject target-RGB-bearing inputs before a trace starts. |
+| 2026-07-17 | Stop the hardware-honest probe-spread SAES branch | The strict canonical TranSplat/Re10K diagnostic pruned 75.0% of Gaussians but lost 7.9188 dB SAES-only PSNR, so this non-claiming historical coverage variant cannot justify another six-pair run. |
 
 ## 9. Paper-Formula SAES Audit
 
@@ -475,3 +490,749 @@
   quality pilots. The full-resolution source changes the raw feature
   distribution but does not recover either the paper path split or sparse
   quality, so the remaining mismatch is not feature-source selection alone.
+
+## 15. Hardware-Honest Probe-Spread Audit
+
+- Run ID: `saes-probe-spread-v1`.
+- Research question: does the AE rewrite's oracle access to complete non-probe
+  Stage-3 Gaussians hide the intended early-materialization semantics? The
+  paper says non-probe adaptor execution is bypassed, while the current
+  representative path reads their means, covariances, harmonics, and opacities.
+- Source basis: repository commit `adc7092` explicitly aligns the simulator to
+  the SCARF specification and implements probe-only covariance expansion from
+  assigned 2D pixel territory. The final Dataflow figure likewise routes L0/L1
+  from probe Gaussians through soft assignment and aggregation before S4.
+- Fixed conditions: canonical TranSplat/Re10K sample 0, seed, checkpoint,
+  context/target selection, default current path decisions, thresholds,
+  feature source, FSDR, renderer, and PSNR/SSIM/LPIPS tolerances.
+- One-factor change: add a diagnostic-only materialization that reads S1
+  features, probe depths, pixel coordinates, and probe Gaussian outputs; it
+  leaves probe means/SH/opacity unchanged, adds the author-history 2D territory
+  covariance spread, and removes non-probe opacities. It must be invariant to
+  arbitrary changes in non-probe Stage-3 attributes.
+- Evidence boundary: claim and Functional modes reject the diagnostic, and its
+  result sets `paper_result_eligible=false`. Historical bandwidth parameters
+  are named, provenance-recorded configuration values from `adc7092`, not
+  fitted against Table 1 or Table 3.
+- Promotion gate: the fixed sample must pass all unchanged quality tolerances
+  and avoid a degenerate L0/L1/Full split. Failure preserves the result and
+  closes this materialization route without a threshold or parameter sweep.
+
+## 16. Schema-v2 And Public-Evidence Milestone
+
+- Run ID: `ae-v2-lsh-rtl-pilot`.
+- Research question: can every Figure 10/Table 2/Table 3/Figure 12 primitive be
+  generated from executed events, while binding software and RTL FSDR to one
+  projection contract and keeping public physical proxies separate from the
+  paper's commercial TSMC28 targets?
+- Implementation result: yes for the evidence plumbing. The 13-result catalog,
+  strict result schema, worst-view retention, exact candidate/traffic counts,
+  SAES S2 evaluation counts, MMCU slot events, hierarchical Table 4, guarded
+  Figure 9 counterpart, and workload-bound DRAM interface are implemented and
+  covered by tests.
+- LSH result: seed-42 normalized hyperplanes are stored as FP16 with matrix
+  SHA256 `a9d3431fca57f8408237281c60f3bf3fbe572289abd0e6be3b05824afc428397`.
+  Python and RTL decode normalized FP16 operands exactly to signed Q1.24. The
+  RTL uses 16 MACs across 128 projection cycles and passes basis-vector
+  signature equivalence (`ffff`, `e84b`, `3ee8`).
+- Pilot result: `outputs/ae_v2_lsh_rtl_pilot` passes strict sample and aggregate
+  validation. It records FSDR Top-1 `7602/7794`, `300352/1048576` depth
+  evaluations, `76890112/268435456` feature bytes, SAES S2
+  `376576/1048576` evaluations, and nonzero S1-S3 MMCU events. The synthetic
+  fixture remains `paper_result_eligible=false`.
+- Resume result: changing source after the first pilot changed
+  `source_tree_sha256`; the second invocation reran the sample rather than
+  accepting stale evidence. Figure 10 manifests were rebuilt from the complete
+  result-write crash window and all selected artifacts are hash-bound.
+- Verification at this milestone: CPU/schema `240 passed, 14 skipped`; locked classic `298
+  passed`; Chisel `9 passed`; SystemVerilog emit and Verilator lint PASS.
+- Claim decision: implementation readiness does not promote Results
+  Reproduced. The six accessible real pairs must be rerun with this LSH
+  contract, DL3DV and Orin evidence are still absent, Figure 12's old heuristic
+  bars may contradict executed-slot measurements, and Figure 9/Table 4 require
+  workload activity plus a routed ASAP7 run. No tolerance or generated result
+  is changed to force acceptance.
+- Physical decision: no Vivado worker was active at the latest check, but
+  `MemAvailable=13.19 GiB`; keep the 48 GiB guard and do not launch or shrink
+  iFlow.
+
+## 17. Seed-42 Six-Pair Mechanism Pilot
+
+- Run ID: `ae-v2-six-pair-pilot-v2`.
+- Command: `run_ae.sh mechanisms --pairs transplat/re10k,transplat/acid,`
+  `mvsplat/re10k,mvsplat/acid,depthsplat/re10k,depthsplat/acid`
+  `--num-samples 1`.
+- Evidence: `outputs/ae_v2_six_pair_pilot_v2/`. Every sample and aggregate
+  passes the v2 schema, uses the canonical upstream index, and has the same
+  source-tree SHA256
+  `d092c6bd305ee1280f82af944de86ffc91224898e716679f4f3e6c9bbf81ffeb`.
+- FSDR result: Guided Rate is 86.51%--94.96%, above every corresponding paper
+  target. Re10K Top-1 Coverage is 96.06%--98.46% and fails the 0.02 absolute
+  gate; ACID is 99.14%--99.97% and is closer, but its guided set still fails.
+- SAES result: every pair routes zero tiles to L1. L0 ranges from 21.00% to
+  48.50%, and the combined output changes PSNR by -0.5624 to -5.0876 dB,
+  SSIM by -0.03129 to -0.12109, and LPIPS by +0.04468 to +0.27226.
+- Figure 12 result: executed-slot utilization is 85.74%--90.38% for S1,
+  82.84%--90.66% for S2, and 84.51%--85.94% for S3. These measurements are
+  retained even though they differ from the manuscript's heuristic bars.
+- Decision: no full quality, mechanism, ablation, or sensitivity matrix may
+  start from this implementation. The next implementation change must explain
+  the zero-L1 structure and preserve quality without reading paper targets;
+  rerunning or adjusting tolerances is not an acceptable retry.
+
+## 18. L1 Lightweight-Path Audit
+
+- Run ID: `transplat-re10k-l1-lightweight-v1`.
+- Structural correction: L0 retains the paper's K(T) representatives, while L1
+  now retains 2K(T) deterministic farthest-point anchors. At T=4 these are
+  4/16 and 8/16 paths. This is the only retention split consistent with the
+  manuscript's statement that L1 is less compressive and with Table 3's
+  reported L0/L1/Gaussians-Saved arithmetic.
+- Isolation: anchor selection uses tile coordinates only. The audit keeps the
+  previously isolated raw-probe-vector/absolute-depth first-hit decisions,
+  canonical sample, checkpoint, seed, images, renderer, and tolerances. It is
+  recorded with `paper_result_eligible=false`.
+- Result: schema PASS, L0/L1/Full=3.796%/86.267%/9.937%, and 46.0% of Gaussians
+  removed. Relative to the prior four-anchor first-hit audit, the final PSNR
+  loss improves from about -3.17 dB to -2.6195 dB, but SSIM still changes by
+  -0.05722 and LPIPS by +0.11396.
+- Decision: retain the structurally correct L1 implementation and its tests,
+  but reject the first-hit interpretation for claim execution. Do not run it
+  across the six pairs; the remaining blocker is the unpublished decision
+  statistic/normalization and the sparse materialization quality contract.
+
+## 19. Historical FSDR Depth-Guard Audit
+
+- Run ID: `transplat-re10k-fsdr-depth-guard-v1`.
+- Source basis: commit `adc7092` contains a 5% local depth-consistency guard,
+  while the final paper/RTL and current claim path route every Hamming hit. The
+  guard is therefore exposed only by `--fsdr-guidance-policy
+  historical-depth-guard`; claim and Functional modes reject it.
+- Fixed conditions: canonical TranSplat/Re10K sample 0, seed-42 FP16/Q1.24 ROM,
+  32 cache entries, Hamming threshold 3, D/4 candidate window, exact discrete
+  Top-1 evidence, and unchanged quality metrics. SAES is disabled to isolate
+  the FSDR decision.
+- Result: schema PASS and `paper_result_eligible=false`. Guided Rate decreases
+  from 89.00% to 53.16%; exact Top-1 Coverage increases from 96.06% to 99.38%.
+  PSNR changes by +0.00010 dB, SSIM by -0.000137, and LPIPS by +0.000444, all
+  within the existing quality tolerances.
+- Decision: the historical guard explains the quality/Top-1 side of the paper
+  result but misses its 72.1% Guided Rate by 18.94 percentage points and is not
+  represented by the submitted RTL. Preserve the diagnostic; do not tune its
+  5% threshold or silently promote it to the claim path.
+
+## 20. Three-Badge Closure Experiment
+
+- Run ID: `three-badge-faithful-engineering-v1`.
+- Research question: can the missing implementation details in the published
+  FSDR/SAES equations be fixed once on a disjoint training calibration set so
+  the unchanged nine-pair result gates pass naturally?
+- Fixed baseline: seed-42 FP16/Q1.24 projection, upstream checkpoints and
+  evaluation indices, current quality metrics, event-derived cycles, and all
+  tolerances in `artifact/expected_results.json`.
+- Permitted changes: cost-volume feature binding, L2/relative-depth statistic
+  normalization, one conservative FSDR hit-validity tolerance, the published
+  bilateral/depth-reliability bandwidths, camera-aware moment conservation,
+  and a probe-constrained `2K(T)` L1 path.
+- Forbidden changes: expected-result access outside validators, evaluation-set
+  calibration, target/GT routing, pair-specific parameters, projection seed
+  search, edited generated JSON, reference cycles, or tolerance changes.
+- Minimal gate: synthetic properties, one TranSplat/Re10K calibration sample,
+  six one-sample pilots, then a fixed 32-scene six-pair gate.
+- Main gate: reviewer profile over all nine pairs followed by the full upstream
+  protocol. Orin Figure 8 is completed only by a real independent evaluator.
+- Stop condition: a candidate that requires a new routing signal or evaluation-
+  target fitting is rejected and preserved as a diagnostic; it is never
+  promoted to recover a paper number.
+
+## 21. Paper Assignment-Formula Audit
+
+- Run ID: `transplat-re10k-paper-formula-v2`.
+- Research question: does implementing the explicit Section 3 bilateral spatial
+  modulation and L1 probe-depth reliability recover sparse-SAES fidelity without
+  introducing a new routing signal?
+- Fixed conditions: canonical TranSplat/Re10K sample 0, pipeline S1 features,
+  `tau_f=0.2`, `tau_d=0.1`, tile size 4, seed 0, same checkpoint, same target
+  views, original renderer, and unchanged quality gates. The run is diagnostic
+  only and does not read expected results during execution.
+- Implementation: the spatial logit now multiplies the normalized squared
+  pixel distance by tile `sigma_feat^2`, and L1 uses the paper's per-probe
+  `exp(-|d_p-mean(d)|/(beta_d*std(d)+epsilon))` reliability factor. The claim
+  path also uses absolute probe-depth standard deviation.
+- Result: schema-v2.1 execution completed without fallback. It routed
+  8,191/8,192 tiles to L0 and 1/8,192 to L1; SAES-only PSNR changed by
+  -6.3895 dB, SSIM by -0.19536, and LPIPS by +0.21078. Combined output changed
+  PSNR by -6.4047 dB. The unchanged quality gate fails decisively.
+- Decision: retain the formula correction and its unit tests because it matches
+  the manuscript, but do not promote it, adjust thresholds, or run the six-pair
+  matrix. Continue only with the preregistered evaluation-disjoint calibration
+  once official training data is available.
+
+## 22. DL3DV Repair-First Recovery
+
+- Run ID: `dl3dv-repair-first-v1`.
+- User priority: do not start, resume, or download any non-DL3DV dataset while
+  this recovery line is active. The already prepared official DL3DV trees and
+  pinned checkpoints are the only permitted data inputs.
+- Baseline: strict one-sample DL3DV executions for TranSplat, MVSplat, and
+  DepthSplat under `outputs/ae_dl3dv_repair_baseline/`. They are diagnostic
+  only because the global calibration configuration is still preregistered.
+- Observed failure: normalized probe-vector variance with the fixed
+  `tau_f=0.2` routes nearly every tile to L0 (100.0%, 99.9%, and 100.0%),
+  producing SAES+FSDR PSNR losses of -16.08, -16.99, and -8.35 dB. A raw-vector
+  TranSplat diagnostic instead gives L0=0%, L1=39.5% and still loses -12.81 dB.
+  Therefore neither representation may be promoted by switching a flag.
+- First repair gate: prove, with hooks and tensor-equality tests, the source,
+  layout, resolution, and numerical equality of the feature tensor that each
+  upstream model actually supplies to its cost-volume matcher. DepthSplat must
+  cover every used `features_mv` scale. Separately prove that DepthSplat's
+  ASIC-no-opt/GGU path is numerically equivalent to its unmodified upstream
+  Gaussian output before assessing SAES.
+- Second repair gate: implement only a paper-supported probe statistic and
+  measurement scale; add synthetic properties for variance, routing order,
+  C2W moment construction, covariance PSD, opacity/transmittance, SH, and
+  camera geometry. The repair must not inspect target RGB, expected results,
+  or evaluation aggregates during routing.
+- Execution ladder: unit/property tests -> three strict DL3DV one-sample
+  reruns in new output directories -> all three mechanism/quality gates on
+  those samples -> only then the fixed official 140-scene DL3DV protocol.
+  Every failure remains preserved; no result JSON, tolerance, sample selection,
+  or paper target is edited to make a row pass.
+- DepthSplat no-opt repair result: the old run mixed approximate hardware S2
+  depth with the original S3 Gaussian head. The repaired run uses one pinned
+  upstream `MultiViewUniMatch` execution for final depth, density, the first
+  cost-volume feature scale, and the S3 head inputs while retaining hardware
+  stage cycles. Its `ASIC (no opt)` DL3DV sample now equals the GPU baseline at
+  35.58808 dB / 0.973352 SSIM / 0.036621 LPIPS; the prior no-opt output was
+  33.94345 dB / 0.966408 / 0.046635. The remaining failure is SAES routing and
+  sparse quality, not the base DepthSplat numerical path.
+- Cost-volume feature-contract result: the live inner matching calls are now
+  captured and checked bitwise on DL3DV sample 0. TranSplat's 128-channel
+  feature (`a8ae...dc80`) reaches `DepthPredictorTrans.match_two`; MVSplat's
+  128-channel feature (`3d25...7bd4`) reaches its warped cost-volume path;
+  and DepthSplat's two live scales (`1ea0...73f0`, 128x32x56; and
+  `215f...aef8`, 64x64x112) reach the corresponding cost-volume stages. The
+  records are preserved in `outputs/ae_dl3dv_feature_contract/` and show that
+  the remaining `tau_f` contradiction is not caused by selecting an inactive
+  feature tensor. These native-loader diagnostics record that target RGB was
+  loaded by the ordinary evaluation dataloader but do not move it to the model
+  or read it in the feature hook/statistics; they are not calibration evidence.
+- Normalized-standard-deviation notation audit: this fixed, non-claiming
+  alternative interprets the normalized probe-vector reduction as
+  σ_feat rather than σ_feat^2 while retaining `tau_f=0.2`, all other
+  defaults, the same sample, and no target-driven routing. It produces
+  TranSplat L0/L1/Full = 12.9%/34.3%/52.8%, but loses 13.4084 dB PSNR on
+  SAES-only and 13.4674 dB combined. The result at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_normalized_probe_std_v1/`
+  fails the unchanged quality gate, so the branch stops before MVSplat,
+  DepthSplat, or a 140-scene run. The immediate defect remains sparse
+  materialization fidelity, not merely the feature-statistic scale.
+- Probe-only geometry repair: L1's synthesized anchors previously caused the
+  later moment matcher to read their native non-probe depth values. The repair
+  propagates a probe-derived virtual depth vector instead. C2W interpolation
+  now also carries the assignment-weighted probe residual from the depth-only
+  ray, preserving adaptor-predicted sub-pixel offsets. Target-free properties
+  cover the no-non-probe-depth rule, ray-offset equivariance, covariance PSD,
+  constant SH, and global proxy transmittance. The locked classic profile
+  passes 58 targeted tests. A single fixed rerun at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_geometry_v1/`
+  improves SAES-only PSNR from -13.4084 dB to -13.3514 dB but still fails the
+  unchanged gate; it is preserved as non-claim evidence and does not open the
+  MVSplat, DepthSplat, or 140-scene stages.
+- L1 retained-output repair contract: the event model already charges 2K(T)
+  L1 anchors as executed S2/S3 work, but the former software path synthesized
+  the latter K anchors from the primary K probes. A target-free full-Stage-3
+  oracle on the fixed TranSplat/DL3DV sample confirms that this is a material
+  approximation: virtual-anchor covariance error has p50 0.3541 versus 0.2367
+  for primary probes, with larger harmonic and opacity errors as well. The
+  next one-factor repair therefore preserves the 2K deterministic positions
+  as selected native L1 outputs after the probe-only route has chosen L1. It
+  may read S2/S3 only for those charged selected anchors; all remaining tile
+  positions remain unread and are absorbed by the same C2W-aware moment match.
+  It must retain thresholds, routing order, selections, quality tolerances,
+  and target isolation. Gate order is synthetic no-unretained-read/event tests,
+  a new target-free audit, then one fresh TranSplat/DL3DV quality diagnostic.
+  If either audit or quality does not improve, preserve the output and do not
+  broaden to MVSplat, DepthSplat, or 140 scenes.
+- L1 retained-output result: the target-free audit passes its directional gate
+  (L1 full-oracle covariance p50 0.2968 -> 0.2333; SH/mean/opacity p50 each
+  improve by more than 58%). The fresh strict TranSplat/DL3DV quality run is
+  preserved under
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_l1_native_quality_v1/`.
+  SAES-only PSNR improves from 23.7823 to 24.2742 dB and combined PSNR from
+  23.7508 to 24.2378 dB, but both remain roughly 10.6 dB below the unchanged
+  no-opt reference. This is a real structural improvement, not a pass and not
+  a basis to expand the protocol. The next bounded diagnostic is attribution
+  only: fixed mass-conserving covariance/opacity pairs plus component restores
+  on this same sample, recorded as non-claim outputs. It may identify a missing
+  conservation invariant but may not select a new runtime parameter, alter the
+  router, or relax a quality tolerance.
+- Engineering-detail decision: `micro59-submit/Sections/section3.tex` fixes
+  L1's probe-constrained *routing* and aggregation principle but leaves its
+  lightweight retained-output count unspecified. Per the author's direction,
+  the implementation therefore declares 2K deterministic native L1 anchors as
+  an engineering detail: K primary probes make the L1 decision; only after it
+  passes are the extra K farthest-point anchors executed, counted, and used in
+  moment matching. This is not an evaluation-tuned choice: it resolves the
+  prior mismatch between 2K event accounting and virtual attributes, improves
+  target-free errors, and is covered by no-unselected-read and event-count
+  properties. It remains non-claiming until all unchanged quality gates pass.
+- Optical-depth conservation diagnostic: the fixed target-free audit at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_optical_depth_v1/`
+  exposed a missing alpha-compositing invariant: representative L0/L1 output
+  retained only 25.2%/50.0% of full-tile optical depth at the median. The
+  one-factor `transmittance-diagnostic` variant kept the router, thresholds,
+  2K L1 anchors, assignments, and event counts fixed, then accumulated only
+  selected-anchor inferred optical depth. Its target-free audit reduces the
+  L0/L1 relative-error medians to 4.94%/1.42% under
+  `transplat_sample0_transmittance_audit_v1/`. The predeclared quality retry
+  improves SAES-only PSNR 24.2742 -> 27.0397 dB and combined PSNR
+  24.2378 -> 26.8889 dB, but still loses 7.9491 dB (22.8173%) against the
+  unchanged no-opt reference. The output is preserved at
+  `transplat_sample0_transmittance_quality_v1/` and rejected: opacity-mass
+  conservation is necessary but not sufficient, and high-opacity tiles also
+  expose finite-alpha saturation. No threshold, sample, or metric changed.
+- Next representation contract: the historical `dense-diagnostic` is not a
+  viable repair because it leaves skipped Gaussian means resident from the
+  full S3 tensor. A new non-claim `virtual-reconstruction-diagnostic` instead
+  reconstructs every skipped descriptor from selected anchors only: C2W-ray
+  means with transported residuals, intrinsic PSD covariance, interpolated SH,
+  and interpolated alpha. It retains every output descriptor and therefore
+  explicitly reports zero Gaussian compression plus a virtual-materialization
+  descriptor count; its fixed-function cycle and traffic model remains
+  unclaimed until separately implemented. It is barred from claim and
+  Functional runs. Synthetic L0/L1 tests
+  prove constant preservation, selected-anchor-only access, C2W geometry, and
+  PSD. Its next gate is a fresh target-free DL3DV attribute audit, followed by
+  exactly one fixed quality run only if that audit improves direct per-pixel
+  reconstruction error.
+- Virtual-reconstruction result: the direct target-free audit passes its
+  structural checks at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_virtual_reconstruction_audit_v1/`:
+  it reconstructs 35,184 positions, keeps all 131,072 output descriptors,
+  has zero PSD violations, and never transfers target RGB. Its one fixed
+  quality run is preserved at
+  `transplat_sample0_virtual_reconstruction_quality_v1/`. SAES-only/combined
+  PSNR reaches 32.2223/31.9587 dB, a +7.9481/+7.7208 dB improvement over the
+  native-anchor sparse path, but it still loses 2.6157/2.8794 dB against the
+  unchanged no-opt reference. Thus virtual coverage is a necessary
+  representation clue, not a pass, and cannot be used for a compression or
+  cycle claim. The unrun geometric/level-aware virtual branch is excluded:
+  reconstructing and retaining every skipped descriptor conflicts with the
+  paper's sparse-representative semantics. The next target-free work is a
+  paper-compatible audit of the native K/2K representative merge, restricted
+  to its existing moments, opacity/transmittance handling, and C2W geometry;
+  it must not add descriptors, alter the three-level router, or select
+  evaluation-dependent parameters.
+- Second-moment candidate (rejected): a synthetic conservation property tested
+  whether each inferred non-probe should carry the full between-anchor mixture
+  covariance before the existing representative merge. The property held, but
+  the fixed target-free TranSplat/DL3DV audit at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_second_moment_audit_v2/`
+  worsened full-oracle covariance p50 from 0.4203 to 0.6317 (L0) and 0.2333
+  to 0.2638 (L1). It neither reads target RGB nor renders quality, so it is
+  retained as a negative diagnostic and the native local-shape covariance
+  merge remains the main path.
+- Depth-scaled covariance candidate (rejected): the upstream adaptor's
+  depth-squared covariance law passes its constant-local-shape property, but
+  the same target-free audit at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_depth_scaled_covariance_audit_v1/`
+  changed L0/L1 oracle covariance p50 only from 0.420318/0.233308 to
+  0.420313/0.233323. This is not a material or consistently positive change,
+  so it is preserved as negative evidence and does not receive a quality run.
+- Corner-depth geometry candidate (rejected): a post-hoc full-S2 audit found
+  that bilinear interpolation of the four existing corner depths reduces
+  depth and attribute-oracle error. A single unchanged TranSplat/DL3DV
+  quality run at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_corner_depth_geometry_quality_v1/`
+  nevertheless reduced combined PSNR from 24.2378 to 24.2147 dB and increased
+  LPIPS from 0.25121 to 0.25221. The runtime path was restored to
+  assignment-weighted probe depth; the full-S2 calculation remains only a
+  post-hoc diagnostic and is not used for routing, materialization, or
+  parameter selection.
+- L1 primary-probe merge candidate (rejected): the bounded
+  `dl3dv-l1-primary-merge-v1` diagnostic kept the 2K native L1 outputs but
+  let only the K routing probes absorb skipped positions. Its local skipped
+  covariance error improved, but a new post-hoc tile-mixture oracle gives a
+  fair comparison of the two legal groupings. Against the same native-2K
+  baseline, L1 covariance p50 improved from 0.129934 to 0.107015, while mean,
+  SH, and average-opacity p50 worsened from 0.000404/0.008279/0.003373 to
+  0.000638/0.011399/0.005775; optical-depth error was effectively unchanged.
+  The outputs are preserved at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_l1_primary_merge_audit_v2/`
+  and `transplat_sample0_l1_native_global_oracle_v1/`. The implementation was
+  removed and no quality run was launched. The generic tile-mixture oracle is
+  retained as a post-hoc, target-free audit aid for future paper-compatible
+  merge candidates.
+- S3-before-S4 raw-descriptor interpolation oracle (completed, scope
+  corrected):
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_s3_before_s4_audit_v1/`
+  executes S1/S2/the raw S3 descriptor head, but not the baseline encoder,
+  GGU/S4, decoder, or any quality metric. It removes target RGB before device
+  transfer and records that the native loader had supplied it. The audit maps
+  TranSplat's 64x64 matching features to the 256x256 S2/S3 grid via the same
+  bilinear, `align_corners=False` mapping as `ProgressiveSAES`.
+
+  Assignment interpolation improved all L0 p50 values, but it worsened L0
+  p95 depth (0.307220 vs 0.213901), raw scale (1.400259 vs 0.901987),
+  rotation (0.358311 vs 0.305182), SH (1.013573 vs 0.989953), and opacity
+  (0.212972 vs 0.178449) against deterministic nearest-anchor reconstruction.
+  This rejects only naïve *per-skipped-position raw descriptor interpolation*:
+  the audit does not perform a retained-anchor first/second-moment update, does
+  not output retained descriptors, and therefore cannot validate or refute the
+  separate post-GGU primitive moment path. No generic pre-GGU quality retry is
+  justified, but the result must not be treated as evidence against an actual
+  paper-compatible aggregate implementation. L1 has encouraging robust deltas
+  but cannot rescue an L0/L1-wide change; retain it only as diagnostic evidence
+  unless a separately specified, paper-compatible L1-only hypothesis clears its
+  own property and event-accounting gates.
+
+- L1 primary-depth-reference diagnostic (rejected): the paper defines the L1
+  reliability normalizer over the primary routing probes, while the 2K native
+  L1 anchor expansion is an engineering detail. The non-claim
+  `l1-primary-depth-reference-diagnostic` therefore retained and charged all
+  2K anchors but computed their depth reliability relative to the original K
+  probe mean and standard deviation. It preserves routing, thresholds,
+  selected anchor positions, and target isolation. The fixed target-free
+  result at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_l1_primary_depth_reference_audit_v1/`
+  improves L1 tile-mixture covariance p50 (0.129935 -> 0.121641) and mean p50
+  (0.000404 -> 0.000351), but worsens harmonic p50 (0.008279 -> 0.008306) and
+  opacity-average p50 (0.003373 -> 0.003485). It fails the all-attribute gate;
+  no quality retry is allowed. The diagnostic code and synthetic properties
+  remain as a transparent failed implementation record, not a claim path.
+
+## 23. DL3DV SAES Routing and Hardware-Cost Closure
+
+- Routing-coordinate result (rejected): the fixed target-free audit at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_routing_coordinate_audit_v1/`
+  confirms that TranSplat searches candidate depth in normalized inverse-depth
+  coordinates upstream but emits metric depth before SAES. On the fixed sample,
+  the existing normalized-feature / metric-depth route yields L0/L1/Full =
+  12.9%/34.3%/52.8%; relative metric depth would route 92.8% to L1 and the
+  candidate-coordinate statistic 99.98%. None is a paper-supported,
+  generalizable replacement, so no unit switch may be fitted to Table 3's
+  average L1 rate.
+- Hardware-accounting contract: L0/L1 bypasses must include (i) probe feature
+  variance, (ii) L0-miss probe-depth standard deviation, (iii) the submitted
+  `SAESController` first-hit FSM transitions, (iv) assignment softmax and
+  moment matching, and (v) retained-descriptor buffer traffic. A nonzero SAES
+  saving without this ledger now raises an error in `SavingsTracker`.
+- Implementation: `saes/hardware_accounting.py` derives a deterministic event
+  ledger from executed tile/anchor counters and the exact runtime feature,
+  tile, SH, and primitive dimensions. It reports all required traffic but only
+  charges retained-descriptor reads/rewrites and route records as incremental
+  storage traffic, avoiding an unproven double-count of baseline S1/S2 reads.
+  Its explicit no-overlap cycle sum is deliberately labelled
+  `analytic_no_overlap_not_rtl_cycle_equivalent`; result records preserve it
+  under `events.saes.hardware_accounting` when present.
+- RTL route-event consistency: `SAESController` now exposes
+  `decisionCycles`, and `ScarfTop` exposes that valid-on-done event for VCD
+  reconciliation. Chisel proves L0 = 2 cycles and L1/Full = 3 cycles from an
+  accepted start, matching the controller portion of the Python ledger; the
+  emitted SystemVerilog includes the signal. This proves only classification
+  control timing, not assignment, moment matching, or descriptor-buffer timing.
+- Fixed real audit: the target-free TranSplat/DL3DV sample-0 run at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_saes_hardware_accounting_v3/results.json`
+  has SHA256
+  `3f3334e5c5a5cea73d1c1e169ee12f6bd3ac7a7c3ed380851af73257e22ec9d4`.
+  The native loader had loaded target RGB, but the diagnostic removed it before
+  device transfer; baseline encoding, rendering, quality metrics, and expected
+  result access are all recorded as false. It executed S1--S4 only.
+- Result: this default-route trace classified all 8,192 tiles as L0, retained
+  32,768 anchors, and bypassed 98,304 positions. The ledger charges 4,293,120
+  serialized analytic cycles (2,457,600 assignment, 851,968 moment matching,
+  770,560 storage, and 212,992 decision cycles) and 45,883,392 bytes of
+  required traffic. Using the same stage-cycle inputs, the illustrative
+  SAES-only analytic speedup changes from 2.0331x with an invalid zero-cost
+  assumption to 1.9207x after the charge. This is not a paper performance
+  result, because the sparse quality gate still fails and the ledger is not
+  RTL timing evidence.
+- Failure preservation: the first v2 audit reached the same target-free SAES
+  counters but failed before result writing because the audit-local GGU counter
+  was initialized in the wrong branch. The failure is retained in
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_saes_hardware_accounting_v2/FAILED.md`;
+  the v3 retry changed only that local initialization.
+- Decision: this closes the zero-cost-accounting defect but does not promote
+  any DL3DV claim or authorize the 140-scene run. Before a cycle-equivalent
+  Figure/Table claim, implement SAES assignment/moment matching and retained
+  descriptor buffering in RTL, establish event-by-event software/RTL agreement,
+  and then rerun the fixed single-sample quality gate from a new directory.
+- RTL safety repair: review exposed that the old `sS2S3_ProbeOnly` controller
+  state performed one bilinear operation and entered GGU without executing the
+  required probe S2/S3 path or any SAES assignment, moment matching, and
+  retained-descriptor buffering. It was therefore neither a correct sparse
+  implementation nor a valid hardware-saving path. The state is removed: L0
+  and L1 now conservatively follow the ordinary FSDR (when enabled), CostVol,
+  U-Net, depth head/regression, S3 refine, and Gaussian-head sequence. Chisel
+  regressions cover both sparse levels. This is a Functional-safety correction
+  only; it deliberately contributes zero SAES RTL savings until the missing
+  numeric datapath and buffer are implemented and reconciled to software events.
+- Descriptor-buffer increment: `SAESDescriptorBuffer` is a standalone emitted
+  Chisel `SyncReadMem` primitive with 32 slots, ordered write completion, stale
+  descriptor invalidation, and synchronous 128-bit reads. The packed layout is
+  shared with `saes.hardware_accounting`: degree-2 and degree-4 descriptors
+  require 92/188 bytes or 6/12 beats. Unit tests cover both layouts and reject
+  out-of-range, skipped, and premature-terminal writes. The module is not yet
+  connected to `ScarfTop` or a numeric merge core; it is therefore Functional
+  plumbing only and does not change any SAES cycle/PPA claim.
+- Scalar-moment increment: `SAESScalarMomentAccumulator` now implements the
+  existing first/second-moment sufficient statistics over caller-defined signed
+  fixed-point units and nonnegative assignment weights. Its target-free Python
+  reference and Chisel tests agree on an exact merge vector and constant
+  preservation. It has no feature, depth, tile, or target input, is not a new
+  SAES decision, and remains unconnected to descriptor packing, bilateral
+  assignment, and `ScarfTop`; it does not authorize a timing or quality claim.
+- Assignment-normalization increment: `SAESAssignmentNormalizer` now maps one
+  to eight already-computed nonnegative bilateral scores into an exact Q0.16
+  distribution, placing finite-precision residual mass on the lowest-index
+  maximum score. The target-free Python reference and Chisel vectors cover the
+  residual, ties, and invalid zero mass. This declares only the quantized
+  normalization boundary; feature/depth score formation, descriptor merge, and
+  top-level scheduling remain unconnected, so it creates no route, cycle, PPA,
+  or quality claim.
+- S2/S3 dependency gate: the fixed target-free
+  `transplat_sample0_s2s3_dependency_audit_v1` result (SHA256
+  `bcbde72ec4029d3b32465ff920df8746a8f636e4383d19f161e5fa906b80f621`)
+  changed every 2,752,512 retained-probe TranSplat raw-head value after zeroing
+  only non-probe `refine_unet` inputs. `SavingsTracker` now records an explicit
+  per-model execution-dependency contract: TranSplat is blocked by that
+  counterexample and MVSplat/DepthSplat lack a positive dependency audit, so
+  all current SAES S2/S3 savings are zero. The existing target-free analytic
+  control/merge/storage ledger remains a recorded non-RTL penalty, and FSDR
+  remains eligible on positions not removed by a *verified* SAES S2 bypass.
+  Schema-v2.1 records carry the resolved model contract plus explicit S2/S3
+  fractions; `validate_result.py` resolves it again and rejects missing,
+  substituted, or nonzero-unverified savings evidence.
+  This rejects only direct sparse execution accounting; it neither changes the
+  paper router nor authorizes a quality retry or DL3DV expansion.
+- Next diagnostic, `dl3dv-transplat-refine-dependency-locality-v1`: run exactly
+  the fixed 3x3 raster of source tiles (top/center/bottom by left/center/right)
+  on the already pinned DL3DV sample 0. In each separate context-only encoder
+  execution, zero only the 12 non-probe `refine_unet` input activations of one
+  4x4 source tile and capture the raw S3 head before S4. Report changed
+  retained-probe positions and their tile-distance envelope, never target RGB,
+  quality metrics, or a selected execution parameter. A result can only bound
+  or reject a prospective finite-halo implementation; it cannot grant S2/S3
+  savings, alter SAES routing, or authorize a quality retry. A future positive
+  path would still require a fixed sparse implementation, full dependency
+  proof, software/RTL event agreement, and the existing property gates.
+- Result: `transplat_sample0_refine_dependency_locality_v1` completed with
+  result SHA256 `bb5c24557a39da455869ebdac8804cf3a9c883f9c0df1592297c051ce2583a56`.
+  It accessed context only and stopped at the raw S3 head. Each of the nine
+  predeclared source tiles changed every retained-probe spatial position in the
+  complete 64x64 tile grid; center-to-probe maximum Chebyshev distance was 32,
+  and edge/corner source tiles reached 63. The finite-halo direct-bypass
+  hypothesis is rejected for the current unmodified TranSplat refinement path.
+  Preserve the diagnostic; do not create a sparse schedule, change a parameter,
+  run quality, or expand DL3DV from this result.
+- FSDR feature/ROM reconciliation: the fresh target-free
+  `depthsplat_sample0_v3` feature contract (SHA256
+  `d519d0a7a7bbc966c9ae4333c42e5ab4ca987f3cd813ae9083feae2fac05def8`)
+  proves that DepthSplat's first executed cost-volume scale is
+  `features_mv[0]` with shape `[1,2,128,32,56]`, exactly matching the
+  seed-42 16x128 FP16/Q1.24 ROM. Its second scale is 64 channels and is
+  separately recorded. The 1024-channel mono tensor is not a cost-volume
+  input; remove its previous `--fsdr-only` claim-path selector so no software
+  hash can evade the RTL dimension contract. This closes feature-source
+  consistency only, not the unresolved Guided-Rate reproduction gate.
+
+## 24. Native Representative-Merge Analysis Campaign
+
+- Campaign ID: `dl3dv-native-merge-conditional-v1`.
+- Parent evidence: `transplat_sample0_l1_native_quality_v1` establishes that
+  native K/2K anchors improve over virtual anchors but still fail sparse
+  quality by roughly 10.6 dB. This campaign is target-free until a strict
+  all-attribute audit clears its predeclared gate.
+- Research question: does the existing representative update accidentally
+  apply an assignment twice by first forming an unconditional pseudo descriptor
+  `g_i = sum_q r_iq g_q` and then adding it to representative `p` with
+  `r_ip`? The paper says to merge a non-probe into its corresponding probe;
+  it does not require cross-probe `r_ip*r_iq` leakage.
+- One permitted intervention: for each selected anchor `p`, construct the
+  conditional selected-anchor-only transport `g_{i|p}` from p's own depth,
+  C2W residual, intrinsic covariance, SH, and opacity, then use `r_ip` once
+  in p's first/second-moment update. The router, K/2K positions, all thresholds,
+  feature/depth inputs, assignment weights, output count, and event ledger stay
+  fixed. The path remains a non-claim diagnostic until all gates pass.
+- Slice A (synthetic property): prove constant descriptors, one-hot assignment,
+  selected-anchor-only access, PSD covariance, and no cross-anchor leakage.
+  Failure means do not run on DL3DV.
+- Slice B (target-free DL3DV audit): same fixed TranSplat sample 0, no target
+  RGB, no renderer, no metrics. Compare L0 and L1 p50 and p95 mean/covariance/
+  SH/opacity/optical-depth errors against the current native K/2K merge.
+  Continue only if every required attribute improves or remains numerically
+  unchanged within exact rounding tolerance; a mixed result is rejected.
+- Slice C (conditional quality retry): only if Slice B passes, run exactly one
+  fresh strict sample with the same command except for the declared diagnostic
+  materialization. It remains in a new directory; quality tolerances and
+  evaluation identity are unchanged. A failure terminates the campaign and
+  leaves the 140-scene protocol closed.
+- Result and decision: Slice A synthetic properties pass. Slice B was run once
+  on TranSplat/DL3DV sample 0 with target RGB removed before execution, no
+  renderer, and no quality metrics. The matched `representative` baseline and
+  `conditional-anchor-transport-diagnostic` candidate have identical scene,
+  seed, `current` decision semantics, feature statistic, all-L0 route (8,192
+  tiles), and 32,768 retained anchors. The baseline results SHA256 is
+  `a3b1d19b0312fb493161a2f868220782744b19bcaa21e423c485792ca3cddbf5`; the
+  candidate results SHA256 is
+  `30876f42d1c9d40a534417247c955ee1e418e45c636952c48a77357612a0c05a`.
+  Although mean, SH, opacity, and optical-depth values are numerically near
+  unchanged or locally better, L0 tile-mixture covariance worsens from p50/p95
+  `0.235292/0.754145` to `0.348608/0.891179`. This is a mixed required
+  attribute result, so the candidate is rejected, Slice C is not run, and the
+  full DL3DV protocol remains closed. The diagnostic-only implementation and
+  both result trees are preserved as negative evidence; no router, tolerance,
+  selection, or evaluation-derived parameter was changed.
+
+## 25. Target-Free DL3DV FSDR Gate
+
+- Decision: retain `--fsdr-only --claim-run` as the calibrated, paper-eligible
+  Table 2 path. Add the strict `--diagnostic-run --fsdr-only
+  --image-output-policy none` path for context-only DL3DV audits. It emits
+  `fsdr_target_free_audit`, which the FSDR aggregator rejects by kind and which
+  requires target RGB to be removed before device transfer, never passed to the
+  model, and never used for routing or metrics.
+- Fixed sample-0 result: the same official DL3DV selection completed for all
+  three encoders using their required environment profiles. The results are
+  target-free execution evidence only: TranSplat `64.1235%` guided and
+  `99.7716%` discrete Top-1 coverage (SHA256
+  `d93a64b7cb24841df141a2af47bea5494759cfeafe064cd0966f39d5140e8d89`);
+  MVSplat `58.4717%` / `99.8539%` (SHA256
+  `b613c3cda8bdd18d675ba261673f2c207e281fcd8b2a5124f8e8fffc593ed5c3`);
+  and native DepthSplat `43.6942%` / `99.9361%` (SHA256
+  `bc401760daf1695d23f4cfdc200eb73dca85d23ff39e9b14292d378af559d1c6`).
+- Decision: these records establish the target-free execution and discrete
+  candidate boundary for the three DL3DV models. They neither select a
+  mechanism configuration nor validate rendering quality, so they cannot
+  promote FSDR, SAES, Table 2, or any Results Reproduced claim. The 140-scene
+  DL3DV protocol remains closed on the existing SAES quality/dependency gates.
+
+## 26. Multi-Model SAES Direct-Dependency Gate
+
+- Run ID: `dl3dv-s2s3-direct-dependency-v1`.
+- Research question: can MVSplat or DepthSplat preserve every selected 4x4
+  corner-probe raw Gaussian-head value after its corresponding dense non-probe
+  S3 input activation is zeroed?
+- Fixed contract: use only sample 0 from the committed DL3DV selection and
+  context tensors; capture the raw Gaussian head before S4, rendering, target
+  metrics, or expected-result access. MVSplat perturbs `refine_unet` input and
+  DepthSplat perturbs `gaussian_regressor` input. The tile mask, seed, model
+  environment, input selection, and retained-probe definition are fixed.
+- Null hypothesis: at least one retained raw-head value changes for each model;
+  the dense implementation therefore cannot directly bypass non-probe S2/S3
+  work. The alternative only reopens a later sparse-implementation audit; it
+  never grants a saving by itself.
+- Stop condition: any retained-probe delta records
+  `dense_dependency_detected` with the immutable result hash. If no deltas are
+  detected, stop before quality and require an independent sparse execution,
+  software/RTL reconciliation, and existing SAES property gates.
+- Result: the fixed context-only gate rejects direct bypass for all three
+  models. TranSplat changed `2,752,512/2,752,512` retained raw-head values
+  (SHA256 `8a73027989cfaafce2145b6370d2209450725eb33dfbd7c9afa0e5c5ead82679`),
+  MVSplat changed `2,752,511/2,752,512`
+  (`ac5610772240887f7f5004c050fbc0ad08261337dd18b02f3430c7cf00174ea5`),
+  and DepthSplat changed `2,121,728/2,121,728`
+  (`893747ecb7d3336f90b9f7afdf052cd3d946d8728b37ec5ebf558533a4befd76`).
+  Every record removed target RGB before context-device transfer and stopped
+  before S4, rendering, or quality. No quality retry or DL3DV expansion is
+  authorized by this result.
+
+## 27. CPU Clean-Room SAES Layout Separation
+
+- Contract: K(T) primary probes and 2K(T) L1 anchor coordinates are structural
+  geometry, not model execution. `saes.probe_layout` therefore implements the
+  existing deterministic layout using only the Python standard library. The
+  public `ProgressiveSAES` static methods retain their names and delegate to
+  this canonical helper, while `saes.hardware_accounting` imports it directly.
+- Evidence: fixed T=4 coordinates, L0/L1 cardinality and prefix invariants for
+  T={4,8,16}, classic-wrapper equivalence for T={4,5,8,16}, and a subprocess
+  that blocks every `torch` import while constructing an event ledger all pass.
+  The locked classic SAES/layout, accounting, diagnostic, and result-record
+  subset passes 77 tests.
+- Boundary: this only removes a CPU schema/accounting clean-room dependency.
+  It neither supplies the missing sparse S2/S3 execution path nor changes the
+  zero-SAEs-savings fail-closed contract, quality gates, calibration, or DL3DV
+  execution schedule.
+
+## 28. Retained-Output Hand-Off Contract
+
+- Contract: the paper's T=4 probe-first S2/S3 order is now made explicit at
+  the native-output boundary. L0 requests `[0,3,12,15]`; L1 retains that prefix
+  and requests `[5,10,1,2]` before a descriptor can enter the staged buffer.
+  Each request must receive an upstream native-descriptor confirmation.
+- Boundary: the standalone scheduler is intentionally not connected to
+  `ScarfTop`, because all three current upstream encoders failed the direct
+  dependency gate. It does not create inputs, values, or a synthetic bypass;
+  the dependency contract and zero S2/S3 saving remain unchanged.
+- Gate: Python layout/reference tests and Chisel request/backpressure tests
+  must pass before this hand-off is used by a real sparse producer. A later
+  integration additionally needs descriptor packing, bilateral assignment,
+  moment matching, buffer/S4 transfer, per-event replay, and an independent
+  model-specific sparse-execution proof.
+
+## 29. Multi-Model Finite-Halo Eligibility Audit
+
+- Research question: after the all-nonprobe direct-dependency failures, does a
+  fixed one-tile nonprobe perturbation have a bounded retained-probe envelope
+  for MVSplat or DepthSplat? A bounded result would only motivate a later exact
+  dependency-aware sparse-producer design; an unbounded result closes the
+  finite-halo route for that unmodified model.
+- Fixed contract: DL3DV sample 0, official selection and checkpoint, one 3x3
+  top/center/bottom by left/center/right source-tile raster, twelve nonprobes
+  per source tile, raw-head stop before S4/rendering, and no target metrics.
+  Target RGB is removed from the batch before context-device transfer and the
+  record must prove this provenance.
+- Stop condition: any source tile changing retained probes outside a finite
+  recorded envelope rejects a direct local bypass for that model. Neither
+  outcome changes routing, calibration, quality tolerances, S2/S3 savings, or
+  authorization for a DL3DV quality/full protocol.
+- Result: MVSplat's fixed record
+  `mvsplat_sample0_refine_dependency_locality_v1/results.json` (SHA256
+  `2ecd6206d4af77fb59c06add007257ecba76bbba07008c99195b9a14c93cdee6`)
+  has a complete 64x64 retained-probe envelope for every source tile; the
+  center reaches distance 32 and edge/corner sources reach 63. The direct
+  finite-halo route is rejected, matching TranSplat.
+- Result: DepthSplat's fixed record
+  `depthsplat_sample0_regressor_dependency_locality_v1/results.json` (SHA256
+  `bfce94a62940e7faa08320695486e505c714d7f7a689d1f8d964bc9e19ef7d2c`)
+  has a bounded one-tile envelope, but the adaptor-footprint contract proves
+  its four 3x3 convolutions require every preceding 256x448 position for both
+  L0 and L1. Only final-head emission can be sparse; that is not a genuine S3
+  producer and cannot change the zero S2/S3 saving or open a quality retry.
+
+## 30. Sparse-Producer Route Decision
+
+- Verdict: reject the direct sparse-producer line for the three unmodified
+  upstream checkpoints. TranSplat and MVSplat have full-grid retained-output
+  dependence; DepthSplat's bounded raw-head envelope still requires every
+  preceding spatial activation through its four-convolution adaptor. The staged
+  retained-output scheduler remains correct Functional plumbing but cannot be
+  connected to a genuine source under these contracts.
+- Rejected alternatives: a constant/dummy descriptor source, zeroing dense
+  activations, final-head-only emission presented as S3 sparsity, or training a
+  new surrogate/adaptor. The first three contradict execution evidence; the
+  last would be a new model-level method outside the submitted mechanism and
+  cannot be represented as a reproduction engineering detail.
+- Reopen condition: obtain an author-provided probe-first/sparse-compatible
+  adaptor or its exact training configuration and checkpoint, then repeat the
+  target-free dependency, software/event/RTL, and unchanged quality gates from
+  new outputs. Until then, leave SAES S2/S3 savings at zero, do not run DL3DV
+  quality/full retries, and retain Results Reproduced as unclaimed.
+
+## 31. Public Source Discovery
+
+- Scope: inspect the official Git remotes, all advertised branch heads/tags,
+  and the SCARF public issue/PR history for a probe-first or sparse-compatible
+  upstream implementation before treating the missing producer as an author
+  hand-off requirement.
+- Result: TranSplat exposes only its pinned `main` commit
+  `aaa29a40`; MVSplat's official and local-fork remotes expose the same pinned
+  `main` commit `01f9a28`; and the local-fork and official DepthSplat remotes
+  expose only `main` (the pinned local revision is `1f5e548`). SCARF's public
+  issue/PR history contains the original SAES simulator and later cycle-honesty
+  work, but no sparse adaptor, probe-first checkpoint, or producer branch.
+- Decision: public source discovery does not reopen the direct sparse route.
+  The remaining source requirement is specifically author-provided model code
+  and weights, or an exact training artifact that is demonstrably compatible
+  with the paper's existing S1/L0/L1/Full mechanism.

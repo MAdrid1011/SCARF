@@ -10,6 +10,24 @@ from typing import Optional
 from .types import FSDRConfig
 
 
+def fp16_to_q24(values: torch.Tensor) -> torch.Tensor:
+    """Decode normalized FP16 operands into exact signed Q1.24 integers."""
+    half = values.to(torch.float16).contiguous()
+    bits = half.view(torch.int16).to(torch.int64) & 0xFFFF
+    sign = (bits >> 15) & 1
+    exponent = (bits >> 10) & 0x1F
+    fraction = bits & 0x3FF
+    if torch.any(exponent == 0x1F):
+        raise ValueError("LSH operands must be finite FP16 values")
+    mantissa = torch.where(exponent == 0, fraction, 0x400 + fraction)
+    shift = torch.clamp(exponent - 1, min=0)
+    magnitude = torch.where(exponent == 0, mantissa, mantissa << shift)
+    signed = torch.where(sign == 0, magnitude, -magnitude)
+    if torch.any(signed.abs() > (1 << 24)):
+        raise ValueError("LSH operands must be normalized to [-1, 1]")
+    return signed
+
+
 class LSHHasher:
     """
     Locality-Sensitive Hashing (LSH) signature generator.
@@ -52,17 +70,19 @@ class LSHHasher:
         self.lsh_dim = config.lsh_dim
         self.feature_dim = config.feature_dim
         
-        # Set random seed if provided
-        if config.seed is not None:
-            torch.manual_seed(config.seed)
-            np.random.seed(config.seed)
-        
         # Initialize random projection matrix [K, D]
-        # Each row is a random unit vector (hyperplane normal)
-        self.projection = torch.randn(self.lsh_dim, self.feature_dim)
-        self.projection = self.projection / torch.norm(
-            self.projection, dim=1, keepdim=True
+        # Each row is a random unit vector quantized exactly as the FP16 ROM.
+        generator = torch.Generator(device="cpu")
+        if config.seed is not None:
+            generator.manual_seed(config.seed)
+        projection = torch.randn(
+            self.lsh_dim, self.feature_dim, generator=generator, dtype=torch.float32
         )
+        projection = projection / torch.linalg.vector_norm(
+            projection, dim=1, keepdim=True
+        ).clamp_min(1e-8)
+        self.projection = projection.to(torch.float16)
+        self.projection_q24 = fp16_to_q24(self.projection)
     
     def hash(self, feature: torch.Tensor) -> int:
         """
@@ -79,19 +99,9 @@ class LSHHasher:
             - K sign extractions (comparators)
             - 1 cycle latency
         """
-        # Normalize input feature
-        feature_norm = feature / (torch.norm(feature) + 1e-8)
-        
-        # Project onto random hyperplanes
-        projections = self.projection @ feature_norm  # [K]
-        
-        # Extract signs as bits
-        signature = 0
-        for i in range(self.lsh_dim):
-            if projections[i] >= 0:
-                signature |= (1 << i)
-        
-        return signature
+        if feature.ndim != 1 or feature.shape[0] != self.feature_dim:
+            raise ValueError(f"feature must have shape [{self.feature_dim}]")
+        return int(self.hash_batch(feature.unsqueeze(0))[0].item())
     
     def hash_batch(self, features: torch.Tensor) -> torch.Tensor:
         """
@@ -107,12 +117,23 @@ class LSHHasher:
             - Can be parallelized with N hash units
             - Or processed sequentially with 1 hash unit
         """
-        # Normalize features
-        features_norm = features / (torch.norm(features, dim=1, keepdim=True) + 1e-8)
-        
-        # Batch projection
-        projection = self.projection.to(device=features.device, dtype=features.dtype)
-        projections = features_norm @ projection.T  # [N, K]
+        if features.ndim != 2 or features.shape[1] != self.feature_dim:
+            raise ValueError(f"features must have shape [N, {self.feature_dim}]")
+        # Quantize normalized features and hyperplanes to the same FP16 values
+        # used by the exported ROM. Float32 accumulation keeps CPU/GPU signs
+        # deterministic while retaining the FP16 operand contract.
+        features_f32 = features.to(torch.float32)
+        features_norm = features_f32 / torch.linalg.vector_norm(
+            features_f32, dim=1, keepdim=True
+        ).clamp_min(1e-8)
+        quantized_features = features_norm.to(torch.float16).to(torch.float32)
+        feature_q24 = fp16_to_q24(quantized_features).to(
+            device=features.device, dtype=torch.float64
+        )
+        projection_q24 = self.projection_q24.to(
+            device=features.device, dtype=torch.float64
+        )
+        projections = feature_q24 @ projection_q24.T  # [N, K]
         
         # Pack all sign bits without per-feature device synchronization.
         bit_weights = 1 << torch.arange(
@@ -141,7 +162,8 @@ class LSHHasher:
                 f"Matrix shape {matrix.shape} doesn't match "
                 f"expected ({self.lsh_dim}, {self.feature_dim})"
             )
-        self.projection = matrix.clone()
+        self.projection = matrix.detach().to(device="cpu", dtype=torch.float16).clone()
+        self.projection_q24 = fp16_to_q24(self.projection)
 
 
 def hamming_distance(sig1: int, sig2: int) -> int:

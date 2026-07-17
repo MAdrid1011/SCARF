@@ -35,6 +35,7 @@ from encoder import (
     CycleStats, ActivationType, NormType, EncoderConfig,
     SoftmaxUnit, SoftmaxConfig,
 )
+from encoder.mmcu_events import recording_stage, trace_torch_mmcu_modules
 from .types import (
     CycleBreakdown,
     DepthPredictorConfig,
@@ -1976,25 +1977,33 @@ class HWDepthPredictor:
             if isinstance(gaussian_head, nn.Module)
             else nullcontext([])
         )
+        gaussian_modules = [
+            getattr(self._original_depth_predictor, name)
+            for name in (
+                "upsampler",
+                "proj_feature",
+                "refine_unet",
+                "to_gaussians",
+            )
+            if hasattr(self._original_depth_predictor, name)
+        ]
         
         # Run original model
         try:
-            with capture_context as captured_saes_features, torch.no_grad():
+            with (
+                capture_context as captured_saes_features,
+                torch.no_grad(),
+                trace_torch_mmcu_modules(
+                    self._original_depth_predictor,
+                    "s2",
+                    exclude_modules=gaussian_modules,
+                ),
+            ):
                 # Build kwargs for original model
                 model_kwargs = self._reference_model_kwargs(kwargs)
                 model_kwargs.setdefault('gaussians_per_pixel', 1)
                 model_kwargs.setdefault('deterministic', True)
 
-                gaussian_modules = [
-                    getattr(self._original_depth_predictor, name)
-                    for name in (
-                        "upsampler",
-                        "proj_feature",
-                        "refine_unet",
-                        "to_gaussians",
-                    )
-                    if hasattr(self._original_depth_predictor, name)
-                ]
                 if gaussian_modules:
                     from .module_cycle_trace import run_callable_with_module_cycle_trace
 
@@ -2003,6 +2012,7 @@ class HWDepthPredictor:
                             features, intrinsics, extrinsics, near, far, **model_kwargs
                         ),
                         gaussian_modules,
+                        mmcu_stage_name="s3",
                     )
                     output = gaussian_trace.output
                     gaussian_head_cycles = gaussian_trace.total_cycles
@@ -4631,6 +4641,7 @@ class HWDepthPredictor:
         
         return pdf, coarse_disps, total_cycles
     
+    @recording_stage("s3")
     def _hw_gaussian_head(
         self,
         features_vb: torch.Tensor,  # [VB, C, H, W] at low res
@@ -6869,6 +6880,7 @@ class HWDepthPredictor:
         
         return out
     
+    @recording_stage("s3")
     def _compute_raw_gaussians_with_original(
         self,
         features: torch.Tensor,  # [B, C, H, W]
@@ -6930,7 +6942,8 @@ class HWDepthPredictor:
                     else:
                         gaussian_in = gaussian_in[:, :expected_in_ch]
                 
-                raw_out = to_g(gaussian_in)
+                with trace_torch_mmcu_modules(to_g, "s3"):
+                    raw_out = to_g(gaussian_in)
             
             # Estimate cycles
             for layer in to_g:
@@ -7025,6 +7038,7 @@ class HWDepthPredictor:
             weight[i, i, 1, 1] = 0.9
         return weight
     
+    @recording_stage("s3")
     def _compute_raw_gaussians_hw(
         self,
         features: torch.Tensor,     # [B, C, H, W]

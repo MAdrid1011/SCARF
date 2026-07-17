@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hardware.iflow.sram_proxies import PROXIES
+from hardware.iflow.paper_table4 import REPORT_COMPONENTS
 
 
 LIBRARIES = (
@@ -22,7 +23,6 @@ LIBRARIES = (
     "asap7sc7p5t_SEQ_RVT_TT_nldm_201020.lib",
     "asap7sc7p5t_SIMPLE_RVT_TT_nldm_201020.lib",
 )
-
 
 def one_match(root: Path, pattern: str, label: str) -> Path:
     matches = sorted(path for path in root.glob(pattern) if path.is_file())
@@ -51,6 +51,10 @@ def build_tcl(runtime: Path, final_def: Path, path_root: Path | None = None) -> 
         f"read_liberty {file_root / 'foundry/asap7/proxy' / (proxy.name + '.lib')}"
         for proxy in PROXIES
     )
+    hierarchy_groups = " ".join(
+        "{" + label + " {" + " ".join(patterns) + "}}"
+        for label, patterns in REPORT_COMPONENTS.items()
+    )
     lines.extend(
         (
             f"read_def {final_def_for_tcl}",
@@ -64,6 +68,33 @@ def build_tcl(runtime: Path, final_def: Path, path_root: Path | None = None) -> 
             "report_tns",
             "report_design_area",
             "report_power",
+            f"set scarf_hierarchy_groups {{{hierarchy_groups}}}",
+            "set scarf_block [[[[::ord::get_db] getChip] getBlock] getInsts]",
+            "set scarf_dbu [[[::ord::get_db] getTech] getDbUnitsPerMicron]",
+            "foreach group $scarf_hierarchy_groups {",
+            "  set label [lindex $group 0]",
+            "  set patterns [lindex $group 1]",
+            "  set area_dbu2 0",
+            "  set matched_instances 0",
+            "  foreach inst $scarf_block {",
+            "    set name [$inst getName]",
+            "    set matched 0",
+            "    foreach pattern $patterns { if {[string match $pattern $name]} { set matched 1 } }",
+            "    if {$matched} {",
+            "      incr matched_instances",
+            "      set master [$inst getMaster]",
+            "      if {[lsearch -exact {mem_1365x768 bank_65536x16 mem_16384x32} [$master getName]] < 0} {",
+            "        set area_dbu2 [expr {$area_dbu2 + ([$master getWidth] * [$master getHeight])}]",
+            "      }",
+            "    }",
+            "  }",
+            "  puts \"SCARF_HIER_AREA $label [expr {double($area_dbu2) / ($scarf_dbu * $scarf_dbu)}]\"",
+            "  puts \"SCARF_HIER_INSTANCE_COUNT $label $matched_instances\"",
+            "  set cells [get_cells -hierarchical -quiet $patterns]",
+            "  puts \"SCARF_HIER_POWER_BEGIN $label\"",
+            "  if {[sizeof_collection $cells] > 0} { report_power -instances $cells }",
+            "  puts \"SCARF_HIER_POWER_END $label\"",
+            "}",
             'puts "SCARF_PPA_END"',
             "exit",
         )

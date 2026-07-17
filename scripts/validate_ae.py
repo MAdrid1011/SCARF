@@ -34,6 +34,17 @@ DATASET_REPRESENTATIONS = {
 }
 
 
+def validate_result_catalog(
+    catalog: dict[str, Any], *, require_key_results: bool
+) -> None:
+    from scripts.generate_report import validate_figure_catalog
+
+    contract = load(ROOT / "artifact/evaluation_catalog.json")
+    validate_figure_catalog(
+        catalog, contract, require_key_results=require_key_results
+    )
+
+
 def load(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(str(path))
@@ -422,7 +433,12 @@ def sensitivity_claim_checks(
     return checks
 
 
-def validate_complete(output: Path, expected_path: Path) -> dict[str, Any]:
+def validate_complete(
+    output: Path,
+    expected_path: Path,
+    *,
+    require_key_results: bool = False,
+) -> dict[str, Any]:
     expected = load(expected_path)
     tolerances = expected["tolerances"]
     protocol = load(ROOT / "artifact/evaluation_protocol.json")
@@ -729,6 +745,10 @@ def validate_complete(output: Path, expected_path: Path) -> dict[str, Any]:
     checks.extend(hardware_claim_checks(output, claim_status))
     report = output / "reports/reproduction_report.md"
     catalog = output / "reports/figure_catalog.json"
+    catalog_record = load(catalog)
+    validate_result_catalog(
+        catalog_record, require_key_results=require_key_results
+    )
     checks.append(
         {
             "claim": "report:paper_comparison_exports",
@@ -758,9 +778,18 @@ def main() -> int:
         type=Path,
         default=ROOT / "artifact/expected_results.json",
     )
+    parser.add_argument(
+        "--require-key-results",
+        action="store_true",
+        help="Reject any mandatory Evaluation result that is not PASS",
+    )
     args = parser.parse_args()
     try:
-        record = validate_complete(args.input.resolve(), args.expected.resolve())
+        record = validate_complete(
+            args.input.resolve(),
+            args.expected.resolve(),
+            require_key_results=args.require_key_results,
+        )
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

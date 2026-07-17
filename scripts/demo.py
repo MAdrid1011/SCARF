@@ -82,15 +82,36 @@ import argparse
 
 # SCARF imports
 from adapters import create_adapter, BaseAdapter
-from integration import create_model_loader, ModelBundle, DataBundle
+from integration import (
+    create_model_loader,
+    load_target_free_calibration_data,
+    ModelBundle,
+    DataBundle,
+)
 from ggu import GGUProcessor, GGUConfig
 from fsdr import FSDRSimulator
 from saes import ProgressiveSAES, apply_progressive_saes
+from saes.execution_dependency import (
+    resolve_s2_s3_execution_contract,
+    s2_s3_saving_ratio,
+)
+from saes.hardware_accounting import build_saes_event_ledger
 from scripts.reproducibility import capture_torch_rng_state, restore_torch_rng_state
 from scripts.result_record import strict_stage_error
 
 # SCARF hardware clock frequency (MHz) — default 1 GHz, overridable via --freq
 SCARF_FREQ_MHZ = 1000
+
+
+def is_target_rgb_free_execution(args: argparse.Namespace) -> bool:
+    """Return whether the requested path must remove target RGB before execution."""
+    return bool(
+        args.fsdr_only
+        or args.saes_materialization_audit
+        or args.saes_s3_raw_audit
+        or args.saes_routing_audit
+        or args.saes_hardware_audit
+    )
 
 
 # ============================================================
@@ -257,6 +278,11 @@ class SCARFConfig:
     fsdr_reuse_hamming: int = 3           # Moderate hamming (depth-only is safe)
     fsdr_reuse_spatial: int = 12          # Moderate spatial distance
     fsdr_reuse_confidence: float = 0.80   # Min peak_prob for reuse decision
+    fsdr_seed: int = 42                   # Public FP16 hyperplane ROM seed
+    gamma_depth: float = 0.10             # Local-validity tolerance selected by calibration
+    beta_x: float = 0.50                  # Tile-normalized spatial assignment bandwidth
+    beta_f: float = 0.10                  # Normalized feature assignment bandwidth
+    beta_d: float = 1.00                  # L1 depth-reliability multiplier
     # All FSDR-guided pixels use single-tier narrowed depth search (no S3 bypass).
     # fsdr_tier1_ratio removed: Tier 1 (HD ≤ 1 full Gaussian reuse) is not
     # implemented in the simulation; claiming it would overstate speedup.
@@ -428,17 +454,17 @@ class SavingsTracker:
     - K(T) adaptive probe count: K(T) = 4 + ceil(2·log2(T/4))
     - L0/L1: weighted moment matching (space+feature / space+feature+depth weights)
              + covariance spread term (law of total variance) for coverage.
-    - Non-probe opacities zeroed → effective Gaussian count ≤ K(T) per early-stopped tile.
-    - FSDR: Feature-Similarity Depth Reuse. Cache hits skip S2 cost_volume for guided pixels.
+    - L0 retains K(T) anchors; the less-compressive L1 path retains 2K(T).
+    - FSDR: Hamming hits narrow S2 to D/4 candidates on the paper/RTL path.
     """
     
     LIGHT_VERIFY_COST_RATIO = 0.04
     
-    def __init__(self):
+    def __init__(self, *, model_type: str | None = None):
         self.total_pixels = 0
         # SAES v4: L0 + L1 only
-        self.level0_pixels = 0   # Feature-uniform tiles: K(T) probes, 12 non-probe opacity→0
-        self.level1_pixels = 0   # Depth-uniform tiles:   K(T) probes, 12 non-probe opacity→0
+        self.level0_pixels = 0   # Feature-uniform: K(T) anchors, 12/16 removed at T=4.
+        self.level1_pixels = 0   # Depth-uniform: 2K(T) anchors, 8/16 removed at T=4.
         self.saes_interpolated_pixels = 0  # Total modified (backward compat)
         # FSDR
         self.fsdr_direct_reuse = 0
@@ -447,9 +473,33 @@ class SavingsTracker:
         self.fsdr_full_search = 0
         self.fsdr_validated = 0
         self.fsdr_rejected = 0
+        # Populated only from executed SAES tile counters.  This is an
+        # analytic no-overlap ledger, not RTL-cycle-equivalent timing.
+        self.saes_hardware_ledger = None
+        self.saes_execution_dependency = resolve_s2_s3_execution_contract(
+            model_type
+        )
     
-    def record_saes(self, total_pixels: int, saes_stats: Dict):
+    def record_saes(
+        self,
+        total_pixels: int,
+        saes_stats: Dict,
+        *,
+        feature_dim: int | None = None,
+        tile_size: int | None = None,
+        sh_degree: int | None = None,
+        primitives_per_pixel: int = 1,
+        model_type: str | None = None,
+    ) -> Dict | None:
         """Record SAES v4 (L0+L1) statistics."""
+        if model_type is not None:
+            requested_contract = resolve_s2_s3_execution_contract(model_type)
+            current_model = self.saes_execution_dependency["model"]
+            if current_model not in (None, requested_contract["model"]):
+                raise ValueError(
+                    "SAES execution-dependency model changed within one tracker"
+                )
+            self.saes_execution_dependency = requested_contract
         self.total_pixels = total_pixels
         validated = saes_stats.get('validated_modified_pixels', None)
         if validated is not None:
@@ -462,6 +512,22 @@ class SavingsTracker:
             self.level0_pixels = saes_stats.get('level0_pixels', 0)
             self.level1_pixels = saes_stats.get('level1_pixels', 0)
         self.saes_interpolated_pixels = self.level0_pixels + self.level1_pixels
+        dimensions = (feature_dim, tile_size, sh_degree)
+        if any(value is not None for value in dimensions):
+            if any(value is None for value in dimensions):
+                raise ValueError(
+                    "SAES accounting requires feature_dim, tile_size, and sh_degree together"
+                )
+            self.saes_hardware_ledger = build_saes_event_ledger(
+                saes_stats,
+                feature_dim=int(feature_dim),
+                tile_size=int(tile_size),
+                sh_degree=int(sh_degree),
+                primitives_per_pixel=int(primitives_per_pixel),
+            )
+        else:
+            self.saes_hardware_ledger = None
+        return self.saes_hardware_ledger
     
     def record_fsdr_pixel(self, path: str, reused: bool = False, validated: bool = False):
         """Record one pixel's FSDR path with reuse status.
@@ -525,15 +591,18 @@ class SavingsTracker:
           Stage 2: Depth Prediction (cost_volume + unet + depth_head + regression)
           Stage 3: Gaussian Generation (refine_unet + to_gaussians + GGU post-processing)
         
-        Realistic Savings Model:
-          SAES Level 0: Feature-uniform tiles → K(T) probes, rest opacity→0
-                        Saves 75% of S2+S3 per tile. Decision: S1 feature variance + cross-check.
-          SAES Level 1: Depth-uniform tiles → K(T) probes, rest opacity→0
-                        Saves 75% of S2+S3 per tile. Decision: probe depth uniformity + cross-check.
+        SAES accounting model:
+          SAES Level 0 and Level 1 route counters describe K(T)/2K(T)
+          retained-anchor work.  They reduce S2/S3 cycles only if the selected
+          model's target-free execution-dependency contract proves that the
+          current sparse path does not consume skipped positions.  Otherwise
+          their S2/S3 saving is fail-closed to zero while their control, merge,
+          and storage ledger remains charged.
           FSDR (Narrowed Search): Guided pixels search D/4 depth candidates.
                 Saves cost_volume computation only (memory-bound, per-pixel per-candidate).
                 U-Net/depth_head/regression unchanged (process full spatial resolution).
-                Decision: LSH hamming + confidence + depth consistency check.
+                Decision: LSH Hamming on the paper/RTL path. The historical
+                depth-consistency guard is isolated from claim execution.
         """
         # ================================================================
         # Differentiated hardware compute scaling (48×48 upgraded arrays)
@@ -547,13 +616,28 @@ class SavingsTracker:
         HW_SCALE_C = CONFIG.hw_scale_compute  # 2.0x for compute-bound
         HW_SCALE_M = CONFIG.hw_scale_memory   # 1.5x for memory-bound
         
-        # SAES v4 ratios (fraction of pixel materializations bypassed)
-        # L0 + L1: both skip full S2+S3 for non-probe pixels.
-        l0_ratio = self.level0_ratio()   # Feature-uniform: saves S2+S3 for non-probe px
-        l1_ratio = self.level1_ratio()   # Depth-uniform:   saves S2+S3 for non-probe px
+        # Route coverage is not an executable bypass claim.  The model-specific
+        # dependency contract below decides whether any of it can reduce S2/S3.
+        l0_ratio = self.level0_ratio()
+        l1_ratio = self.level1_ratio()
         total_saes = l0_ratio + l1_ratio
+        if total_saes > 0.0 and self.saes_hardware_ledger is None:
+            raise ValueError(
+                "nonzero SAES savings require an explicit control/storage event ledger"
+            )
+        saes_accounting_cycles = (
+            int(
+                self.saes_hardware_ledger['cycles'][
+                    'serialized_accounting_cycles'
+                ]
+            )
+            if self.saes_hardware_ledger is not None
+            else 0
+        )
         
-        # FSDR: fraction of remaining (non-SAES) pixels that get guided search
+        # FSDR can exclude only positions that an executable SAES S2 bypass
+        # actually removed.  Route coverage without a verified sparse path
+        # remains in the FSDR denominator.
         fsdr_ratio = self.fsdr_validated_saving_ratio()
         
         if min(feature_cycles, dp_core_cycles, gauss_gen_cycles, ggu_cycles) <= 0:
@@ -622,9 +706,15 @@ class SavingsTracker:
         #   l0_ratio = (num_L0_tiles * non_probe_count) / total_pixels
         #   l1_ratio = (num_L1_tiles * non_probe_count) / total_pixels
         #
-        # Both L0 and L1 skip the full S2+S3 pipeline for non-probe pixels.
-        saes_s2_saving = total_saes   # L0+L1 both skip S2 for non-probe px
-        saes_s3_saving = total_saes   # L0+L1 both skip S3 for non-probe px
+        # A SAES route is not a direct S2/S3 bypass unless the current model
+        # has independently demonstrated that retained outputs do not depend
+        # on skipped positions.  Current contracts intentionally fail closed.
+        saes_s2_saving = s2_s3_saving_ratio(
+            total_saes, self.saes_execution_dependency
+        )
+        saes_s3_saving = s2_s3_saving_ratio(
+            total_saes, self.saes_execution_dependency
+        )
         
         # ================================================================
         # FSDR savings: Narrowed Depth Search only
@@ -665,7 +755,7 @@ class SavingsTracker:
         FSDR_S2_SAVE_PER_PIXEL = FSDR_TIER2_RATIO * tier2_per_pixel
         FSDR_S3_SAVE_PER_PIXEL = 0.0
 
-        remaining_for_fsdr = 1.0 - total_saes
+        remaining_for_fsdr = 1.0 - saes_s2_saving
         fsdr_s2_saving = fsdr_ratio * remaining_for_fsdr * FSDR_S2_SAVE_PER_PIXEL
         fsdr_s3_saving = fsdr_ratio * remaining_for_fsdr * FSDR_S3_SAVE_PER_PIXEL
         
@@ -674,15 +764,29 @@ class SavingsTracker:
         # ================================================================
         configs = {}
         
-        def _make_cfg(fe, dp, gg_nn, ggu_post, d_sav, g_sav, cfg_key=None):
+        def _make_cfg(
+            fe,
+            dp,
+            gg_nn,
+            ggu_post,
+            d_sav,
+            g_sav,
+            cfg_key=None,
+            saes_control=0,
+        ):
             """Build config with both raw (serial) and effective (pipelined) cycles."""
-            raw_total = fe + dp + gg_nn + ggu_post
+            if saes_control < 0:
+                raise ValueError("SAES control accounting cycles must be nonnegative")
+            raw_total = fe + dp + gg_nn + ggu_post + saes_control
             
             eff_fe = int(fe * PIPE_FE)
             eff_dp = int(dp * PIPE_DP)
             eff_gg_nn = int(gg_nn * PIPE_GG_NN)
             eff_ggu = 0  # hidden behind conv work
-            eff_total = eff_fe + eff_dp + eff_gg_nn + eff_ggu
+            # The ledger deliberately assumes no overlap with S2/S3/VectorALU
+            # work.  It makes the analytic SAES ablation stricter, but does not
+            # turn the number into an RTL timing claim.
+            eff_total = eff_fe + eff_dp + eff_gg_nn + eff_ggu + saes_control
             
             result = {
                 'feature': fe,
@@ -693,6 +797,7 @@ class SavingsTracker:
                 'gauss_saving': g_sav,
                 'gauss_head_nn': gg_nn,
                 'ggu_post': ggu_post,
+                'saes_control': saes_control,
                 'eff_feature': eff_fe,
                 'eff_dp_core': eff_dp,
                 'eff_gauss_gen': eff_gg_nn,
@@ -728,7 +833,8 @@ class SavingsTracker:
         ggu_saes = int(ggu_cycles * (1.0 - saes_s3_saving))
         configs['asic_saes'] = _make_cfg(
             feature_cycles, dp_saes, gh_saes, ggu_saes,
-            saes_s2_saving, saes_s3_saving, cfg_key='asic_saes')
+            saes_s2_saving, saes_s3_saving, cfg_key='asic_saes',
+            saes_control=saes_accounting_cycles)
         
         # 4. ASIC + SAES + FSDR (full optimization)
         combined_s2_saving = saes_s2_saving + fsdr_s2_saving
@@ -742,7 +848,7 @@ class SavingsTracker:
         configs['asic_fsdr_saes'] = _make_cfg(
             feature_cycles, dp_both, gh_both, ggu_both,
             combined_s2_saving, combined_s3_saving,
-            cfg_key='asic_fsdr_saes')
+            cfg_key='asic_fsdr_saes', saes_control=saes_accounting_cycles)
         
         # Store pipeline factors and multi-level info
         configs['_pipeline'] = {
@@ -761,12 +867,20 @@ class SavingsTracker:
             'saes_total_ratio': total_saes,
             'saes_s2_saving': saes_s2_saving,
             'saes_s3_saving': saes_s3_saving,
+            'saes_execution_dependency': self.saes_execution_dependency,
+            'saes_control_accounting_cycles': saes_accounting_cycles,
+            'saes_control_timing_class': (
+                self.saes_hardware_ledger['timing_class']
+                if self.saes_hardware_ledger is not None
+                else 'not_applicable_no_saes_savings'
+            ),
             'fsdr_reuse_ratio': fsdr_ratio,
             'fsdr_s2_saving': fsdr_s2_saving,
             'fsdr_s3_saving': fsdr_s3_saving,
             'combined_s2_saving': combined_s2_saving,
             'combined_s3_saving': combined_s3_saving,
         }
+        configs['_saes_accounting'] = self.saes_hardware_ledger
         
         return configs
 
@@ -785,6 +899,7 @@ def load_model_and_data(
     device: Optional[torch.device] = None,
     num_samples: int = 1,
     sample_index: int = 0,
+    calibration_target_free: bool = False,
 ):
     """
     Load model and data using the model loader abstraction.
@@ -833,13 +948,26 @@ def load_model_and_data(
     else:
         loader, model_bundle = cached
     
-    # Load data
-    data_bundle = loader.load_data(
-        model_bundle,
-        dataset_name=dataset_name,
-        num_samples=max(num_samples, sample_index + 1),
-        sample_index=sample_index,
-    )
+    # Calibration uses a sidecar with context RGB and target camera geometry;
+    # ordinary evaluation retains the model's native dataloader.
+    if calibration_target_free:
+        if dataset_root is None or evaluation_index is None:
+            raise ValueError("target-free calibration requires dataset root and index")
+        data_bundle = load_target_free_calibration_data(
+            loader,
+            model_bundle,
+            dataset_name=dataset_name,
+            dataset_root=Path(dataset_root),
+            evaluation_index=Path(evaluation_index),
+            sample_index=sample_index,
+        )
+    else:
+        data_bundle = loader.load_data(
+            model_bundle,
+            dataset_name=dataset_name,
+            num_samples=max(num_samples, sample_index + 1),
+            sample_index=sample_index,
+        )
     
     return model_bundle.model, data_bundle.batch, model_bundle.config, model_bundle.device
 
@@ -897,7 +1025,11 @@ def tune_thresholds(
                 trial_g, h, w, CONFIG.tile_size, gpp=1,
                 feature_var_threshold=fv,
                 depth_std_threshold=ds, features=features, depths=depths,
-                cross_check_threshold=CONFIG.saes_cross_check)
+                cross_check_threshold=CONFIG.saes_cross_check,
+                beta_x=CONFIG.beta_x,
+                beta_f=CONFIG.beta_f,
+                beta_d=CONFIG.beta_d,
+                num_depth_candidates=CONFIG.num_depth_candidates)
 
             with torch.no_grad():
                 out = model.decoder.forward(
@@ -973,6 +1105,9 @@ def tune_thresholds(
         reuse_spatial=CONFIG.fsdr_reuse_spatial,
         reuse_confidence=CONFIG.fsdr_reuse_confidence,
         num_depth_candidates=CONFIG.num_depth_candidates,
+        seed=CONFIG.fsdr_seed,
+        depth_consistency_threshold=CONFIG.gamma_depth,
+        tile_size=CONFIG.tile_size,
     )
     
     if has_features:
@@ -1120,7 +1255,17 @@ def main(argv=None):
     global CONFIG
     
     args = parse_demo_args(argv)
-    strict_run = args.claim_run or args.functional_run
+    strict_run = args.claim_run or args.functional_run or args.diagnostic_run
+    from scripts.mechanism_config import (
+        load_mechanism_config,
+        require_calibrated_mechanism,
+    )
+
+    mechanism_config, mechanism_provenance = (
+        require_calibrated_mechanism()
+        if args.claim_run
+        else load_mechanism_config()
+    )
     fallback_stages = []
     from scripts.ae_config import (
         resolve_experiment,
@@ -1136,17 +1281,22 @@ def main(argv=None):
     dataset_manifest = (
         args.dataset_manifest or dataset_root / ".scarf-manifest.json"
     ).resolve()
-    if not dataset_manifest.is_file():
-        raise FileNotFoundError(
-            f"dataset provenance manifest not found: {dataset_manifest}\n"
-            "Run the documented dataset preparation command before evaluation."
+    if args.calibration_trace:
+        from scripts.calibration_inputs import validate_target_free_input_root
+
+        dataset_identity = validate_target_free_input_root(dataset_root, args.dataset)
+    else:
+        if not dataset_manifest.is_file():
+            raise FileNotFoundError(
+                f"dataset provenance manifest not found: {dataset_manifest}\n"
+                "Run the documented dataset preparation command before evaluation."
+            )
+        dataset_identity = validate_prepared_dataset(
+            experiment,
+            dataset_root,
+            dataset_manifest,
+            allow_functional_fixture=args.functional_run,
         )
-    dataset_identity = validate_prepared_dataset(
-        experiment,
-        dataset_root,
-        dataset_manifest,
-        allow_functional_fixture=args.functional_run,
-    )
     if args.claim_run:
         validate_claim_dataset_tree(
             args.model,
@@ -1185,6 +1335,16 @@ def main(argv=None):
     
     # Initialize config
     CONFIG = SCARFConfig(model_type=args.model)
+    engineering = mechanism_config.get('selected') or {
+        'gamma_depth': CONFIG.gamma_depth,
+        'beta_x': CONFIG.beta_x,
+        'beta_f': CONFIG.beta_f,
+        'beta_d': CONFIG.beta_d,
+    }
+    CONFIG.gamma_depth = float(engineering['gamma_depth'])
+    CONFIG.beta_x = float(engineering['beta_x'])
+    CONFIG.beta_f = float(engineering['beta_f'])
+    CONFIG.beta_d = float(engineering['beta_d'])
 
     # Apply CLI threshold overrides (after CONFIG is initialized)
     if args.saes_fv is not None:
@@ -1234,15 +1394,15 @@ def main(argv=None):
     print(f"  L0+L1 probe-anchored Gaussian moment matching")
     print(f"[Config] FSDR (realistic ASIC):")
     print(f"  cache_size={CONFIG.fsdr_cache_size}, hamming_threshold={CONFIG.fsdr_hamming_threshold}")
-    print(f"  reuse_hamming={CONFIG.fsdr_reuse_hamming}, reuse_spatial={CONFIG.fsdr_reuse_spatial}")
-    print(f"  reuse_confidence={CONFIG.fsdr_reuse_confidence} (cache hit → use cached Gaussians)")
+    print(f"  guidance_policy={args.fsdr_guidance_policy}")
+    print(f"  gamma_depth={CONFIG.gamma_depth}")
     print(f"[Config] GGU:")
     print(f"  scale_range=({CONFIG.scale_min}, {CONFIG.scale_max})")
     print()
     
     # Initialize cycle counter and savings tracker
     cycle_counter = HWCycleCounter(ggu_pe_count=CONFIG.ggu_pe_count)
-    savings = SavingsTracker()
+    savings = SavingsTracker(model_type=args.model)
     
     # --------------------------------------------------------
     # Step 1: Load Model and Data
@@ -1259,6 +1419,7 @@ def main(argv=None):
         device=selected_device,
         num_samples=args.num_samples,
         sample_index=args.sample_index,
+        calibration_target_free=args.calibration_trace,
     )
     print("  ✓ Model and data loaded")
     model_depth_predictor = getattr(model.encoder, 'depth_predictor', None)
@@ -1288,13 +1449,33 @@ def main(argv=None):
     print("[2/6] Processing batch...")
     
     B, V_ctx, _, h, w = batch['context']['image'].shape
-    _, V_tgt, _, _, _ = batch['target']['image'].shape
+    native_dataloader_loaded_target_rgb = False
+    target_rgb_removed_before_execution = False
+    target_rgb_free_execution = is_target_rgb_free_execution(args)
+    if args.calibration_trace:
+        if 'image' in batch['target']:
+            raise RuntimeError("calibration batch unexpectedly contains target RGB")
+        V_tgt = int(batch['target']['extrinsics'].shape[1])
+    elif target_rgb_free_execution:
+        # The ordinary official dataloader may have loaded target RGB. Remove
+        # it before device transfer or any model/audit invocation so this
+        # diagnostic cannot accidentally use RGB evidence.
+        V_tgt = int(batch['target']['extrinsics'].shape[1])
+        native_dataloader_loaded_target_rgb = 'image' in batch['target']
+        batch['target'].pop('image', None)
+        target_rgb_removed_before_execution = True
+    else:
+        _, V_tgt, _, _, _ = batch['target']['image'].shape
     scene_name = batch['scene'][0] if 'scene' in batch else 'unknown'
     
     print(f"  ✓ Scene: {scene_name}, Testing {V_tgt} view(s), Size: {h}x{w}")
     
     context = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch['context'].items()}
-    target = {k: v[:, :V_tgt].to(device) if torch.is_tensor(v) and v.dim() > 1 else (v.to(device) if torch.is_tensor(v) else v) for k, v in batch['target'].items()}
+    target = {
+        k: v[:, :V_tgt].to(device) if torch.is_tensor(v) and v.dim() > 1 else (v.to(device) if torch.is_tensor(v) else v)
+        for k, v in batch['target'].items()
+        if not (target_rgb_free_execution and k == 'image')
+    }
     
     # --------------------------------------------------------
     # Step 3: Run BASELINE (full encoder) when image evidence needs it.
@@ -1307,6 +1488,23 @@ def main(argv=None):
     if args.fsdr_only:
         print("[3/6] Baseline encoder and renderer: SKIPPED (--fsdr-only)")
         print(f"  GPU: {gpu_name}")
+    elif (
+        args.saes_s3_raw_audit
+        or args.saes_routing_audit
+        or args.saes_hardware_audit
+    ):
+        audit_name = (
+            "S3 raw audit"
+            if args.saes_s3_raw_audit
+            else "SAES routing audit"
+            if args.saes_routing_audit
+            else "SAES hardware audit"
+        )
+        print(f"[3/6] Baseline encoder and renderer: SKIPPED ({audit_name})")
+        if args.saes_hardware_audit:
+            print("  The diagnostic records S1--S4 events but never renders or scores images.")
+        else:
+            print("  The diagnostic stops before GGU/S4 and rendering.")
     else:
         print("[3/6] Running BASELINE (original model)...")
         print(f"  GPU: {gpu_name} @ {gpu_freq_mhz} MHz (max SM clock)")
@@ -1420,6 +1618,9 @@ def main(argv=None):
     print("[4/6] Running SCARF Pipeline...")
     
     t0 = time.time()
+    from encoder.mmcu_events import mmcu_stage, mmcu_stage_records, reset_mmcu_events
+
+    reset_mmcu_events()
     
     # Initialize cycle counters
     feature_sim_cycles = 0
@@ -1473,11 +1674,12 @@ def main(argv=None):
                 feature_extractor = None
             
             if feature_extractor is not None:
-                fe_output = feature_extractor.forward(
-                    context['image'],
-                    context.get('extrinsics'),
-                    context.get('intrinsics'),
-                )
+                with mmcu_stage("s1"):
+                    fe_output = feature_extractor.forward(
+                        context['image'],
+                        context.get('extrinsics'),
+                        context.get('intrinsics'),
+                    )
                 feature_sim_cycles = fe_output.total_cycles
                 
                 # Extract CNN cycle count for per-component ASIC scaling.
@@ -1676,19 +1878,20 @@ def main(argv=None):
                     # exact stream used by the baseline so the hardware cycle model
                     # changes execution cost, not the sampled neural result.
                     restore_torch_rng_state(paired_rng_state)
-                    dp_output = depth_predictor_sim.forward(
-                        pipeline_features,  # Input from Stage 1
-                        context['intrinsics'],
-                        context['extrinsics'],
-                        near,
-                        far,
-                        images=context.get('image'),
-                        da_depth=dp_da_depth,
-                        dino_feature=dp_dino_feature,
-                        cnn_features=pipeline_cnn_features,
-                        extra_info=extra_info,
-                        deterministic=False,
-                    )
+                    with mmcu_stage("s2"):
+                        dp_output = depth_predictor_sim.forward(
+                            pipeline_features,  # Input from Stage 1
+                            context['intrinsics'],
+                            context['extrinsics'],
+                            near,
+                            far,
+                            images=context.get('image'),
+                            da_depth=dp_da_depth,
+                            dino_feature=dp_dino_feature,
+                            cnn_features=pipeline_cnn_features,
+                            extra_info=extra_info,
+                            deterministic=False,
+                        )
                 
                 cycle_breakdown = dp_output.cycle_breakdown.to_dict()
                 cost_volume_cycles = cycle_breakdown.get('cost_volume', 0)
@@ -1773,7 +1976,11 @@ def main(argv=None):
                             far_bv = far.expand(b_ds, v_ds) if far.dim() <= 1 else far
                             near_bv = near_bv.to(device).clamp(min=1e-6)
                             far_bv = far_bv.to(device).clamp(min=1e-6)
-                            
+
+                            # The hardware path above supplies cycle counts. Replay
+                            # the baseline RNG before taking the pinned upstream
+                            # numerical path used for quality and mechanism evidence.
+                            restore_torch_rng_state(paired_rng_state)
                             results_dict = model.encoder.depth_predictor(
                                 context['image'],
                                 attn_splits_list=[2],
@@ -1783,9 +1990,28 @@ def main(argv=None):
                                 extrinsics=context['extrinsics'],
                             )
                             depthsplat_results = results_dict
+                            from scripts.depthsplat_execution import (
+                                extract_depthsplat_execution_tensors,
+                            )
                             from scripts.fsdr_trace import (
                                 depthsplat_global_candidate_tensors,
                             )
+
+                            reference_tensors = extract_depthsplat_execution_tensors(
+                                results_dict,
+                                batch_size=b_ds,
+                                view_count=v_ds,
+                                image_height=h_ds,
+                                image_width=w_ds,
+                            )
+                            # The Gaussian head below is exact upstream execution.
+                            # Do not combine it with approximate hardware depth or
+                            # feature tensors: that would corrupt ASIC-no-opt before
+                            # SAES/FSDR are applied.
+                            pipeline_depths = reference_tensors.depths
+                            pipeline_densities = reference_tensors.densities
+                            pipeline_features = reference_tensors.matching_features
+                            pipeline_mono_features = reference_tensors.mono_features
 
                             fsdr_depth_probs, fsdr_depth_candidates = (
                                 depthsplat_global_candidate_tensors(
@@ -1799,8 +2025,8 @@ def main(argv=None):
                                 'pinned_original_depthsplat_first_scale_softmax'
                             )
                             
-                            depth_final = results_dict['depth_preds'][-1]
-                            match_prob = results_dict['match_probs'][-1]
+                            depth_final = reference_tensors.final_depth
+                            match_prob = reference_tensors.final_match_probability
 
                             from depth_predictor.module_cycle_trace import (
                                 run_module_with_cycle_trace,
@@ -1811,7 +2037,8 @@ def main(argv=None):
                                 results_dict["features_mono_intermediate"],
                                 cnn_features=results_dict["features_cnn_all_scales"][::-1],
                                 mv_features=results_dict["features_mv"][0] if model.encoder.cfg.num_scales == 1
-                                           else results_dict["features_mv"][::-1]
+                                           else results_dict["features_mv"][::-1],
+                                mmcu_stage_name="s3",
                             )
                             features_upsampled = feature_upsampler_trace.output
                             
@@ -1827,7 +2054,9 @@ def main(argv=None):
                             ), dim=1)
                             
                             gaussian_regressor_trace = run_module_with_cycle_trace(
-                                model.encoder.gaussian_regressor, concat_input
+                                model.encoder.gaussian_regressor,
+                                concat_input,
+                                mmcu_stage_name="s3",
                             )
                             regressor_out = gaussian_regressor_trace.output
                             
@@ -1846,7 +2075,9 @@ def main(argv=None):
                             )
                             
                             gaussian_head_trace = run_module_with_cycle_trace(
-                                model.encoder.gaussian_head, gaussian_head_input
+                                model.encoder.gaussian_head,
+                                gaussian_head_input,
+                                mmcu_stage_name="s3",
                             )
                             gaussians_bv = gaussian_head_trace.output
                             gauss_gen_cycles = (
@@ -1855,15 +2086,12 @@ def main(argv=None):
                                 + gaussian_head_trace.total_cycles
                             )
                             pipeline_raw_gaussians = gaussians_bv
-                            pipeline_densities = rearrange(match_prob_max, "(b v) c h w -> b v (c h w) () ()", b=b_ds, v=v_ds)
-                            
-                            # Update features from results_dict if not yet set
-                            if pipeline_features is None or isinstance(pipeline_features, str):
-                                pipeline_features = rearrange(
-                                    results_dict['features_mv'][0],
-                                    '(b v) c h w -> b v c h w', b=b_ds, v=v_ds
-                                )
-                            
+                            print(
+                                "      ✓ Numeric source rebound to pinned "
+                                "DepthSplat cost-volume/Gaussian execution "
+                                f"({pipeline_features.shape[-2]}x"
+                                f"{pipeline_features.shape[-1]} matching scale)"
+                            )
                             print(f"      ✓ raw_gaussians computed: {pipeline_raw_gaussians.shape}")
                             print(
                                 "      ✓ S3 traced cycles: "
@@ -2000,6 +2228,10 @@ def main(argv=None):
         reuse_spatial=CONFIG.fsdr_reuse_spatial,
         reuse_confidence=CONFIG.fsdr_reuse_confidence,
         num_depth_candidates=CONFIG.num_depth_candidates,
+        seed=CONFIG.fsdr_seed,
+        guidance_policy=args.fsdr_guidance_policy,
+        depth_consistency_threshold=CONFIG.gamma_depth,
+        tile_size=CONFIG.tile_size,
     )
     print(
         f"    FSDR feature source: {fsdr_feature_source} "
@@ -2085,6 +2317,7 @@ def main(argv=None):
                 'git_commit': source['git_commit'],
                 'git_dirty': source['git_dirty'],
                 'source_identity': source['source'],
+                'source_tree_sha256': source['source_tree_sha256'],
                 'submodules': source['submodules'],
                 'model': args.model,
                 'dataset': {
@@ -2093,7 +2326,7 @@ def main(argv=None):
                     'tree_sha256': dataset_identity['tree_sha256'],
                     'manifest': str(dataset_manifest.relative_to(SCARF_ROOT)),
                     'manifest_sha256': sha256_file(dataset_manifest),
-                    'paper_result_eligible': True,
+                    'paper_result_eligible': args.claim_run,
                 },
                 'checkpoint': {
                     'path': str(checkpoint_path.relative_to(SCARF_ROOT)),
@@ -2104,6 +2337,14 @@ def main(argv=None):
                     experiment.environment_profile
                 ),
                 'runtime_assets': runtime_assets,
+                'target_rgb': {
+                    'loaded_by_native_dataloader': native_dataloader_loaded_target_rgb,
+                    'removed_before_device_transfer_or_execution': (
+                        target_rgb_removed_before_execution
+                    ),
+                    'passed_to_model': False,
+                    'used_for_routing_or_metric': False,
+                },
                 'command': portable_command(
                     [
                         sys.executable,
@@ -2140,6 +2381,11 @@ def main(argv=None):
                     ],
                 },
             },
+            kind=(
+                'fsdr_sample'
+                if args.claim_run
+                else 'fsdr_target_free_audit'
+            ),
             total_pixels=int(summary['total_pixels']),
             cache_hits=int(summary['cache_hits']),
             cache_misses=int(summary['cache_misses']),
@@ -2167,10 +2413,292 @@ def main(argv=None):
         print(f"Structured result: {output_dir / 'results.json'}")
         return
 
+    if args.saes_routing_audit:
+        if pipeline_features is None or pipeline_depths is None:
+            raise RuntimeError(
+                "SAES routing audit requires executed S1 features and S2 depths"
+            )
+        from scripts.saes_diagnostics import decision_statistics
+        from scripts.result_record import (
+            cached_sha256_file,
+            portable_command,
+            sha256_file,
+            source_identity,
+            write_result,
+        )
+
+        audit_record = decision_statistics(
+            pipeline_features,
+            pipeline_depths,
+            height=h,
+            width=w,
+            tile_size=CONFIG.tile_size,
+            feature_threshold=CONFIG.feature_var_threshold,
+            depth_threshold=CONFIG.depth_std_threshold,
+            near=near,
+            far=far,
+        )
+        source = source_identity()
+        protocol_sample_index = (
+            args.protocol_sample_index
+            if args.protocol_sample_index is not None
+            else args.sample_index
+        )
+        audit_record.update(
+            {
+                'model': args.model,
+                'dataset': args.dataset,
+                'dataset_representation': dataset_identity['representation'],
+                'dataset_tree_sha256': dataset_identity['tree_sha256'],
+                'dataset_manifest': str(dataset_manifest.relative_to(SCARF_ROOT)),
+                'dataset_manifest_sha256': sha256_file(dataset_manifest),
+                'checkpoint': {
+                    'path': str(checkpoint_path.relative_to(SCARF_ROOT)),
+                    'sha256': cached_sha256_file(checkpoint_path),
+                    'load': getattr(model, '_scarf_checkpoint_load', {}),
+                },
+                'source': source,
+                'command': portable_command(
+                    [
+                        sys.executable,
+                        str(SCARF_ROOT / 'scripts/demo.py'),
+                        *(list(argv) if argv is not None else sys.argv[1:]),
+                    ]
+                ),
+                'seed': args.seed,
+                'sample_index': args.sample_index,
+                'protocol_sample_index': protocol_sample_index,
+                'scene': str(scene_name),
+                'context_indices': [
+                    int(value) for value in batch['context']['index'][0].tolist()
+                ],
+                'target_indices': [
+                    int(value)
+                    for value in batch['target']['index'][0, :V_tgt].tolist()
+                ],
+                'target_rgb_provenance': {
+                    'loaded_by_native_dataloader': native_dataloader_loaded_target_rgb,
+                    'removed_before_device_transfer_or_execution': (
+                        target_rgb_removed_before_execution
+                    ),
+                    'passed_to_model': False,
+                    'used_for_routing_or_metric': False,
+                },
+                'execution_boundary': {
+                    'completed': ('S1', 'S2', 'S3_raw_descriptor_head'),
+                    'baseline_encoder_executed': False,
+                    'ggu_s4_executed': False,
+                    'renderer_executed': False,
+                    'quality_metrics_computed': False,
+                },
+                'audit_configuration': {
+                    'tile_size': CONFIG.tile_size,
+                    'feature_threshold': CONFIG.feature_var_threshold,
+                    'depth_threshold': CONFIG.depth_std_threshold,
+                    'decision_semantics': args.saes_decision_semantics,
+                    'feature_source': args.saes_feature_source,
+                    'depth_coordinate_candidates': (
+                        'metric_depth',
+                        'relative_depth',
+                        'normalized_inverse_depth',
+                    ),
+                },
+                'full_s2_reference_use': 'posthoc-diagnostic-only',
+                'paper_result_eligible': False,
+            }
+        )
+        output_dir = (
+            Path(args.output_dir)
+            if args.output_dir
+            else SCARF_ROOT / 'outputs' / 'saes-routing-audit'
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        write_result(audit_record, output_dir / 'results.json')
+        print(
+            "Target-free SAES routing-statistics audit: "
+            f"{output_dir / 'results.json'}"
+        )
+        return
+
+    if args.saes_s3_raw_audit:
+        # This audit intentionally terminates after the model's raw Gaussian
+        # descriptor head.  Do not instantiate GGU/S4 or the renderer: the
+        # only complete descriptors are the post-hoc reference for measuring
+        # whether selected probe descriptors can predict withheld S3 outputs.
+        if (
+            pipeline_features is None
+            or pipeline_depths is None
+            or pipeline_densities is None
+            or pipeline_raw_gaussians is None
+        ):
+            raise RuntimeError(
+                "S3 raw audit requires executed S1 features, S2 depths/densities, "
+                "and raw Gaussian descriptors"
+            )
+        gpp = getattr(model.encoder.cfg, 'gaussians_per_pixel', 1)
+        num_surfaces = getattr(model.encoder.cfg, 'num_surfaces', 1)
+        if args.model == 'transplat':
+            from src.geometry.projection import sample_image_grid
+        elif args.model == 'mvsplat':
+            MVSPLAT_ROOT = SCARF_ROOT / 'mvsplat'
+            sys.path.insert(0, str(MVSPLAT_ROOT))
+            from src.geometry.projection import sample_image_grid
+        elif args.model == 'depthsplat':
+            DEPTHSPLAT_ROOT = SCARF_ROOT / 'depthsplat'
+            sys.path.insert(0, str(DEPTHSPLAT_ROOT))
+            from src.geometry.projection import sample_image_grid
+        else:
+            raise RuntimeError(f"unsupported model for S3 raw audit: {args.model}")
+
+        xy_ray, _ = sample_image_grid((h, w), device)
+        xy_ray = rearrange(xy_ray, "h w xy -> (h w) () xy").to(device)
+        pixel_size = 1 / torch.tensor((w, h), dtype=torch.float32, device=device)
+        if args.model == 'depthsplat' and pipeline_raw_gaussians.dim() == 4:
+            raw_by_view = rearrange(
+                pipeline_raw_gaussians,
+                "(b v) c h w -> b v (h w) c",
+                b=B,
+                v=V_ctx,
+            )
+            raw_without_opacity = raw_by_view[..., 1:]
+            raw_parsed = rearrange(
+                raw_without_opacity,
+                "b v r (srf c) -> b v r srf c",
+                srf=num_surfaces,
+            )
+            opacities_for_audit = raw_by_view[..., :1].sigmoid().unsqueeze(-1)
+            raw_descriptors = raw_parsed[..., 2:]
+            offset_xy = raw_parsed[..., :2].sigmoid()
+            depths_for_audit = pipeline_depths
+            if depths_for_audit.dim() == 4:
+                depths_for_audit = rearrange(
+                    depths_for_audit, "b v h w -> b v (h w) () ()"
+                )
+        else:
+            raw_parsed = rearrange(
+                pipeline_raw_gaussians,
+                "b v r (srf c) -> b v r srf c",
+                srf=num_surfaces,
+            )
+            offset_xy = raw_parsed[..., :2].sigmoid()
+            raw_descriptors = raw_parsed[..., 2:]
+            if hasattr(model.encoder, 'map_pdf_to_opacity'):
+                opacities_for_audit = (
+                    model.encoder.map_pdf_to_opacity(pipeline_densities, 0) / gpp
+                )
+            else:
+                opacities_for_audit = pipeline_densities.sigmoid() / gpp
+            depths_for_audit = pipeline_depths
+        coordinates_for_audit = xy_ray + (offset_xy - 0.5) * pixel_size
+
+        from scripts.saes_diagnostics import raw_s3_probe_interpolation_audit
+        from scripts.result_record import (
+            cached_sha256_file,
+            portable_command,
+            sha256_file,
+            source_identity,
+            write_result,
+        )
+
+        audit_record = raw_s3_probe_interpolation_audit(
+            raw_descriptors,
+            depths_for_audit,
+            opacities_for_audit,
+            coordinates_for_audit,
+            features=pipeline_features,
+            height=h,
+            width=w,
+            tile_size=CONFIG.tile_size,
+            feature_threshold=CONFIG.feature_var_threshold,
+            depth_threshold=CONFIG.depth_std_threshold,
+            decision_semantics=args.saes_decision_semantics,
+        )
+        source = source_identity()
+        protocol_sample_index = (
+            args.protocol_sample_index
+            if args.protocol_sample_index is not None
+            else args.sample_index
+        )
+        audit_record.update(
+            {
+                'model': args.model,
+                'dataset': args.dataset,
+                'dataset_representation': dataset_identity['representation'],
+                'dataset_tree_sha256': dataset_identity['tree_sha256'],
+                'dataset_manifest': str(dataset_manifest.relative_to(SCARF_ROOT)),
+                'dataset_manifest_sha256': sha256_file(dataset_manifest),
+                'checkpoint': {
+                    'path': str(checkpoint_path.relative_to(SCARF_ROOT)),
+                    'sha256': cached_sha256_file(checkpoint_path),
+                    'load': getattr(model, '_scarf_checkpoint_load', {}),
+                },
+                'source': source,
+                'command': portable_command(
+                    [
+                        sys.executable,
+                        str(SCARF_ROOT / 'scripts/demo.py'),
+                        *(list(argv) if argv is not None else sys.argv[1:]),
+                    ]
+                ),
+                'seed': args.seed,
+                'sample_index': args.sample_index,
+                'protocol_sample_index': protocol_sample_index,
+                'scene': str(scene_name),
+                'context_indices': [
+                    int(value) for value in batch['context']['index'][0].tolist()
+                ],
+                'target_indices': [
+                    int(value)
+                    for value in batch['target']['index'][0, :V_tgt].tolist()
+                ],
+                'target_rgb_provenance': {
+                    'loaded_by_native_dataloader': native_dataloader_loaded_target_rgb,
+                    'removed_before_device_transfer_or_execution': (
+                        target_rgb_removed_before_execution
+                    ),
+                    'passed_to_model': False,
+                    'used_for_routing_or_metric': False,
+                },
+                'execution_boundary': {
+                    'completed': ('S1', 'S2', 'S3_raw_descriptor_head'),
+                    'ggu_s4_executed': False,
+                    'baseline_encoder_executed': False,
+                    'renderer_executed': False,
+                    'quality_metrics_computed': False,
+                },
+                'audit_configuration': {
+                    'tile_size': CONFIG.tile_size,
+                    'feature_threshold': CONFIG.feature_var_threshold,
+                    'depth_threshold': CONFIG.depth_std_threshold,
+                    'decision_semantics': args.saes_decision_semantics,
+                    'feature_source': args.saes_feature_source,
+                },
+                'paper_result_eligible': False,
+            }
+        )
+        output_dir = (
+            Path(args.output_dir)
+            if args.output_dir
+            else SCARF_ROOT / 'outputs' / 'saes-s3-raw-audit'
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        write_result(audit_record, output_dir / 'results.json')
+        print(
+            "Target-free S3-before-S4 raw-descriptor audit: "
+            f"{output_dir / 'results.json'}"
+        )
+        return
+
     # ============================================================
     # STAGE 3: Gaussian Generation
     # ============================================================
     print("  [Stage 3] Gaussian Generation...")
+    # Keep a valid descriptor layout for accounting even in a non-strict
+    # all-hardware-disabled debugging run.  Model adapters overwrite these
+    # defaults below whenever a native Gaussian configuration is available.
+    actual_sh_degree = CONFIG.sh_degree
+    actual_scale_min = CONFIG.scale_min
+    actual_scale_max = CONFIG.scale_max
     
     # Special case: if ALL hardware simulators are disabled, use baseline directly
     # This avoids error accumulation from running components separately
@@ -2319,10 +2847,15 @@ def main(argv=None):
                 opacities=ggu_opacities,
             )
             
-            # Verify GGU matches baseline
-            mse_means = F.mse_loss(ggu_means, baseline_gaussians.means)
-            ggu_psnr_means = -10 * torch.log10(mse_means + 1e-10).item()
-            print(f"    ✓ GGU vs Baseline PSNR (means): {ggu_psnr_means:.2f} dB")
+            # The hardware-only diagnostic intentionally has no baseline
+            # encoder or target-image path.  Its event ledger remains valid
+            # without this numerical comparison.
+            if args.saes_hardware_audit:
+                print("    GGU baseline comparison: skipped (target-free hardware audit)")
+            else:
+                mse_means = F.mse_loss(ggu_means, baseline_gaussians.means)
+                ggu_psnr_means = -10 * torch.log10(mse_means + 1e-10).item()
+                print(f"    ✓ GGU vs Baseline PSNR (means): {ggu_psnr_means:.2f} dB")
             
         except Exception as e:
             if strict_run:
@@ -2515,9 +3048,13 @@ def main(argv=None):
             reuse_spatial=CONFIG.fsdr_reuse_spatial,
             reuse_confidence=CONFIG.fsdr_reuse_confidence,
             num_depth_candidates=CONFIG.num_depth_candidates,
+            seed=CONFIG.fsdr_seed,
+            guidance_policy=args.fsdr_guidance_policy,
+            depth_consistency_threshold=CONFIG.gamma_depth,
+            tile_size=CONFIG.tile_size,
         )
         # Reset savings tracker
-        savings = SavingsTracker()
+        savings = SavingsTracker(model_type=args.model)
         print("=" * 70)
     
     # --------------------------------------------------------
@@ -2541,6 +3078,74 @@ def main(argv=None):
     orig_covs = scarf_gaussians_full.covariances.clone()
     orig_harmo = scarf_gaussians_full.harmonics.clone()
     orig_opacs = scarf_gaussians_full.opacities.clone()
+
+    if args.calibration_trace:
+        from scripts.calibration_replay import replay_calibration_sample
+
+        if batch.get('calibration', {}).get('target_rgb_accessed') is not False:
+            raise RuntimeError("calibration input provenance does not prove target isolation")
+
+        def _calibration_render(gaussians_obj):
+            with torch.no_grad():
+                rendered = model.decoder.forward(
+                    gaussians_obj,
+                    tgt_ext,
+                    tgt_int,
+                    target['near'],
+                    target['far'],
+                    (h, w),
+                    depth_mode=None,
+                )
+            return rendered.color[0, :V_tgt]
+
+        candidates, trace = replay_calibration_sample(
+            config=CONFIG,
+            gaussians=scarf_gaussians_full,
+            features=saes_features,
+            depths=depths,
+            render=_calibration_render,
+            gaussian_type=Gaussians,
+            image_height=h,
+            image_width=w,
+            context_extrinsics=context['extrinsics'],
+            context_intrinsics=context['intrinsics'],
+            ray_depth_mode=('z' if args.model == 'depthsplat' else 'euclidean'),
+        )
+        trace['calibration_input'] = batch['calibration']
+        protocol_sample_index = (
+            args.protocol_sample_index
+            if args.protocol_sample_index is not None
+            else args.sample_index
+        )
+        record = {
+            'schema_version': '1.0',
+            'kind': 'calibration_sample_trace',
+            'sample_index': protocol_sample_index,
+            'execution_index': args.sample_index,
+            'scene': str(scene_name),
+            'context_indices': [
+                int(value) for value in batch['context']['index'][0].tolist()
+            ],
+            'target_indices': [
+                int(value) for value in batch['target']['index'][0, :V_tgt].tolist()
+            ],
+            'model': args.model,
+            'dataset': args.dataset,
+            'seed': args.seed,
+            'trace': trace,
+            'candidates': candidates,
+        }
+        output_dir = (
+            Path(args.output_dir)
+            if args.output_dir
+            else SCARF_ROOT / 'outputs' / 'calibration-trace'
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        from scripts.result_record import write_result
+
+        write_result(record, output_dir / 'results.json')
+        print(f"Calibration trace: {output_dir / 'results.json'}")
+        return
 
     if args.sensitivity_trace:
         from scripts.sensitivity_replay import replay_sample
@@ -2578,6 +3183,9 @@ def main(argv=None):
             cost_volume_cycles=cost_volume_cycles,
             gauss_gen_cycles=gauss_gen_cycles,
             s1_cnn_cycles=s1_cnn_cycles,
+            context_extrinsics=context['extrinsics'],
+            context_intrinsics=context['intrinsics'],
+            ray_depth_mode=('z' if args.model == 'depthsplat' else 'euclidean'),
         )
         protocol_sample_index = (
             args.protocol_sample_index
@@ -2661,6 +3269,13 @@ def main(argv=None):
             view_count=V_ctx,
             materialization=args.saes_materialization,
             decision_semantics=args.saes_decision_semantics,
+            beta_x=CONFIG.beta_x,
+            beta_f=CONFIG.beta_f,
+            beta_d=CONFIG.beta_d,
+            num_depth_candidates=CONFIG.num_depth_candidates,
+            context_extrinsics=context['extrinsics'],
+            context_intrinsics=context['intrinsics'],
+            ray_depth_mode=('z' if args.model == 'depthsplat' else 'euclidean'),
         )
         saes_stats['feature_source'] = args.saes_feature_source
 
@@ -2668,7 +3283,13 @@ def main(argv=None):
         if saes_features is not None:
             import numpy as np
             _tv, _ = ProgressiveSAES.classify_tiles_by_features(
-                saes_features, h, w, CONFIG.tile_size, threshold=1.0)
+                saes_features,
+                h,
+                w,
+                CONFIG.tile_size,
+                threshold=1.0,
+                statistic="normalized-probe-total-variance",
+            )
             _vals = sorted(_tv.values())
             _arr = np.array(_vals)
             _p = [1, 2, 5, 8, 10, 15, 20, 30, 50]
@@ -2709,6 +3330,77 @@ def main(argv=None):
         print(f"    Low-Var. Agree.: {saes_low_var_stats['low_var_agree']*100:.1f}% "
               f"({saes_low_var_stats['low_var_tiles']}/{saes_low_var_stats['early_tiles']} early tiles, "
               f"mean sim={saes_low_var_stats['mean_similarity']:.3f})")
+        print(
+            "    S2 candidate evaluations: "
+            f"{saes_stats['executed_s2_evaluations']:,}/"
+            f"{saes_stats['full_s2_evaluations']:,} executed"
+        )
+
+        if args.saes_materialization_audit:
+            from scripts.saes_diagnostics import materialization_attribute_audit
+            from scripts.result_record import write_result
+
+            primitives_per_pixel = N // (V_ctx * h * w)
+            audit_record = materialization_attribute_audit(
+                Gaussians(
+                    means=orig_means,
+                    covariances=orig_covs,
+                    harmonics=orig_harmo,
+                    opacities=orig_opacs,
+                ),
+                saes_gaussians,
+                features=saes_features,
+                depths=depths,
+                height=h,
+                width=w,
+                tile_size=CONFIG.tile_size,
+                feature_threshold=CONFIG.feature_var_threshold,
+                depth_threshold=CONFIG.depth_std_threshold,
+                view_count=V_ctx,
+                decision_semantics=args.saes_decision_semantics,
+                materialization=args.saes_materialization,
+            )
+            audit_record.update(
+                {
+                    'model': args.model,
+                    'dataset': args.dataset,
+                    'sample_index': args.sample_index,
+                    'protocol_sample_index': (
+                        args.protocol_sample_index
+                        if args.protocol_sample_index is not None
+                        else args.sample_index
+                    ),
+                    'scene': str(scene_name),
+                    'context_indices': [
+                        int(value) for value in batch['context']['index'][0].tolist()
+                    ],
+                    'target_indices': [
+                        int(value)
+                        for value in batch['target']['index'][0, :V_tgt].tolist()
+                    ],
+                    'primitives_per_pixel': primitives_per_pixel,
+                    'saes_stats': saes_stats,
+                    'target_rgb_accessed': False,
+                    'native_dataloader_loaded_target_rgb': (
+                        native_dataloader_loaded_target_rgb
+                    ),
+                    'target_rgb_removed_before_execution': (
+                        target_rgb_removed_before_execution
+                    ),
+                }
+            )
+            output_dir = (
+                Path(args.output_dir)
+                if args.output_dir
+                else SCARF_ROOT / 'outputs' / 'saes-materialization-audit'
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            write_result(audit_record, output_dir / 'results.json')
+            print(
+                "Target-free SAES materialization audit: "
+                f"{output_dir / 'results.json'}"
+            )
+            return
 
         if args.saes_diagnostic_sweep:
             from scripts.saes_diagnostics import (
@@ -2749,10 +3441,118 @@ def main(argv=None):
                 }
             )
 
-    # Record SAES v4 savings for cycle model
+    # Record SAES v4 savings for the cycle model.  The analytic event ledger
+    # charges S3 route selection, moment matching, and retained-descriptor
+    # traffic instead of treating L0/L1 bypasses as zero-cost savings.
     # Use h*w (pixel positions) as base, not N (total Gaussians incl. surfaces)
-    # because ASIC processes per pixel position - skipping a position skips all surfaces
-    savings.record_saes(total_pixels=V_ctx*h*w, saes_stats=saes_stats)
+    # because ASIC processes per pixel position - skipping a position skips all surfaces.
+    primitives_per_pixel = N // (V_ctx * h * w)
+    saes_hardware_ledger = savings.record_saes(
+        total_pixels=V_ctx * h * w,
+        saes_stats=saes_stats,
+        feature_dim=int(saes_features.shape[2]),
+        tile_size=CONFIG.tile_size,
+        sh_degree=actual_sh_degree,
+        primitives_per_pixel=primitives_per_pixel,
+        model_type=args.model,
+    )
+    saes_stats['hardware_accounting'] = saes_hardware_ledger
+    saes_stats['execution_dependency'] = savings.saes_execution_dependency
+
+    if args.saes_hardware_audit:
+        from scripts.result_record import (
+            cached_sha256_file,
+            portable_command,
+            sha256_file,
+            source_identity,
+            write_result,
+        )
+
+        source = source_identity()
+        protocol_sample_index = (
+            args.protocol_sample_index
+            if args.protocol_sample_index is not None
+            else args.sample_index
+        )
+        audit_ggu_counter = HWCycleCounter(ggu_pe_count=CONFIG.ggu_pe_count)
+        audit_ggu_counter.add_ggu(N, sh_degree=actual_sh_degree)
+        audit_record = {
+            'kind': 'saes_hardware_accounting_audit',
+            'model': args.model,
+            'dataset': args.dataset,
+            'dataset_representation': dataset_identity['representation'],
+            'dataset_tree_sha256': dataset_identity['tree_sha256'],
+            'dataset_manifest': str(dataset_manifest.relative_to(SCARF_ROOT)),
+            'dataset_manifest_sha256': sha256_file(dataset_manifest),
+            'checkpoint': {
+                'path': str(checkpoint_path.relative_to(SCARF_ROOT)),
+                'sha256': cached_sha256_file(checkpoint_path),
+                'load': getattr(model, '_scarf_checkpoint_load', {}),
+            },
+            'source': source,
+            'command': portable_command(
+                [
+                    sys.executable,
+                    str(SCARF_ROOT / 'scripts/demo.py'),
+                    *(list(argv) if argv is not None else sys.argv[1:]),
+                ]
+            ),
+            'seed': args.seed,
+            'sample_index': args.sample_index,
+            'protocol_sample_index': protocol_sample_index,
+            'scene': str(scene_name),
+            'context_indices': [
+                int(value) for value in batch['context']['index'][0].tolist()
+            ],
+            'target_indices': [
+                int(value) for value in batch['target']['index'][0, :V_tgt].tolist()
+            ],
+            'target_rgb_provenance': {
+                'loaded_by_native_dataloader': native_dataloader_loaded_target_rgb,
+                'removed_before_device_transfer_or_execution': (
+                    target_rgb_removed_before_execution
+                ),
+                'passed_to_model': False,
+                'used_for_routing_or_metric': False,
+            },
+            'execution_boundary': {
+                'completed': ('S1', 'S2', 'S3', 'S4'),
+                'baseline_encoder_executed': False,
+                'renderer_executed': False,
+                'quality_metrics_computed': False,
+                'expected_results_accessed': False,
+            },
+            # The Python simulator materializes a full descriptor tensor in
+            # order to preserve reference numerics.  The ledger reads no
+            # descriptor values, only the sparse path counters, and therefore
+            # cannot be promoted to RTL timing evidence from this audit alone.
+            'simulation_boundary': {
+                'full_s3_descriptor_tensor_materialized': True,
+                'ledger_input': 'runtime tile/anchor counters plus fixed dimensions only',
+                'rtl_cycle_equivalent': False,
+            },
+            'stage_cycles': {
+                's1_feature': feature_sim_cycles,
+                's2_depth': dp_core_cycles,
+                's3_gaussian': gauss_gen_cycles,
+                's4_ggu': audit_ggu_counter.get_summary()['ggu_cycles'],
+            },
+            'saes_stats': saes_stats,
+            'saes_hardware_accounting': saes_hardware_ledger,
+            'paper_result_eligible': False,
+        }
+        output_dir = (
+            Path(args.output_dir)
+            if args.output_dir
+            else SCARF_ROOT / 'outputs' / 'saes-hardware-accounting-audit'
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        write_result(audit_record, output_dir / 'results.json')
+        print(
+            "Target-free SAES hardware accounting audit: "
+            f"{output_dir / 'results.json'}"
+        )
+        return
     
     # ---- Step 4c: FSDR (Feature-Similarity Gaussian Reuse) — Realistic ASIC ----
     if args.no_fsdr:
@@ -2765,26 +3565,62 @@ def main(argv=None):
                        hasattr(fsdr_features, 'shape'))
         
         if has_features and len(all_pixels) > 0:
-            from scripts.fsdr_trace import prepare_fsdr_frame, tile_probe_pixel_order
+            from scripts.fsdr_trace import (
+                prepare_fsdr_candidate_frames,
+                tile_probe_pixel_order,
+            )
 
-            if depths is None:
-                raise RuntimeError("FSDR requires a real depth frame")
-            feature_frame, frame_depths = prepare_fsdr_frame(
+            if (
+                fsdr_depth_probs is None
+                or fsdr_depth_candidates is None
+                or fsdr_candidate_domain != 'inverse_depth'
+                or not fsdr_probability_source
+            ):
+                raise RuntimeError(
+                    "FSDR claim execution requires authentic full-search "
+                    "probabilities and inverse-depth candidates"
+                )
+            fsdr_frames = prepare_fsdr_candidate_frames(
                 fsdr_features,
-                depths,
-                height=h,
-                width=w,
+                fsdr_depth_probs,
+                fsdr_depth_candidates,
             )
-            paths = fsdr.process_frame(
+            frame_shape = fsdr_frames[0][4]
+            fsdr_height, fsdr_width = frame_shape
+            pixels_per_frame = fsdr_height * fsdr_width
+            all_reuse_data = {}
+            for frame_index, (
                 feature_frame,
-                frame_depths,
-                w,
-                pixel_order=tile_probe_pixel_order(
-                    height=h, width=w, tile_size=CONFIG.tile_size
-                ),
-            )
-            for pixel_idx, path in enumerate(paths):
-                savings.record_fsdr_pixel(path, reused=(pixel_idx in fsdr.reuse_data))
+                candidate_anchors,
+                top1_indices,
+                candidate_frame,
+                current_shape,
+            ) in enumerate(fsdr_frames):
+                if current_shape != frame_shape:
+                    raise RuntimeError(
+                        "FSDR context frames have inconsistent evidence shapes"
+                    )
+                fsdr.begin_frame()
+                offset = frame_index * pixels_per_frame
+                paths = fsdr.process_discrete_frame(
+                    feature_frame,
+                    candidate_anchors,
+                    top1_indices,
+                    candidate_frame,
+                    width=fsdr_width,
+                    pixel_order=tile_probe_pixel_order(
+                        height=fsdr_height,
+                        width=fsdr_width,
+                        tile_size=CONFIG.tile_size,
+                    ),
+                    pixel_index_offset=offset,
+                )
+                all_reuse_data.update(fsdr.reuse_data)
+                for pixel_idx, path in enumerate(paths):
+                    savings.record_fsdr_pixel(
+                        path, reused=(offset + pixel_idx in fsdr.reuse_data)
+                    )
+            fsdr.reuse_data = all_reuse_data
         
         fsdr_stats = fsdr.get_summary()
         if fsdr_stats['total_pixels'] > 0:
@@ -2792,13 +3628,17 @@ def main(argv=None):
             print(f"    Cache hit rate: {fsdr_stats['hit_rate']*100:.1f}%")
             print(f"    Guided (narrowed): {fsdr_stats.get('guided', 0):,} "
                   f"({fsdr_stats.get('guided_rate', 0)*100:.1f}%)")
-            print(f"    Depth inconsistent: {fsdr_stats.get('depth_inconsistent', 0):,}")
-            print(f"    Not guided: {fsdr_stats.get('hit_no_guide', 0):,}")
+            if fsdr.guidance_policy == 'historical-depth-guard':
+                print(f"    Depth inconsistent: {fsdr_stats.get('depth_inconsistent', 0):,}")
+                print(f"    Not guided: {fsdr_stats.get('hit_no_guide', 0):,}")
             print(f"    Full compute (miss): {fsdr_stats['full_compute']:,}")
-            print(f"    Criteria: hamming≤{fsdr.reuse_hamming}, conf>{fsdr.reuse_confidence:.2f}")
+            criteria = f"hamming≤{fsdr.config.hamming_threshold}"
+            if fsdr.guidance_policy == 'historical-depth-guard':
+                criteria += f", depth_consist≤{fsdr.depth_consistency_threshold:.0%}"
+            print(f"    Criteria: {criteria}")
     
     # Record GGU cycles (with compact writeback savings modelled for Stage 4)
-    cycle_counter.add_ggu(N, sh_degree=CONFIG.sh_degree)
+    cycle_counter.add_ggu(N, sh_degree=actual_sh_degree)
     
     # ---- Step 4d: Build 4 Ablation Gaussian Configs + Render (Realistic) ----
     print()
@@ -2957,19 +3797,34 @@ def main(argv=None):
     # Quality loss is measured relative to SCARF no-opt, NOT GPU baseline.
     ablation_quality = {}
     
-    # First compute no-opt quality (reference for loss calculation)
-    noopt_psnr = compute_psnr(ablation_renders['asic'], gt_images)
-    noopt_ssim = compute_ssim(ablation_renders['asic'], gt_images)
+    ablation_view_metrics = {
+        cfg_key: compute_view_metrics(cfg_images, gt_images)
+        for cfg_key, cfg_images in ablation_renders.items()
+    }
+    noopt_views = ablation_view_metrics['asic']
+    noopt_psnr = sum(item['psnr_db'] for item in noopt_views) / len(noopt_views)
+    noopt_ssim = sum(item['ssim'] for item in noopt_views) / len(noopt_views)
     
     for cfg_key, cfg_image in ablation_renders.items():
-        psnr = compute_psnr(cfg_image, gt_images)
-        ssim = compute_ssim(cfg_image, gt_images)
+        view_metrics = ablation_view_metrics[cfg_key]
+        psnr = sum(item['psnr_db'] for item in view_metrics) / len(view_metrics)
+        ssim = sum(item['ssim'] for item in view_metrics) / len(view_metrics)
+        lpips = sum(item['lpips'] for item in view_metrics) / len(view_metrics)
         # Loss vs SCARF no-opt (the "correct" ASIC output)
         loss_db = psnr - noopt_psnr
         loss_pct = abs(loss_db) / noopt_psnr * 100 if noopt_psnr > 0 else 0
         ablation_quality[cfg_key] = {
-            'psnr': psnr, 'ssim': ssim,
+            'psnr': psnr, 'ssim': ssim, 'lpips': lpips,
             'loss_db': loss_db, 'loss_pct': loss_pct,
+            'quality_views': [
+                {
+                    'target_index': int(
+                        batch['target']['index'][0, view_index].item()
+                    ),
+                    **metrics,
+                }
+                for view_index, metrics in enumerate(view_metrics)
+            ],
         }
         ref_label = "(reference)" if cfg_key == 'asic' else f"loss={loss_db:+.4f} dB ({loss_pct:.4f}%)"
         print(f"  {cfg_key:<20s}: PSNR={psnr:.4f} dB, SSIM={ssim:.6f}, {ref_label}")
@@ -2999,7 +3854,6 @@ def main(argv=None):
             build_component_variant,
             build_coverage_variant,
             build_ranked_tile_subset_variant,
-            declared_level0_rate,
             probe_cross_check_errors,
             probe_feature_variances,
         )
@@ -3112,11 +3966,6 @@ def main(argv=None):
                 fields={'restored_components': list(restored_components)},
             )
 
-        declared_rate = declared_level0_rate(
-            SCARF_ROOT / 'artifact/expected_results.json',
-            args.model,
-            args.dataset,
-        )
         tile_scores = probe_feature_variances(
             saes_features,
             height=h,
@@ -3126,10 +3975,9 @@ def main(argv=None):
         current_rate = float(saes_stats['level0_ratio'])
         retention_fractions = sorted(
             {
-                declared_rate * numerator / 4.0
+                current_rate * numerator / 4.0
                 for numerator in range(1, 5)
             }
-            | {current_rate}
         )
         print("  Diagnostic target-free L0 retention boundary:")
         for target_fraction in retention_fractions:
@@ -3155,7 +4003,7 @@ def main(argv=None):
                 diagnostic_images=diagnostic_images,
                 fields={
                     **metadata,
-                    'declared_level0_rate': declared_rate,
+                    'boundary_source': 'executed_current_level0_rate',
                 },
             )
 
@@ -3191,7 +4039,7 @@ def main(argv=None):
                 diagnostic_images=diagnostic_images,
                 fields={
                     **metadata,
-                    'declared_level0_rate': declared_rate,
+                    'boundary_source': 'executed_current_level0_rate',
                 },
             )
     
@@ -3300,6 +4148,10 @@ def main(argv=None):
         fsdr_narrowing_ratio=fsdr_narrow_ratio,
     )
     pipe_info = ablation.get('_pipeline', {})
+    saes_stats['s2_s3_saving'] = {
+        's2': pipe_info.get('saes_s2_saving', 0.0),
+        's3': pipe_info.get('saes_s3_saving', 0.0),
+    }
     
     # --------------------------------------------------------
     # Print Results
@@ -3353,10 +4205,11 @@ def main(argv=None):
               f"({fsdr_summary.get('in_window_rate', 0)*100:.1f}% → zero quality impact)")
         print(f"    Out of window:      {fsdr_summary.get('guided_out_window', 0):,} "
               f"(means modified)")
-        print(f"  Depth inconsistent:   {fsdr_summary.get('depth_inconsistent', 0):,} "
-              f"(→ full 128-candidate search)")
-        print(f"  Not guided (criteria):{fsdr_summary.get('hit_no_guide', 0):,} "
-              f"({fsdr_summary.get('hit_no_guide_rate', 0)*100:.1f}%)")
+        if fsdr.guidance_policy == 'historical-depth-guard':
+            print(f"  Depth inconsistent:   {fsdr_summary.get('depth_inconsistent', 0):,} "
+                  f"(→ full 128-candidate search)")
+            print(f"  Not guided (criteria):{fsdr_summary.get('hit_no_guide', 0):,} "
+                  f"({fsdr_summary.get('hit_no_guide_rate', 0)*100:.1f}%)")
         print(f"  Full compute (miss):  {fsdr_summary['full_compute']:,} "
               f"({fsdr_summary['full_compute_rate']*100:.1f}%)")
         fsdr_save_pct = pipe_info.get('fsdr_s2_save_per_pixel', 0.42) * 100
@@ -3365,9 +4218,10 @@ def main(argv=None):
         depth_err = fsdr_summary.get('depth_error', {})
         if depth_err.get('count', 0) > 0:
             print(f"  Out-window depth err: mean={depth_err['mean']:.4f}, max={depth_err['max']:.4f}")
-        print(f"  Criteria:             hamming≤{fsdr.reuse_hamming}, "
-              f"conf>{fsdr.reuse_confidence:.2f}, "
-              f"depth_consist≤{fsdr.depth_consistency_threshold:.0%}")
+        criteria = f"hamming≤{fsdr.config.hamming_threshold}"
+        if fsdr.guidance_policy == 'historical-depth-guard':
+            criteria += f", depth_consist≤{fsdr.depth_consistency_threshold:.0%}"
+        print(f"  Criteria:             {criteria}")
     else:
         print(f"  (No FSDR pixels processed)")
     
@@ -3425,12 +4279,17 @@ def main(argv=None):
     print(f"  GGU Post:           hidden (dedicated PEs overlap with ConvEngine)")
     _ggu_s = ggu_stats.get('compact_writeback_bytes_saved', 0)
     _ggu_cs = ggu_stats.get('compact_writeback_cycles_saved', 0)
-    print(f"  S4 compact writeback: cov=6 (upper-tri), SH={CONFIG.sh_degree}°={(CONFIG.sh_degree+1)**2} coeffs×3ch")
+    print(f"  S4 compact writeback: cov=6 (upper-tri), SH={actual_sh_degree}°={(actual_sh_degree+1)**2} coeffs×3ch")
     print(f"    Bytes saved: {_ggu_s:,}  Cycles saved: {_ggu_cs:,} "
           f"({_ggu_cs / max(1, ggu_stats.get('ggu_raw_cycles', 1)) * 100:.1f}% of raw GGU cycles)")
     print(f"  SAES v4 multi-level (K(T) adaptive probes):")
     print(f"    Combined S2 save: {pipe_info.get('saes_s2_saving', 0)*100:.1f}%")
     print(f"    Combined S3 save: {pipe_info.get('saes_s3_saving', 0)*100:.1f}%")
+    print(
+        "    SAES control+merge: "
+        f"{pipe_info.get('saes_control_accounting_cycles', 0):,} cycles "
+        f"({pipe_info.get('saes_control_timing_class', 'unavailable')})"
+    )
     fsdr_save_pp = pipe_info.get('fsdr_s2_save_per_pixel', 0.42)
     print(f"  FSDR guided:        {pipe_info.get('fsdr_reuse_ratio', 0)*100:.1f}% "
           f"(narrowed S2: {CONFIG.fsdr_narrowed_candidates}/{CONFIG.num_depth_candidates} candidates, "
@@ -3457,6 +4316,12 @@ def main(argv=None):
         key: {**value, 'quality': ablation_quality[key]}
         for key, value in ablation.items()
         if not key.startswith('_')
+    }
+    component_cycles = {
+        'feature': feature_sim_cycles,
+        'depth': dp_core_cycles,
+        'gaussian': gauss_gen_cycles,
+        'ggu': base_ggu_cycles,
     }
     record = build_result_record(
         model=args.model,
@@ -3494,12 +4359,7 @@ def main(argv=None):
         },
         quality_views=quality_views,
         baseline_cycles=baseline_equivalent_cycles,
-        cycles={
-            'feature': feature_sim_cycles,
-            'depth': dp_core_cycles,
-            'gaussian': gauss_gen_cycles,
-            'ggu': base_ggu_cycles,
-        },
+        cycles=component_cycles,
         scarf_cycles=best_cycles,
         cycle_source='scarf_component_simulators',
         ablation=ablation_record,
@@ -3538,13 +4398,17 @@ def main(argv=None):
             )
         ),
         fallback_stages=fallback_stages,
+        stage_records=mmcu_stage_records(component_cycles),
         paper_result_eligible=(
-            False
-            if (
+            args.claim_run
+            and not (
+                args.saes_materialization != 'representative'
+                or
                 args.saes_decision_semantics != 'current'
                 or args.saes_feature_source != 'pipeline'
+                or args.fsdr_guidance_policy != 'paper-hamming-local-validity'
+                or saes_stats.get('camera_aware_moment_matching') is not True
             )
-            else None
         ),
     )
     if strict_run:

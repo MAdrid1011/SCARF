@@ -18,6 +18,36 @@ def test_batched_lsh_matches_scalar_signatures():
     assert torch.equal(batched.cpu(), scalar)
 
 
+def test_lsh_projection_is_fp16_seeded_and_does_not_mutate_global_rng():
+    from fsdr import FSDRSimulator
+    from fsdr.lsh_hasher import LSHHasher
+    from fsdr.types import FSDRConfig
+
+    torch.manual_seed(123)
+    expected = torch.randn(4)
+    torch.manual_seed(123)
+    hasher = LSHHasher(FSDRConfig(feature_dim=8, seed=42))
+    actual = torch.randn(4)
+
+    assert torch.equal(actual, expected)
+    assert hasher.get_projection_matrix().dtype == torch.float16
+    assert torch.equal(
+        hasher.get_projection_matrix(),
+        LSHHasher(FSDRConfig(feature_dim=8, seed=42)).get_projection_matrix(),
+    )
+    assert FSDRSimulator(feature_dim=8).config.seed == 42
+
+
+def test_fp16_lsh_operands_decode_exactly_to_q24():
+    from fsdr.lsh_hasher import fp16_to_q24
+
+    smallest_subnormal = torch.tensor([1], dtype=torch.int16).view(torch.float16)
+    values = torch.tensor([0.0, 1.0, -1.0, 0.5], dtype=torch.float16)
+    decoded = fp16_to_q24(torch.cat((values, smallest_subnormal)))
+
+    assert decoded.tolist() == [0, 1 << 24, -(1 << 24), 1 << 23, 1]
+
+
 def test_frame_processing_preserves_raster_cache_semantics():
     from fsdr import FSDRSimulator
 
@@ -115,6 +145,63 @@ def test_every_rtl_cache_hit_uses_the_narrow_path():
     assert second[0] == "guided"
 
 
+def test_historical_depth_guard_falls_back_on_a_locally_inconsistent_anchor():
+    from fsdr import FSDRSimulator
+
+    simulator = FSDRSimulator(
+        feature_dim=8,
+        cache_size=8,
+        hamming_threshold=0,
+        guidance_policy="historical-depth-guard",
+        seed=30,
+    )
+    simulator.process_signature(0x0000, 10.0, (10, 10), 0)
+    for index, signature in enumerate((0xFFFF, 0xFFFE, 0xFFFC), start=1):
+        simulator.process_signature(signature, 1.0, (0, index + 3), index)
+
+    guarded = simulator.process_signature(0x0000, 1.0, (0, 7), 4)
+    summary = simulator.get_summary()
+
+    assert guarded[0] == "hit_no_guide"
+    assert guarded[1] == simulator.num_depth_candidates
+    assert summary["depth_inconsistent"] == 1
+    assert summary["hit_no_guide"] == 1
+    assert summary["guidance_policy"] == "historical-depth-guard"
+
+
+def test_claim_local_validity_guard_falls_back_and_records_discrete_events():
+    from fsdr import FSDRSimulator
+
+    simulator = FSDRSimulator(
+        feature_dim=8,
+        cache_size=8,
+        hamming_threshold=0,
+        depth_consistency_threshold=0.10,
+        guidance_policy="paper-hamming-local-validity",
+        seed=30,
+    )
+    simulator.process_signature(0x0000, 10.0, (10, 10), 0)
+    for index, signature in enumerate((0xFFFF, 0xFFFE, 0xFFFC), start=1):
+        simulator.process_signature(signature, 1.0, (0, index + 3), index)
+
+    guarded = simulator.process_signature(0x0000, 1.0, (0, 7), 4)
+    summary = simulator.get_summary()
+
+    assert guarded[0] == "hit_no_guide"
+    assert summary["hamming_hits"] == 1
+    assert summary["local_valid_hits"] == 0
+    assert summary["local_invalid_fallbacks"] == 1
+    assert summary["depth_consistency_threshold"] == pytest.approx(0.10)
+
+
+def test_local_validity_threshold_must_be_in_the_registered_range():
+    from fsdr import FSDRSimulator
+
+    for invalid in (0.0, -0.1, 1.0, float("inf")):
+        with pytest.raises(ValueError, match="depth consistency"):
+            FSDRSimulator(feature_dim=8, depth_consistency_threshold=invalid)
+
+
 def test_discrete_top1_coverage_uses_the_actual_nearest_candidate_subset():
     from fsdr import FSDRSimulator
 
@@ -168,3 +255,26 @@ def test_begin_frame_clears_frame_local_state_but_preserves_aggregate_counts():
     assert simulator.reuse_data == {}
     assert simulator.stats["total_pixels"] == 1
     assert simulator.stats["frames_started"] == 1
+
+
+def test_candidate_and_feature_buffer_events_are_counted_from_executed_paths():
+    from fsdr import FSDRSimulator
+
+    simulator = FSDRSimulator(
+        feature_dim=2,
+        cache_size=1,
+        hamming_threshold=3,
+        num_depth_candidates=4,
+        seed=41,
+    )
+    for pixel_index in range(3):
+        simulator.process_signature(0b0011, 1.0, (0, pixel_index), pixel_index)
+
+    summary = simulator.get_summary()
+    assert summary["full_depth_evaluations"] == 12
+    assert summary["executed_depth_evaluations"] == 6
+    assert summary["depth_evaluations_available"] is True
+    assert summary["feature_buffer_bytes_baseline"] == 48
+    assert summary["feature_buffer_bytes_actual"] == 24
+    assert summary["feature_buffer_bytes_available"] is True
+    assert summary["feature_buffer_element_bytes"] == 2

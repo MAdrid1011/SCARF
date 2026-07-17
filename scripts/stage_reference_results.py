@@ -77,6 +77,12 @@ def portable_execution_manifest(
         str(orchestrator_python.resolve()): "$PYTHON",
         str(orchestrator_python): "$PYTHON",
     }
+    declared_root = record.get("root")
+    if isinstance(declared_root, str) and declared_root:
+        source_root = Path(declared_root)
+        if source_root.is_absolute() and source_root != Path(source_root.anchor):
+            replacements[declared_root] = "$SCARF_ROOT"
+            replacements[str(source_root.resolve())] = "$SCARF_ROOT"
 
     def command_lists(value):
         if not isinstance(value, list) or not value:

@@ -60,6 +60,59 @@ def test_export_trace_rejects_invalid_or_nonmonotonic_events(tmp_path):
         export(source, tmp_path / "trace")
 
 
+def test_export_trace_binds_complete_workload_selection(tmp_path):
+    from hardware.dram.export_trace import export
+
+    source = tmp_path / "memory-events.jsonl"
+    source.write_text(
+        '{"cycle":0,"op":"read","address":0,"bytes":32,"sample_index":3}\n'
+        '{"cycle":1,"op":"write","address":64,"bytes":32,"sample_index":7}\n',
+        encoding="utf-8",
+    )
+    software = tmp_path / "software-results.json"
+    software.write_text(
+        json.dumps(
+            {
+                "schema_version": "2.0",
+                "evidence_class": "deterministic_execution",
+                "provenance": {
+                    "model": "mvsplat",
+                    "dataset": {"name": "re10k", "paper_result_eligible": True},
+                    "evaluation": {
+                        "kind": "dataset_aggregate",
+                        "sample_indices": [3, 7],
+                        "sample_selection_sha256": "a" * 64,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    record = export(
+        source,
+        tmp_path / "ramulator.trace",
+        evidence_root=tmp_path,
+        workload_result=software,
+    )
+
+    assert record["workload"]["sample_indices"] == [3, 7]
+    assert record["workload"]["software_result"]["path"] == "software-results.json"
+    assert record["workload"]["software_result"]["sha256"]
+
+    source.write_text(
+        '{"cycle":0,"op":"read","address":0,"bytes":32,"sample_index":3}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="do not match"):
+        export(
+            source,
+            tmp_path / "incomplete.trace",
+            evidence_root=tmp_path,
+            workload_result=software,
+        )
+
+
 def test_convert_ramulator_lpddr5_commands_is_explicit_and_drampower_ordered(tmp_path):
     from hardware.dram.convert_commands import convert
 
@@ -194,3 +247,50 @@ def test_dram_collector_binds_evidence_to_source_identity(tmp_path, monkeypatch)
         "source_identity": "git",
         "submodules": identity["submodules"],
     }
+
+
+def test_dram_collector_labels_only_bound_workload_energy_per_inference(
+    tmp_path, monkeypatch
+):
+    import hashlib
+    import hardware.dram.collect as collector
+
+    software = tmp_path / "software-results.json"
+    software.write_text("{}\n", encoding="utf-8")
+    workload = {
+        "model": "mvsplat",
+        "dataset": "re10k",
+        "sample_count": 2,
+        "sample_indices": [3, 7],
+        "sample_selection_sha256": "a" * 64,
+        "software_result": {
+            "path": software.name,
+            "path_base": "output_dir",
+            "sha256": hashlib.sha256(software.read_bytes()).hexdigest(),
+        },
+    }
+    (tmp_path / "trace-manifest.json").write_text(
+        json.dumps({"request_count": 8, "workload": workload}), encoding="utf-8"
+    )
+    (tmp_path / "ramulator.json").write_text(
+        json.dumps({"metrics": {"memory_cycles": 121}}), encoding="utf-8"
+    )
+    (tmp_path / "drampower.json").write_text(
+        json.dumps({"metrics": {"offchip_energy_j": 8.0e-3}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        collector,
+        "source_identity",
+        lambda: {
+            "git_commit": "a" * 40,
+            "git_dirty": False,
+            "source": "git",
+            "submodules": {},
+        },
+    )
+
+    record = collector.collect(tmp_path)
+
+    assert record["scope"]["claim"] == "per_inference_workload_proxy"
+    assert record["metrics"]["drampower_offchip_energy_per_inference_j"] == 4.0e-3
+    assert record["workload"] == workload

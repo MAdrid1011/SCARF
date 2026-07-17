@@ -32,22 +32,26 @@ evaluation. The examples below are developer-oriented.
 | **DeformableAttentionUnit** | Multi-scale deformable attention |
 
 ### SAES (Scene-Adaptive Early Sparsification)
-- Analyzes feature similarity within tiles
-- Skips depth search for homogeneous regions
-- Reduces Gaussian count by ~30%
+- Uses probe feature variance followed by probe-depth standard deviation to
+  select L0, L1, or Full at tile granularity
+- Keeps the pretrained adaptor as the source of every retained probe descriptor
+- Current sparse-quality and SAES RTL-speed claims are explicitly not claimed;
+  see [artifact/CLAIMS.md](artifact/CLAIMS.md) for the authoritative status
 
 ### FSDR (Feature Similarity Depth Reuse)
 - Caches depth results using LSH-based feature signatures
-- Reuses cached depths for similar pixels
-- Reduces memory access by ~87%
+- Narrows only a valid Hamming-matched local candidate set and otherwise falls
+  back to full search
+- Paper-result status is defined only by validated raw evidence, not these
+  developer descriptions
 
 ## Supported Models
 
 | Model | Status | Description |
 |-------|--------|-------------|
-| **TranSplat** | ✅ Full | Transformer-based with depth priors |
-| **MVSplat** | ✅ Full | Multi-view stereo with cost volume |
-| **DepthSplat** | ✅ Full | DINOv2 features with 3-view support |
+| **TranSplat** | Functional adapter | Transformer-based with depth priors |
+| **MVSplat** | Functional adapter | Multi-view stereo with cost volume |
+| **DepthSplat** | Functional adapter | DINOv2 features with 3-view support |
 
 See [Multi-Model Demo Guide](docs/multi-model-demo-guide.md) for detailed instructions.
 
@@ -119,7 +123,9 @@ Do not install all three upstream requirement files into one environment.
 Their PyTorch and CUDA constraints differ. The AE runner discovers these two
 default virtual environments automatically. If they live elsewhere, export
 `SCARF_PYTHON_CLASSIC` and `SCARF_PYTHON_DEPTHSPLAT` with their interpreter
-paths.
+paths. If automatic CUDA discovery cannot find the compiler matching the
+profile, set `SCARF_NVCC` to its `nvcc` executable; the checker still requires
+the locked CUDA release.
 
 For a small Functional smoke test that does not download Re10K, build the
 deterministic synthetic fixture and run quick mode:

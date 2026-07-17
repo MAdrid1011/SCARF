@@ -24,7 +24,8 @@ from scripts.ae_config import (
 )
 from scripts.aggregate_results import _mean_tree
 from scripts.result_record import build_quality_record, sha256_file
-from scripts.run_ae import _protocol_sample_count, _python_for
+from scripts.run_ae import _python_for
+from scripts.evidence_profiles import resolve_evidence_selection
 
 
 STUDIES: dict[str, dict[str, Any]] = {
@@ -62,16 +63,23 @@ def build_plan(
     python_override: str | None = None,
     num_samples: int | None = None,
     seed: int = 0,
+    evidence_profile: str = "full",
 ) -> dict[str, Any]:
     pair_traces = []
     for model, dataset in CLAIMED_MATRIX:
         sample_count = (
             num_samples
             if num_samples is not None
-            else _protocol_sample_count(model, dataset)
+            else resolve_evidence_selection(
+                model, dataset, ROOT, evidence_profile
+            ).sample_count
         )
         experiment = resolve_experiment(model, dataset, ROOT)
-        selection = resolve_claim_selection(model, dataset, ROOT)
+        selection = (
+            resolve_claim_selection(model, dataset, ROOT)
+            if evidence_profile == "full"
+            else resolve_evidence_selection(model, dataset, ROOT, evidence_profile)
+        )
         profile_python = _python_for(experiment.environment_profile, python_override)
         trace_dir = output_dir / "traces" / f"{model}_{dataset}"
         demo_command = [
@@ -101,6 +109,8 @@ def build_plan(
             str(selection.index_path),
             "--source-index-sha256",
             selection.source_index_sha256,
+            "--dataset-root",
+            str(experiment.dataset_root),
             "--output-dir",
             str(trace_dir),
             "--num-samples",
@@ -115,7 +125,9 @@ def build_plan(
                 "dataset": dataset,
                 "environment_profile": experiment.environment_profile,
                 "sample_count": sample_count,
+                "declared_sample_count": selection.sample_count,
                 "declared_sample_selection_sha256": selection.sample_selection_sha256,
+                "evaluation_index": str(selection.index_path),
                 "trace_dir": str(trace_dir),
                 "command": command,
             }
@@ -137,6 +149,7 @@ def build_plan(
     return {
         "schema_version": "1.0",
         "kind": "sensitivity_plan",
+        "evidence_profile": evidence_profile,
         "grids": {
             name: {"values": list(cfg["values"]), "default": cfg["default"]}
             for name, cfg in STUDIES.items()
@@ -184,10 +197,10 @@ def aggregate_pair_traces(pair: dict[str, Any]) -> tuple[dict[tuple[str, Any], A
     selection_hash = hashlib.sha256(
         json.dumps(selections, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    full_claim = pair["sample_count"] == _protocol_sample_count(
-        pair["model"], pair["dataset"]
+    selection_complete = pair["sample_count"] == pair.get(
+        "declared_sample_count", pair["sample_count"]
     )
-    if full_claim and selection_hash != pair["declared_sample_selection_sha256"]:
+    if selection_complete and selection_hash != pair["declared_sample_selection_sha256"]:
         raise ValueError("sensitivity trace selection hash does not match the protocol")
     if any(record["trace"].get("neural_forward_passes") != 1 for record in traces):
         raise ValueError("sensitivity trace did not preserve one neural forward pass")
@@ -225,7 +238,7 @@ def aggregate_pair_traces(pair: dict[str, Any]) -> tuple[dict[tuple[str, Any], A
                 "kind": "sensitivity_trace_aggregate",
                 "sample_count": pair["sample_count"],
                 "sample_selection_sha256": selection_hash,
-                "claim_protocol_complete": full_claim,
+                "claim_protocol_complete": selection_complete,
                 "trace_results": [
                     {"path": str(path), "sha256": sha256_file(path)} for path in paths
                 ],
@@ -310,6 +323,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--python", help="Override the locked profile interpreters")
     parser.add_argument("--num-samples", type=int)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--profile", choices=("full", "reviewer"), default="full")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.num_samples is not None and args.num_samples <= 0:
@@ -324,6 +338,7 @@ def main() -> int:
         python_override=args.python,
         num_samples=args.num_samples,
         seed=args.seed,
+        evidence_profile=args.profile,
     )
     if args.dry_run:
         print(json.dumps(plan, indent=2, sort_keys=True))

@@ -41,7 +41,9 @@ def _count(value: Any, label: str, *, positive: bool = False) -> int:
     return value
 
 
-def _validate_provenance(provenance: Mapping[str, Any]) -> None:
+def _validate_provenance(
+    provenance: Mapping[str, Any], *, paper_result_eligible: bool
+) -> None:
     commit = provenance.get("git_commit")
     if (
         not isinstance(commit, str)
@@ -70,8 +72,12 @@ def _validate_provenance(provenance: Mapping[str, Any]) -> None:
         raise ValueError("provenance.environment is missing")
     _digest(environment.get("digest_sha256"), "environment digest")
     dataset = provenance.get("dataset")
-    if not isinstance(dataset, dict) or dataset.get("paper_result_eligible") is not True:
-        raise ValueError("FSDR claims require a paper-eligible dataset")
+    if (
+        not isinstance(dataset, dict)
+        or dataset.get("paper_result_eligible") is not paper_result_eligible
+    ):
+        expected = "paper-eligible" if paper_result_eligible else "non-claim"
+        raise ValueError(f"FSDR evidence requires a {expected} dataset")
     if not isinstance(dataset.get("name"), str) or not dataset["name"]:
         raise ValueError("provenance.dataset.name is missing")
     _digest(dataset.get("tree_sha256"), "dataset tree")
@@ -95,11 +101,29 @@ def _validate_provenance(provenance: Mapping[str, Any]) -> None:
         "runtime_assets"
     ]:
         raise ValueError("provenance.runtime_assets is missing")
+    target_rgb = provenance.get("target_rgb")
+    if not isinstance(target_rgb, dict):
+        raise ValueError("provenance.target_rgb is missing")
+    for field in (
+        "loaded_by_native_dataloader",
+        "removed_before_device_transfer_or_execution",
+        "passed_to_model",
+        "used_for_routing_or_metric",
+    ):
+        if not isinstance(target_rgb.get(field), bool):
+            raise ValueError(f"provenance.target_rgb.{field} must be boolean")
+    if target_rgb["removed_before_device_transfer_or_execution"] is not True:
+        raise ValueError("FSDR target RGB must be removed before execution")
+    if target_rgb["passed_to_model"] is not False:
+        raise ValueError("FSDR evidence cannot pass target RGB to the model")
+    if target_rgb["used_for_routing_or_metric"] is not False:
+        raise ValueError("FSDR evidence cannot use target RGB")
 
 
 def build_fsdr_sample_record(
     *,
     provenance: Mapping[str, Any],
+    kind: str = "fsdr_sample",
     total_pixels: int,
     cache_hits: int,
     cache_misses: int,
@@ -118,6 +142,8 @@ def build_fsdr_sample_record(
     evidence_width: int,
 ) -> dict[str, Any]:
     """Build one sample record from observed simulator counters."""
+    if kind not in {"fsdr_sample", "fsdr_target_free_audit"}:
+        raise ValueError("invalid FSDR sample evidence kind")
     counts = {
         key: _count(value, key, positive=key == "total_pixels")
         for key, value in {
@@ -164,7 +190,7 @@ def build_fsdr_sample_record(
 
     record = {
         "schema_version": "1.0",
-        "kind": "fsdr_sample",
+        "kind": kind,
         "provenance": copy.deepcopy(dict(provenance)),
         "fsdr": {
             "counts": counts,
@@ -193,6 +219,7 @@ def build_fsdr_sample_record(
             "target_image_used_for_routing": False,
             "discrete_candidate_evidence": True,
             "complete_sample": True,
+            "paper_result_eligible": kind == "fsdr_sample",
         },
     }
     validate_fsdr_record(record)
@@ -213,18 +240,25 @@ def validate_fsdr_record(record: Mapping[str, Any]) -> None:
     if record.get("schema_version") != "1.0":
         raise ValueError("schema_version must be 1.0")
     kind = record.get("kind")
-    if kind not in {"fsdr_sample", "fsdr_dataset_aggregate"}:
+    if kind not in {
+        "fsdr_sample",
+        "fsdr_dataset_aggregate",
+        "fsdr_target_free_audit",
+    }:
         raise ValueError("invalid FSDR evidence kind")
     provenance = record.get("provenance")
     if not isinstance(provenance, dict):
         raise ValueError("provenance is missing")
-    _validate_provenance(provenance)
+    paper_result_eligible = kind in {"fsdr_sample", "fsdr_dataset_aggregate"}
+    _validate_provenance(
+        provenance, paper_result_eligible=paper_result_eligible
+    )
     evaluation = provenance.get("evaluation")
     if not isinstance(evaluation, dict):
         raise ValueError("provenance.evaluation is missing")
-    if kind == "fsdr_sample":
+    if kind in {"fsdr_sample", "fsdr_target_free_audit"}:
         if evaluation.get("kind") != "sample":
-            raise ValueError("FSDR sample has invalid evaluation kind")
+            raise ValueError("FSDR sample or audit has invalid evaluation kind")
         for key in ("sample_index", "execution_index", "candidate_count"):
             _count(evaluation.get(key), key, positive=key == "candidate_count")
         if not 0 <= evaluation["execution_index"] < evaluation["candidate_count"]:
@@ -316,6 +350,8 @@ def validate_fsdr_record(record: Mapping[str, Any]) -> None:
         raise ValueError("target-image routing is forbidden")
     if validation.get("discrete_candidate_evidence") is not True:
         raise ValueError("exact discrete candidate evidence is required")
+    if validation.get("paper_result_eligible") is not paper_result_eligible:
+        raise ValueError("FSDR evidence eligibility does not match its kind")
 
 
 def aggregate_fsdr_records(
@@ -345,6 +381,7 @@ def aggregate_fsdr_records(
         ("checkpoint",),
         ("environment",),
         ("runtime_assets",),
+        ("target_rgb",),
         ("seed",),
         ("device",),
     )

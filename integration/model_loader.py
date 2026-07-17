@@ -6,6 +6,7 @@ Abstract base class and implementations for loading different 3DGS models.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional
 from dataclasses import dataclass
@@ -93,6 +94,149 @@ class DataBundle:
     """Container for loaded data."""
     batch: Dict[str, torch.Tensor]
     data_shim: Any
+
+
+def _decode_calibration_context_images(images: list[Any]) -> torch.Tensor:
+    """Decode only declared context images from a target-free sidecar."""
+    from PIL import Image
+    import torchvision.transforms as transforms
+
+    decoded = []
+    for image in images:
+        if torch.is_tensor(image):
+            if image.dtype != torch.uint8:
+                raise ValueError("calibration context image must be uint8 bytes")
+            payload = image.detach().cpu().contiguous().numpy().tobytes()
+        elif isinstance(image, (bytes, bytearray)):
+            payload = bytes(image)
+        else:
+            raise ValueError("calibration context image has an unsupported type")
+        decoded.append(transforms.ToTensor()(Image.open(BytesIO(payload))))
+    if not decoded:
+        raise ValueError("calibration input has no context images")
+    return torch.stack(decoded)
+
+
+def _calibration_camera_geometry(cameras: Any) -> tuple[torch.Tensor, torch.Tensor]:
+    cameras = torch.as_tensor(cameras, dtype=torch.float32).clone()
+    if cameras.dim() != 2 or cameras.shape[1] != 18:
+        raise ValueError("calibration camera geometry must have shape [views, 18]")
+    views = cameras.shape[0]
+    intrinsics = torch.eye(3, dtype=torch.float32).repeat(views, 1, 1)
+    intrinsics[:, 0, 0] = cameras[:, 0]
+    intrinsics[:, 1, 1] = cameras[:, 1]
+    intrinsics[:, 0, 2] = cameras[:, 2]
+    intrinsics[:, 1, 2] = cameras[:, 3]
+    w2c = torch.eye(4, dtype=torch.float32).repeat(views, 1, 1)
+    w2c[:, :3] = cameras[:, 6:].reshape(views, 3, 4)
+    return torch.linalg.inv(w2c), intrinsics
+
+
+def load_target_free_calibration_data(
+    loader: Any,
+    model_bundle: ModelBundle,
+    *,
+    dataset_name: str,
+    dataset_root: Path,
+    evaluation_index: Path,
+    sample_index: int,
+) -> DataBundle:
+    """Construct one model-ready batch without loading target RGB pixels."""
+    from scripts.calibration_inputs import (
+        calibration_scene_order,
+        load_target_free_record,
+        sha256_file,
+        validate_target_free_input_root,
+    )
+    from scripts.compile_protocol import canonicalize_index
+
+    loader._setup_imports()
+    try:
+        calibration_identity = validate_target_free_input_root(
+            dataset_root, dataset_name
+        )
+        scene_order = calibration_scene_order(dataset_root)
+        rows, _ = canonicalize_index(
+            evaluation_index,
+            sha256_file(evaluation_index),
+            execution_scene_order=scene_order,
+        )
+        if sample_index < 0 or sample_index >= len(rows):
+            raise IndexError(f"sample_index={sample_index} is out of range")
+        selection = rows[sample_index]
+        record = load_target_free_record(dataset_root, selection["scene"])
+        if (
+            record["context_indices"] != selection["context_indices"]
+            or record["target_indices"] != selection["target_indices"]
+        ):
+            raise ValueError("calibration input record does not match its selection")
+
+        context_images = _decode_calibration_context_images(record["context_images"])
+        source_height, source_width = context_images.shape[-2:]
+        extrinsics, intrinsics = _calibration_camera_geometry(record["cameras"])
+        context_indices = selection["context_indices"]
+        target_indices = selection["target_indices"]
+        if max([*context_indices, *target_indices]) >= extrinsics.shape[0]:
+            raise ValueError("calibration selection exceeds camera geometry")
+
+        dataset_cfg = model_bundle.config.dataset
+        context_extrinsics = extrinsics[context_indices]
+        scale: torch.Tensor | float = 1.0
+        if len(context_indices) == 2 and bool(
+            getattr(dataset_cfg, "make_baseline_1", False)
+        ):
+            scale = (
+                context_extrinsics[0, :3, 3] - context_extrinsics[1, :3, 3]
+            ).norm()
+            if float(scale) < float(getattr(dataset_cfg, "baseline_epsilon", 0.0)):
+                raise ValueError("calibration context has insufficient baseline")
+            extrinsics[:, :3, 3] /= scale
+        near_value = float(getattr(dataset_cfg, "near", -1.0))
+        far_value = float(getattr(dataset_cfg, "far", -1.0))
+        near_value = 0.1 if near_value == -1.0 else near_value
+        far_value = 1000.0 if far_value == -1.0 else far_value
+        nf_scale: torch.Tensor | float = (
+            scale
+            if bool(getattr(dataset_cfg, "baseline_scale_bounds", True))
+            else 1.0
+        )
+
+        # This all-zero shape carrier is used only by upstream crop shims. It is
+        # discarded before any model or calibration computation can inspect it.
+        target_placeholder = context_images.new_zeros(
+            (len(target_indices), 3, source_height, source_width)
+        )
+        batch = {
+            "context": {
+                "extrinsics": extrinsics[context_indices].unsqueeze(0),
+                "intrinsics": intrinsics[context_indices].unsqueeze(0),
+                "image": context_images.unsqueeze(0),
+                "near": torch.full((1, len(context_indices)), near_value) / nf_scale,
+                "far": torch.full((1, len(context_indices)), far_value) / nf_scale,
+                "index": torch.tensor(context_indices, dtype=torch.long).unsqueeze(0),
+            },
+            "target": {
+                "extrinsics": extrinsics[target_indices].unsqueeze(0),
+                "intrinsics": intrinsics[target_indices].unsqueeze(0),
+                "image": target_placeholder.unsqueeze(0),
+                "near": torch.full((1, len(target_indices)), near_value) / nf_scale,
+                "far": torch.full((1, len(target_indices)), far_value) / nf_scale,
+                "index": torch.tensor(target_indices, dtype=torch.long).unsqueeze(0),
+            },
+            "scene": [selection["scene"]],
+        }
+
+        from src.dataset.data_module import get_data_shim
+        from src.dataset.shims.crop_shim import apply_crop_shim
+
+        batch = apply_crop_shim(batch, tuple(model_bundle.config.dataset.image_shape))
+        data_shim = get_data_shim(model_bundle.encoder)
+        batch = data_shim(batch)
+        batch["target"].pop("image")
+        batch["calibration"] = calibration_identity
+        return DataBundle(batch=batch, data_shim=data_shim)
+    finally:
+        loader._restore_cwd()
 
 
 def _load_sequential_data(

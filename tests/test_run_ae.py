@@ -27,16 +27,192 @@ def dry_run(tmp_path: Path, mode: str, *extra: str):
     return json.loads(result.stdout)
 
 
-def test_quality_dry_run_explicitly_skips_unclaimed_software_pairs(tmp_path):
+def test_quality_dry_run_plans_all_pairs_independently_of_current_evidence(tmp_path):
     plan = dry_run(tmp_path, "quality", "--num-samples", "2")
     assert plan["mode"] == "quality"
-    assert not plan["experiments"]
-    assert not plan["dataset_commands"]
+    assert len(plan["experiments"]) == 9
+    assert len(plan["dataset_commands"]) == 4
     assert plan["software_claim_scope"] == {
-        "status": "NO_CLAIMED_PAIRS",
-        "pair_count": 0,
+        "status": "ACTIVE",
+        "pair_count": 9,
         "diagnostic_results_are_claim_evidence": False,
     }
+
+
+def test_pair_filter_runs_only_requested_protocol_pairs(tmp_path):
+    plan = dry_run(
+        tmp_path,
+        "mechanisms",
+        "--num-samples",
+        "1",
+        "--pairs",
+        "transplat/re10k,mvsplat/acid,depthsplat/re10k",
+    )
+
+    assert [(item["model"], item["dataset"]) for item in plan["experiments"]] == [
+        ("transplat", "re10k"),
+        ("mvsplat", "acid"),
+        ("depthsplat", "re10k"),
+    ]
+    assert len(plan["dataset_commands"]) == 2
+    assert plan["requested_pairs"] == [
+        "transplat/re10k",
+        "mvsplat/acid",
+        "depthsplat/re10k",
+    ]
+
+
+def test_pair_filter_rejects_unknown_duplicate_or_nonsoftware_pairs(tmp_path):
+    for mode, value in (
+        ("quality", "transplat/unknown"),
+        ("quality", "transplat/re10k,transplat/re10k"),
+        ("rtl", "transplat/re10k"),
+    ):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(RUNNER),
+                mode,
+                "--dry-run",
+                "--output-root",
+                str(tmp_path),
+                "--pairs",
+                value,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+
+
+def test_reviewer_profile_uses_frozen_hash_selected_protocol(tmp_path):
+    plan = dry_run(
+        tmp_path,
+        "all-eval",
+        "--profile",
+        "reviewer",
+        "--pairs",
+        "transplat/re10k",
+    )
+
+    assert plan["evidence_profile"] == "reviewer"
+    assert {item["sample_count"] for item in plan["experiments"]} == {512}
+    assert all(
+        "artifact/protocol/reviewer/re10k.json" in item["evaluation_index"]
+        for item in plan["experiments"]
+    )
+    assert all(len(item["sample_selection_sha256"]) == 64 for item in plan["experiments"])
+    all_commands = [
+        command
+        for item in plan["experiments"]
+        for command in item["commands"]
+    ] + plan["dataset_commands"]
+    assert all(
+        "downloads/calibration" not in " ".join(command)
+        for command in all_commands
+    )
+
+
+def test_full_profile_preserves_the_complete_upstream_protocol(tmp_path):
+    plan = dry_run(
+        tmp_path,
+        "quality",
+        "--profile",
+        "full",
+        "--pairs",
+        "transplat/re10k",
+    )
+
+    assert plan["evidence_profile"] == "full"
+    assert plan["experiments"][0]["sample_count"] == 6474
+    assert plan["experiments"][0]["evaluation_index"].endswith(
+        "transplat/assets/evaluation_index_re10k.json"
+    )
+
+
+def test_pilot_all_expands_to_every_pair_with_one_sample(tmp_path):
+    plan = dry_run(tmp_path, "pilot", "--pairs", "all")
+
+    assert len(plan["experiments"]) == 9
+    assert {item["sample_count"] for item in plan["experiments"]} == {1}
+    assert {item["workflow"] for item in plan["experiments"]} == {"mechanisms"}
+    assert plan["evidence_profile"] == "pilot"
+    assert all(
+        "--diagnostic-run" in item["command"]
+        and "--claim-run" not in item["command"]
+        for item in plan["experiments"]
+    )
+
+
+def test_calibrate_mode_is_bound_to_the_public_contract(tmp_path):
+    plan = dry_run(tmp_path, "calibrate")
+    commands = plan["commands"]
+
+    assert plan["evidence_profile"] == "calibration"
+    assert len(commands) == 3
+    assert commands[0][1].endswith("scripts/compile_calibration.py")
+    assert "--calibration-root" in commands[0]
+    assert commands[0][commands[0].index("--calibration-root") + 1].endswith(
+        "downloads/calibration/prepared"
+    )
+    assert commands[1][1].endswith("scripts/calibration_sweep.py")
+    assert commands[2][1].endswith("scripts/calibrate_mechanisms.py")
+    assert "artifact/CALIBRATION.md" in plan["calibration_contract"]
+    assert "expected_results" not in " ".join(
+        argument for command in commands for argument in command
+    )
+
+
+def test_calibrate_mode_uses_the_locked_classic_profile(tmp_path, monkeypatch):
+    import scripts.run_ae as runner
+
+    classic = "/opt/scarf/classic/bin/python"
+    monkeypatch.setenv("SCARF_PYTHON_CLASSIC", classic)
+    plan = runner.build_plan(
+        SimpleNamespace(
+            mode="calibrate",
+            output_root=tmp_path,
+            python=None,
+            num_samples=None,
+            profile="full",
+            pairs=None,
+            device="auto",
+            figures="all",
+            require_key_results=False,
+            allow_low_memory_attempt=False,
+            calibration_root=runner.DEFAULT_CALIBRATION_ROOT,
+        )
+    )
+
+    assert plan["calibration_python"] == classic
+    assert all(command[0] == classic for command in plan["commands"])
+
+
+def test_pair_filter_intersects_each_composite_workflow(tmp_path):
+    all_plan = dry_run(
+        tmp_path / "all",
+        "all",
+        "--num-samples",
+        "1",
+        "--pairs",
+        "transplat/dl3dv",
+    )
+    eval_plan = dry_run(
+        tmp_path / "all-eval",
+        "all-eval",
+        "--num-samples",
+        "1",
+        "--pairs",
+        "transplat/re10k",
+    )
+
+    assert [item["workflow"] for item in all_plan["experiments"]] == ["quality"]
+    assert [item["workflow"] for item in eval_plan["experiments"]] == [
+        "quality",
+        "performance",
+        "mechanisms",
+        "utilization",
+    ]
 
 
 def test_quality_plan_contains_all_dataset_aware_commands_when_claimed(
@@ -63,15 +239,20 @@ def test_quality_plan_contains_all_dataset_aware_commands_when_claimed(
     )
 
     assert plan["software_claim_scope"]["status"] == "ACTIVE"
-    assert len(plan["experiments"]) == 6
+    assert len(plan["experiments"]) == 9
     pairs = {(item["model"], item["dataset"]) for item in plan["experiments"]}
-    assert len(pairs) == 6
-    assert all(dataset != "dl3dv" for _, dataset in pairs)
-    assert len(plan["dataset_commands"]) == 2
+    assert len(pairs) == 9
+    assert {dataset for _, dataset in pairs} == {"re10k", "acid", "dl3dv"}
+    assert len(plan["dataset_commands"]) == 4
     assert {
         command[command.index("--representation") + 1]
         for command in plan["dataset_commands"]
-    } == {"re10k-native", "acid-native"}
+    } == {
+        "re10k-native",
+        "acid-native",
+        "re10k-compatible-360x640-v1",
+        "depthsplat-native-270x480-v1",
+    }
     for item in plan["experiments"]:
         command = item["command"]
         assert command[1].endswith("scripts/run_pair.py")
@@ -127,7 +308,7 @@ def test_fsdr_plan_runs_six_claim_pairs_without_saes_or_rendering(tmp_path):
         assert "--require-match" not in item["aggregate_command"]
 
 
-def test_full_fsdr_plan_requires_the_paper_comparison(tmp_path):
+def test_full_fsdr_plan_remains_isolated_from_paper_targets(tmp_path):
     import scripts.run_ae as runner
 
     plan = runner.build_plan(
@@ -143,18 +324,16 @@ def test_full_fsdr_plan_requires_the_paper_comparison(tmp_path):
         )()
     )
     assert len(plan["experiments"]) == 6
-    assert all(
-        "--require-match" in item["aggregate_command"]
-        for item in plan["experiments"]
-    )
+    assert all("--require-match" not in item["aggregate_command"] for item in plan["experiments"])
+    assert all("--expected-results" not in item["aggregate_command"] for item in plan["experiments"])
 
 
 def test_all_reuses_quality_runs_for_embedded_ablation_and_validation(tmp_path):
     plan = dry_run(tmp_path, "all", "--num-samples", "2")
 
-    assert len(plan["experiments"]) == 6
-    assert all(item["workflow"] == "fsdr" for item in plan["experiments"])
-    assert len(plan["dataset_commands"]) == 2
+    assert len(plan["experiments"]) == 15
+    assert {item["workflow"] for item in plan["experiments"]} == {"quality", "fsdr"}
+    assert len(plan["dataset_commands"]) == 4
     assert plan["software_claim_scope"]["status"] == "ACTIVE"
     command_text = [" ".join(command) for command in plan["commands"]]
     assert any("hardware/dram/run.sh" in command for command in command_text)
@@ -168,6 +347,31 @@ def test_dram_mode_uses_only_the_labeled_smoke_vector(tmp_path):
     command = plan["commands"][0]
     assert "hardware/dram/run.sh" in " ".join(command)
     assert command[command.index("--events") + 1].endswith("scarf_smoke_events.jsonl")
+
+
+def test_physical_low_memory_attempt_is_explicit_and_recorded(tmp_path):
+    plan = dry_run(tmp_path, "physical", "--allow-low-memory-attempt")
+
+    assert plan["allow_low_memory_attempt"] is True
+    assert "--allow-low-memory-attempt" in plan["commands"][0]
+
+
+def test_low_memory_attempt_is_rejected_for_nonphysical_modes(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(RUNNER),
+            "quick",
+            "--dry-run",
+            "--output-root",
+            str(tmp_path),
+            "--allow-low-memory-attempt",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
 
 
 def test_dry_run_does_not_create_output_tree(tmp_path):
@@ -198,16 +402,19 @@ def test_full_mode_uses_recovered_executable_sample_counts(tmp_path, monkeypatch
     counts = {
         item["dataset"]: item["sample_count"] for item in plan["experiments"]
     }
-    assert counts == {"re10k": 6474, "acid": 1595}
+    assert counts == {"re10k": 6474, "acid": 1595, "dl3dv": 140}
 
 
-def test_unavailable_orin_and_sensitivity_are_explicitly_not_claimed(tmp_path):
+def test_unavailable_orin_is_not_planned_but_sensitivity_remains_executable(tmp_path):
     orin = dry_run(tmp_path / "orin", "orin", "--num-samples", "1")
     sensitivity = dry_run(tmp_path / "sensitivity", "sensitivity", "--num-samples", "1")
 
     assert not orin["experiments"]
     assert orin["claim_status"]["figure8"].startswith("NOT_CLAIMED")
-    assert not sensitivity["commands"]
+    assert len(sensitivity["commands"]) == 1
+    assert sensitivity["commands"][0][1].endswith("scripts/sensitivity_sweep.py")
+    command = sensitivity["commands"][0]
+    assert command[command.index("--profile") + 1] == "full"
     assert sensitivity["claim_status"]["sensitivity"].startswith("NOT_CLAIMED")
 
 

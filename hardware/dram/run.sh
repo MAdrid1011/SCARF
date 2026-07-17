@@ -6,6 +6,7 @@ ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 RAMULATOR_ROOT="${RAMULATOR_ROOT:-${ROOT}/downloads/tools/ramulator2}"
 DRAMPOWER_ROOT="${DRAMPOWER_ROOT:-${ROOT}/downloads/tools/DRAMPower}"
 EVENTS=""
+WORKLOAD_RESULT=""
 OUTPUT_DIR="${ROOT}/outputs/dram"
 
 while [[ $# -gt 0 ]]; do
@@ -13,6 +14,7 @@ while [[ $# -gt 0 ]]; do
         --ramulator-root) RAMULATOR_ROOT="$2"; shift 2 ;;
         --drampower-root) DRAMPOWER_ROOT="$2"; shift 2 ;;
         --events) EVENTS="$2"; shift 2 ;;
+        --workload-result) WORKLOAD_RESULT="$2"; shift 2 ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -26,11 +28,20 @@ EVENTS_COPY="${OUTPUT_DIR}/memory-events.jsonl"
 if [[ "$(realpath -- "${EVENTS}")" != "$(realpath -m -- "${EVENTS_COPY}")" ]]; then
     cp -- "${EVENTS}" "${EVENTS_COPY}"
 fi
+WORKLOAD_ARGS=()
+if [[ -n "${WORKLOAD_RESULT}" ]]; then
+    WORKLOAD_COPY="${OUTPUT_DIR}/software-results.json"
+    if [[ "$(realpath -- "${WORKLOAD_RESULT}")" != "$(realpath -m -- "${WORKLOAD_COPY}")" ]]; then
+        cp -- "${WORKLOAD_RESULT}" "${WORKLOAD_COPY}"
+    fi
+    WORKLOAD_ARGS=(--workload-result "${WORKLOAD_COPY}")
+fi
 
 python3 "${SCRIPT_DIR}/export_trace.py" \
     --input "${EVENTS_COPY}" \
     --output "${OUTPUT_DIR}/ramulator.trace" \
-    --manifest "${OUTPUT_DIR}/trace-manifest.json"
+    --manifest "${OUTPUT_DIR}/trace-manifest.json" \
+    "${WORKLOAD_ARGS[@]}"
 python3 "${SCRIPT_DIR}/run_ramulator.py" \
     --ramulator-root "${RAMULATOR_ROOT}" \
     --trace "${OUTPUT_DIR}/ramulator.trace" \

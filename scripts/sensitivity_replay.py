@@ -51,6 +51,9 @@ def replay_sample(
     cost_volume_cycles: int,
     gauss_gen_cycles: int,
     s1_cnn_cycles: int,
+    context_extrinsics: torch.Tensor | None = None,
+    context_intrinsics: torch.Tensor | None = None,
+    ray_depth_mode: str = "euclidean",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not torch.is_tensor(features) or not torch.is_tensor(depths):
         raise ValueError("sensitivity replay requires feature and depth tensors")
@@ -147,6 +150,13 @@ def replay_sample(
                 features=features,
                 depths=depths,
                 cross_check_threshold=config.saes_cross_check,
+                beta_x=config.beta_x,
+                beta_f=config.beta_f,
+                beta_d=config.beta_d,
+                num_depth_candidates=config.num_depth_candidates,
+                context_extrinsics=context_extrinsics,
+                context_intrinsics=context_intrinsics,
+                ray_depth_mode=ray_depth_mode,
             )
             fsdr = FSDRSimulator(
                 feature_dim=config.feature_dim,
@@ -156,11 +166,21 @@ def replay_sample(
                 reuse_spatial=config.fsdr_reuse_spatial,
                 reuse_confidence=config.fsdr_reuse_confidence,
                 num_depth_candidates=config.num_depth_candidates,
+                guidance_policy="paper-hamming-local-validity",
+                depth_consistency_threshold=config.gamma_depth,
+                tile_size=int(parameters["saes_tile_size"]),
             )
             savings = savings_tracker_type()
-            savings.record_saes(
-                total_pixels=image_height * image_width, saes_stats=saes_stats
+            saes_hardware_ledger = savings.record_saes(
+                total_pixels=image_height * image_width,
+                saes_stats=saes_stats,
+                feature_dim=int(features.shape[2]),
+                tile_size=int(parameters["saes_tile_size"]),
+                sh_degree=int(config.sh_degree),
+                model_type=getattr(config, "model_type", None),
             )
+            saes_stats["hardware_accounting"] = saes_hardware_ledger
+            saes_stats["execution_dependency"] = savings.saes_execution_dependency
             paths = fsdr.process_frame(frame_features, frame_depths, image_width)
             for pixel_index, path in enumerate(paths):
                 savings.record_fsdr_pixel(
@@ -221,6 +241,15 @@ def replay_sample(
         "feature_tensor": tensor_record(features),
         "depth_tensor": tensor_record(depths),
         "gaussian_means": tensor_record(means),
+        "camera_geometry": (
+            {
+                "extrinsics": tensor_record(context_extrinsics),
+                "intrinsics": tensor_record(context_intrinsics),
+                "ray_depth_mode": ray_depth_mode,
+            }
+            if context_extrinsics is not None and context_intrinsics is not None
+            else None
+        ),
         "cycle_breakdown": {
             "feature": feature_cycles,
             "depth": depth_cycles,

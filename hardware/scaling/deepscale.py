@@ -30,8 +30,10 @@ TABLES: dict[str, dict[int, float]] = {
 
 FIELD_METRICS = {
     "area_mm2": "area",
+    "cell_area_mm2": "area",
     "logic_area_mm2": "area",
     "sram_proxy_area_mm2": "area",
+    "routing_filler_area_mm2": "area",
     "delay_ns": "delay",
     "critical_path_ns": "delay",
     "power_w": "power",
@@ -118,6 +120,30 @@ def scale_record(raw: dict[str, Any], source_node: int, target_node: int) -> dic
     if not scaled_metrics:
         raise ValueError("metrics contains no scalable PPA fields")
 
+    scaled_hierarchy: dict[str, dict[str, float | None]] = {}
+    hierarchy = metrics.get("hierarchy")
+    if hierarchy is not None:
+        if not isinstance(hierarchy, dict) or not hierarchy:
+            raise ValueError("metrics.hierarchy must be a non-empty object")
+        for component, component_metrics in hierarchy.items():
+            if not isinstance(component, str) or not component or not isinstance(
+                component_metrics, dict
+            ):
+                raise ValueError("hierarchical PPA component is invalid")
+            scaled_component: dict[str, float | None] = {}
+            for field, value in component_metrics.items():
+                if value is None:
+                    scaled_component[field] = None
+                    continue
+                if field not in FIELD_METRICS or not isinstance(value, (int, float)):
+                    raise ValueError(
+                        f"unsupported hierarchical PPA field: {component}.{field}"
+                    )
+                scaled_component[field] = scale_value(
+                    FIELD_METRICS[field], value, source_node, target_node
+                )
+            scaled_hierarchy[component] = scaled_component
+
     return {
         "schema_version": "1.0",
         "evidence_type": "28nm_equivalent_estimate" if target_node == 28 else "technology_equivalent_estimate",
@@ -125,6 +151,7 @@ def scale_record(raw: dict[str, Any], source_node: int, target_node: int) -> dic
         "target_process": f"{target_node} nm equivalent",
         "raw": copy.deepcopy(raw),
         "scaled_metrics": scaled_metrics,
+        "scaled_hierarchy": scaled_hierarchy,
         "scaling": {
             "tool": "DeepScaleTool",
             "workbook_sha256": WORKBOOK_SHA256,

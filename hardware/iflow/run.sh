@@ -9,6 +9,7 @@ PLATFORM="asap7"
 STAGE="all"
 OUTPUT_DIR="${ROOT}/outputs/physical/asap7"
 DRY_RUN=0
+ALLOW_LOW_MEMORY_ATTEMPT=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -16,6 +17,7 @@ while [[ $# -gt 0 ]]; do
         --stage) STAGE="$2"; shift 2 ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
+        --allow-low-memory-attempt) ALLOW_LOW_MEMORY_ATTEMPT=1; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -42,8 +44,14 @@ if [[ "${DRY_RUN}" == "1" ]]; then
     exit 0
 fi
 
+RESOURCE_GUARD_ARGS=()
+if [[ "${ALLOW_LOW_MEMORY_ATTEMPT}" == "1" ]]; then
+    RESOURCE_GUARD_ARGS+=(--allow-low-memory-attempt)
+fi
+
 python3 "${SCRIPT_DIR}/resource_guard.py" \
-    --output "${OUTPUT_DIR}/resource-validation.json"
+    --output "${OUTPUT_DIR}/resource-validation.json" \
+    "${RESOURCE_GUARD_ARGS[@]}"
 
 RTL_DIR="${OUTPUT_DIR}/rtl-validation"
 bash "${ROOT}/scripts/run_rtl.sh" --output-dir "${RTL_DIR}"
@@ -85,6 +93,9 @@ DOCKER_MOUNTS=(
 IFS=',' read -r -a STAGE_LIST <<<"${STAGES}"
 : >"${OUTPUT_DIR}/iflow.log"
 for flow_stage in "${STAGE_LIST[@]}"; do
+    python3 "${SCRIPT_DIR}/resource_guard.py" \
+        --snapshot-only \
+        --output "${OUTPUT_DIR}/resource-before-${flow_stage}.json"
     SCARF_IFLOW_RUNTIME="${RUNTIME}" SCARF_IFLOW_IMAGE="${RESOLVED_IFLOW_IMAGE}" \
         /usr/bin/time -v -o "${OUTPUT_DIR}/time-${flow_stage}.log" \
         bash "hardware/iflow/run_stage.sh" "${flow_stage}" \
@@ -94,6 +105,9 @@ for flow_stage in "${STAGE_LIST[@]}"; do
         --runtime "${RUNTIME}" \
         --stage "${flow_stage}" \
         --output "${OUTPUT_DIR}/stage-${flow_stage}-validation.json"
+    python3 "${SCRIPT_DIR}/resource_guard.py" \
+        --snapshot-only \
+        --output "${OUTPUT_DIR}/resource-after-${flow_stage}.json"
 done
 
 python3 "${SCRIPT_DIR}/validate_stages.py" \

@@ -13,9 +13,17 @@ from importlib.metadata import version
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
+from scripts.mechanism_config import load_mechanism_config
+
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENTS = ("feature", "depth", "gaussian", "ggu")
+STAGE_COMPONENTS = {
+    "s1": "feature",
+    "s2": "depth",
+    "s3": "gaussian",
+    "s4": "ggu",
+}
 
 
 @lru_cache(maxsize=2)
@@ -90,6 +98,339 @@ def require_positive_cycles(cycles: Mapping[str, Any]) -> dict[str, int]:
             raise ValueError(f"{component} cycle count must be a positive integer")
         checked[component] = int(value)
     return checked
+
+
+def _nonnegative_count(value: Any, label: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+        or int(value) != value
+    ):
+        raise ValueError(f"{label} must be a nonnegative integer")
+    return int(value)
+
+
+def _unit_fraction(value: Any, label: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not 0.0 <= float(value) <= 1.0
+    ):
+        raise ValueError(f"{label} must be a finite fraction in [0, 1]")
+    return float(value)
+
+
+def _default_stage_records(cycles: Mapping[str, int]) -> dict[str, dict[str, Any]]:
+    return {
+        stage: {
+            "cycles": int(cycles[component]),
+            "useful_mmcu_slots": 0,
+            "scheduled_mmcu_slots": 0,
+            "mmcu_slots_available": False,
+            "source": "component_simulator_without_mmcu_events",
+        }
+        for stage, component in STAGE_COMPONENTS.items()
+    }
+
+
+def _copy_stage_records(
+    records: Mapping[str, Any] | None, cycles: Mapping[str, int]
+) -> dict[str, dict[str, Any]]:
+    if records is None:
+        return _default_stage_records(cycles)
+    if set(records) != set(STAGE_COMPONENTS):
+        raise ValueError("stage records must contain exactly s1-s4")
+    copied: dict[str, dict[str, Any]] = {}
+    for stage in STAGE_COMPONENTS:
+        value = records[stage]
+        if not isinstance(value, Mapping):
+            raise ValueError(f"stage record {stage} must be an object")
+        copied[stage] = dict(value)
+    return copied
+
+
+def _default_event_records(fsdr_saes: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    fsdr_value = fsdr_saes.get("fsdr", {})
+    fsdr = fsdr_value if isinstance(fsdr_value, Mapping) else {}
+    total_pixels = _nonnegative_count(fsdr.get("total_pixels", 0), "FSDR total pixels")
+    cache_hits = _nonnegative_count(fsdr.get("cache_hits", 0), "FSDR cache hits")
+    guided_pixels = _nonnegative_count(fsdr.get("guided", 0), "FSDR guided pixels")
+    covered = _nonnegative_count(
+        fsdr.get("guided_top1_covered", 0), "FSDR covered Top-1 pixels"
+    )
+    missed = _nonnegative_count(
+        fsdr.get("guided_top1_missed", 0), "FSDR missed Top-1 pixels"
+    )
+    discrete_top1_available = (
+        fsdr.get("discrete_candidate_evidence") is True
+        and covered + missed == guided_pixels
+    )
+    if not discrete_top1_available:
+        covered = 0
+        missed = 0
+    depth_evaluations_available = fsdr.get("depth_evaluations_available") is True
+    feature_buffer_bytes_available = (
+        fsdr.get("feature_buffer_bytes_available") is True
+    )
+
+    saes_value = fsdr_saes.get("saes", {})
+    saes = saes_value if isinstance(saes_value, Mapping) else {}
+    total_tiles = _nonnegative_count(
+        saes.get("total_tiles_processed", 0), "SAES total tiles"
+    )
+    level0_tiles = _nonnegative_count(saes.get("level0_tiles", 0), "SAES L0 tiles")
+    level1_tiles = _nonnegative_count(saes.get("level1_tiles", 0), "SAES L1 tiles")
+    full_tiles = _nonnegative_count(saes.get("full_tiles", 0), "SAES full tiles")
+    tile_path_available = (
+        total_tiles > 0 and level0_tiles + level1_tiles + full_tiles == total_tiles
+    )
+    effective_gaussians = _nonnegative_count(
+        saes.get("effective_gaussians", 0), "SAES effective Gaussians"
+    )
+    zeroed_gaussians = _nonnegative_count(
+        saes.get("zeroed_gaussians", 0), "SAES zeroed Gaussians"
+    )
+    gaussian_counts_available = "effective_gaussians" in saes and "zeroed_gaussians" in saes
+    s2_evaluations_available = saes.get("s2_evaluations_available") is True
+    full_s2_evaluations = (
+        _nonnegative_count(
+            saes.get("full_s2_evaluations", 0), "SAES full S2 evaluations"
+        )
+        if s2_evaluations_available
+        else 0
+    )
+    executed_s2_evaluations = (
+        _nonnegative_count(
+            saes.get("executed_s2_evaluations", 0),
+            "SAES executed S2 evaluations",
+        )
+        if s2_evaluations_available
+        else 0
+    )
+    if executed_s2_evaluations > full_s2_evaluations:
+        raise ValueError("SAES executed S2 evaluations exceed the full search")
+    hardware_accounting = saes.get("hardware_accounting")
+    if hardware_accounting is not None and not isinstance(hardware_accounting, Mapping):
+        raise ValueError("SAES hardware accounting must be an object when available")
+    execution_dependency = saes.get("execution_dependency")
+    if execution_dependency is not None and not isinstance(execution_dependency, Mapping):
+        raise ValueError("SAES execution dependency must be an object when available")
+    requested_saving = saes.get("s2_s3_saving", {})
+    if not isinstance(requested_saving, Mapping):
+        raise ValueError("SAES S2/S3 saving must be an object when available")
+
+    return {
+        "fsdr": {
+            "total_pixels": total_pixels,
+            "cache_hits": cache_hits,
+            "guided_pixels": guided_pixels,
+            "hamming_hits": _nonnegative_count(
+                fsdr.get("hamming_hits", cache_hits), "FSDR Hamming hits"
+            ),
+            "local_valid_hits": _nonnegative_count(
+                fsdr.get("local_valid_hits", guided_pixels),
+                "FSDR local-valid hits",
+            ),
+            "local_invalid_fallbacks": _nonnegative_count(
+                fsdr.get(
+                    "local_invalid_fallbacks", max(0, cache_hits - guided_pixels)
+                ),
+                "FSDR local-invalid fallbacks",
+            ),
+            "guided_top1_covered": covered,
+            "guided_top1_missed": missed,
+            "discrete_top1_available": discrete_top1_available,
+            "full_depth_evaluations": _nonnegative_count(
+                fsdr.get("full_depth_evaluations", 0),
+                "FSDR full depth evaluations",
+            )
+            if depth_evaluations_available
+            else 0,
+            "executed_depth_evaluations": _nonnegative_count(
+                fsdr.get("executed_depth_evaluations", 0),
+                "FSDR executed depth evaluations",
+            )
+            if depth_evaluations_available
+            else 0,
+            "depth_evaluations_available": depth_evaluations_available,
+            "feature_buffer_bytes_baseline": _nonnegative_count(
+                fsdr.get("feature_buffer_bytes_baseline", 0),
+                "FSDR baseline feature-buffer bytes",
+            )
+            if feature_buffer_bytes_available
+            else 0,
+            "feature_buffer_bytes_actual": _nonnegative_count(
+                fsdr.get("feature_buffer_bytes_actual", 0),
+                "FSDR actual feature-buffer bytes",
+            )
+            if feature_buffer_bytes_available
+            else 0,
+            "feature_buffer_bytes_available": feature_buffer_bytes_available,
+            "source": "fsdr_path_event_counter",
+        },
+        "saes": {
+            "total_tiles": total_tiles if tile_path_available else 0,
+            "level0_tiles": level0_tiles if tile_path_available else 0,
+            "level1_tiles": level1_tiles if tile_path_available else 0,
+            "full_tiles": full_tiles if tile_path_available else 0,
+            "tile_path_available": tile_path_available,
+            "baseline_gaussians": (
+                effective_gaussians + zeroed_gaussians
+                if gaussian_counts_available
+                else 0
+            ),
+            "actual_gaussians": effective_gaussians if gaussian_counts_available else 0,
+            "gaussian_counts_available": gaussian_counts_available,
+            "full_s2_evaluations": full_s2_evaluations,
+            "executed_s2_evaluations": executed_s2_evaluations,
+            "s2_evaluations_available": s2_evaluations_available,
+            "l0_representatives": _nonnegative_count(
+                saes.get("l0_representatives", level0_tiles * 4),
+                "SAES L0 representatives",
+            ),
+            "l1_lightweight_anchors": _nonnegative_count(
+                saes.get("l1_lightweight_anchors", level1_tiles * 8),
+                "SAES L1 lightweight anchors",
+            ),
+            "full_stage3_gaussians": _nonnegative_count(
+                saes.get("full_stage3_gaussians", full_tiles * 16),
+                "SAES full Stage-3 Gaussians",
+            ),
+            "assignment_weight_sum_error_max": float(
+                saes.get("assignment_weight_sum_error_max", 0.0)
+            ),
+            "opacity_transmittance_error_max": float(
+                saes.get("opacity_transmittance_error_max", 0.0)
+            ),
+            "covariance_psd_violations": _nonnegative_count(
+                saes.get("covariance_psd_violations", 0),
+                "SAES covariance PSD violations",
+            ),
+            "hardware_accounting": (
+                dict(hardware_accounting)
+                if isinstance(hardware_accounting, Mapping)
+                else None
+            ),
+            "execution_dependency": (
+                dict(execution_dependency)
+                if isinstance(execution_dependency, Mapping)
+                else None
+            ),
+            "s2_s3_saving": {
+                "s2": _unit_fraction(
+                    requested_saving.get("s2", 0.0), "SAES S2 saving"
+                ),
+                "s3": _unit_fraction(
+                    requested_saving.get("s3", 0.0), "SAES S3 saving"
+                ),
+            },
+            "source": "runtime_summary",
+        },
+    }
+
+
+def _copy_event_records(
+    records: Mapping[str, Any] | None, fsdr_saes: Mapping[str, Any]
+) -> dict[str, dict[str, Any]]:
+    if records is None:
+        return _default_event_records(fsdr_saes)
+    if set(records) != {"fsdr", "saes"}:
+        raise ValueError("event records must contain exactly fsdr and saes")
+    copied: dict[str, dict[str, Any]] = {}
+    for namespace in ("fsdr", "saes"):
+        value = records[namespace]
+        if not isinstance(value, Mapping):
+            raise ValueError(f"event record {namespace} must be an object")
+        copied[namespace] = dict(value)
+    return copied
+
+
+def _upgrade_v21_events(records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    fsdr = records["fsdr"]
+    cache_hits = _nonnegative_count(fsdr.get("cache_hits", 0), "FSDR cache hits")
+    guided = _nonnegative_count(fsdr.get("guided_pixels", 0), "FSDR guided pixels")
+    hamming_hits = _nonnegative_count(
+        fsdr.get("hamming_hits", cache_hits), "FSDR Hamming hits"
+    )
+    local_valid = _nonnegative_count(
+        fsdr.get("local_valid_hits", guided), "FSDR local-valid hits"
+    )
+    local_fallbacks = _nonnegative_count(
+        fsdr.get("local_invalid_fallbacks", hamming_hits - local_valid),
+        "FSDR local-invalid fallbacks",
+    )
+    fsdr.update(
+        {
+            "hamming_hits": hamming_hits,
+            "local_valid_hits": local_valid,
+            "local_invalid_fallbacks": local_fallbacks,
+        }
+    )
+
+    saes = records["saes"]
+    level0_tiles = _nonnegative_count(saes.get("level0_tiles", 0), "SAES L0 tiles")
+    level1_tiles = _nonnegative_count(saes.get("level1_tiles", 0), "SAES L1 tiles")
+    full_tiles = _nonnegative_count(saes.get("full_tiles", 0), "SAES full tiles")
+    saes.update(
+        {
+            "l0_representatives": _nonnegative_count(
+                saes.get("l0_representatives", level0_tiles * 4),
+                "SAES L0 representatives",
+            ),
+            "l1_lightweight_anchors": _nonnegative_count(
+                saes.get("l1_lightweight_anchors", level1_tiles * 8),
+                "SAES L1 lightweight anchors",
+            ),
+            "full_stage3_gaussians": _nonnegative_count(
+                saes.get("full_stage3_gaussians", full_tiles * 16),
+                "SAES full Stage-3 Gaussians",
+            ),
+            "assignment_weight_sum_error_max": float(
+                saes.get("assignment_weight_sum_error_max", 0.0)
+            ),
+            "opacity_transmittance_error_max": float(
+                saes.get("opacity_transmittance_error_max", 0.0)
+            ),
+            "covariance_psd_violations": _nonnegative_count(
+                saes.get("covariance_psd_violations", 0),
+                "SAES covariance PSD violations",
+            ),
+        }
+    )
+    requested_saving = saes.get("s2_s3_saving", {})
+    if not isinstance(requested_saving, Mapping):
+        raise ValueError("SAES S2/S3 saving must be an object")
+    saes["s2_s3_saving"] = {
+        "s2": _unit_fraction(requested_saving.get("s2", 0.0), "SAES S2 saving"),
+        "s3": _unit_fraction(requested_saving.get("s3", 0.0), "SAES S3 saving"),
+    }
+    return records
+
+
+def _bind_saes_execution_dependency(
+    records: dict[str, dict[str, Any]], model: str
+) -> None:
+    """Bind v2.1 SAES cycle savings to the shipped per-model contract."""
+    from saes.execution_dependency import resolve_s2_s3_execution_contract
+
+    expected = resolve_s2_s3_execution_contract(model)
+    observed = records["saes"].get("execution_dependency")
+    if observed is not None:
+        if not isinstance(observed, Mapping) or dict(observed) != expected:
+            raise ValueError(
+                "SAES execution dependency does not match the model contract"
+            )
+    records["saes"]["execution_dependency"] = expected
+    saving = records["saes"]["s2_s3_saving"]
+    if not expected["s2_s3_sparse_execution_verified"] and any(
+        saving[stage] != 0.0 for stage in ("s2", "s3")
+    ):
+        raise ValueError(
+            "unverified SAES execution dependency cannot claim S2/S3 savings"
+        )
 
 
 def strict_stage_error(stage: str, error: BaseException) -> RuntimeError:
@@ -211,12 +552,53 @@ def _archive_source_identity(root: Path) -> dict[str, Any]:
             or sha256_file(source) != expected
         ):
             raise RuntimeError(f"release source hash mismatch: {relative}")
+    source_tree = hashlib.sha256(
+        json.dumps(
+            {"git_commit": commit, "submodules": submodules, "files": files},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     return {
         "git_commit": commit,
         "git_dirty": False,
         "submodules": dict(submodules),
         "source": "release_manifest",
+        "source_tree_sha256": source_tree,
     }
+
+
+def _worktree_source_sha256(
+    root: Path, commit: str, submodules: Mapping[str, str]
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(commit.encode("ascii") + b"\0")
+    digest.update(
+        json.dumps(dict(submodules), sort_keys=True, separators=(",", ":")).encode(
+            "ascii"
+        )
+    )
+    diff = subprocess.run(
+        ["git", "diff", "--binary", "--no-ext-diff", "HEAD", "--", "."],
+        cwd=root,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
+    digest.update(b"\0tracked-diff\0" + diff)
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=root,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout.split(b"\0")
+    for raw_path in sorted(path for path in untracked if path):
+        path = root / raw_path.decode("utf-8")
+        if path.is_file():
+            digest.update(b"\0untracked\0" + raw_path + b"\0")
+            digest.update(bytes.fromhex(sha256_file(path)))
+    return digest.hexdigest()
 
 
 @lru_cache(maxsize=2)
@@ -225,13 +607,16 @@ def source_identity(root: Path = ROOT) -> dict[str, Any]:
     if (root / "release-manifest.json").is_file():
         return _archive_source_identity(root)
     try:
+        commit = _git("rev-parse", "HEAD", root=root)
+        submodules = _submodule_commits(root)
         return {
-            "git_commit": _git("rev-parse", "HEAD", root=root),
-            "git_dirty": bool(
-                _git("status", "--porcelain", allow_empty=True, root=root)
-            ),
-            "submodules": _submodule_commits(root),
+            "git_commit": commit,
+            "git_dirty": bool(_git("status", "--porcelain", allow_empty=True, root=root)),
+            "submodules": submodules,
             "source": "git",
+            "source_tree_sha256": _worktree_source_sha256(
+                root, commit, submodules
+            ),
         }
     except RuntimeError:
         return _archive_source_identity(root)
@@ -288,6 +673,10 @@ def build_result_record(
     baseline_source: str = "diagnostic_device_timing",
     fallback_stages: list[str] | None = None,
     paper_result_eligible: bool | None = None,
+    evidence_class: str = "deterministic_execution",
+    stage_records: Mapping[str, Any] | None = None,
+    event_records: Mapping[str, Any] | None = None,
+    energy_record: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not dataset_representation:
         raise ValueError("dataset representation must be recorded")
@@ -317,6 +706,11 @@ def build_result_record(
     except ValueError as exc:
         raise ValueError("dataset tree SHA256 must be hexadecimal") from exc
     checked_cycles = require_positive_cycles(cycles)
+    checked_stages = _copy_stage_records(stage_records, checked_cycles)
+    checked_events = _upgrade_v21_events(
+        _copy_event_records(event_records, fsdr_saes)
+    )
+    _bind_saes_execution_dependency(checked_events, model)
     if baseline_cycles <= 0:
         raise ValueError("baseline cycle count must be positive")
     if scarf_cycles is None:
@@ -389,12 +783,24 @@ def build_result_record(
     elif not isinstance(paper_result_eligible, bool):
         raise ValueError("paper_result_eligible must be a boolean")
     paper_result_eligible = paper_result_eligible and not functional_fixture
+    _, mechanism = load_mechanism_config()
+    if mechanism["status"] != "calibrated":
+        paper_result_eligible = False
+    calibration_provenance = {
+        key: value
+        for key, value in mechanism.items()
+        if key != "mechanism_config_sha256"
+    }
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.1",
+        "evidence_class": evidence_class,
         "provenance": {
             "git_commit": source["git_commit"],
             "git_dirty": source["git_dirty"],
             "source_identity": source["source"],
+            "source_tree_sha256": source["source_tree_sha256"],
+            "mechanism_config_sha256": mechanism["mechanism_config_sha256"],
+            "calibration_provenance": calibration_provenance,
             "submodules": source["submodules"],
             "command": portable_command(command),
             "runtime_assets": dict(runtime_assets),
@@ -436,7 +842,14 @@ def build_result_record(
             "baseline_source": baseline_source,
             "cycle_source": cycle_source,
             "components": checked_cycles,
+            "stages": checked_stages,
         },
+        "events": checked_events,
+        "energy": dict(
+            energy_record
+            if energy_record is not None
+            else {"available": False, "source": "not_measured"}
+        ),
         "ablation": dict(ablation),
         "fsdr_saes": dict(fsdr_saes),
         "hardware": {

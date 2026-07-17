@@ -13,6 +13,7 @@ def sample_record(index: int, *, dataset: str = "re10k") -> dict:
             "git_commit": "a" * 40,
             "git_dirty": False,
             "source_identity": "git",
+            "source_tree_sha256": "9" * 64,
             "submodules": {
                 "transplat": "b" * 40,
                 "mvsplat": "c" * 40,
@@ -93,6 +94,96 @@ def sample_record(index: int, *, dataset: str = "re10k") -> dict:
     }
 
 
+def v2_sample_record(index: int) -> dict:
+    record = sample_record(index)
+    record["schema_version"] = "2.0"
+    record["evidence_class"] = "deterministic_execution"
+    record["performance"]["stages"] = {
+        stage: {
+            "cycles": (ordinal + 1) * 10 + index * 2,
+            "useful_mmcu_slots": (ordinal + 1) * 7 + index,
+            "scheduled_mmcu_slots": (ordinal + 1) * 8 + index,
+            "mmcu_slots_available": True,
+            "source": "event_simulator",
+        }
+        for ordinal, stage in enumerate(("s1", "s2", "s3", "s4"))
+    }
+    record["events"] = {
+        "fsdr": {
+            "total_pixels": 100 + index,
+            "cache_hits": 80 + index,
+            "guided_pixels": 70 + index,
+            "guided_top1_covered": 69 + index,
+            "guided_top1_missed": 1,
+            "discrete_top1_available": True,
+            "full_depth_evaluations": 6400 + index,
+            "executed_depth_evaluations": 2200 + index,
+            "depth_evaluations_available": True,
+            "feature_buffer_bytes_baseline": 1024 + index,
+            "feature_buffer_bytes_actual": 512 + index,
+            "feature_buffer_bytes_available": True,
+            "source": "event_simulator",
+        },
+        "saes": {
+            "total_tiles": 10 + index,
+            "level0_tiles": 2 + index,
+            "level1_tiles": 3,
+            "full_tiles": 5,
+            "tile_path_available": True,
+            "baseline_gaussians": 100 + index,
+            "actual_gaussians": 70 + index,
+            "gaussian_counts_available": True,
+            "full_s2_evaluations": 6400 + index,
+            "executed_s2_evaluations": 4000 + index,
+            "s2_evaluations_available": True,
+            "source": "event_simulator",
+        },
+    }
+    record["energy"] = {"available": False, "source": "not_measured"}
+    return record
+
+
+def v21_sample_record(index: int) -> dict:
+    from saes.execution_dependency import resolve_s2_s3_execution_contract
+
+    record = v2_sample_record(index)
+    record["schema_version"] = "2.1"
+    record["provenance"].update(
+        {
+            "mechanism_config_sha256": "3" * 64,
+            "calibration_provenance": {
+                "manifest_sha256": "4" * 64,
+                "status": "preregistered",
+                "candidate_records_sha256": None,
+                "evaluation_disjoint": False,
+                "expected_results_accessed": False,
+                "global_configuration": True,
+            },
+        }
+    )
+    record["provenance"]["dataset"]["paper_result_eligible"] = False
+    record["events"]["fsdr"].update(
+        {
+            "hamming_hits": 80 + index,
+            "local_valid_hits": 70 + index,
+            "local_invalid_fallbacks": 10,
+        }
+    )
+    record["events"]["saes"].update(
+        {
+            "l0_representatives": 8 + index,
+            "l1_lightweight_anchors": 12,
+            "full_stage3_gaussians": 80,
+            "covariance_psd_violations": 0,
+            "assignment_weight_sum_error_max": 0.0,
+            "opacity_transmittance_error_max": 0.0,
+            "execution_dependency": resolve_s2_s3_execution_contract("mvsplat"),
+            "s2_s3_saving": {"s2": 0.0, "s3": 0.0},
+        }
+    )
+    return record
+
+
 def write_samples(tmp_path: Path, records: list[dict]) -> list[Path]:
     paths = []
     for ordinal, record in enumerate(records):
@@ -125,6 +216,38 @@ def test_aggregate_results_preserves_evidence_and_computes_dataset_means(tmp_pat
     assert record["performance"]["speedup"] == 1050 / 425
     assert record["ablation"]["asic"]["eff_total"] == 505
     assert record["validation"]["dispersion"]["baseline.psnr_db"]["population_stddev"] == 0.5
+
+
+def test_v2_aggregate_sums_discrete_events_and_mmcu_slots(tmp_path):
+    from scripts.aggregate_results import aggregate
+    from scripts.validate_result import validate
+
+    paths = write_samples(tmp_path, [v2_sample_record(0), v2_sample_record(1)])
+    record = aggregate(paths, 2)
+    validate(record)
+
+    assert record["schema_version"] == "2.0"
+    assert record["evidence_class"] == "deterministic_execution"
+    assert record["performance"]["stages"]["s1"]["cycles"] == 11
+    assert record["performance"]["stages"]["s1"]["useful_mmcu_slots"] == 15
+    assert record["performance"]["stages"]["s1"]["scheduled_mmcu_slots"] == 17
+    assert record["events"]["fsdr"]["total_pixels"] == 201
+    assert record["events"]["fsdr"]["guided_top1_covered"] == 139
+    assert record["events"]["saes"]["total_tiles"] == 21
+    assert record["events"]["saes"]["level0_tiles"] == 5
+
+
+def test_v21_aggregate_preserves_execution_dependency_contract(tmp_path):
+    from scripts.aggregate_results import aggregate
+    from scripts.validate_result import validate
+
+    paths = write_samples(tmp_path, [v21_sample_record(0), v21_sample_record(1)])
+    record = aggregate(paths, 2)
+    validate(record)
+
+    assert record["schema_version"] == "2.1"
+    assert record["events"]["saes"]["execution_dependency"]["model"] == "mvsplat"
+    assert record["events"]["saes"]["s2_s3_saving"] == {"s2": 0.0, "s3": 0.0}
 
 
 def test_aggregate_results_rejects_missing_or_duplicate_samples(tmp_path):

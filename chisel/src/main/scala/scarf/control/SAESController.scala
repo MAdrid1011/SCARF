@@ -7,7 +7,7 @@ import scarf.{ScarfConfig, ModelConfig, SAESLevel}
 /**
  * SAESController — SAES Tile Classification FSM.
  *
- * 3-level progressive classification: L0 (feature) → L1 (depth) → L2/Full.
+ * First-hit classification: L0 (feature) → L1 (depth) → Full.
  */
 class SAESController extends Module {
   val io = IO(new Bundle {
@@ -19,24 +19,32 @@ class SAESController extends Module {
     val probeDepthStd   = Input(UInt(ScarfConfig.DataWidth.W))
     val crossCheckError = Input(UInt(ScarfConfig.DataWidth.W))
 
-    val level    = Output(SAESLevel())
+    val level          = Output(SAESLevel())
+    // Valid only with ``done``.  This traces the accepted-start-to-result
+    // controller latency so the software SAES event ledger can check its
+    // L0 versus L1/Full classification counts against real RTL behavior.
+    val decisionCycles = Output(UInt(2.W))
   })
 
-  val sIdle :: sCheckL0 :: sCheckL1 :: sCheckL2 :: sResult :: Nil = Enum(5)
+  val sIdle :: sCheckL0 :: sCheckL1 :: sResult :: Nil = Enum(4)
   val state = RegInit(sIdle)
   val resultLevel = RegInit(SAESLevel.sFull)
+  val decisionCycles = RegInit(0.U(2.W))
 
-  io.done  := state === sResult
+  io.done := state === sResult
   io.level := resultLevel
+  io.decisionCycles := Mux(io.done, decisionCycles, 0.U)
 
   switch(state) {
     is(sIdle) {
       when(io.start) {
         state := Mux(io.config.saesEnabled, sCheckL0, sResult)
         resultLevel := SAESLevel.sFull
+        decisionCycles := 1.U
       }
     }
     is(sCheckL0) {
+      decisionCycles := decisionCycles + 1.U
       when(io.probeFeatureVar < io.config.saesFeatureVarThresh) {
         resultLevel := SAESLevel.sL0
         state := sResult
@@ -45,20 +53,9 @@ class SAESController extends Module {
       }
     }
     is(sCheckL1) {
+      decisionCycles := decisionCycles + 1.U
       when(io.probeDepthStd < io.config.saesDepthStdThresh) {
-        when(io.crossCheckError < io.config.saesCrossCheckThresh) {
-          resultLevel := SAESLevel.sL1
-          state := sResult
-        }.otherwise {
-          state := sCheckL2
-        }
-      }.otherwise {
-        state := sCheckL2
-      }
-    }
-    is(sCheckL2) {
-      when(io.crossCheckError < io.config.saesCrossCheckThresh) {
-        resultLevel := SAESLevel.sL2
+        resultLevel := SAESLevel.sL1
       }.otherwise {
         resultLevel := SAESLevel.sFull
       }

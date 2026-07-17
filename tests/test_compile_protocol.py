@@ -1,4 +1,3 @@
-import copy
 import hashlib
 import json
 from pathlib import Path
@@ -145,7 +144,12 @@ def test_compiled_pairs_preserve_prepared_tree_identity():
     assert pairs["mvsplat/acid"]["dataset_tree_sha256"] == (
         "0e21d05f448675e160529881d583701a2d03f19dbaae1af7941f37137688c187"
     )
-    assert pairs["depthsplat/dl3dv"]["dataset_tree_sha256"] is None
+    assert pairs["depthsplat/dl3dv"]["dataset_tree_sha256"] == (
+        "7ce97805b7b445dc3571d145a15a2efc3336dc05b88fc2fa26c6322511d7529a"
+    )
+    assert pairs["transplat/dl3dv"]["dataset_tree_sha256"] == (
+        "4ea2b8a5794ffac079c986a2a3c94756f27bc90aa287524022fd866c4b6c6ef9"
+    )
 
 
 def test_protocol_compiler_rejects_invalid_prepared_tree_hash(tmp_path: Path):

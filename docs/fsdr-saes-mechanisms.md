@@ -72,13 +72,14 @@ FSDR is implemented with a small hash-and-CAM subsystem:
 ## 3. SAES
 
 SAES targets redundant Gaussian materialization in locally regular tiles. It
-uses a small set of probes to estimate feature, depth, and Gaussian consistency.
-The result selects one of three generation paths.
+uses a small set of probes and follows the published first-hit decision order:
+feature statistic for L0, then depth statistic for L1 after an L0 miss, then
+Full. It does not use a Gaussian-similarity or quality-validation routing gate.
 
 | Path | Trigger condition | Action |
 |------|-------------------|--------|
 | L0 representative path | Low feature variance | Use representative Gaussians for the tile |
-| L1 lightweight path | Low depth variance | Reuse a lightweight geometry path |
+| L1 lightweight path | L0 miss and low probe-depth standard deviation | Retain the declared lightweight anchor path |
 | Full path | Irregular tile | Run full per-pixel Gaussian generation |
 
 ### 3.1 Probe Selection
@@ -89,15 +90,15 @@ keeps the path decision stable as tile size changes.
 
 ### 3.2 Path Decision
 
-SAES computes three statistics:
+SAES computes the two decision statistics specified by the mechanism:
 
 - Feature variance for L0 decisions.
-- Depth variance for L1 decisions.
-- Gaussian similarity for validation and quality control.
+- Probe-depth standard deviation for L1 decisions after an L0 miss.
 
-The default thresholds are selected from the sensitivity study in the paper. A
-tile only takes a lower-cost path when the probe statistics indicate enough local
-regularity.
+Frozen thresholds may only be selected through the disjoint training-calibration
+contract. They are never selected from evaluation RGB, paper tables, or
+evaluation aggregates. A tile takes a lower-cost path only when this fixed
+first-hit rule accepts it.
 
 ### 3.3 Representative Gaussian Generation
 
@@ -125,8 +126,9 @@ python scripts/demo.py --model transplat --no-fsdr --no-saes
 ```
 
 The simulator reports cycle counts, path statistics, cache hit rates, Gaussian
-counts, and image-quality metrics. These counters are used by the paper to
-attribute speedup to hardware execution, FSDR, and SAES.
+counts, and image-quality metrics. These records become paper evidence only
+when the fixed validator accepts a complete raw result set; diagnostics and
+partial runs remain non-claiming.
 
 ### 4.1 Artifact claim boundary
 
@@ -136,6 +138,15 @@ numerically aligned, but representative sparsification exceeds the declared
 quality tolerance and produces no L1 tiles for the tested TranSplat/MVSplat
 Re10K samples. A separately guarded dense interpolation diagnostic retains all
 Gaussians; it is useful for failure analysis but is not pruning evidence.
+
+### 4.2 Target-Free FSDR Audits
+
+`--claim-run --fsdr-only` is the calibrated, paper-eligible FSDR evidence
+path. `--diagnostic-run --fsdr-only --image-output-policy none` instead emits
+an `fsdr_target_free_audit`: it removes target RGB before device transfer and
+records that RGB was not passed to the model, routing, or metrics. The FSDR
+aggregator rejects this diagnostic kind, so it cannot become Table 2 evidence
+without a fresh calibrated claim run.
 
 ## 5. Related Documentation
 

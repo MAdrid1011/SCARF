@@ -21,6 +21,8 @@ Savings model (per guided pixel, cost_volume-only):
 - S3: unchanged (0% saving)
 """
 
+import math
+
 import torch
 import numpy as np
 from typing import Dict, List, Tuple
@@ -78,7 +80,10 @@ class FSDRSimulator:
                  reuse_hamming: int = 3, reuse_spatial: int = 12,
                  reuse_confidence: float = 0.80,
                  num_depth_candidates: int = 128,
-                 seed: int = 0):
+                 seed: int = 42,
+                 guidance_policy: str = "paper-hamming-local-validity",
+                 depth_consistency_threshold: float = 0.10,
+                 tile_size: int = 4):
         self.config = FSDRConfig(
             cache_size=cache_size,
             feature_dim=feature_dim,
@@ -90,6 +95,14 @@ class FSDRSimulator:
 
         # Number of depth candidates for full search
         self.num_depth_candidates = num_depth_candidates
+        self.feature_buffer_element_bytes = 2  # Paper execution contract: FP16.
+        if guidance_policy not in (
+            "paper-hamming-local-validity",
+            "paper-hamming",
+            "historical-depth-guard",
+        ):
+            raise ValueError(f"unsupported FSDR guidance policy: {guidance_policy}")
+        self.guidance_policy = guidance_policy
 
         # Guidance criteria (ASIC hardware parameters)
         self.reuse_hamming = reuse_hamming
@@ -98,8 +111,17 @@ class FSDRSimulator:
 
         # Local depth consistency buffer (ASIC: register file of recent depths)
         self.recent_depths = {}
-        self.depth_consistency_threshold = 0.05  # 5% tolerance (wider: narrowed search is safe)
-        self.recent_depth_radius = 6
+        if (
+            isinstance(depth_consistency_threshold, bool)
+            or not isinstance(depth_consistency_threshold, (int, float))
+            or not math.isfinite(depth_consistency_threshold)
+            or not 0.0 < depth_consistency_threshold < 1.0
+        ):
+            raise ValueError("depth consistency threshold must be finite and in (0, 1)")
+        self.depth_consistency_threshold = float(depth_consistency_threshold)
+        if isinstance(tile_size, bool) or not isinstance(tile_size, int) or tile_size <= 0:
+            raise ValueError("FSDR tile size must be positive")
+        self.tile_size = tile_size
 
         # Reuse data: pixel_idx -> {'depth_ratio': float, 'in_window': bool}
         self.reuse_data = {}
@@ -116,12 +138,32 @@ class FSDRSimulator:
             'guided_top1_missed': 0,
             'discrete_top1_pixels': 0,
             'depth_inconsistent': 0,
+            'hamming_hits': 0,
+            'local_valid_hits': 0,
+            'local_invalid_fallbacks': 0,
             'hit_no_guide': 0,      # Hit but criteria not met
             'full_compute': 0,      # Cache miss
             'total_reuse': 0,       # = guided (for backward compat)
             'total_validated': 0,   # backward compat
             'depth_errors': [],
+            'full_depth_evaluations': 0,
+            'executed_depth_evaluations': 0,
+            'feature_buffer_bytes_baseline': 0,
+            'feature_buffer_bytes_actual': 0,
         }
+
+    def _record_candidate_work(self, executed_candidates: int) -> None:
+        if not 0 < executed_candidates <= self.num_depth_candidates:
+            raise ValueError("executed depth-candidate count is out of range")
+        bytes_per_candidate = self.config.feature_dim * self.feature_buffer_element_bytes
+        self.stats['full_depth_evaluations'] += self.num_depth_candidates
+        self.stats['executed_depth_evaluations'] += executed_candidates
+        self.stats['feature_buffer_bytes_baseline'] += (
+            self.num_depth_candidates * bytes_per_candidate
+        )
+        self.stats['feature_buffer_bytes_actual'] += (
+            executed_candidates * bytes_per_candidate
+        )
 
     def begin_frame(self) -> None:
         """Reset the paper-defined frame-local cache without discarding aggregates."""
@@ -131,16 +173,16 @@ class FSDRSimulator:
         self.stats['frames_started'] += 1
 
     def _check_depth_consistency(self, position: Tuple[int, int], cached_depth: float) -> bool:
-        """Check cached depth consistency with local region (ASIC register file)."""
-        nearby = []
+        """Check a cache anchor against completed depths in the current tile."""
         r, c = position
-        radius = self.recent_depth_radius
-        for row_offset in range(-radius, radius + 1):
-            column_radius = radius - abs(row_offset)
-            for column_offset in range(-column_radius, column_radius + 1):
-                depth = self.recent_depths.get((r + row_offset, c + column_offset))
-                if depth is not None:
-                    nearby.append(depth)
+        tile_row = r // self.tile_size
+        tile_column = c // self.tile_size
+        nearby = [
+            depth
+            for (row, column), depth in self.recent_depths.items()
+            if row // self.tile_size == tile_row
+            and column // self.tile_size == tile_column
+        ]
         if len(nearby) < 3:
             return True
         mean_d = sum(nearby) / len(nearby)
@@ -229,6 +271,22 @@ class FSDRSimulator:
             # CacheTable already enforces distance <= tau_h. The paper and RTL
             # route every such hit to the narrowed candidate path.
             if hamming_dist <= self.config.hamming_threshold:
+                self.stats['hamming_hits'] += 1
+                if (
+                    self.guidance_policy in (
+                        "paper-hamming-local-validity",
+                        "historical-depth-guard",
+                    )
+                    and not self._check_depth_consistency(position, entry.best_depth)
+                ):
+                    self.stats['depth_inconsistent'] += 1
+                    self.stats['local_invalid_fallbacks'] += 1
+                    self.stats['hit_no_guide'] += 1
+                    self._insert_current(signature, float(actual_depth), position)
+                    self._update_recent_depths(position, float(actual_depth))
+                    self._record_candidate_work(self.num_depth_candidates)
+                    return 'hit_no_guide', self.num_depth_candidates, actual_depth
+                self.stats['local_valid_hits'] += 1
                 # GUIDED: S2 runs with D/4 candidates centered on cached_depth
                 cached_depth = entry.best_depth
                 in_window = self._depth_in_window(actual_depth, cached_depth)
@@ -275,12 +333,15 @@ class FSDRSimulator:
                 self._insert_current(signature, float(actual_depth), position)
                 self._update_recent_depths(position, float(actual_depth))
 
-                return 'guided', max(1, self.num_depth_candidates // 4), actual_depth
+                searches = max(1, self.num_depth_candidates // 4)
+                self._record_candidate_work(searches)
+                return 'guided', searches, actual_depth
             else:
                 # Defensive only: CacheTable must not return an over-threshold hit.
                 self.stats['hit_no_guide'] += 1
                 self._insert_current(signature, float(actual_depth), position)
                 self._update_recent_depths(position, float(actual_depth))
+                self._record_candidate_work(self.num_depth_candidates)
                 return 'hit_no_guide', self.num_depth_candidates, actual_depth
         else:
             # Cache miss → FULL search
@@ -290,6 +351,7 @@ class FSDRSimulator:
             self._insert_current(signature, float(actual_depth), position)
             self._update_recent_depths(position, float(actual_depth))
 
+            self._record_candidate_work(self.num_depth_candidates)
             return 'full_compute', self.num_depth_candidates, actual_depth
 
     def process_frame(
@@ -399,7 +461,7 @@ class FSDRSimulator:
     def get_summary(self) -> Dict:
         total = self.stats['total_pixels']
         if total == 0:
-            return self.stats
+            return {**self.stats, 'guidance_policy': self.guidance_policy}
         summary = {k: v for k, v in self.stats.items() if k != 'depth_errors'}
         summary['hit_rate'] = self.stats['cache_hits'] / total
         summary['guided_rate'] = self.stats['guided'] / total
@@ -425,4 +487,10 @@ class FSDRSimulator:
         summary['total_validated'] = self.stats['total_reuse']
         summary['depth_error'] = self.get_depth_error_stats()
         summary['depth_inconsistent'] = self.stats.get('depth_inconsistent', 0)
+        summary['depth_evaluations_available'] = True
+        summary['feature_buffer_bytes_available'] = True
+        summary['feature_buffer_element_bytes'] = self.feature_buffer_element_bytes
+        summary['guidance_policy'] = self.guidance_policy
+        summary['depth_consistency_threshold'] = self.depth_consistency_threshold
+        summary['local_depth_tile_size'] = self.tile_size
         return summary

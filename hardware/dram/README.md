@@ -26,6 +26,11 @@ The input is JSON Lines with one actual address event per line:
 vector for `run_ae.sh dram` and `run_ae.sh all`. It validates the public tool
 chain only. It is not a measured paper workload and its energy is not a paper
 result. Full workload runs must pass an exported event file with `--events`.
+For Figure 9, pass the matching schema-v2 aggregate with `--workload-result`.
+Every event must then include its canonical `sample_index`; the exporter rejects
+missing or extra sample indices and binds the trace to the aggregate selection
+hash and SHA256. Only this path emits per-inference energy. The smoke vector can
+never satisfy that contract.
 
 Run:
 
@@ -34,6 +39,7 @@ bash hardware/dram/run.sh \
   --ramulator-root /path/to/ramulator2-v2.1.0 \
   --drampower-root /path/to/DRAMPower-v6.0.2 \
   --events outputs/software/memory-events.jsonl \
+  --workload-result outputs/software/results.json \
   --output-dir outputs/dram
 ```
 

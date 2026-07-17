@@ -79,10 +79,18 @@ def finalize(
         datasets["acid"]["expected_tree_sha256"] = validated["acid-native"]["tree_sha256"]
         datasets["acid"]["prepared_source_revision"] = validated["acid-native"]["revision"]
     if "depthsplat-native-270x480-v1" in validated:
+        if validated["depthsplat-native-270x480-v1"]["source"] != datasets["dl3dv"]["prepared_source"]:
+            raise ValueError("DL3DV native prepared source does not match the dataset contract")
+        if validated["depthsplat-native-270x480-v1"]["revision"] != datasets["dl3dv"]["prepared_source_revision"]:
+            raise ValueError("DL3DV native prepared revision does not match the dataset contract")
         datasets["dl3dv"]["representations"]["native"]["expected_tree_sha256"] = validated[
             "depthsplat-native-270x480-v1"
         ]["tree_sha256"]
     if "re10k-compatible-360x640-v1" in validated:
+        if validated["re10k-compatible-360x640-v1"]["source"] != datasets["dl3dv"]["prepared_source"]:
+            raise ValueError("DL3DV Re10K prepared source does not match the dataset contract")
+        if validated["re10k-compatible-360x640-v1"]["revision"] != datasets["dl3dv"]["prepared_source_revision"]:
+            raise ValueError("DL3DV Re10K prepared revision does not match the dataset contract")
         datasets["dl3dv"]["representations"]["re10k"]["expected_tree_sha256"] = validated[
             "re10k-compatible-360x640-v1"
         ]["tree_sha256"]

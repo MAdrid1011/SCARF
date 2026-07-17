@@ -68,11 +68,15 @@ def test_download_scripts_do_not_install_packages_implicitly():
 
 
 def test_dl3dv_download_is_gated_and_restricted_to_required_trees():
-    text = (ROOT / "data/download_dl3dv.sh").read_text()
-    assert "get_token" in text
-    assert "*/nerfstudio/transforms.json" in text
-    assert "*/nerfstudio/images_4/*" in text
-    assert "*/nerfstudio/images_8/*" in text
+    shell = (ROOT / "data/download_dl3dv.sh").read_text()
+    helper = (ROOT / "data/download_dl3dv_benchmark.py").read_text()
+    assert "DL3DV/DL3DV-10K-Benchmark" in shell
+    assert "download_dl3dv_benchmark.py" in shell
+    assert "get_token" in helper
+    assert "filelist.bin" in helper
+    assert "images_2" in helper
+    assert "images_4" in helper
+    assert "images_8" in helper
 
 
 def test_quick_profile_selects_only_mvsplat_re10k_checkpoint(tmp_path, monkeypatch):

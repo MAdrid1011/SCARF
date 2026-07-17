@@ -1,6 +1,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,10 +24,13 @@ def test_demo_help_exposes_public_ae_arguments():
         "--device",
         "--seed",
         "--functional-run",
+        "--diagnostic-run",
         "--image-output-policy",
         "--fsdr-only",
         "--fsdr-feature-source",
         "--saes-feature-source",
+        "--saes-routing-audit",
+        "--saes-hardware-audit",
     ):
         assert option in result.stdout
 
@@ -145,6 +149,48 @@ def test_functional_run_has_the_same_strict_stage_contract():
         )
 
 
+def test_diagnostic_run_is_strict_but_never_a_claim_run():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(["--diagnostic-run", "--evaluation-index", "index.json"])
+    assert args.diagnostic_run is True
+    assert args.claim_run is False
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--diagnostic-run",
+                "--evaluation-index",
+                "index.json",
+                "--no-depth",
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    (
+        ("--tune-thresholds",),
+        ("--saes-fv", "0.1"),
+        ("--fsdr-cache-size", "64"),
+        ("--fsdr-guidance-policy", "paper-hamming"),
+        ("--seed", "1"),
+    ),
+)
+def test_calibration_trace_rejects_unregistered_overrides(extra):
+    from scripts.demo_cli import parse_args
+
+    base = [
+        "--diagnostic-run",
+        "--evaluation-index",
+        "index.json",
+        "--calibration-trace",
+        "--image-output-policy",
+        "none",
+    ]
+    with pytest.raises(SystemExit):
+        parse_args([*base, *extra])
+
+
 def test_claim_run_rejects_dense_saes_diagnostic():
     from scripts.demo_cli import parse_args
 
@@ -158,6 +204,195 @@ def test_claim_run_rejects_dense_saes_diagnostic():
                 "dense-diagnostic",
             ]
         )
+
+
+def test_probe_spread_materialization_is_non_claiming_only():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(["--saes-materialization", "probe-spread-diagnostic"])
+    assert args.saes_materialization == "probe-spread-diagnostic"
+
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--saes-materialization",
+                    "probe-spread-diagnostic",
+                ]
+            )
+
+    diagnostic = parse_args(
+        [
+            "--diagnostic-run",
+            "--evaluation-index",
+            "index.json",
+            "--saes-materialization",
+            "probe-spread-diagnostic",
+        ]
+    )
+    assert diagnostic.diagnostic_run is True
+    assert diagnostic.claim_run is False
+    assert diagnostic.saes_materialization == "probe-spread-diagnostic"
+
+
+def test_conditional_anchor_transport_is_diagnostic_only():
+    from scripts.demo_cli import parse_args
+
+    materialization = "conditional-anchor-transport-diagnostic"
+    args = parse_args(["--saes-materialization", materialization])
+    assert args.saes_materialization == materialization
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--saes-materialization",
+                    materialization,
+                ]
+            )
+
+
+def test_probe_spread_materialization_forces_non_claim_result():
+    source = DEMO.read_text(encoding="utf-8")
+
+    assert "args.saes_materialization != 'representative'" in source
+
+
+def test_saes_hardware_audit_is_target_free_and_protocol_locked():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(
+        [
+            "--diagnostic-run",
+            "--evaluation-index",
+            "index.json",
+            "--saes-hardware-audit",
+            "--image-output-policy",
+            "none",
+        ]
+    )
+    assert args.saes_hardware_audit is True
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--diagnostic-run",
+                "--evaluation-index",
+                "index.json",
+                "--saes-hardware-audit",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--claim-run",
+                "--evaluation-index",
+                "index.json",
+                "--saes-hardware-audit",
+                "--image-output-policy",
+                "none",
+            ]
+        )
+
+
+def test_transmittance_materialization_is_non_claiming_only():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(["--saes-materialization", "transmittance-diagnostic"])
+    assert args.saes_materialization == "transmittance-diagnostic"
+
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--saes-materialization",
+                    "transmittance-diagnostic",
+                ]
+            )
+
+    diagnostic = parse_args(
+        [
+            "--diagnostic-run",
+            "--evaluation-index",
+            "index.json",
+            "--saes-materialization",
+            "transmittance-diagnostic",
+        ]
+    )
+    assert diagnostic.diagnostic_run is True
+    assert diagnostic.saes_materialization == "transmittance-diagnostic"
+
+
+def test_l1_primary_depth_reference_materialization_is_non_claiming_only():
+    from scripts.demo_cli import parse_args
+
+    materialization = "l1-primary-depth-reference-diagnostic"
+    args = parse_args(["--saes-materialization", materialization])
+    assert args.saes_materialization == materialization
+
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--saes-materialization",
+                    materialization,
+                ]
+            )
+
+    diagnostic = parse_args(
+        [
+            "--diagnostic-run",
+            "--evaluation-index",
+            "index.json",
+            "--saes-materialization",
+            materialization,
+        ]
+    )
+    assert diagnostic.diagnostic_run is True
+
+
+def test_virtual_reconstruction_materialization_is_non_claiming_only():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(
+        ["--saes-materialization", "virtual-reconstruction-diagnostic"]
+    )
+    assert args.saes_materialization == "virtual-reconstruction-diagnostic"
+
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--saes-materialization",
+                    "virtual-reconstruction-diagnostic",
+                ]
+            )
+
+    diagnostic = parse_args(
+        [
+            "--diagnostic-run",
+            "--evaluation-index",
+            "index.json",
+            "--saes-materialization",
+            "virtual-reconstruction-diagnostic",
+        ]
+    )
+    assert diagnostic.diagnostic_run is True
+    assert diagnostic.saes_materialization == "virtual-reconstruction-diagnostic"
 
 
 def test_saes_diagnostic_sweep_is_non_claiming_only():
@@ -192,6 +427,176 @@ def test_probe_vector_first_hit_is_non_claiming_only():
                     "index.json",
                     "--saes-decision-semantics",
                     "probe-vector-first-hit",
+                ]
+            )
+
+
+def test_normalized_probe_standard_deviation_is_non_claiming_only():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(
+        ["--saes-decision-semantics", "probe-normalized-std-first-hit"]
+    )
+    assert args.saes_decision_semantics == "probe-normalized-std-first-hit"
+
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--saes-decision-semantics",
+                    "probe-normalized-std-first-hit",
+                ]
+            )
+
+
+def test_materialization_attribute_audit_is_diagnostic_only_and_isolated():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(
+        [
+            "--diagnostic-run",
+            "--evaluation-index",
+            "index.json",
+            "--saes-materialization-audit",
+        ]
+    )
+    assert args.saes_materialization_audit is True
+
+    with pytest.raises(SystemExit):
+        parse_args(["--saes-materialization-audit"])
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--claim-run",
+                "--evaluation-index",
+                "index.json",
+                "--saes-materialization-audit",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--diagnostic-run",
+                "--evaluation-index",
+                "index.json",
+                "--saes-materialization-audit",
+                "--saes-diagnostic-sweep",
+            ]
+        )
+
+
+def test_s3_raw_audit_is_diagnostic_only_and_protocol_fixed():
+    from scripts.demo_cli import parse_args
+
+    command = [
+        "--diagnostic-run",
+        "--evaluation-index",
+        "index.json",
+        "--image-output-policy",
+        "none",
+        "--saes-s3-raw-audit",
+    ]
+    args = parse_args(command)
+    assert args.saes_s3_raw_audit is True
+
+    with pytest.raises(SystemExit):
+        parse_args(["--saes-s3-raw-audit"])
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--image-output-policy",
+                    "none",
+                    "--saes-s3-raw-audit",
+                ]
+            )
+    with pytest.raises(SystemExit):
+        parse_args([*command, "--saes-materialization-audit"])
+    with pytest.raises(SystemExit):
+        parse_args([*command, "--saes-feature-source", "gaussian-head-input"])
+    with pytest.raises(SystemExit):
+        parse_args([*command, "--saes-fv", "0.1"])
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--diagnostic-run",
+                "--evaluation-index",
+                "index.json",
+                "--saes-s3-raw-audit",
+            ]
+        )
+
+
+def test_saes_routing_audit_is_diagnostic_only_and_protocol_fixed():
+    from scripts.demo_cli import parse_args
+
+    command = [
+        "--diagnostic-run",
+        "--evaluation-index",
+        "index.json",
+        "--image-output-policy",
+        "none",
+        "--saes-decision-semantics",
+        "probe-normalized-std-first-hit",
+        "--saes-routing-audit",
+    ]
+    args = parse_args(command)
+    assert args.saes_routing_audit is True
+
+    with pytest.raises(SystemExit):
+        parse_args(["--saes-routing-audit"])
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--diagnostic-run",
+                "--evaluation-index",
+                "index.json",
+                "--image-output-policy",
+                "none",
+                "--saes-routing-audit",
+            ]
+        )
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--image-output-policy",
+                    "none",
+                    "--saes-decision-semantics",
+                    "probe-normalized-std-first-hit",
+                    "--saes-routing-audit",
+                ]
+            )
+    with pytest.raises(SystemExit):
+        parse_args([*command, "--saes-s3-raw-audit"])
+    with pytest.raises(SystemExit):
+        parse_args([*command, "--saes-ds", "0.05"])
+
+
+def test_historical_fsdr_depth_guard_is_non_claiming_only():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(["--fsdr-guidance-policy", "historical-depth-guard"])
+    assert args.fsdr_guidance_policy == "historical-depth-guard"
+
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--fsdr-guidance-policy",
+                    "historical-depth-guard",
                 ]
             )
 
@@ -232,7 +637,8 @@ def test_gaussian_head_saes_diagnostic_does_not_replace_fsdr_features():
     )[0]
 
     assert "has_features = (fsdr_features is not None" in fsdr_runtime
-    assert "prepare_fsdr_frame(\n                fsdr_features," in fsdr_runtime
+    assert "prepare_fsdr_candidate_frames(\n                fsdr_features," in fsdr_runtime
+    assert "process_discrete_frame(" in fsdr_runtime
 
 
 def test_gaussian_head_retention_boundary_uses_selected_saes_features():
@@ -249,27 +655,13 @@ def test_fsdr_only_is_an_isolated_claim_mode():
     )
     assert args.fsdr_only is True
 
-    mono = parse_args(
-        [
-            "--model",
-            "depthsplat",
-            "--claim-run",
-            "--evaluation-index",
-            "index.json",
-            "--fsdr-only",
-            "--fsdr-feature-source",
-            "depthsplat-mono",
-        ]
-    )
-    assert mono.fsdr_feature_source == "depthsplat-mono"
-
     with pytest.raises(SystemExit):
         parse_args(["--fsdr-only"])
     with pytest.raises(SystemExit):
         parse_args(
             [
                 "--model",
-                "mvsplat",
+                "depthsplat",
                 "--claim-run",
                 "--evaluation-index",
                 "index.json",
@@ -307,3 +699,67 @@ def test_fsdr_only_is_an_isolated_claim_mode():
                 "--saes-diagnostic-sweep",
             ]
         )
+
+
+def test_fsdr_only_is_a_target_rgb_free_execution_mode():
+    import scripts.demo as demo
+
+    common = {
+        "fsdr_only": False,
+        "saes_materialization_audit": False,
+        "saes_s3_raw_audit": False,
+        "saes_routing_audit": False,
+        "saes_hardware_audit": False,
+    }
+    assert demo.is_target_rgb_free_execution(
+        SimpleNamespace(**{**common, "fsdr_only": True})
+    )
+    assert not demo.is_target_rgb_free_execution(SimpleNamespace(**common))
+
+
+def test_fsdr_only_diagnostic_mode_is_target_free_and_non_rendering():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(
+        [
+            "--diagnostic-run",
+            "--evaluation-index",
+            "index.json",
+            "--fsdr-only",
+            "--image-output-policy",
+            "none",
+        ]
+    )
+    assert args.diagnostic_run is True
+    assert args.fsdr_only is True
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--diagnostic-run",
+                "--evaluation-index",
+                "index.json",
+                "--fsdr-only",
+            ]
+        )
+
+
+def test_probe_channel_variance_first_hit_is_non_claiming_only():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(
+        ["--saes-decision-semantics", "probe-channel-variance-first-hit"]
+    )
+    assert args.saes_decision_semantics == "probe-channel-variance-first-hit"
+
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--saes-decision-semantics",
+                    "probe-channel-variance-first-hit",
+                ]
+            )

@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,3 +46,37 @@ def test_profile_lock_version_comparison_uses_pep440_normalization():
     assert lock_versions_equal("1.1", "1.1.0")
     assert lock_versions_equal("2.4.0+cu121", "2.4.0+cu121")
     assert not lock_versions_equal("1.1", "1.2.0")
+
+
+def test_nvcc_resolution_requires_a_matching_explicit_override(tmp_path, monkeypatch):
+    import scripts.check_environment as environment
+
+    nvcc = tmp_path / "nvcc"
+    nvcc.write_text("", encoding="utf-8")
+    monkeypatch.setenv("SCARF_NVCC", str(nvcc))
+    monkeypatch.setattr(environment, "run", lambda _command: "release 12.1")
+
+    assert environment.resolve_nvcc("12.1") == nvcc
+
+    monkeypatch.setattr(environment, "run", lambda _command: "release 12.0")
+    with pytest.raises(RuntimeError, match="SCARF_NVCC requires release 12.1"):
+        environment.resolve_nvcc("12.1")
+
+
+def test_nvcc_resolution_prefers_matching_conda_package_over_path(tmp_path, monkeypatch):
+    import scripts.check_environment as environment
+
+    root = tmp_path / "conda"
+    nvcc = root / "pkgs" / "cuda-nvcc-12.1.105-0" / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("", encoding="utf-8")
+    monkeypatch.delenv("SCARF_NVCC", raising=False)
+    monkeypatch.setenv("CONDA_PREFIX", str(root))
+    monkeypatch.setattr(environment.shutil, "which", lambda _name: "/usr/bin/nvcc")
+    monkeypatch.setattr(
+        environment,
+        "run",
+        lambda command: "release 12.1" if Path(command[0]) == nvcc else "release 12.0",
+    )
+
+    assert environment.resolve_nvcc("12.1") == nvcc

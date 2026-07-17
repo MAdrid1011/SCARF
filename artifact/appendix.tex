@@ -1,82 +1,76 @@
 \appendix
 \section{Artifact Appendix}
 
-\paragraph{Artifact access.}
-The archived SCARF artifact contains the Python cycle and functional simulator,
-FSDR and SAES implementations, three model adapters, Chisel RTL, experiment
-automation, expected-result manifests, and a public physical-design proxy. The
-final archival DOI is recorded in the MICRO artifact-evaluation submission and
-in the release manifest. GitHub may be used during evaluation, but the Artifact
-Available badge refers to the DOI archive.
-The current submission requests Artifact Available and Artifact Functional.
-It does not request Results Reproduced while the sparse-SAES Table~1/Table~3
-contracts and the FSDR Table~2 LSH contract remain unresolved.
+\paragraph{Artifact and badge scope.}
+SCARF applies for Artifact Available, Artifacts Evaluated--Functional, and
+Results Reproduced.  The DOI archive contains the functional and cycle
+simulator, FSDR and SAES, three model adapters, Chisel RTL, experiment
+automation, result validators, and a public physical-design proxy.  The
+machine-readable catalog maps all nine Evaluation figures and four tables to
+their commands, raw inputs, evidence classes, and acceptance gates.  A result
+is marked reproduced only after a non-author evaluator obtains it; listing a
+result as mandatory does not turn missing evidence into a pass.
 
-\paragraph{Hardware and software requirements.}
-Quick strict inference requires an NVIDIA CUDA GPU with at least 8\,GB VRAM,
-an x86-64 Linux host with 16\,GB RAM, and 20\,GB free disk. It uses a
-deterministic synthetic fixture and provides Functional evidence only. CPU
-smoke validation covers the CLI, result schema, DeepScale, and applicable RTL
-tools. Full quality evaluation uses an NVIDIA GPU
-with at least 24\,GB VRAM and the pinned Python 3.10 environments. The optional
-system baseline uses a Jetson Orin NX 16\,GB in MAXN mode, but it
-is outside the current reproduced claim. RTL validation needs
-JDK~11+, sbt~1.9+, Chisel~6.6, and Verilator~5+. The public physical flow uses
-iFlow commit \texttt{04b4d98} and ASAP7. Its clean-worktree and collateral
-preflight is included, but routed PPA is outside the current claim because the
-host did not satisfy the fixed no-Vivado/48\,GiB resource gate.
+\paragraph{Key results and hardware.}
+Figure~8 is a mandatory key result.  It requires a real Jetson Orin NX 16\,GB
+in MAXN mode with the GPU locked at 918\,MHz.  The wrapper records five CUDA
+event repetitions per sample, Nsight Systems output, \texttt{tegrastats},
+JetPack/L4T/CUDA/PyTorch versions, clocks, power mode, and temperature.  MICRO
+reviewers bid using declared hardware dependencies; if no assigned reviewer
+has the rare device, the AE FAQ permits chairs to broker exceptional remote
+access.  Workstation timings and calculated Orin estimates are rejected.
+Full model evaluation requires an NVIDIA GPU with at least 24\,GB VRAM and the
+pinned classic and DepthSplat Python environments.  Quick Functional inference
+uses an 8\,GB CUDA GPU and a redistributable synthetic fixture.  CPU checks
+cover schemas and scaling; RTL needs JDK~11+, sbt~1.9+, Chisel~6.6, and
+Verilator~5+.
 
-\paragraph{Data and models.}
-The artifact records download sources, licenses, formats, and SHA256 values for
-Re10K, ACID, DL3DV, and the official pretrained checkpoints. Re10K and ACID
-remain executable diagnostics. Their sparse-SAES paper rows are not claimed.
-DL3DV remains an unclaimed gated workflow.
-Full datasets are downloaded separately. The final archive records the ordered sample indices,
-dataset tree hashes, and context and target view rule used for every reported
-aggregate. A representative LPDDR5 trace validates the public Ramulator and
-DRAMPower workflow but is not a paper workload.
+\paragraph{Calibration boundary.}
+One global mechanism configuration is frozen before evaluation.  Unspecified
+engineering bandwidths and a conservative FSDR hit-validity tolerance are
+selected from a preregistered finite grid on 32 Re10K and 32 ACID training
+scenes.  Their hashes must be disjoint from all evaluation scenes.  Calibration
+cannot read target RGB, ground truth, manuscript tables, expected-result files,
+or evaluator outputs; it does not select an LSH seed or pair-specific values.
 
-The selection protocol uses the committed upstream evaluation indices shared
-by the three model repositories. Null index entries are recorded but excluded
-because the upstream evaluation samplers reject them. The executable protocol
-contains 6,474 Re10K samples, 1,595 ACID samples, and 140 DL3DV samples.
+\paragraph{Data and protocol.}
+Re10K, ACID, and official checkpoints are downloaded from manifest-pinned
+sources.  DL3DV-Benchmark is auto-gated; each evaluator accepts the upstream
+terms independently, and the dataset is not redistributed in Zenodo.  The
+protocol uses the committed upstream evaluation indices: 6,474 executable
+Re10K samples, 1,595 ACID samples, and 140 DL3DV samples with their exact
+context and target views.  Each result binds the source index, ordered
+selection, prepared tree, checkpoint, runtime assets, environment, and command
+by SHA256.  Partial, random, or bounded selections are not paper evidence.
 
-\paragraph{Workflow and key results.}
-After installation, \texttt{run\_ae.sh quick} validates the setup.
-The claim-aware \texttt{quality} and \texttt{ablation} modes explicitly skip
-unclaimed rows. Focused diagnostics remain available through the experiment
-driver. Table~1 and Tables~2--3 are not claimed: real sparse-SAES probes exceed
-the quality tolerance and do not reproduce the reported L1 rates, while six
-32-sample FSDR prefixes miss the Guided Rate and exact Top-1 targets, while the
-public RTL has no populated LSH projection ROM or equivalent signed projection
-MAC. A separate DepthSplat ViT-L feature diagnostic also fails and is not
-promoted.
-A dense interpolation diagnostic retains every Gaussian and is forbidden in
-claim runs. Figure~8, Figure~11, the DL3DV rows, and Figures~13--16 are also
-not claimed. Each run emits structured results
-with source, environment, data, checkpoint, and command provenance. The
-\texttt{validate} mode compares results with archived expectations and reports
-explicit \texttt{PASS}, \texttt{FAIL}, \texttt{NOT\_RUN}, or
-\texttt{NOT\_CLAIMED} states.
+\paragraph{Evaluation workflow.}
+\texttt{run\_ae.sh quick} validates installation.  The \texttt{quality},
+\texttt{performance}, \texttt{worstcase}, \texttt{mechanisms},
+\texttt{utilization}, and \texttt{sensitivity} modes regenerate Figure~8,
+Table~1, and Figures~10--16/Tables~2--3.  Every target view stores PSNR, SSIM,
+and LPIPS; mechanism outputs use discrete cache, candidate, buffer, tile,
+Gaussian, and MMCU-slot events.  Figure~10 selects its displayed cases from the
+complete per-view records rather than a hand-picked metadata file.  Sensitivity
+replays fixed sample traces so a model forward pass is not repeated for each
+grid point.  The expected-result file is readable only by report validation,
+never by simulation or aggregation.
 
-Figure~8 uses the 1\,GHz architectural target in the paper. It is not in the
-current reproduced claim because raw Orin NX timing is unavailable. A completed
-public physical run would report ASAP7 timing independently and preserve any
-negative slack. No routed run is claimed in this release.
+\paragraph{Public physical proxy.}
+The commercial TSMC 28\,nm PDK, memory compiler, Liberty files, and LPDDR PHY
+cannot be redistributed.  The public hardware path instead routes the released
+RTL with iFlow commit \texttt{04b4d98} and ASAP7, reports hierarchical logic and
+explicit SRAM proxies, and applies the paper-cited DeepScaleTool normalization
+from 7 to 28\,nm.  Figure~9 and Table~4 show ASAP7 raw values, the deterministic
+28\,nm-equivalent estimate, the paper TSMC28 target, and their difference.  The
+target is not a pass/fail criterion, and neither public layer is called a
+foundry-specific TSMC28 measurement.  Missing route, STA, power, DRC, GDS, or
+hash evidence fails closed.
 
-\paragraph{Public hardware proxy.}
-The commercial TSMC 28\,nm PDK, memory compiler, and Liberty collateral cannot
-be redistributed. We therefore include a fully public predictive-PDK workflow:
-the Chisel RTL can be implemented with iFlow/ASAP7, after which the paper-cited
-DeepScaleTool model can produce a 28\,nm-equivalent estimate. In the current
-release, routed ASAP7 PPA is not claimed because the host failed the resource
-gate. Scaling is not claimed because no valid routed PPA is available. Only the
-pinned preflight and deterministic scaling tests are Functional evidence. No
-estimate is described as a foundry-specific TSMC 28\,nm post-layout measurement.
-
-\paragraph{Expected variation.}
-Quality tolerances are 0.15\,dB PSNR, 0.005 SSIM, and 0.005 LPIPS. Optional Orin
-measurements allow 5\% variation under the documented power and clock state,
-but are outside the current claim. Deterministic cycle, RTL, report-parsing, and technology-scaling
-checks must match exactly. DeepScaleTool model uncertainty and cross-node
-extrapolation limitations are reported alongside the nominal estimate.
+\paragraph{Acceptance and variation.}
+Quality tolerances are 0.15\,dB PSNR, 0.005 SSIM, and 0.005 LPIPS.  Figure~8
+and Figure~11 geometric means allow 5\% relative variation under their fixed
+contracts.  Mechanism rates and utilization allow two percentage points;
+event counts allow 5\% relative variation.  Deterministic schemas, hashes,
+selection identities, RTL, and scaling formulas must match exactly.  No
+manuscript constant, seed sweep, edited result JSON, dense diagnostic, or
+fallback path can satisfy a claim.

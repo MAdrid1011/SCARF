@@ -25,6 +25,27 @@ def test_resource_guard_requires_48_gib_available():
     assert check["minimum_available_bytes"] == 48 * 1024**3
 
 
+def test_resource_guard_allows_an_explicit_low_memory_attempt():
+    from hardware.iflow.resource_guard import check_resources
+
+    check = check_resources(
+        available_bytes=12 * 1024**3,
+        active_processes=[],
+        allow_low_memory_attempt=True,
+    )
+
+    assert check["pass"]
+    assert check["mode"] == "low_memory_attempt"
+    assert check["available_memory_threshold_met"] is False
+
+    with pytest.raises(RuntimeError, match="Vivado"):
+        check_resources(
+            available_bytes=60 * 1024**3,
+            active_processes=["vivado"],
+            allow_low_memory_attempt=True,
+        )
+
+
 def test_iflow_run_wires_resource_guard_before_rtl_and_materialization():
     script = (Path(__file__).resolve().parents[1] / "hardware/iflow/run.sh").read_text()
 
@@ -50,6 +71,15 @@ def test_iflow_records_per_stage_time_and_logs():
     assert 'time-${flow_stage}.log' in script
     assert 'iflow-${flow_stage}.log' in script
     assert 'stage-${flow_stage}-validation.json' in script
+    assert 'resource-before-${flow_stage}.json' in script
+    assert 'resource-after-${flow_stage}.json' in script
+
+
+def test_iflow_exposes_the_explicit_low_memory_attempt_flag():
+    script = (Path(__file__).resolve().parents[1] / "hardware/iflow/run.sh").read_text()
+
+    assert "--allow-low-memory-attempt" in script
+    assert "ALLOW_LOW_MEMORY_ATTEMPT" in script
 
 
 def test_iflow_executes_the_preflight_resolved_image_id():

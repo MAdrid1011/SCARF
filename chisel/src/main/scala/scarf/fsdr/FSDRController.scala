@@ -33,6 +33,8 @@ class FSDRController extends Module {
     val cacheLookupSig = Output(UInt(ScarfConfig.LSHDim.W))
     val cacheHit       = Input(Bool())
     val cacheHitDepth  = Input(UInt(ScarfConfig.DataWidth.W))
+    val localDepthMean = Input(UInt(ScarfConfig.DataWidth.W))
+    val localDepthCount = Input(UInt(8.W))
 
     val cacheInsertEn    = Output(Bool())
     val cacheInsertSig   = Output(UInt(ScarfConfig.LSHDim.W))
@@ -52,6 +54,11 @@ class FSDRController extends Module {
   val currentSig   = RegInit(0.U(ScarfConfig.LSHDim.W))
   val isNarrow     = RegInit(false.B)
   val cachedDepth  = RegInit(0.U(ScarfConfig.DataWidth.W))
+  val localValidity = Module(new FSDRLocalDepthValidity)
+  localValidity.io.cachedDepth := io.cacheHitDepth
+  localValidity.io.localDepthMean := io.localDepthMean
+  localValidity.io.localDepthCount := io.localDepthCount
+  localValidity.io.gammaQ10 := io.config.fsdrDepthValidThresh
 
   io.done := state === FSDRState.sDone
   io.busy := state =/= FSDRState.sIdle
@@ -90,7 +97,7 @@ class FSDRController extends Module {
       state := FSDRState.sDecide
     }
     is(FSDRState.sDecide) {
-      when(io.cacheHit) {
+      when(io.cacheHit && localValidity.io.valid) {
         isNarrow    := true.B
         cachedDepth := io.cacheHitDepth
         state       := FSDRState.sNarrow

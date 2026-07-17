@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -42,6 +44,79 @@ def run(command: list[str]) -> str:
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or f"command failed: {' '.join(command)}")
     return result.stdout.strip()
+
+
+def _nvcc_release(nvcc: Path) -> str | None:
+    """Return one compiler's CUDA release, or ``None`` for an unusable binary."""
+    try:
+        output = run([str(nvcc), "--version"])
+    except (OSError, RuntimeError):
+        return None
+    match = re.search(r"release\s+(\d+\.\d+)", output)
+    return match.group(1) if match is not None else None
+
+
+def resolve_nvcc(required_release: str) -> Path:
+    """Find the compiler matching a locked profile without trusting PATH order.
+
+    ``SCARF_NVCC`` is an explicit, strict override. Otherwise the resolver
+    considers standard CUDA roots, then a matching Conda ``cuda-nvcc`` package
+    reachable from the active interpreter or ``CONDA_PREFIX``, and finally the
+    PATH candidate. A mismatched compiler never satisfies a CUDA profile.
+    """
+    explicit = os.environ.get("SCARF_NVCC")
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        if not candidate.is_file():
+            raise RuntimeError(f"SCARF_NVCC is not an executable file: {candidate}")
+        observed = _nvcc_release(candidate)
+        if observed != required_release:
+            raise RuntimeError(
+                f"SCARF_NVCC requires release {required_release}, got {observed}"
+            )
+        return candidate
+
+    candidates: list[Path] = []
+    for variable in ("CUDA_HOME", "CUDA_PATH"):
+        root = os.environ.get(variable)
+        if root:
+            candidates.append(Path(root).expanduser() / "bin" / "nvcc")
+
+    conda_roots: list[Path] = []
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        conda_roots.append(Path(conda_prefix).expanduser())
+    interpreter = Path(sys.executable).resolve()
+    conda_roots.extend(interpreter.parents)
+    for root in conda_roots:
+        packages = root / "pkgs"
+        if packages.is_dir():
+            candidates.extend(
+                sorted(packages.glob(f"cuda-nvcc-{required_release}*/bin/nvcc"))
+            )
+
+    path_candidate = shutil.which("nvcc")
+    if path_candidate:
+        candidates.append(Path(path_candidate))
+
+    checked: list[tuple[Path, str | None]] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate in seen or not candidate.is_file():
+            continue
+        seen.add(candidate)
+        observed = _nvcc_release(candidate)
+        checked.append((candidate, observed))
+        if observed == required_release:
+            return candidate
+    discovered = ", ".join(
+        f"{path} ({release or 'unreadable'})" for path, release in checked
+    ) or "none"
+    raise RuntimeError(
+        f"requires nvcc release {required_release}; discovered {discovered}. "
+        "Set SCARF_NVCC to a matching compiler if discovery is incomplete"
+    )
 
 
 def file_text(path: Path) -> str:
@@ -81,12 +156,8 @@ def validate_python_profile(profile: str) -> dict:
     if cuda_version is not None and cuda_version != contract["cuda"]:
         raise RuntimeError(f"{profile} requires CUDA {contract['cuda']}, got {cuda_version}")
     freeze = run([sys.executable, "-m", "pip", "freeze", "--all"])
-    nvcc_path = shutil.which("nvcc")
-    nvcc_version = run([nvcc_path, "--version"]) if nvcc_path else None
-    if cuda_version is not None and (
-        nvcc_version is None or f"release {contract['cuda']}" not in nvcc_version
-    ):
-        raise RuntimeError(f"{profile} requires nvcc release {contract['cuda']}")
+    nvcc_path = resolve_nvcc(contract["cuda"]) if cuda_version is not None else None
+    nvcc_version = run([str(nvcc_path), "--version"]) if nvcc_path else None
     compiler = run(["cc", "--version"])
     lock = ROOT / "environments" / profile / "requirements.lock"
     mismatches = []

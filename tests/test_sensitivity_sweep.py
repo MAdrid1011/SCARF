@@ -52,6 +52,18 @@ def test_sensitivity_dry_run_covers_every_grid_point_and_pair(tmp_path):
     assert all("command" not in run for run in plan["runs"])
 
 
+def test_reviewer_sensitivity_uses_the_frozen_reviewer_profile(tmp_path):
+    from scripts.sensitivity_sweep import build_plan
+
+    plan = build_plan(tmp_path, evidence_profile="reviewer")
+
+    assert plan["evidence_profile"] == "reviewer"
+    assert {pair["sample_count"] for pair in plan["pair_traces"]} == {512, 140}
+    for pair in plan["pair_traces"]:
+        assert "--dataset-root" in pair["command"]
+        assert "artifact/protocol/reviewer/" in pair["evaluation_index"]
+
+
 def test_trace_aggregation_replays_grid_without_rerunning_models(tmp_path: Path):
     from scripts.sensitivity_sweep import STUDIES, aggregate_pair_traces
 
@@ -99,6 +111,7 @@ def test_trace_aggregation_replays_grid_without_rerunning_models(tmp_path: Path)
             "model": "mvsplat",
             "dataset": "re10k",
             "sample_count": 2,
+            "declared_sample_count": 6474,
             "declared_sample_selection_sha256": "0" * 64,
             "trace_dir": str(trace_dir),
         }

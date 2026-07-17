@@ -17,6 +17,7 @@ from .types import (
     ENCODER_CYCLES,
     ENCODER_RESOURCES,
 )
+from .mmcu_events import record_conv_tensors
 
 
 class ConvEngine:
@@ -131,6 +132,9 @@ class ConvEngine:
         total_macs = B * H_out * W_out * Cin * Cout * K * K
         pe_throughput = self.config.pe_array_size ** 2
         compute_cycles = (total_macs + pe_throughput - 1) // pe_throughput
+        record_conv_tensors(
+            input, weight, output, array_size=self.config.pe_array_size
+        )
         # Extra overhead for zero-insertion address generation
         setup_cycles = ENCODER_CYCLES['conv_setup'] * 2
         weight_load_cycles = Cin * Cout * K * K // self.config.pe_array_size
@@ -175,6 +179,9 @@ class ConvEngine:
         
         # Compute cycles
         compute_cycles = (total_macs + pe_throughput - 1) // pe_throughput
+        record_conv_tensors(
+            input, weight, output, array_size=self.config.pe_array_size
+        )
         
         # Setup/overhead cycles
         setup_cycles = ENCODER_CYCLES['conv_setup']

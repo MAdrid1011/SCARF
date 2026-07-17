@@ -54,7 +54,44 @@ def collect(output_dir: Path) -> dict:
     ):
         raise ValueError("DRAM evidence contains missing, zero, or non-finite metrics")
     source = source_identity()
-    return {
+    workload = records["trace_manifest"].get("workload")
+    if workload is not None:
+        if not isinstance(workload, dict):
+            raise ValueError("DRAM workload binding is invalid")
+        count = workload.get("sample_count")
+        software = workload.get("software_result")
+        if (
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or count <= 0
+            or not isinstance(software, dict)
+            or software.get("path_base") != "output_dir"
+        ):
+            raise ValueError("DRAM workload binding is incomplete")
+        software_path = output_dir / str(software.get("path", ""))
+        if (
+            not software_path.is_file()
+            or sha256_file(software_path) != software.get("sha256")
+        ):
+            raise ValueError("DRAM workload software result hash mismatch")
+    claim = (
+        "per_inference_workload_proxy"
+        if workload is not None
+        else "functional public proxy only"
+    )
+    metrics = {
+        "trace_requests": requests,
+        "ramulator_memory_cycles": cycles,
+        "ramulator_average_read_latency_cycles": records["ramulator"]["metrics"].get(
+            "average_read_latency_cycles"
+        ),
+        "drampower_offchip_energy_j": energy,
+    }
+    if workload is not None:
+        metrics["drampower_offchip_energy_per_inference_j"] = energy / workload[
+            "sample_count"
+        ]
+    result = {
         "schema_version": "1.0",
         "status": "PASS",
         "provenance": {
@@ -65,14 +102,7 @@ def collect(output_dir: Path) -> dict:
         },
         "evidence_type": "public_memory_system_proxy",
         "paper_lpddr4x_reproduced": False,
-        "metrics": {
-            "trace_requests": requests,
-            "ramulator_memory_cycles": cycles,
-            "ramulator_average_read_latency_cycles": records["ramulator"]["metrics"].get(
-                "average_read_latency_cycles"
-            ),
-            "drampower_offchip_energy_j": energy,
-        },
+        "metrics": metrics,
         "artifacts": {
             key: output_artifact(path, output_dir) for key, path in paths.items()
         },
@@ -80,9 +110,12 @@ def collect(output_dir: Path) -> dict:
             "timing_model": "Ramulator 2.1 LPDDR5-6400",
             "energy_model": "DRAMPower 6.0.2 LPDDR5",
             "paper_interface": "LPDDR4X",
-            "claim": "functional public proxy only",
+            "claim": claim,
         },
     }
+    if workload is not None:
+        result["workload"] = workload
+    return result
 
 
 def main() -> int:

@@ -12,11 +12,13 @@ VALIDATOR = ROOT / "scripts" / "validate_result.py"
 
 def valid_result() -> dict:
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
+        "evidence_class": "deterministic_execution",
         "provenance": {
             "git_commit": "a" * 40,
             "git_dirty": False,
             "source_identity": "git",
+            "source_tree_sha256": "9" * 64,
             "submodules": {
                 "transplat": "b" * 40,
                 "mvsplat": "c" * 40,
@@ -78,13 +80,117 @@ def valid_result() -> dict:
             "speedup": 2.5,
             "cycle_source": "simulated",
             "baseline_source": "diagnostic_device_timing",
+            "stages": {
+                stage: {
+                    "cycles": 100,
+                    "useful_mmcu_slots": 80,
+                    "scheduled_mmcu_slots": 100,
+                    "mmcu_slots_available": True,
+                    "source": "event_simulator",
+                }
+                for stage in ("s1", "s2", "s3", "s4")
+            },
         },
+        "events": {
+            "fsdr": {
+                "total_pixels": 100,
+                "cache_hits": 80,
+                "guided_pixels": 70,
+                "guided_top1_covered": 69,
+                "guided_top1_missed": 1,
+                "discrete_top1_available": True,
+                "full_depth_evaluations": 6400,
+                "executed_depth_evaluations": 2200,
+                "depth_evaluations_available": True,
+                "feature_buffer_bytes_baseline": 1024,
+                "feature_buffer_bytes_actual": 512,
+                "feature_buffer_bytes_available": True,
+                "source": "event_simulator",
+            },
+            "saes": {
+                "total_tiles": 10,
+                "level0_tiles": 2,
+                "level1_tiles": 3,
+                "full_tiles": 5,
+                "tile_path_available": True,
+                "baseline_gaussians": 100,
+                "actual_gaussians": 70,
+                "gaussian_counts_available": True,
+                "full_s2_evaluations": 6400,
+                "executed_s2_evaluations": 4000,
+                "s2_evaluations_available": True,
+                "source": "event_simulator",
+            },
+        },
+        "energy": {"available": False, "source": "not_measured"},
         "ablation": {},
         "fsdr": {},
         "saes": {},
         "hardware": {},
         "validation": {"reproducible": True, "reference_fallback_used": False},
     }
+
+
+def valid_v21_result() -> dict:
+    from saes.execution_dependency import resolve_s2_s3_execution_contract
+
+    record = valid_result()
+    record["schema_version"] = "2.1"
+    record["provenance"].update(
+        {
+            "mechanism_config_sha256": "3" * 64,
+            "model": "transplat",
+            "calibration_provenance": {
+                "status": "calibrated",
+                "manifest_sha256": "4" * 64,
+                "candidate_records_sha256": "5" * 64,
+                "evaluation_disjoint": True,
+                "expected_results_accessed": False,
+                "global_configuration": True,
+            },
+        }
+    )
+    record["events"]["fsdr"].update(
+        {
+            "hamming_hits": 80,
+            "local_valid_hits": 70,
+            "local_invalid_fallbacks": 10,
+            "source": "fsdr_path_event_counter",
+        }
+    )
+    record["events"]["saes"].update(
+        {
+            "l0_representatives": 8,
+            "l1_lightweight_anchors": 24,
+            "full_stage3_gaussians": 50,
+            "assignment_weight_sum_error_max": 1e-7,
+            "opacity_transmittance_error_max": 1e-6,
+            "covariance_psd_violations": 0,
+            "execution_dependency": resolve_s2_s3_execution_contract("transplat"),
+            "s2_s3_saving": {"s2": 0.0, "s3": 0.0},
+        }
+    )
+    return record
+
+
+def test_v21_result_requires_calibration_and_faithful_event_evidence(tmp_path):
+    result = run_validator(tmp_path, valid_v21_result())
+    assert result.returncode == 0, result.stderr
+
+    mutations = (
+        lambda r: r["provenance"].pop("mechanism_config_sha256"),
+        lambda r: r["provenance"]["calibration_provenance"].update(
+            evaluation_disjoint=False
+        ),
+        lambda r: r["events"]["fsdr"].update(local_valid_hits=81),
+        lambda r: r["events"]["saes"].update(covariance_psd_violations=1),
+        lambda r: r["events"]["saes"].pop("execution_dependency"),
+        lambda r: r["events"]["saes"]["s2_s3_saving"].update(s2=0.1),
+    )
+    for mutation in mutations:
+        payload = valid_v21_result()
+        mutation(payload)
+        assert run_validator(tmp_path, payload).returncode != 0
 
 
 def run_validator(tmp_path: Path, payload: dict):
@@ -126,6 +232,9 @@ def test_synthetic_functional_result_is_explicitly_not_paper_eligible(tmp_path):
         (lambda r: r.pop("provenance"), "provenance"),
         (lambda r: r["quality"]["scarf"].pop("lpips"), "lpips"),
         (lambda r: r["performance"].update(scarf_cycles=0), "scarf_cycles"),
+        (lambda r: r.pop("evidence_class"), "evidence_class"),
+        (lambda r: r["events"].pop("fsdr"), "events.fsdr"),
+        (lambda r: r.pop("energy"), "energy"),
         (
             lambda r: r["validation"].update(reference_fallback_used=True),
             "reference_fallback_used",

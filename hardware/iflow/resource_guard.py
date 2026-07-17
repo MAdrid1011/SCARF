@@ -6,38 +6,80 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 MINIMUM_AVAILABLE_BYTES = 48 * 1024**3
 
 
-def check_resources(*, available_bytes: int, active_processes: list[str]) -> dict:
+def vivado_processes(active_processes: list[str]) -> list[str]:
     normalized = [name.lower() for name in active_processes]
-    if any("vivado" in name for name in normalized):
+    return [
+        process
+        for process, normalized_process in zip(active_processes, normalized)
+        if "vivado" in normalized_process
+    ]
+
+
+def require_no_vivado(active_processes: list[str]) -> None:
+    if vivado_processes(active_processes):
         raise RuntimeError("Vivado is active; the SCARF physical flow must wait")
-    if available_bytes < MINIMUM_AVAILABLE_BYTES:
+
+
+def check_resources(
+    *,
+    available_bytes: int,
+    active_processes: list[str],
+    allow_low_memory_attempt: bool = False,
+) -> dict:
+    """Validate the host before a physical run.
+
+    The default path requires enough free memory for an unconstrained full
+    implementation. An explicit low-memory attempt is permitted for evidence
+    collection, but remains visibly labeled in its resource record.
+    """
+
+    require_no_vivado(active_processes)
+    threshold_met = available_bytes >= MINIMUM_AVAILABLE_BYTES
+    if not threshold_met and not allow_low_memory_attempt:
         available_gib = available_bytes / 1024**3
         raise RuntimeError(
             f"physical flow requires 48 GiB available memory, found {available_gib:.1f} GiB"
         )
     return {
         "pass": True,
+        "mode": "standard" if threshold_met else "low_memory_attempt",
         "available_bytes": int(available_bytes),
         "minimum_available_bytes": MINIMUM_AVAILABLE_BYTES,
-        "active_processes": list(active_processes),
+        "available_memory_threshold_met": threshold_met,
+        "allow_low_memory_attempt": bool(allow_low_memory_attempt),
+        "active_vivado_processes": vivado_processes(active_processes),
     }
 
 
-def available_memory_bytes(path: Path = Path("/proc/meminfo")) -> int:
+def memory_snapshot(path: Path = Path("/proc/meminfo")) -> dict[str, int]:
     fields = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         key, value = line.split(":", 1)
         fields[key] = value.strip()
-    text = fields.get("MemAvailable")
-    if text is None or not text.endswith(" kB"):
-        raise ValueError("/proc/meminfo has no MemAvailable field")
-    return int(text[:-3].strip()) * 1024
+    values = {}
+    for name in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree"):
+        text = fields.get(name)
+        if text is None or not text.endswith(" kB"):
+            raise ValueError(f"/proc/meminfo has no {name} field")
+        values[name] = int(text[:-3].strip()) * 1024
+    return {
+        "mem_total_bytes": values["MemTotal"],
+        "mem_available_bytes": values["MemAvailable"],
+        "swap_total_bytes": values["SwapTotal"],
+        "swap_free_bytes": values["SwapFree"],
+        "swap_used_bytes": values["SwapTotal"] - values["SwapFree"],
+    }
+
+
+def available_memory_bytes(path: Path = Path("/proc/meminfo")) -> int:
+    return memory_snapshot(path)["mem_available_bytes"]
 
 
 def process_names() -> list[str]:
@@ -52,11 +94,35 @@ def process_names() -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--allow-low-memory-attempt",
+        action="store_true",
+        help="Run unchanged physical stages below 48 GiB and label the evidence.",
+    )
+    parser.add_argument(
+        "--snapshot-only",
+        action="store_true",
+        help="Record host memory and reject newly active Vivado without a RAM threshold.",
+    )
     args = parser.parse_args()
     try:
-        record = check_resources(
-            available_bytes=available_memory_bytes(), active_processes=process_names()
-        )
+        snapshot = memory_snapshot()
+        processes = process_names()
+        if args.snapshot_only:
+            require_no_vivado(processes)
+            record = {
+                "pass": True,
+                "mode": "snapshot",
+                "active_vivado_processes": vivado_processes(processes),
+            }
+        else:
+            record = check_resources(
+                available_bytes=snapshot["mem_available_bytes"],
+                active_processes=processes,
+                allow_low_memory_attempt=args.allow_low_memory_attempt,
+            )
+        record["timestamp_utc"] = datetime.now(timezone.utc).isoformat()
+        record["memory"] = snapshot
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}")
         return 2

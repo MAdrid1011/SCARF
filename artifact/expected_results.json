@@ -18,7 +18,34 @@
     "depthsplat/dl3dv": {"baseline": [26.93, 0.885, 0.157], "scarf": [26.98, 0.886, 0.156]}
   },
   "figure8": {"geometric_mean_speedup": 2.94},
+  "figure9": {
+    "paper_comparison_target": {
+      "transplat/re10k": {"energy_efficiency": {"orin_nx": 1.0, "tsmc28": 36.2, "nm8_equivalent": 71.5}, "throughput_per_area": {"orin_nx": 1.0, "tsmc28": 16.9, "nm8_equivalent": 58.0}},
+      "transplat/acid": {"energy_efficiency": {"orin_nx": 1.0, "tsmc28": 38.3, "nm8_equivalent": 75.7}, "throughput_per_area": {"orin_nx": 1.0, "tsmc28": 17.8, "nm8_equivalent": 61.1}},
+      "transplat/dl3dv": {"energy_efficiency": {"orin_nx": 1.0, "tsmc28": 33.5, "nm8_equivalent": 66.2}, "throughput_per_area": {"orin_nx": 1.0, "tsmc28": 15.6, "nm8_equivalent": 53.5}},
+      "mvsplat/re10k": {"energy_efficiency": {"orin_nx": 1.0, "tsmc28": 31.6, "nm8_equivalent": 62.4}, "throughput_per_area": {"orin_nx": 1.0, "tsmc28": 14.8, "nm8_equivalent": 50.8}},
+      "mvsplat/acid": {"energy_efficiency": {"orin_nx": 1.0, "tsmc28": 33.5, "nm8_equivalent": 66.2}, "throughput_per_area": {"orin_nx": 1.0, "tsmc28": 15.7, "nm8_equivalent": 53.8}},
+      "mvsplat/dl3dv": {"energy_efficiency": {"orin_nx": 1.0, "tsmc28": 29.5, "nm8_equivalent": 58.3}, "throughput_per_area": {"orin_nx": 1.0, "tsmc28": 13.8, "nm8_equivalent": 47.3}},
+      "depthsplat/re10k": {"energy_efficiency": {"orin_nx": 1.0, "tsmc28": 36.3, "nm8_equivalent": 71.7}, "throughput_per_area": {"orin_nx": 1.0, "tsmc28": 16.9, "nm8_equivalent": 58.0}},
+      "depthsplat/acid": {"energy_efficiency": {"orin_nx": 1.0, "tsmc28": 37.9, "nm8_equivalent": 74.9}, "throughput_per_area": {"orin_nx": 1.0, "tsmc28": 17.6, "nm8_equivalent": 60.4}},
+      "depthsplat/dl3dv": {"energy_efficiency": {"orin_nx": 1.0, "tsmc28": 34.8, "nm8_equivalent": 68.8}, "throughput_per_area": {"orin_nx": 1.0, "tsmc28": 16.2, "nm8_equivalent": 55.6}}
+    }
+  },
   "ablation": {"fsdr": 1.35, "saes": 1.26, "combined": 1.59},
+  "figure12": {
+    "tolerance_absolute": 0.02,
+    "utilization": {
+      "transplat/re10k": {"s1": 0.968, "s2": 0.665, "s3": 0.789},
+      "mvsplat/re10k": {"s1": 0.968, "s2": 0.816, "s3": 0.768},
+      "depthsplat/re10k": {"s1": 1.000, "s2": 0.872, "s3": 0.739},
+      "transplat/acid": {"s1": 0.968, "s2": 0.685, "s3": 0.766},
+      "mvsplat/acid": {"s1": 0.968, "s2": 0.840, "s3": 0.746},
+      "depthsplat/acid": {"s1": 1.000, "s2": 0.892, "s3": 0.714},
+      "transplat/dl3dv": {"s1": 0.968, "s2": 0.630, "s3": 0.807},
+      "mvsplat/dl3dv": {"s1": 0.968, "s2": 0.775, "s3": 0.811},
+      "depthsplat/dl3dv": {"s1": 1.000, "s2": 0.847, "s3": 0.764}
+    }
+  },
   "mechanism_tolerance_absolute": 0.02,
   "mechanisms": {
     "transplat/re10k": {"guided_rate": 0.721, "top1_coverage": 0.9991, "level0_rate": 0.172, "level1_rate": 0.148, "low_variance_agreement": 1.0, "gaussians_saved": 0.202},
@@ -44,7 +71,34 @@
     "total_power_w": 2.092,
     "frequency_mhz": 1000.0,
     "includes_lpddr4x_phy_and_io": true,
-    "reproduction_claimed": false
+    "reproduction_claimed": false,
+    "hierarchy": {
+      "mvu": {"area_mm2": 15.35, "dynamic_power_w": 1.1336, "static_power_w": 0.0823},
+      "mvu_mmcu": {"area_mm2": 14.0, "dynamic_power_w": 1.016, "static_power_w": 0.0738},
+      "mvu_vector_alu": {"area_mm2": 0.50, "dynamic_power_w": 0.0467, "static_power_w": 0.0021},
+      "mvu_bilinear_unit": {"area_mm2": 0.82, "dynamic_power_w": 0.0619, "static_power_w": 0.0048},
+      "mvu_norm_unit": {"area_mm2": 0.02, "dynamic_power_w": 0.0058, "static_power_w": 0.0009},
+      "mvu_activation_unit": {"area_mm2": 0.01, "dynamic_power_w": 0.0032, "static_power_w": 0.0007},
+      "ggu_array": {"area_mm2": 4.80, "dynamic_power_w": 0.3146, "static_power_w": 0.0256},
+      "ggu_position_calc": {"area_mm2": 0.65, "dynamic_power_w": 0.0421, "static_power_w": 0.0034},
+      "ggu_cov_builder": {"area_mm2": 1.35, "dynamic_power_w": 0.0893, "static_power_w": 0.0072},
+      "ggu_sh_op_generator": {"area_mm2": 2.80, "dynamic_power_w": 0.1832, "static_power_w": 0.0150},
+      "fsdr_subsystem": {"area_mm2": 0.08, "dynamic_power_w": 0.0153, "static_power_w": 0.0012},
+      "fsdr_lsh_hash_unit": {"area_mm2": 0.03, "dynamic_power_w": 0.0061, "static_power_w": 0.0005},
+      "fsdr_cam_array": {"area_mm2": 0.04, "dynamic_power_w": 0.0078, "static_power_w": 0.0005},
+      "fsdr_controller": {"area_mm2": 0.01, "dynamic_power_w": 0.0014, "static_power_w": 0.0002},
+      "on_chip_buffers": {"area_mm2": 1.26, "dynamic_power_w": 0.1533, "static_power_w": 0.0187},
+      "on_chip_buffers_weight_buffer": {"area_mm2": 0.38, "dynamic_power_w": 0.0412, "static_power_w": 0.0063},
+      "on_chip_buffers_feature_buffer": {"area_mm2": 0.70, "dynamic_power_w": 0.0894, "static_power_w": 0.0101},
+      "on_chip_buffers_tile_buffer": {"area_mm2": 0.18, "dynamic_power_w": 0.0227, "static_power_w": 0.0023},
+      "control_and_clock": {"area_mm2": 0.47, "dynamic_power_w": 0.0862, "static_power_w": 0.0052},
+      "control_interconnect": {"area_mm2": 0.32, "dynamic_power_w": 0.0278, "static_power_w": 0.0014},
+      "pll_clock_tree": {"area_mm2": 0.15, "dynamic_power_w": 0.0584, "static_power_w": 0.0038},
+      "io_phy": {"area_mm2": 3.50, "dynamic_power_w": 0.244, "static_power_w": 0.012},
+      "io_lpddr4x_phy": {"area_mm2": 3.50, "dynamic_power_w": 0.244, "static_power_w": 0.012},
+      "routing_filler": {"area_mm2": 2.32, "dynamic_power_w": null, "static_power_w": null},
+      "total_die": {"area_mm2": 27.8, "dynamic_power_w": null, "static_power_w": null, "total_power_w": 2.092}
+    }
   },
   "sensitivity_expected_runs": 225,
   "sensitivity_claims": {

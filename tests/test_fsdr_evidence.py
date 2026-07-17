@@ -28,6 +28,12 @@ def _provenance(index: int):
         },
         "environment": {"profile": "classic", "digest_sha256": "1" * 64},
         "runtime_assets": {"asset": {"sha256": "2" * 64}},
+        "target_rgb": {
+            "loaded_by_native_dataloader": True,
+            "removed_before_device_transfer_or_execution": True,
+            "passed_to_model": False,
+            "used_for_routing_or_metric": False,
+        },
         "command": ["python", "scripts/demo.py", "--fsdr-only"],
         "seed": 0,
         "device": {"type": "cuda", "name": "test"},
@@ -138,3 +144,48 @@ def test_fsdr_record_rejects_continuous_window_counts_as_top1_evidence():
 
     with pytest.raises(ValueError, match="top1_coverage"):
         validate_fsdr_record(record)
+
+
+def test_fsdr_record_rejects_target_rgb_execution_or_routing():
+    from scripts.fsdr_evidence import validate_fsdr_record
+
+    record = _sample(0, 1000, 720, 720)
+    record["provenance"]["target_rgb"]["passed_to_model"] = True
+
+    with pytest.raises(ValueError, match="target RGB"):
+        validate_fsdr_record(record)
+
+
+def test_target_free_fsdr_audit_cannot_be_aggregated_as_claim_evidence():
+    from scripts.fsdr_evidence import (
+        aggregate_fsdr_records,
+        build_fsdr_sample_record,
+        validate_fsdr_record,
+    )
+
+    provenance = _provenance(0)
+    provenance["dataset"]["paper_result_eligible"] = False
+    record = build_fsdr_sample_record(
+        provenance=provenance,
+        kind="fsdr_target_free_audit",
+        total_pixels=1000,
+        cache_hits=720,
+        cache_misses=280,
+        guided_pixels=720,
+        guided_in_window=720,
+        guided_out_window=0,
+        guided_top1_covered=719,
+        guided_top1_missed=1,
+        depth_inconsistent=0,
+        hit_no_guide=0,
+        full_depth_candidates=128,
+        narrowed_depth_candidates=32,
+        candidate_domain="inverse_depth",
+        probability_source="pinned_original_depth_head_softmax",
+        evidence_height=8,
+        evidence_width=8,
+    )
+    validate_fsdr_record(record)
+    assert record["validation"]["paper_result_eligible"] is False
+    with pytest.raises(ValueError, match="aggregate inputs"):
+        aggregate_fsdr_records([record], expected_count=1)

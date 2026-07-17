@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aggregate FSDR sample counters and compare them with paper Table 2."""
+"""Aggregate FSDR sample counters without reading paper targets."""
 
 from __future__ import annotations
 
@@ -14,12 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.fsdr_evidence import (
-    aggregate_fsdr_records,
-    compare_fsdr_aggregate,
-    validate_fsdr_record,
-    write_json,
-)
+from scripts.fsdr_evidence import aggregate_fsdr_records, validate_fsdr_record, write_json
 from scripts.result_record import portable_command
 
 
@@ -35,9 +30,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--expected-count", type=int, required=True)
-    parser.add_argument("--expected-results", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--require-match", action="store_true")
     args = parser.parse_args()
     try:
         paths = sorted(args.input_dir.glob("sample_*/results.json"))
@@ -61,18 +54,12 @@ def main() -> int:
             }
             for path, record in zip(paths, records)
         ]
-        expected = json.loads(args.expected_results.read_text(encoding="utf-8"))
-        aggregate["paper_comparison"] = compare_fsdr_aggregate(
-            aggregate, expected
-        )
         validate_fsdr_record(aggregate)
         write_json(aggregate, args.output)
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     print(args.output)
-    if args.require_match and aggregate["paper_comparison"]["status"] != "PASS":
-        return 1
     return 0
 
 

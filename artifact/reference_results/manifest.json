@@ -215,8 +215,8 @@
       "size": 14
     },
     "evidence/reports/figure_catalog.json": {
-      "sha256": "e6829e0ee0b5020a9838403b6cba863857a96fc8340fd81788f116aba30fbecf",
-      "size": 317
+      "sha256": "f043ae7301f11c64bcd7f66f0fd593f6569a3cb4da9876f6f1841850dd89bb6d",
+      "size": 8204
     },
     "evidence/reports/hardware_comparison.csv": {
       "sha256": "2fa1cff0f0c567118efebf0834dea7dcac76fe02c9cd5caed7747668338d1f0b",
@@ -231,12 +231,16 @@
       "size": 102
     },
     "evidence/reports/table2_fsdr.csv": {
-      "sha256": "265cb71aea64b974b9350ec5a2ccac7f7f41e60c0a6c1ae244489b1058434c75",
-      "size": 32
+      "sha256": "6f201e98113cb78184fc9eac476242e4f25ac260bc8160eae2cf8ed5c77e0a21",
+      "size": 140
     },
     "evidence/reports/table3_saes.csv": {
-      "sha256": "6f5ef87105d2b1b95507b787ece1c884380efdacdc506f128a1394bea55729d0",
-      "size": 69
+      "sha256": "eb80fda3df3d3979a1e3147719adb5e4e87cb92c0973a08460bdef791a5fd36d",
+      "size": 123
+    },
+    "evidence/reports/table4_hierarchy.csv": {
+      "sha256": "3e4d1a2c8bbd9e8efffcdcd943746ff1febf52a12573afb16504acb13387f29b",
+      "size": 195
     },
     "evidence/rtl/emit.log": {
       "sha256": "46bf8263dc17de28037e68a1b6864ccd1155f6e2c999b768b6016d428ad3f873",

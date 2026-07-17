@@ -1,0 +1,32 @@
+{
+  "datasets": {
+    "acid": {
+      "index_path": "artifact/protocol/reviewer/acid.json",
+      "null_entry_count": 0,
+      "sample_count": 512,
+      "sample_selection_sha256": "fbe962ec0214176717339c26090a296b2aea8a416d9b409b8a022aafe4a03085",
+      "source_entry_count": 512,
+      "source_index_sha256": "8308f2339b22308a24b0a7d6bb19582500350abc8f66c59ca8fcc9ab1c370758"
+    },
+    "dl3dv": {
+      "index_path": "artifact/protocol/reviewer/dl3dv.json",
+      "null_entry_count": 0,
+      "sample_count": 140,
+      "sample_selection_sha256": "a2b432a5513cec757bc7f5a03c8f424029a856b02fb6a22125a21a61b71cb63e",
+      "source_entry_count": 140,
+      "source_index_sha256": "e2e8c3de617cb0fd211c354f08c76583333cc565b217bd155d59b85e06263b2c"
+    },
+    "re10k": {
+      "index_path": "artifact/protocol/reviewer/re10k.json",
+      "null_entry_count": 0,
+      "sample_count": 512,
+      "sample_selection_sha256": "9d45c99078d5832fa3e4acbf921e9d450822c8de256bc1da85c07c9056ee6c10",
+      "source_entry_count": 512,
+      "source_index_sha256": "05a420098c1f464686966f5d698faa23c9acb19235ee841bf73f06c6dc15419a"
+    }
+  },
+  "domain": "SCARF-AE-reviewer-v1",
+  "kind": "reviewer_evidence_profile",
+  "schema_version": "1.0",
+  "selection_sha256": "f2216fd308639872b1c8a6f01c606877070463c2784f60932542ee5853865bd9"
+}

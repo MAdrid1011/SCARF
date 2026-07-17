@@ -73,6 +73,20 @@ def test_cli_preserves_raw_record_and_writes_provenance(tmp_path):
             "logic_area_mm2": 1.0,
             "critical_path_ns": 0.5,
             "total_power_w": 2.0,
+            "hierarchy": {
+                "mmcu": {
+                    "area_mm2": 0.4,
+                    "dynamic_power_w": 0.8,
+                    "static_power_w": 0.1,
+                    "total_power_w": 0.9,
+                },
+                "sram_proxy": {
+                    "area_mm2": 0.2,
+                    "dynamic_power_w": None,
+                    "static_power_w": None,
+                    "total_power_w": None,
+                },
+            },
         },
     }
     result, output = run_scale(tmp_path, raw)
@@ -84,6 +98,13 @@ def test_cli_preserves_raw_record_and_writes_provenance(tmp_path):
     assert scaled["target_process"] == "28 nm equivalent"
     assert scaled["scaling"]["tool"] == "DeepScaleTool"
     assert scaled["scaled_metrics"]["logic_area_mm2"] == pytest.approx(31.8181818)
+    assert scaled["scaled_hierarchy"]["mmcu"]["area_mm2"] == pytest.approx(
+        0.4 * 31.8181818
+    )
+    assert scaled["scaled_hierarchy"]["mmcu"]["total_power_w"] == pytest.approx(
+        0.9 / 0.375
+    )
+    assert scaled["scaled_hierarchy"]["sram_proxy"]["total_power_w"] is None
 
 
 def test_cli_rejects_invalid_or_incomplete_physical_record(tmp_path):

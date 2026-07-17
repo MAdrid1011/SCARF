@@ -10,12 +10,16 @@ import scarf.ScarfConfig
  * Projects feature vector onto K random hyperplanes (ProjROM),
  * accumulates via MAC units, extracts sign bits, packs into K-bit signature.
  *
- * Latency: ceil(D / VectorALUWidth) + 1 = 3 cycles for D=128, ALU=64.
+ * Uses one signed MAC per hash bit and streams one feature per cycle.
+ * Latency: D projection cycles + 1 pack cycle.
  */
 class LSHHashUnit(
   val lshDim: Int = ScarfConfig.LSHDim,
   val featureDim: Int = ScarfConfig.LSHFeatureDim,
 ) extends Module {
+  require(lshDim == LSHProjectionROM.Rows)
+  require(featureDim == LSHProjectionROM.Columns)
+
   val io = IO(new Bundle {
     val featureIn   = Input(Vec(featureDim, UInt(ScarfConfig.DataWidth.W)))
     val start       = Input(Bool())
@@ -23,19 +27,33 @@ class LSHHashUnit(
     val signature   = Output(UInt(lshDim.W))
   })
 
-  // ProjROM: K rows × D columns (FP16), inferred as ROM by synthesis
-  val projMatrix = RegInit(VecInit(Seq.fill(lshDim)(
-    VecInit(Seq.fill(featureDim)(0.U(ScarfConfig.DataWidth.W)))
-  )))
+  // FP16 operands are normalized to [-1, 1]. Every such binary16 value can
+  // be decoded exactly as a signed Q1.24 integer before the MAC.
+  private def fp16ToQ24(bits: UInt): SInt = {
+    val exponent = bits(14, 10)
+    val fraction = bits(9, 0)
+    val mantissa = Mux(exponent === 0.U, fraction.pad(11), Cat(1.U(1.W), fraction))
+    val shift = Mux(exponent === 0.U, 0.U, exponent - 1.U)
+    val magnitude = Wire(UInt(32.W))
+    magnitude := (mantissa << shift)(31, 0)
+    Mux(bits(15), -magnitude.asSInt, magnitude.asSInt)
+  }
+
+  // Seed-42 normalized hyperplanes, stored as IEEE-754 binary16 bit patterns.
+  val projMatrix = VecInit(LSHProjectionROM.fp16Bits.map(row =>
+    VecInit(row.map(value => value.U(ScarfConfig.DataWidth.W)))
+  ))
 
   val sIdle :: sProject :: sPack :: sDone :: Nil = Enum(4)
   val state = RegInit(sIdle)
 
-  // MAC accumulators (one per hyperplane)
-  val accum = RegInit(VecInit(Seq.fill(lshDim)(0.U(ScarfConfig.AccWidth.W))))
+  // Q2.48 products need 55 signed bits for a 128-term dot product. Keep
+  // additional headroom so chunk additions cannot truncate the sign.
+  val accumWidth = 72
+  val accum = RegInit(VecInit(Seq.fill(lshDim)(0.S(accumWidth.W))))
 
   val elemIdx = RegInit(0.U(log2Ceil(featureDim + 1).W))
-  val chunkSize = ScarfConfig.VectorALUWidth
+  val chunkSize = 1
 
   val sigReg = RegInit(0.U(lshDim.W))
 
@@ -47,20 +65,19 @@ class LSHHashUnit(
       when(io.start) {
         state := sProject
         elemIdx := 0.U
-        for (k <- 0 until lshDim) { accum(k) := 0.U }
+        for (k <- 0 until lshDim) { accum(k) := 0.S }
       }
     }
     is(sProject) {
       for (k <- 0 until lshDim) {
-        var partialSum = 0.U(ScarfConfig.AccWidth.W)
-        for (j <- 0 until chunkSize) {
+        val products = (0 until chunkSize).map { j =>
           val idx = elemIdx + j.U
           val idxTrunc = idx(log2Ceil(featureDim) - 1, 0)
-          val product = Mux(idx < featureDim.U,
-            (projMatrix(k)(idxTrunc) * io.featureIn(idxTrunc))(ScarfConfig.AccWidth - 1, 0),
-            0.U)
-          partialSum = partialSum + product
+          val feature = fp16ToQ24(io.featureIn(idxTrunc))
+          val projection = fp16ToQ24(projMatrix(k)(idxTrunc))
+          Mux(idx < featureDim.U, feature * projection, 0.S(64.W))
         }
+        val partialSum = products.reduce(_ +& _)
         accum(k) := accum(k) + partialSum
       }
       elemIdx := elemIdx + chunkSize.U
@@ -72,7 +89,7 @@ class LSHHashUnit(
       // Sign extraction + bit packing
       val sigBits = Wire(Vec(lshDim, Bool()))
       for (k <- 0 until lshDim) {
-        sigBits(k) := !accum(k)(ScarfConfig.AccWidth - 1)
+        sigBits(k) := accum(k) >= 0.S
       }
       sigReg := sigBits.asUInt
       state := sDone

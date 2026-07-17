@@ -106,6 +106,39 @@ def test_execution_manifest_archival_copy_normalizes_local_paths(tmp_path):
     assert '"applied": true' in portable
 
 
+def test_execution_manifest_normalizes_declared_archive_root(tmp_path):
+    from scripts.stage_reference_results import portable_execution_manifest
+
+    archive_root = tmp_path / "extracted/SCARF-AE-source-v1.0.0"
+    manifest = tmp_path / "manifest-quick.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "root": str(archive_root),
+                "commands": [
+                    [
+                        "/opt/author/miniconda/bin/python3",
+                        str(archive_root / "scripts/run_ae.py"),
+                    ]
+                ],
+                "dataset_commands": [],
+                "experiments": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    portable = portable_execution_manifest(
+        manifest,
+        repository_root=tmp_path / "staging/repository",
+        orchestrator_python=Path("/different/staging/env/bin/python"),
+    ).decode()
+
+    assert str(archive_root) not in portable
+    assert "$SCARF_ROOT/scripts/run_ae.py" in portable
+    assert "/opt/author" not in portable
+
+
 def test_execution_manifest_normalizes_top_level_orchestrator_commands(tmp_path):
     from scripts.stage_reference_results import portable_execution_manifest
 

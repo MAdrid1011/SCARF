@@ -79,6 +79,46 @@ def test_contract_finalizer_accepts_only_passing_representation_validation(tmp_p
     )
 
 
+def test_contract_finalizer_rejects_dl3dv_source_drift(tmp_path: Path):
+    from data.finalize_dataset_contract import finalize
+
+    root = Path(__file__).resolve().parents[1]
+    protocol = json.loads((root / "artifact/evaluation_protocol.json").read_text())
+    manifest = json.loads((root / "artifact/manifests/datasets.json").read_text())
+    protocol_path = tmp_path / "protocol.json"
+    manifest_path = tmp_path / "datasets.json"
+    protocol_path.write_text(json.dumps(protocol), encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    validation = tmp_path / "validation.json"
+    pair = protocol["pairs"]["depthsplat/dl3dv"]
+    validation.write_text(
+        json.dumps(
+            {
+                "kind": "prepared_dataset_validation",
+                "status": "PASS",
+                "representation": "depthsplat-native-270x480-v1",
+                "tree": {
+                    "tree_sha256": "a" * 64,
+                    "source": "https://example.invalid/dl3dv",
+                    "revision": manifest["datasets"]["dl3dv"]["prepared_source_revision"],
+                },
+                "selection": {
+                    "source_index_sha256": pair["source_index_sha256"],
+                    "sample_selection_sha256": pair["sample_selection_sha256"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="DL3DV native prepared source"):
+        finalize(
+            protocol_path,
+            manifest_path,
+            {"depthsplat-native-270x480-v1": validation},
+        )
+
+
 def test_prepared_scene_order_matches_sorted_chunks_and_in_chunk_order(tmp_path: Path):
     torch = pytest.importorskip("torch")
     from data.verify_prepared_dataset import prepared_scene_order

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
@@ -9,6 +10,7 @@ import torch
 from torch import nn
 
 from encoder import ActivationType, ActivationUnit, ConvEngine
+from encoder.mmcu_events import mmcu_stage
 
 
 @dataclass(frozen=True)
@@ -19,7 +21,7 @@ class ModuleCycleTrace:
 
 
 def run_module_with_cycle_trace(
-    module: nn.Module, *args: Any, **kwargs: Any
+    module: nn.Module, *args: Any, mmcu_stage_name: str | None = None, **kwargs: Any
 ) -> ModuleCycleTrace:
     """Execute a module once and count its mapped Conv/activation layers."""
     conv = ConvEngine()
@@ -44,14 +46,26 @@ def run_module_with_cycle_trace(
             return
         input_tensor = inputs[0]
         if isinstance(layer, nn.Conv2d):
-            stats = conv._compute_cycles(
-                input_tensor, layer.weight, output, layer.stride[0]
+            context = (
+                mmcu_stage(mmcu_stage_name)
+                if mmcu_stage_name is not None
+                else contextlib.nullcontext()
             )
+            with context:
+                stats = conv._compute_cycles(
+                    input_tensor, layer.weight, output, layer.stride[0]
+                )
             breakdown["conv2d"] += stats.total_cycles
         elif isinstance(layer, nn.ConvTranspose2d):
-            stats = conv._compute_transposed_cycles(
-                input_tensor, layer.weight, output
+            context = (
+                mmcu_stage(mmcu_stage_name)
+                if mmcu_stage_name is not None
+                else contextlib.nullcontext()
             )
+            with context:
+                stats = conv._compute_transposed_cycles(
+                    input_tensor, layer.weight, output
+                )
             breakdown["conv_transpose2d"] += stats.total_cycles
         else:
             for layer_type, (name, unit) in activations.items():
@@ -83,7 +97,7 @@ def run_module_with_cycle_trace(
 
 
 def run_callable_with_module_cycle_trace(
-    function: Callable[[], Any], modules: Iterable[nn.Module]
+    function: Callable[[], Any], modules: Iterable[nn.Module], *, mmcu_stage_name: str | None = None
 ) -> ModuleCycleTrace:
     """Trace selected module trees while a larger callable executes once."""
     conv = ConvEngine()
@@ -109,14 +123,26 @@ def run_callable_with_module_cycle_trace(
             return
         input_tensor = inputs[0]
         if isinstance(layer, nn.Conv2d):
-            stats = conv._compute_cycles(
-                input_tensor, layer.weight, output, layer.stride[0]
+            context = (
+                mmcu_stage(mmcu_stage_name)
+                if mmcu_stage_name is not None
+                else contextlib.nullcontext()
             )
+            with context:
+                stats = conv._compute_cycles(
+                    input_tensor, layer.weight, output, layer.stride[0]
+                )
             breakdown["conv2d"] += stats.total_cycles
         elif isinstance(layer, nn.ConvTranspose2d):
-            stats = conv._compute_transposed_cycles(
-                input_tensor, layer.weight, output
+            context = (
+                mmcu_stage(mmcu_stage_name)
+                if mmcu_stage_name is not None
+                else contextlib.nullcontext()
             )
+            with context:
+                stats = conv._compute_transposed_cycles(
+                    input_tensor, layer.weight, output
+                )
             breakdown["conv_transpose2d"] += stats.total_cycles
         else:
             for layer_type, (name, unit) in activations.items():

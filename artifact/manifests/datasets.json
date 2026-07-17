@@ -14,24 +14,24 @@
       }
     },
     "dl3dv": {
-      "prepared_source": "https://huggingface.co/datasets/DL3DV/DL3DV-Benchmark",
+      "prepared_source": "https://huggingface.co/datasets/DL3DV/DL3DV-10K-Benchmark",
       "prepared_source_revision": "9684e8382278c5e18173c1e72bd246daf2874539",
       "representations": {
         "native": {
           "path": "datasets/dl3dv/native",
           "schema": "depthsplat-native-270x480-v1",
-          "expected_tree_sha256": null
+          "expected_tree_sha256": "7ce97805b7b445dc3571d145a15a2efc3336dc05b88fc2fa26c6322511d7529a"
         },
         "re10k": {
           "path": "datasets/dl3dv/re10k",
           "schema": "re10k-compatible-360x640-v1",
-          "expected_tree_sha256": null
+          "expected_tree_sha256": "4ea2b8a5794ffac079c986a2a3c94756f27bc90aa287524022fd866c4b6c6ef9"
         }
       },
       "license": {
         "status": "verified_no_redistribution",
         "identifier": "Gated source access does not grant redistribution rights",
-        "terms_url": "https://huggingface.co/datasets/DL3DV/DL3DV-Benchmark",
+        "terms_url": "https://huggingface.co/datasets/DL3DV/DL3DV-10K-Benchmark",
         "reviewed_on": "2026-07-13",
         "redistribution_in_zenodo": false
       }

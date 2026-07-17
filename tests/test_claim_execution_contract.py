@@ -66,7 +66,7 @@ def test_full_claim_dry_run_passes_index_to_pair_worker(
     plan = runner.build_plan(
         Namespace(mode="quality", output_root=tmp_path, python=None, num_samples=None)
     )
-    assert len(plan["experiments"]) == 6
+    assert len(plan["experiments"]) == 9
     for experiment in plan["experiments"]:
         command = experiment["command"]
         assert command[1].endswith("scripts/run_pair.py")

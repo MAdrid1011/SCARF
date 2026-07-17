@@ -38,6 +38,7 @@ class ConfigRegs extends Module {
   val fsdrEnabled        = RegInit(true.B)
   val fsdrCacheSize      = RegInit(512.U(10.W))
   val fsdrHammingThresh  = RegInit(3.U(4.W))
+  val fsdrDepthValidThresh = RegInit(102.U(10.W))
   val configValidReg     = RegInit(false.B)
 
   when(io.writeEn) {
@@ -60,6 +61,7 @@ class ConfigRegs extends Module {
       is(0x3C.U) { fsdrCacheSize := io.writeData(9, 0) }
       is(0x40.U) { fsdrHammingThresh := io.writeData(3, 0) }
       is(0x44.U) { configValidReg := io.writeData(0) }
+      is(0x48.U) { fsdrDepthValidThresh := io.writeData(9, 0) }
     }
   }
 
@@ -83,6 +85,7 @@ class ConfigRegs extends Module {
     is(0x3C.U) { io.readData := Cat(0.U(22.W), fsdrCacheSize) }
     is(0x40.U) { io.readData := Cat(0.U(28.W), fsdrHammingThresh) }
     is(0x44.U) { io.readData := Cat(0.U(31.W), configValidReg.asUInt) }
+    is(0x48.U) { io.readData := Cat(0.U(22.W), fsdrDepthValidThresh) }
   }
 
   io.config.numDepthCandidates := numDepthCandidates
@@ -102,5 +105,6 @@ class ConfigRegs extends Module {
   io.config.fsdrEnabled        := fsdrEnabled
   io.config.fsdrCacheSize      := fsdrCacheSize
   io.config.fsdrHammingThresh  := fsdrHammingThresh
+  io.config.fsdrDepthValidThresh := fsdrDepthValidThresh
   io.configValid               := configValidReg
 }
