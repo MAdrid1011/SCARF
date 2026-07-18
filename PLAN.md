@@ -1626,19 +1626,23 @@
   branch. A synthetic pass only permits a new target-free-audit preregistration;
   a target-free pass alone does not authorize a quality retry, which remains
   blocked on the fixed failure record and disjoint calibration.
-- Synthetic result (2026-07-18, source `43dfd37`): the isolated virtual path
-  now accepts only selected means/covariances/S2 depths/positions, assignment
-  rows, skipped positions, and context-camera geometry. It writes skipped
-  descriptors directly, so the retained-anchor update cannot apply assignment
-  a second time. The full SAES test collection passed `158` tests (one upstream
-  `skvideo` deprecation warning), including constant and one-hot geometry,
-  exact alpha `1.0` constants, nonidentity TranSplat adapter geometry,
-  assignment-squaring rejection, anchor permutation, L0/L1 selected/skipped
-  poison, route/event equivalence, PSD/finite checks, and atomic multi-slot
-  Full fallback. The analytic ledger separately charges successful virtual
-  outputs and a conservative full virtual attempt before any fail-closed
-  fallback. No DL3DV audit, render, quality metric, target RGB read, or sparse
-  execution claim was run or created by this result.
+- Synthetic result correction (2026-07-18): the source `43dfd37` pass is
+  invalidated as selected-only evidence. Its atomic Full fallback first cloned
+  all tile descriptors, which read skipped raw S3 attributes even though later
+  writes restored them. The corrected `92dec5c` implementation builds
+  selected-anchor-only virtual plans without writing outputs, and commits them
+  only after every primitive slot validates; `968563d` also accepts the valid
+  no-output case where the anchor layout covers an entire tile. The full SAES
+  collection now passes `164` tests (one upstream `skvideo` deprecation
+  warning), including constant and one-hot geometry, exact alpha `1.0`
+  constants, nonidentity TranSplat adapter geometry, assignment-squaring
+  rejection, anchor permutation, L0/L1 selected/skipped poison, selected-read
+  guards with default materialization guard enabled, route/event equivalence,
+  PSD/finite checks, and atomic multi-slot Full fallback. The analytic ledger
+  separately charges successful virtual outputs and a conservative full virtual
+  attempt before any fail-closed fallback. No DL3DV audit, render, quality
+  metric, target RGB read, or sparse execution claim was run or created by
+  either state.
 
 ## 34. DL3DV Training-Calibration Preparation
 

@@ -45,12 +45,16 @@
   The shadow's rejected-to-Full tiles have higher SH/opacity error but
   same-order covariance/coverage error, so guard-threshold repair is rejected.
   The guard policy, thresholds, and failed quality gate remain frozen.
-- Latest synthetic gate: source `43dfd37` implements the selected-anchor-only
-  assignment-consensus pseudo-descriptor as a direct virtual skipped-output
-  diagnostic. `158` SAES tests pass, including alpha-1 constant exactness,
-  nonidentity C2W adapter geometry, no assignment squaring, L0/L1 poison and
-  route/event invariance, PSD/full-tile failure, and non-free aborted-work
-  accounting. It has zero compression and remains non-paper-eligible.
+- Synthetic-gate correction: the earlier `43dfd37` result is invalidated as
+  selected-only evidence because its atomic fallback snapshot cloned raw S3
+  descriptors for every tile position, including skipped outputs. No DL3DV
+  audit, render, quality metric, or sparse claim was produced from that state.
+  The corrected `92dec5c`/`968563d` path defers virtual-output writes until all
+  primitive slots validate, so it never needs a skipped-S3 rollback snapshot.
+  `164` SAES tests pass, including selected-read guards with the default
+  materialization guard enabled for both success and later-slot Full fallback,
+  plus valid L0/L1 no-op handling when every tile position is an anchor. The
+  diagnostic remains zero-compression and non-paper-eligible.
 - Next action: separately pre-register, but do not yet run, one fixed
   target-free DL3DV virtual-output audit for this candidate. It cannot alter
   the sparse claim path, save Gaussians, or authorize quality. The fixed

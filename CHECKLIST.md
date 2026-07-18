@@ -417,8 +417,11 @@ Verified on 2026-07-16 and 2026-07-17:
   `04b4d98`, immutable container ID, repo digest, and ASAP7 collateral hashes.
 - iFlow execution now uses the immutable image ID resolved by preflight, and
   the resource guard inspects full Vivado worker command lines.
-- All six public checkpoints and all three required runtime assets passed their pinned
-  SHA256 checks. Dataset terms are recorded without redistribution permission.
+- Historical release snapshot: all six public checkpoints and all three
+  required runtime assets passed their pinned SHA256 checks. Dataset terms are
+  recorded without redistribution permission. The legacy ACID identifiers in
+  this historical paragraph do not bind the active full-training calibration
+  archive; its current binding appears in the Third-Badge Closure checklist.
   Re10K archive `ce351771c966fb25ef41efc561a313ef40607c9aa8ea904ed8d582b361408097`
   and prepared tree `2866634245989caa455fb46e5991d4e4b51e643c3f3e024e8793ff2b664fadd4`
   passed complete validation. ACID archive
@@ -788,14 +791,18 @@ Verified on 2026-07-16 and 2026-07-17:
   L0-rejected/L1-accepted tiles. The shadow keeps those labels, but dominant
   covariance/coverage error remains the same order as accepted tiles; reject
   guard-threshold repair and do not retry quality.
-- [x] Implement and pass the synthetic-only assignment-consensus
-  adapter-pseudo-descriptor geometry gate at source `43dfd37`: fixed routing,
-  thresholds, primary-K/2K anchors, selected-anchor-only S2/S3 access, direct
-  virtual skipped outputs, no assignment squaring, constant/one-hot/PSD/C2W,
-  L0/L1 selected/skipped poison, route/event, and atomic Full-fallback tests.
-  The path has zero compression and separately charged successful and aborted
-  geometry/traffic work. `158` SAES tests pass; this is non-paper-eligible and
-  does not authorize a quality run.
+- [x] Correct and pass the synthetic-only assignment-consensus
+  adapter-pseudo-descriptor geometry gate. The original `43dfd37` synthetic
+  pass is retained as invalidated history: its atomic rollback snapshot read
+  skipped raw S3 descriptors. `92dec5c` defers every virtual-output write until
+  all primitive slots validate; `968563d` preserves valid no-op tiles where
+  every position is an anchor. Fixed routing, thresholds, primary-K/2K anchors,
+  direct virtual skipped outputs, no assignment squaring, constant/one-hot/
+  PSD/C2W, L0/L1 selected/skipped poison, route/event, default-guard selected
+  read, and atomic Full-fallback tests now pass. The full SAES collection is
+  `164` passed; the path has zero compression, separately charged successful
+  and aborted geometry/traffic work, is non-paper-eligible, and does not
+  authorize a quality run.
 - [ ] Separately pre-register a fixed target-free DL3DV virtual-output audit
   for this candidate. Do not run it, read target RGB, retry quality, or expand
   DL3DV until that contract and its audit-specific tests are committed.
