@@ -71,7 +71,11 @@ from scripts.saes_target_free_materialization_audit import (
 
 
 KIND = "saes_same_budget_render_teacher_parameter_attribution"
-ATTRIBUTION_ID = "same-budget-render-teacher-parameter-attribution-v2"
+# v3 is an index-domain-only technical replay of the frozen v2 protocol.
+# Keeping both identities in each record prevents the new durable output from
+# being confused with the immutable v2 failure.
+ATTRIBUTION_ID = "same-budget-render-teacher-parameter-attribution-v3"
+FROZEN_PROTOCOL_ID = "same-budget-render-teacher-parameter-attribution-v2"
 FAMILIES = ("means", "covariances", "opacities", "harmonics")
 SELECTED_ONLY_PREFLIGHT_MATERIALIZATION = (
     "conditional-adapter-offset-attribute-transport-diagnostic"
@@ -442,6 +446,93 @@ def _load_model_and_inputs(device: torch.device) -> tuple[Any, dict[str, torch.T
     }
 
 
+def _require_clean_source_identity() -> dict[str, Any]:
+    """Bind every technical replay to a committed, clean source identity."""
+    from scripts.result_record import source_identity
+
+    source = source_identity()
+    if source.get("git_dirty") is not False:
+        raise RuntimeError("frozen teacher attribution requires a clean source tree before execution")
+    return source
+
+
+def _build_compact_index_maps(
+    *,
+    dense: Any,
+    compact: Any,
+    modified: torch.Tensor,
+    representative_global: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Map frozen dense representative IDs to validated compact slots."""
+    if not torch.is_tensor(modified) or modified.ndim != 1 or modified.dtype != torch.bool:
+        raise RuntimeError("frozen compact index map has an invalid modified mask")
+    if not torch.is_tensor(representative_global) or (
+        representative_global.ndim != 1
+        or representative_global.dtype != torch.long
+        or representative_global.numel() < 1
+    ):
+        raise RuntimeError("frozen compact index map has invalid representative IDs")
+    dense_means = getattr(dense, "means", None)
+    compact_means = getattr(compact, "means", None)
+    if (
+        not torch.is_tensor(dense_means)
+        or not torch.is_tensor(compact_means)
+        or dense_means.ndim < 2
+        or compact_means.ndim < 2
+    ):
+        raise RuntimeError("frozen compact index map has an invalid Gaussian layout")
+    dense_slots = int(dense_means.shape[1])
+    compact_slots = int(compact_means.shape[1])
+    if (
+        modified.numel() != dense_slots
+        or modified.device != dense_means.device
+        or representative_global.device != dense_means.device
+        or compact_means.device != dense_means.device
+    ):
+        raise RuntimeError("frozen compact index map has inconsistent devices or slot counts")
+    for family in ATTRIBUTE_NAMES:
+        dense_value = getattr(dense, family, None)
+        compact_value = getattr(compact, family, None)
+        if (
+            not torch.is_tensor(dense_value)
+            or not torch.is_tensor(compact_value)
+            or dense_value.ndim < 2
+            or compact_value.ndim < 2
+            or dense_value.shape[:2] != dense_means.shape[:2]
+            or compact_value.shape[:2] != compact_means.shape[:2]
+            or dense_value.device != dense_means.device
+            or compact_value.device != compact_means.device
+        ):
+            raise RuntimeError(f"frozen compact index map has an invalid {family} layout")
+    if (
+        bool((representative_global < 0).any())
+        or bool((representative_global >= dense_slots).any())
+        or (
+            representative_global.numel() > 1
+            and not bool((representative_global[1:] > representative_global[:-1]).all())
+        )
+    ):
+        raise RuntimeError("frozen compact index map has unordered or out-of-range representatives")
+    retained_global = torch.nonzero(~modified, as_tuple=False).flatten()
+    if compact_slots != retained_global.numel():
+        raise RuntimeError("frozen compact reconstruction has the wrong slot count")
+    global_to_local = torch.full(
+        (dense_slots,), -1, dtype=torch.long, device=dense_means.device
+    )
+    global_to_local[retained_global] = torch.arange(
+        retained_global.numel(), dtype=torch.long, device=dense_means.device
+    )
+    representative_local = global_to_local[representative_global]
+    if (
+        bool((representative_local < 0).any())
+        or bool((representative_local >= compact_slots).any())
+        or torch.unique(representative_local).numel() != representative_local.numel()
+        or not torch.equal(retained_global[representative_local], representative_global)
+    ):
+        raise RuntimeError("frozen representative global-to-local map drifted")
+    return retained_global, global_to_local, representative_local
+
+
 def _build_parameter_variants(
     initial: Any,
     optimized_values: dict[str, torch.Tensor],
@@ -451,10 +542,27 @@ def _build_parameter_variants(
     if set(optimized_values) != set(ATTRIBUTE_NAMES):
         raise ValueError("optimized values must contain every descriptor family")
     count = int(representative_local.numel())
-    if representative_local.ndim != 1 or representative_local.dtype != torch.long or count < 1:
+    slot_count = int(initial.means.shape[1])
+    if (
+        representative_local.ndim != 1
+        or representative_local.dtype != torch.long
+        or count < 1
+        or representative_local.device != initial.means.device
+        or bool((representative_local < 0).any())
+        or bool((representative_local >= slot_count).any())
+    ):
         raise ValueError("representative local indices are invalid")
     if torch.unique(representative_local).numel() != count:
         raise ValueError("representative local indices alias one another")
+    for family in ATTRIBUTE_NAMES:
+        values = getattr(initial, family, None)
+        if (
+            not torch.is_tensor(values)
+            or values.ndim < 2
+            or values.shape[:2] != initial.means.shape[:2]
+            or values.device != initial.means.device
+        ):
+            raise ValueError(f"initial compact has an invalid {family} layout")
     variants: dict[str, dict[str, Any]] = {}
     all_slots = torch.arange(initial.means.shape[1], device=representative_local.device)
     frozen = torch.ones_like(all_slots, dtype=torch.bool)
@@ -545,20 +653,48 @@ def _grouped_parameter_changes(
     initial: Any,
     optimized_values: dict[str, torch.Tensor],
     representative_global: torch.Tensor,
+    representative_local: torch.Tensor,
     groups: dict[str, torch.Tensor],
 ) -> dict[str, Any]:
     """Report frozen initial-to-teacher absolute and relative family changes."""
+    if (
+        representative_global.ndim != 1
+        or representative_global.dtype != torch.long
+        or representative_global.device != initial.means.device
+        or representative_local.ndim != 1
+        or representative_local.dtype != torch.long
+        or representative_local.device != initial.means.device
+        or representative_local.shape != representative_global.shape
+        or representative_global.numel() < 1
+        or (
+            representative_global.numel() > 1
+            and not bool((representative_global[1:] > representative_global[:-1]).all())
+        )
+        or bool((representative_local < 0).any())
+        or bool((representative_local >= initial.means.shape[1]).any())
+        or torch.unique(representative_local).numel() != representative_local.numel()
+    ):
+        raise RuntimeError("representative global-to-local map is invalid")
     output: dict[str, Any] = {}
     for level, mask in groups.items():
+        if (
+            not torch.is_tensor(mask)
+            or mask.ndim != 1
+            or mask.dtype != torch.bool
+            or mask.device != representative_global.device
+            or mask.numel() <= int(representative_global[-1].item())
+        ):
+            raise RuntimeError(f"{level} representative group has an invalid global layout")
         selected_global = torch.nonzero(mask, as_tuple=False).flatten()
         locations = torch.searchsorted(representative_global, selected_global)
         if bool((locations >= representative_global.numel()).any()) or not torch.equal(
             representative_global[locations], selected_global
         ):
             raise RuntimeError(f"{level} representatives are not in the frozen archive")
+        selected_local = representative_local[locations]
         family_values: dict[str, Any] = {}
         for family in FAMILIES:
-            baseline = getattr(initial, family)[0, torch.nonzero(mask, as_tuple=False).flatten()]
+            baseline = getattr(initial, family)[0, selected_local]
             teacher = optimized_values[family].to(device=baseline.device, dtype=baseline.dtype)[locations]
             difference = (teacher - baseline).reshape(baseline.shape[0], -1)
             reference = baseline.reshape(baseline.shape[0], -1)
@@ -739,8 +875,7 @@ def _run_two_sentinel_selected_only_preflight(
 
 def collect_parameter_attribution(*, device: torch.device) -> dict[str, Any]:
     """Execute the one fixed frozen-oracle attribution without target RGB."""
-    from scripts.result_record import source_identity
-
+    source = _require_clean_source_identity()
     s3_access_contract = require_posthoc_full_s3_exception(
         materialization=MATERIALIZATION,
         runtime_execution=False,
@@ -786,17 +921,13 @@ def collect_parameter_attribution(*, device: torch.device) -> dict[str, Any]:
         )
         representative_global = torch.nonzero(representative_mask, as_tuple=False).flatten()
         optimized_values = _assert_optimized_values(optimized_archive, representative_global)
-        retained = ~modified
-        compact = _retain_renderable_gaussians(canonical, retained)
-        global_to_local = torch.full(
-            (dense.means.shape[1],), -1, dtype=torch.long, device=retained.device
+        compact = _retain_renderable_gaussians(canonical, ~modified)
+        _retained_global, global_to_local, representative_local = _build_compact_index_maps(
+            dense=dense,
+            compact=compact,
+            modified=modified,
+            representative_global=representative_global,
         )
-        global_to_local[torch.nonzero(retained, as_tuple=False).flatten()] = torch.arange(
-            int(retained.sum().item()), device=retained.device
-        )
-        representative_local = global_to_local[representative_global]
-        if bool((representative_local < 0).any()):
-            raise RuntimeError("frozen representative was removed from compact output")
         full_local = _assert_compact_full_passthrough(
             compact=compact,
             dense=dense,
@@ -825,6 +956,13 @@ def collect_parameter_attribution(*, device: torch.device) -> dict[str, Any]:
         level_masks = _representative_level_masks(
             modified, representative_mask, views=views, height=height, width=width
         )
+        parameter_group_relative_changes = _grouped_parameter_changes(
+            initial,
+            optimized_values,
+            representative_global,
+            representative_local,
+            level_masks,
+        )
         fidelity = _render_variant_fidelity(
             model,
             variants,
@@ -847,6 +985,8 @@ def collect_parameter_attribution(*, device: torch.device) -> dict[str, Any]:
         "schema_version": "1.0",
         "kind": KIND,
         "audit_id": ATTRIBUTION_ID,
+        "frozen_protocol_id": FROZEN_PROTOCOL_ID,
+        "technical_replay_of": FROZEN_PROTOCOL_ID,
         "status": "COMPLETED",
         "paper_result_eligible": False,
         "quality_gate_authorized": False,
@@ -896,9 +1036,7 @@ def collect_parameter_attribution(*, device: torch.device) -> dict[str, Any]:
         },
         "same_budget_output_accounting": accounting,
         "fixed_partition": observed_partition,
-        "parameter_group_relative_changes": _grouped_parameter_changes(
-            initial, optimized_values, representative_global, level_masks
-        ),
+        "parameter_group_relative_changes": parameter_group_relative_changes,
         "variants": fidelity,
         "restoration_summary": _restoration_summary(fidelity),
         "sanity_controls": {
@@ -906,13 +1044,14 @@ def collect_parameter_attribution(*, device: torch.device) -> dict[str, Any]:
             "all_teacher": full_sanity,
         },
         "next_action": "interpret-frozen-parameter-attribution-before-any-new-candidate",
-        "source": source_identity(),
+        "source": source,
         "numerical_execution": numerical_execution,
     }
 
 
 def smoke_initial_compact_render(*, device: torch.device) -> dict[str, Any]:
     """Exercise the fixed compact reconstruction and one render without metrics."""
+    source = _require_clean_source_identity()
     s3_access_contract = require_posthoc_full_s3_exception(
         materialization=MATERIALIZATION,
         runtime_execution=False,
@@ -956,17 +1095,13 @@ def smoke_initial_compact_render(*, device: torch.device) -> dict[str, Any]:
         )
         representative_global = torch.nonzero(representative_mask, as_tuple=False).flatten()
         _assert_optimized_values(optimized_archive, representative_global)
-        retained = ~modified
-        compact = _retain_renderable_gaussians(canonical, retained)
-        global_to_local = torch.full(
-            (dense.means.shape[1],), -1, dtype=torch.long, device=retained.device
+        compact = _retain_renderable_gaussians(canonical, ~modified)
+        _retained_global, global_to_local, representative_local = _build_compact_index_maps(
+            dense=dense,
+            compact=compact,
+            modified=modified,
+            representative_global=representative_global,
         )
-        global_to_local[torch.nonzero(retained, as_tuple=False).flatten()] = torch.arange(
-            int(retained.sum().item()), device=retained.device
-        )
-        representative_local = global_to_local[representative_global]
-        if bool((representative_local < 0).any()):
-            raise RuntimeError("frozen representative was removed from compact output")
         full_local = _assert_compact_full_passthrough(
             compact=compact,
             dense=dense,
@@ -1000,6 +1135,8 @@ def smoke_initial_compact_render(*, device: torch.device) -> dict[str, Any]:
     return {
         "kind": KIND,
         "audit_id": ATTRIBUTION_ID,
+        "frozen_protocol_id": FROZEN_PROTOCOL_ID,
+        "technical_replay_of": FROZEN_PROTOCOL_ID,
         "status": "PASS",
         "output_written": False,
         "teacher_metrics_computed": False,
@@ -1013,6 +1150,7 @@ def smoke_initial_compact_render(*, device: torch.device) -> dict[str, Any]:
         "selected_only_descriptor_access_preflight": selected_only_descriptor_access_preflight,
         "s3_access_preflight": s3_access_preflight,
         "input_provenance": input_provenance,
+        "source": source,
         "numerical_execution": numerical_execution,
     }
 
@@ -1049,6 +1187,8 @@ def main(argv: list[str] | None = None) -> int:
             "schema_version": "1.0",
             "kind": KIND,
             "audit_id": ATTRIBUTION_ID,
+            "frozen_protocol_id": FROZEN_PROTOCOL_ID,
+            "technical_replay_of": FROZEN_PROTOCOL_ID,
             "status": "FAILED",
             "paper_result_eligible": False,
             "quality_gate_authorized": False,

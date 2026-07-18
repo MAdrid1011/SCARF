@@ -26,11 +26,13 @@ def _optimized(gaussians, representative_local):
 def test_fixed_parameter_variant_registry_has_exactly_requested_twelve_variants():
     from scripts.saes_same_budget_render_teacher_parameter_attribution import (
         ATTRIBUTION_ID,
+        FROZEN_PROTOCOL_ID,
         _expected_variant_names,
         _variant_specs,
     )
 
-    assert ATTRIBUTION_ID == "same-budget-render-teacher-parameter-attribution-v2"
+    assert ATTRIBUTION_ID == "same-budget-render-teacher-parameter-attribution-v3"
+    assert FROZEN_PROTOCOL_ID == "same-budget-render-teacher-parameter-attribution-v2"
     assert _expected_variant_names() == (
         "initial_compact",
         "teacher_means",
@@ -72,6 +74,46 @@ def test_parameter_variants_change_only_registered_representative_families():
             assert entry["reverted_families"]
 
 
+def test_parameter_variants_reject_out_of_range_compact_slots_before_indexing():
+    from scripts.saes_same_budget_render_teacher_parameter_attribution import (
+        _build_parameter_variants,
+    )
+
+    initial = _gaussians(2)
+    optimized = _optimized(initial, torch.tensor((0, 1), dtype=torch.long))
+    with pytest.raises(ValueError, match="representative local indices"):
+        _build_parameter_variants(initial, optimized, torch.tensor((0, 2), dtype=torch.long))
+
+
+def test_compact_index_map_translates_dense_representatives_before_compact_access():
+    from scripts.saes_same_budget_render_teacher_parameter_attribution import (
+        _build_compact_index_maps,
+    )
+
+    dense = _gaussians(32)
+    modified = torch.zeros(32, dtype=torch.bool)
+    modified[:10] = True
+    compact = _gaussians(22)
+    global_indices = torch.tensor((10, 31), dtype=torch.long)
+    retained, global_to_local, representative_local = _build_compact_index_maps(
+        dense=dense,
+        compact=compact,
+        modified=modified,
+        representative_global=global_indices,
+    )
+    assert torch.equal(representative_local, torch.tensor((0, 21)))
+    assert torch.equal(retained[representative_local], global_indices)
+    assert int(global_to_local[31]) == 21
+
+    with pytest.raises(RuntimeError, match="wrong slot count"):
+        _build_compact_index_maps(
+            dense=dense,
+            compact=_gaussians(23),
+            modified=modified,
+            representative_global=global_indices,
+        )
+
+
 def test_l0_l1_masks_and_grouped_changes_cover_each_representative_once():
     from scripts.saes_same_budget_render_teacher_parameter_attribution import (
         _grouped_parameter_changes,
@@ -90,13 +132,41 @@ def test_l0_l1_masks_and_grouped_changes_cover_each_representative_once():
     )
     assert int(groups["L0"].sum()) == 4
     assert int(groups["L1"].sum()) == 8
-    initial = _gaussians(32)
     global_representatives = torch.nonzero(representatives, as_tuple=False).flatten()
-    optimized = _optimized(initial, global_representatives)
-    report = _grouped_parameter_changes(initial, optimized, global_representatives, groups)
+    representative_local = torch.arange(global_representatives.numel(), dtype=torch.long)
+    initial = _gaussians(global_representatives.numel())
+    optimized = _optimized(initial, representative_local)
+    report = _grouped_parameter_changes(
+        initial,
+        optimized,
+        global_representatives,
+        representative_local,
+        groups,
+    )
     assert report["L0"]["representative_count"] == 4
     assert report["L1"]["representative_count"] == 8
     assert report["L0"]["families"]["means"]["relative_change"]["maximum"] > 0.0
+
+
+def test_grouped_changes_rejects_a_global_to_local_mapping_outside_compact_slots():
+    from scripts.saes_same_budget_render_teacher_parameter_attribution import (
+        _grouped_parameter_changes,
+    )
+
+    initial = _gaussians(2)
+    representatives = torch.tensor((8, 20), dtype=torch.long)
+    groups = {"L0": torch.zeros(32, dtype=torch.bool), "L1": torch.zeros(32, dtype=torch.bool)}
+    groups["L0"][8] = True
+    groups["L1"][20] = True
+    optimized = _optimized(initial, torch.tensor((0, 1), dtype=torch.long))
+    with pytest.raises(RuntimeError, match="global-to-local"):
+        _grouped_parameter_changes(
+            initial,
+            optimized,
+            representatives,
+            torch.tensor((0, 2), dtype=torch.long),
+            groups,
+        )
 
 
 def test_sanity_match_is_metric_direction_agnostic_and_fail_closed():
@@ -137,6 +207,7 @@ def test_selected_only_preflight_runs_before_frozen_oracle_reconstruction(monkey
         "_load_model_and_inputs",
         lambda _device: (Model(), {}, {}, {}),
     )
+    monkeypatch.setattr(attribution, "_require_clean_source_identity", lambda: {})
     monkeypatch.setattr(
         attribution,
         "_run_two_sentinel_selected_only_preflight",
@@ -149,4 +220,22 @@ def test_selected_only_preflight_runs_before_frozen_oracle_reconstruction(monkey
     )
 
     with pytest.raises(RuntimeError, match="preflight-blocked"):
+        attribution.collect_parameter_attribution(device=torch.device("cpu"))
+
+
+def test_attribution_rejects_dirty_source_before_model_loading(monkeypatch):
+    import scripts.saes_same_budget_render_teacher_parameter_attribution as attribution
+
+    monkeypatch.setattr(
+        attribution,
+        "_require_clean_source_identity",
+        lambda: (_ for _ in ()).throw(RuntimeError("clean-source-blocked")),
+    )
+    monkeypatch.setattr(
+        attribution,
+        "_load_model_and_inputs",
+        lambda _device: pytest.fail("model loading ran from a dirty source tree"),
+    )
+
+    with pytest.raises(RuntimeError, match="clean-source-blocked"):
         attribution.collect_parameter_attribution(device=torch.device("cpu"))

@@ -905,8 +905,8 @@ Verified on 2026-07-16 and 2026-07-17:
   as a diagnostic and the tangent candidate is retired rather than rerun.
 - [x] Wire the common runner-invoked S3-access preflight. Selected-only audit
   paths use an allowlisted payload and two finite S2/S3 sentinels, requiring
-  equal route trace, counters, committed outputs, and Full outputs. The v2
-  runner invokes that preflight on the fixed attribute-transport path before
+  equal route trace, counters, committed outputs, and Full outputs. The frozen
+  attribution runner invokes that preflight on the fixed attribute-transport path before
   reconstructing the oracle. Its separately declared full-S3 oracle read is
   recorded as a non-runtime `not-applicable` exception with an observed full
   read count, never as selected-only execution. This cannot authorize a
@@ -920,18 +920,31 @@ Verified on 2026-07-16 and 2026-07-17:
   transient terminal log SHA256 is
   `ef3501040e0b5d92420fbcd8c2c9e27a2c9dbf59eadae7423d839071e2686475`;
   the record separately reports the non-runtime 46,896 full-S3 oracle reads.
-- [ ] Run exactly one frozen render-teacher representative-parameter
-  attribution at
-  `transplat_sample0_same_budget_render_teacher_parameter_attribution_v2/`.
-  Use only the v3 `optimized_representatives.pt` and saved dense-render teacher
-  under the fixed partition. Measure the twelve pre-registered descriptor
-  family substitutions and leave-one-family-out controls against the teacher,
-  including L0/L1 relative-change summaries. Reject any artifact, partition,
-  camera, Full-slot, teacher-fidelity, target-RGB, or optimizer-boundary
-  violation. This is a capacity diagnostic only and cannot launch a new
-  materialization candidate or any DL3DV quality gate.
+- [x] Preserve the aborted `...parameter_attribution_v2/` record (results
+  SHA256 `5c804d5b1445d8e5c5fb474318dddb8081bcd0d9430db14dc2b5dda8d9c29906`,
+  terminal SHA256 `c912b34a0f2867d4d44187d879745844d73d6d2bf1e8eb996f517b00343056a8`).
+  Its CUDA out-of-bounds occurred because dense global representative IDs were
+  used against compact slots; no teacher metric was persisted, recovered, or
+  interpreted. The immutable v1 record remains cause-undetermined.
+- [x] Make fixed input/checkpoint hashes and the two-finite-sentinel
+  selected-only S3 proof a shared mandatory precondition for every later frozen
+  selected-output or descriptor audit in this line. The dense teacher remains
+  an explicit non-runtime full-S3 exception.
+- [ ] Run exactly one frozen render-teacher representative-parameter technical
+  replay at
+  `transplat_sample0_same_budget_render_teacher_parameter_attribution_v3/`.
+  It is a v3 execution identity over the immutable v2 scientific protocol:
+  use only the frozen oracle assets, partition, seed, twelve variants and
+  teacher-only metric contract. From a clean committed source, first repeat
+  the no-output smoke, then map dense global representatives to compact local
+  slots and verify the mapping before any render. Reject any source, artifact,
+  partition, camera, Full-slot, index-domain, teacher-fidelity, target-RGB, or
+  optimizer-boundary violation. A failure ends this attribution campaign; a
+  completion is capacity evidence only and cannot launch a new materialization
+  candidate or any DL3DV quality gate.
 - [x] Preserve the aborted `...parameter_attribution_v1/` record rather than
   overwriting it. It ended before any direct-teacher metric with a CUDA
   device-side assert; its retained record does not determine the cause. The
-  designated v2 replay is hash-bound to the target-free source sidecar and
-  must pass strict-FP32 exact-partition verification before rendering.
+  designated v3 technical replay is hash-bound to the target-free source
+  sidecar and must pass strict-FP32 exact-partition verification before
+  rendering.

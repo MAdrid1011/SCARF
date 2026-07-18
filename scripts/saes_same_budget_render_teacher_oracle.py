@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Optimize fixed K/2K SAES representatives against dense renders only."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
@@ -194,6 +196,53 @@ def _assert_compact_full_passthrough(
     global_to_local: torch.Tensor,
 ) -> torch.Tensor:
     """Confirm compaction retained every verified Full descriptor unchanged."""
+    dense_means = getattr(dense, "means", None)
+    compact_means = getattr(compact, "means", None)
+    if (
+        not torch.is_tensor(dense_means)
+        or not torch.is_tensor(compact_means)
+        or dense_means.ndim < 2
+        or compact_means.ndim < 2
+    ):
+        raise RuntimeError("same-budget oracle has an invalid compact index layout")
+    dense_slots = int(dense_means.shape[1])
+    compact_slots = int(compact_means.shape[1])
+    if (
+        not torch.is_tensor(full_global_mask)
+        or full_global_mask.ndim != 1
+        or full_global_mask.dtype != torch.bool
+        or full_global_mask.numel() != dense_slots
+        or full_global_mask.device != dense_means.device
+        or not torch.is_tensor(global_to_local)
+        or global_to_local.ndim != 1
+        or global_to_local.dtype != torch.long
+        or global_to_local.numel() != dense_slots
+        or global_to_local.device != dense_means.device
+        or compact_means.device != dense_means.device
+    ):
+        raise RuntimeError("same-budget oracle has an invalid compact index layout")
+    for name in ATTRIBUTE_NAMES:
+        dense_value = getattr(dense, name, None)
+        compact_value = getattr(compact, name, None)
+        if (
+            not torch.is_tensor(dense_value)
+            or not torch.is_tensor(compact_value)
+            or dense_value.ndim < 2
+            or compact_value.ndim < 2
+            or dense_value.shape[:2] != dense_means.shape[:2]
+            or compact_value.shape[:2] != compact_means.shape[:2]
+            or dense_value.device != dense_means.device
+            or compact_value.device != compact_means.device
+        ):
+            raise RuntimeError("same-budget oracle has an invalid compact index layout")
+    mapped = global_to_local >= 0
+    if (
+        bool((global_to_local < -1).any())
+        or bool((global_to_local[mapped] >= compact_slots).any())
+        or int(mapped.sum().item()) != compact_slots
+        or torch.unique(global_to_local[mapped]).numel() != compact_slots
+    ):
+        raise RuntimeError("same-budget oracle has an invalid compact index layout")
     full_global = torch.nonzero(full_global_mask, as_tuple=False).flatten()
     full_local = global_to_local[full_global]
     if (
@@ -267,8 +316,46 @@ class BoundedRepresentativeParameters(torch.nn.Module):
         width: int,
     ) -> None:
         super().__init__()
-        if representative_global.numel() != representative_local.numel() or not representative_global.numel():
+        compact_means = getattr(compact, "means", None)
+        dense_means = getattr(dense, "means", None)
+        if (
+            not torch.is_tensor(compact_means)
+            or not torch.is_tensor(dense_means)
+            or compact_means.ndim < 2
+            or dense_means.ndim < 2
+            or not torch.is_tensor(representative_global)
+            or not torch.is_tensor(representative_local)
+            or representative_global.ndim != 1
+            or representative_local.ndim != 1
+            or representative_global.dtype != torch.long
+            or representative_local.dtype != torch.long
+            or representative_global.numel() != representative_local.numel()
+            or not representative_global.numel()
+            or representative_global.device != dense_means.device
+            or representative_local.device != compact_means.device
+            or dense_means.device != compact_means.device
+            or bool((representative_global < 0).any())
+            or bool((representative_global >= dense_means.shape[1]).any())
+            or bool((representative_local < 0).any())
+            or bool((representative_local >= compact_means.shape[1]).any())
+            or torch.unique(representative_global).numel() != representative_global.numel()
+            or torch.unique(representative_local).numel() != representative_local.numel()
+        ):
             raise ValueError("representative index maps must be nonempty and aligned")
+        for name in ATTRIBUTE_NAMES:
+            dense_value = getattr(dense, name, None)
+            compact_value = getattr(compact, name, None)
+            if (
+                not torch.is_tensor(dense_value)
+                or not torch.is_tensor(compact_value)
+                or dense_value.ndim < 2
+                or compact_value.ndim < 2
+                or dense_value.shape[:2] != dense_means.shape[:2]
+                or compact_value.shape[:2] != compact_means.shape[:2]
+                or dense_value.device != dense_means.device
+                or compact_value.device != compact_means.device
+            ):
+                raise ValueError("representative index maps have an invalid Gaussian layout")
         self.gaussian_type = type(compact)
         self.register_buffer("representative_local", representative_local.to(dtype=torch.long))
         self.register_buffer("representative_global", representative_global.to(dtype=torch.long))
@@ -288,6 +375,8 @@ class BoundedRepresentativeParameters(torch.nn.Module):
         tile_indices = _producer_tile_indices(
             self.representative_global, height=height, width=width
         )
+        if bool((tile_indices < 0).any()) or bool((tile_indices >= dense_means.shape[1]).any()):
+            raise ValueError("representative producer tile exceeds dense Gaussian bounds")
         source_means = dense.means[0, tile_indices]
         source_harmonics = dense.harmonics[0, tile_indices]
         source_covariances = dense.covariances[0, tile_indices]

@@ -1923,8 +1923,11 @@
 
 ## 38. Frozen Render-Teacher Parameter Attribution
 
-- Campaign id: `same-budget-render-teacher-parameter-attribution-v2`. This is
-  one post-hoc capacity diagnostic answering which representative descriptor
+- Frozen protocol id: `same-budget-render-teacher-parameter-attribution-v2`.
+  The only remaining execution is
+  `same-budget-render-teacher-parameter-attribution-v3`, an index-domain-only
+  technical replay. It keeps every scientific condition frozen and is one
+  post-hoc capacity diagnostic answering which representative descriptor
   families the already-computed teacher needed. It is not a materialization
   candidate, a quality gate, a calibration run, or a runtime claim.
 - Frozen inputs: accept only the v3 render-teacher oracle record SHA256
@@ -1950,22 +1953,39 @@
   expected partition. Neither diagnostic proves that the mismatch caused the
   v1 CUDA failure or turns v1 into an attribution observation. The failed
   record is immutable.
-- Corrected replay boundary: the sole planned v2 execution uses the hash-bound
+- v2 technical failure: preserve
+  `transplat_sample0_same_budget_render_teacher_parameter_attribution_v2/`
+  `results.json` SHA256
+  `5c804d5b1445d8e5c5fb474318dddb8081bcd0d9430db14dc2b5dda8d9c29906`
+  and terminal capture SHA256
+  `c912b34a0f2867d4d44187d879745844d73d6d2bf1e8eb996f517b00343056a8`.
+  It failed with CUDA `IndexKernel.cu:92` out-of-bounds and persisted no
+  direct-teacher metric. The root cause is now established as post-render
+  report aggregation indexing the 121,640-slot compact reconstruction with
+  dense global representative IDs; 510 of 4,792 IDs lie outside that compact
+  range, up to 130,987. No in-memory render or metric value may be recovered,
+  reported, or interpreted from v2.
+- Corrected v3 replay boundary: the sole v3 execution uses the hash-bound
   target-free calibration sidecar, its two context-image payloads, and camera
   metadata. It synthesizes a zero-only target shape carrier only while
   applying the native crop/data shims, then removes it before decoder
-  execution. It must fail closed unless strict-FP32 replay verifies the fixed
-  partition before rendering. The sidecar schema contains no target-image
-  payload or target-image path; target-camera metadata is permitted only for
-  rendering against the saved teacher.
+  execution. Before any compact index, v3 maps each dense
+  `representative_global` ID to a compact `representative_local` slot and
+  verifies `retained_global[representative_local] == representative_global`.
+  It computes L0/L1 parameter summaries before any renderer call and fails
+  closed on compact, Full-passthrough, producer-tile, or parameter-module
+  index-domain drift. This repair changes no hash-bound input, checkpoint,
+  sidecar, seed, teacher asset, partition, route mask, K/2K budget, Full slot,
+  variant, metric, target-RGB, or optimizer condition.
 - Common S3-access preflight: before the oracle reconstruction or renderer,
-  v2 verifies the fixed input/checkpoint path and runs the shared two-finite-
+  every later frozen selected-output or descriptor audit in this line must
+  verify the fixed input/checkpoint hashes and run the shared two-finite-
   sentinel selected-only descriptor-access proof against the unchanged
   attribute-transport materialization. Both replays must preserve the route
   trace, counters, committed descriptors, and Full outputs while the wrapper
   rejects skipped S3 reads. This proves descriptor-access isolation after a
   dense encoder capture only; it does not prove S3 compute savings or that the
-  dense oracle is selected-only. The v2 oracle therefore records a separate
+  dense oracle is selected-only. The v3 attribution therefore records a separate
   `same-budget-dense-oracle-diagnostic` full-S3 exception, observed full-read
   count, `runtime_execution=false`, `paper_result_eligible=false`, and
   `quality_gate_authorized=false`; any attempt to attach runtime or quality
@@ -1983,6 +2003,10 @@
   transient terminal capture SHA256 was
   `ef3501040e0b5d92420fbcd8c2c9e27a2c9dbf59eadae7423d839071e2686475`.
   Its observed `46,896` dense-oracle S3 reads remain explicitly non-runtime.
+  Because that smoke predates the v3 index-domain repair, v3 must repeat the
+  same no-output smoke from a clean committed source identity before its sole
+  twelve-variant execution; that smoke carries no teacher metric or new result
+  artifact and does not consume the one v3 attribution run.
 - Isolation boundary: target RGB must not be loaded, decoded, transferred, or
   passed to any model component. The only target-side input is the frozen
   target-camera metadata needed to render against the saved dense-render
@@ -2004,6 +2028,12 @@
   p50/p95/maximum absolute and relative changes from frozen initial to saved
   teacher values for mean, covariance, opacity, and SH. Full slots must be
   bit-identical for every variant.
+- v3 launch limit: after the mapping repair, tests, and these documents are
+  committed from a clean source identity, run exactly once in the new
+  `transplat_sample0_same_budget_render_teacher_parameter_attribution_v3/`
+  directory. A v3 technical failure terminates this attribution campaign; it
+  does not authorize a fourth replay, a tangent rerun, a new materialization
+  candidate, or any DL3DV quality measurement.
 - Decision after the one run: if mean+covariance supplies the dominant
   restoration, the next permitted idea is selected-only multi-context joint
   geometry/coverage moments. If opacity+covariance dominates, use a joint

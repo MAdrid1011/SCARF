@@ -183,6 +183,52 @@ def test_fixed_partition_rejects_routing_or_full_passthrough_drift():
         )
 
 
+def test_compact_index_guards_fail_before_out_of_bounds_access():
+    from scripts.saes_same_budget_render_teacher_oracle import (
+        BoundedRepresentativeParameters,
+        _assert_compact_full_passthrough,
+    )
+
+    dense = _dense_gaussians()
+    representatives = torch.tensor((0, 3, 24, 27))
+    removed = torch.tensor(
+        [
+            row * 8 + column
+            for row in range(4)
+            for column in range(4)
+            if row * 8 + column not in representatives.tolist()
+        ]
+    )
+    retained_mask = torch.ones(32, dtype=torch.bool)
+    retained_mask[removed] = False
+    retained = torch.nonzero(retained_mask, as_tuple=False).flatten()
+    compact = _compact(dense, retained)
+    global_to_local = torch.full((32,), -1, dtype=torch.long)
+    global_to_local[retained] = torch.arange(retained.numel())
+    full_mask = ~(~retained_mask | torch.isin(torch.arange(32), representatives))
+    invalid_map = global_to_local.clone()
+    invalid_map[full_mask] = compact.means.shape[1]
+    with pytest.raises(RuntimeError, match="invalid compact index layout"):
+        _assert_compact_full_passthrough(
+            compact=compact,
+            dense=dense,
+            full_global_mask=full_mask,
+            global_to_local=invalid_map,
+        )
+
+    representative_local = global_to_local[representatives]
+    representative_local[0] = compact.means.shape[1]
+    with pytest.raises(ValueError, match="representative index maps"):
+        BoundedRepresentativeParameters(
+            compact,
+            dense,
+            representatives,
+            representative_local,
+            height=4,
+            width=8,
+        )
+
+
 def test_oracle_artifact_serializes_the_rendered_representatives(tmp_path):
     from scripts.saes_same_budget_render_teacher_oracle import (
         _save_oracle_artifacts,
