@@ -831,6 +831,53 @@ class ProgressiveSAES:
             view_index=view_index,
         )
 
+    def _commit_assignment_consensus_plan(self, gaussians_full, plan: Dict) -> None:
+        """Commit one already-validated virtual-output plan.
+
+        Planning is deliberately separate from writing so every primitive slot
+        can validate from selected S2/S3 inputs before any skipped descriptor
+        is touched. This preserves whole-tile fail-closed behavior without
+        snapshotting raw skipped S3 attributes.
+        """
+        output_indices = plan.get("output_indices")
+        consensus_means = plan.get("means")
+        consensus_covariances = plan.get("covariances")
+        consensus_harmonics = plan.get("harmonics")
+        consensus_opacities = plan.get("opacities")
+        harmonic_shape = plan.get("harmonic_shape")
+        opacity_shape = plan.get("opacity_shape")
+        anchor_count = plan.get("anchor_count")
+        target_count = len(output_indices) if isinstance(output_indices, tuple) else -1
+        if (
+            target_count < 0
+            or not isinstance(anchor_count, int)
+            or anchor_count < 1
+            or consensus_means.shape != (target_count, 3)
+            or consensus_covariances.shape != (target_count, 3, 3)
+            or consensus_harmonics.shape[0] != target_count
+            or consensus_opacities.shape[0] != target_count
+            or not isinstance(harmonic_shape, torch.Size)
+            or not isinstance(opacity_shape, torch.Size)
+        ):
+            raise ValueError("invalid assignment-consensus virtual-output plan")
+        for pseudo_index, output_index in enumerate(output_indices):
+            gaussians_full.means[0, output_index] = consensus_means[pseudo_index]
+            gaussians_full.covariances[0, output_index] = consensus_covariances[
+                pseudo_index
+            ]
+            gaussians_full.harmonics[0, output_index] = consensus_harmonics[
+                pseudo_index
+            ].reshape(harmonic_shape)
+            gaussians_full.opacities[0, output_index] = consensus_opacities[
+                pseudo_index
+            ].reshape(opacity_shape)
+        self.stats['assignment_consensus_pseudo_outputs'] += target_count
+        self.stats['assignment_consensus_anchor_pairs'] += target_count * anchor_count
+        self.stats['assignment_consensus_offset_recoveries'] += anchor_count
+        self.stats['assignment_consensus_target_lifts'] += target_count * (
+            anchor_count + 1
+        )
+
     def _assignment_consensus_adapter_pseudo_geometry(
         self,
         selected_means: torch.Tensor,
@@ -1537,6 +1584,7 @@ class ProgressiveSAES:
         opacity_aggregation: str = "range-constrained-average",
         output_style: str = "representative",
         merge_semantics: str = "assignment-mixture",
+        defer_assignment_consensus_plan: bool = False,
     ):
         """Absorb a tile using only selected-anchor Stage-3 attributes.
 
@@ -1553,7 +1601,7 @@ class ProgressiveSAES:
         device = gaussians_full.means.device
         K = len(probe_indices)
         if K < 1:
-            return
+            return (True, None) if defer_assignment_consensus_plan else None
         if opacity_aggregation not in (
             "range-constrained-average",
             "assignment-weighted-optical-depth",
@@ -1597,11 +1645,20 @@ class ProgressiveSAES:
             raise ValueError(
                 "assignment-consensus merge semantics require virtual-only output"
             )
+        is_assignment_consensus = (
+            output_style == "assignment-consensus-adapter-pseudo-descriptor"
+        )
+        if defer_assignment_consensus_plan and not is_assignment_consensus:
+            raise ValueError(
+                "only assignment-consensus virtual outputs may defer a tile plan"
+            )
 
-        means = gaussians_full.means[0]
-        covs = gaussians_full.covariances[0]
-        harmonics = gaussians_full.harmonics[0]
-        opacities = gaussians_full.opacities[0]
+        gaussian_dtype = gaussians_full.means.dtype
+        if not is_assignment_consensus:
+            means = gaussians_full.means[0]
+            covs = gaussians_full.covariances[0]
+            harmonics = gaussians_full.harmonics[0]
+            opacities = gaussians_full.opacities[0]
 
         # Flat Gaussian indices contain the view and primitive slot, so spatial
         # probe coordinates must be recovered from tile-local positions.
@@ -1639,7 +1696,7 @@ class ProgressiveSAES:
                 probe_depths.append(1.0)
 
         probe_depth_tensor = torch.tensor(
-            probe_depths, device=device, dtype=means.dtype
+            probe_depths, device=device, dtype=gaussian_dtype
         )
         depth_reference_tensor = probe_depth_tensor
         if level == "L1":
@@ -1653,10 +1710,18 @@ class ProgressiveSAES:
                 )
             depth_reference_tensor = probe_depth_tensor[:primary_count]
 
-        source_means = means[probe_indices].clone()
-        source_covs = covs[probe_indices].clone()
-        source_harmonics = harmonics[probe_indices].clone()
-        source_opacities = opacities[probe_indices].clone()
+        if is_assignment_consensus:
+            # Select before indexing the batch dimension. This branch must not
+            # materialize a view of skipped S3 descriptors even transiently.
+            source_means = gaussians_full.means[0, probe_indices].clone()
+            source_covs = gaussians_full.covariances[0, probe_indices].clone()
+            source_harmonics = gaussians_full.harmonics[0, probe_indices].clone()
+            source_opacities = gaussians_full.opacities[0, probe_indices].clone()
+        else:
+            source_means = means[probe_indices].clone()
+            source_covs = covs[probe_indices].clone()
+            source_harmonics = harmonics[probe_indices].clone()
+            source_opacities = opacities[probe_indices].clone()
         non_probe_items = list(non_probe_map.items())
         assignments = []
         coordinate_scale = max(T - 1, 1)
@@ -1686,8 +1751,10 @@ class ProgressiveSAES:
                 feature_distances.append(feature)
             assignments.append(
                 paper_assignment_weights(
-                    torch.tensor(spatial_distances, device=device, dtype=means.dtype),
-                    torch.tensor(feature_distances, device=device, dtype=means.dtype),
+                    torch.tensor(
+                        spatial_distances, device=device, dtype=gaussian_dtype
+                    ),
+                    torch.tensor(feature_distances, device=device, dtype=gaussian_dtype),
                     feature_variance=feature_variance,
                     beta_x=self.beta_x,
                     beta_f=self.beta_f,
@@ -1703,7 +1770,7 @@ class ProgressiveSAES:
         assignment_matrix = (
             torch.stack(assignments, dim=0)
             if assignments
-            else torch.empty(0, K, device=device, dtype=means.dtype)
+            else torch.empty(0, K, device=device, dtype=gaussian_dtype)
         )
         if assignment_matrix.numel():
             error = float(
@@ -1715,7 +1782,7 @@ class ProgressiveSAES:
 
         if output_style == "assignment-consensus-adapter-pseudo-descriptor":
             if not assignments:
-                return False
+                return (False, None) if defer_assignment_consensus_plan else False
             target_positions = [
                 (tile_y + local_y, tile_x + local_x)
                 for (local_y, local_x), _ in non_probe_items
@@ -1732,7 +1799,7 @@ class ProgressiveSAES:
                 )
             )
             if consensus_geometry is None:
-                return True
+                return (True, None) if defer_assignment_consensus_plan else True
             consensus_means, consensus_covariances = consensus_geometry
             flat_harmonics = source_harmonics.reshape(K, -1)
             flat_opacities = source_opacities.reshape(K, -1)
@@ -1741,34 +1808,30 @@ class ProgressiveSAES:
                 or bool((flat_opacities < 0.0).any())
                 or bool((flat_opacities > 1.0).any())
             ):
-                return True
+                return (True, None) if defer_assignment_consensus_plan else True
             consensus_harmonics = assignment_matrix @ flat_harmonics
             consensus_opacities = assignment_matrix @ flat_opacities
             if (
                 not bool(torch.isfinite(consensus_harmonics).all())
                 or not bool(torch.isfinite(consensus_opacities).all())
             ):
-                return True
+                return (True, None) if defer_assignment_consensus_plan else True
 
-            # All candidate values are validated before this first write. The
-            # virtual descriptor is written once at its skipped position; it
-            # is intentionally never absorbed into a retained anchor.
-            harmonic_shape = source_harmonics.shape[1:]
-            opacity_shape = source_opacities.shape[1:]
-            for pseudo_index, (_, output_index) in enumerate(non_probe_items):
-                means[output_index] = consensus_means[pseudo_index]
-                covs[output_index] = consensus_covariances[pseudo_index]
-                harmonics[output_index] = consensus_harmonics[pseudo_index].reshape(
-                    harmonic_shape
-                )
-                opacities[output_index] = consensus_opacities[pseudo_index].reshape(
-                    opacity_shape
-                )
-            target_count = len(non_probe_items)
-            self.stats['assignment_consensus_pseudo_outputs'] += target_count
-            self.stats['assignment_consensus_anchor_pairs'] += target_count * K
-            self.stats['assignment_consensus_offset_recoveries'] += K
-            self.stats['assignment_consensus_target_lifts'] += target_count * (K + 1)
+            plan = {
+                "output_indices": tuple(
+                    output_index for _, output_index in non_probe_items
+                ),
+                "means": consensus_means,
+                "covariances": consensus_covariances,
+                "harmonics": consensus_harmonics,
+                "opacities": consensus_opacities,
+                "harmonic_shape": source_harmonics.shape[1:],
+                "opacity_shape": source_opacities.shape[1:],
+                "anchor_count": K,
+            }
+            if defer_assignment_consensus_plan:
+                return False, plan
+            self._commit_assignment_consensus_plan(gaussians_full, plan)
             return False
 
         if merge_semantics in (
@@ -2725,49 +2788,10 @@ class ProgressiveSAES:
                             else self.lightweight_positions
                         )
                         fallback_to_full = False
-                        consensus_tile_snapshot = None
-                        if self.materialization == (
+                        is_assignment_consensus = self.materialization == (
                             "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
-                        ):
-                            # A later primitive slot can still reject its
-                            # selected descriptors. Hold the whole tile until
-                            # every slot validates so this virtual diagnostic
-                            # is genuinely Full-or-nothing.
-                            tile_indices = torch.tensor(
-                                [
-                                    flat_index(
-                                        view,
-                                        (tile_y + local_y) * self.W
-                                        + tile_x
-                                        + local_x,
-                                        slot,
-                                    )
-                                    for slot in range(self.primitives_per_pixel)
-                                    for local_y in range(tile_size)
-                                    for local_x in range(tile_size)
-                                ],
-                                device=device,
-                                dtype=torch.long,
-                            )
-                            consensus_tile_snapshot = {
-                                'indices': tile_indices,
-                                'means': gaussians_full.means[0, tile_indices].clone(),
-                                'covariances': (
-                                    gaussians_full.covariances[0, tile_indices].clone()
-                                ),
-                                'harmonics': gaussians_full.harmonics[0, tile_indices].clone(),
-                                'opacities': gaussians_full.opacities[0, tile_indices].clone(),
-                                'modified_mask': modified_mask[tile_indices].clone(),
-                                'counters': {
-                                    key: self.stats[key]
-                                    for key in (
-                                        'assignment_consensus_pseudo_outputs',
-                                        'assignment_consensus_anchor_pairs',
-                                        'assignment_consensus_offset_recoveries',
-                                        'assignment_consensus_target_lifts',
-                                    )
-                                },
-                            }
+                        )
+                        consensus_plans = []
                         for slot in range(self.primitives_per_pixel):
                             if self.materialization == "dense-diagnostic":
                                 materialized_positions = self.probe_positions
@@ -2790,7 +2814,7 @@ class ProgressiveSAES:
                                 # succeeds, its deterministic 2K positions are
                                 # charged native S2/S3 outputs; only the rest
                                 # of the tile is skipped.
-                                fallback_to_full = self._weighted_moment_match(
+                                moment_result = self._weighted_moment_match(
                                     gaussians_full,
                                     probes,
                                     non_probes,
@@ -2818,7 +2842,20 @@ class ProgressiveSAES:
                                         else "representative"
                                     ),
                                     merge_semantics=self.merge_semantics,
+                                    defer_assignment_consensus_plan=(
+                                        is_assignment_consensus
+                                    ),
                                 )
+                                if is_assignment_consensus:
+                                    fallback_to_full, consensus_plan = moment_result
+                                    if not fallback_to_full:
+                                        if consensus_plan is None:
+                                            raise RuntimeError(
+                                                "assignment-consensus plan is missing"
+                                            )
+                                        consensus_plans.append(consensus_plan)
+                                else:
+                                    fallback_to_full = moment_result
                                 if fallback_to_full:
                                     break
                             elif self.materialization == "probe-spread-diagnostic":
@@ -2839,6 +2876,11 @@ class ProgressiveSAES:
                                 self._dense_interpolate_non_probes(
                                     gaussians_full, probes, non_probes
                                 )
+                            if is_assignment_consensus:
+                                # Plans are committed only after every slot
+                                # validates, so no skipped S3 descriptor needs
+                                # a rollback snapshot.
+                                continue
                             preserves_virtual_outputs = self.materialization in (
                                 "dense-diagnostic",
                                 "virtual-reconstruction-diagnostic",
@@ -2850,26 +2892,18 @@ class ProgressiveSAES:
                                 modified_mask[index] = True
                             if not preserves_virtual_outputs:
                                 total_zeroed += len(non_probes)
+                        if is_assignment_consensus and not fallback_to_full:
+                            if len(consensus_plans) != self.primitives_per_pixel:
+                                raise RuntimeError(
+                                    "assignment-consensus did not plan every primitive slot"
+                                )
+                            for consensus_plan in consensus_plans:
+                                self._commit_assignment_consensus_plan(
+                                    gaussians_full, consensus_plan
+                                )
+                                for output_index in consensus_plan["output_indices"]:
+                                    modified_mask[output_index] = True
                         if fallback_to_full:
-                            if consensus_tile_snapshot is not None:
-                                tile_indices = consensus_tile_snapshot['indices']
-                                gaussians_full.means[0, tile_indices] = (
-                                    consensus_tile_snapshot['means']
-                                )
-                                gaussians_full.covariances[0, tile_indices] = (
-                                    consensus_tile_snapshot['covariances']
-                                )
-                                gaussians_full.harmonics[0, tile_indices] = (
-                                    consensus_tile_snapshot['harmonics']
-                                )
-                                gaussians_full.opacities[0, tile_indices] = (
-                                    consensus_tile_snapshot['opacities']
-                                )
-                                modified_mask[tile_indices] = consensus_tile_snapshot[
-                                    'modified_mask'
-                                ]
-                                for key, value in consensus_tile_snapshot['counters'].items():
-                                    self.stats[key] = value
                             if self.merge_semantics in (
                                 "conditional-optical-mass",
                                 "conditional-projected-optical-mass",

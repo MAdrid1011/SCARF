@@ -9,6 +9,36 @@ torch = pytest.importorskip("torch")
 MATERIALIZATION = "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
 
 
+class _SelectedReadTensor:
+    """Permit selected S3 reads and skipped-output writes only."""
+
+    def __init__(self, tensor, selected_indices):
+        self._tensor = tensor
+        self._selected_indices = set(int(index) for index in selected_indices)
+        self.read_indices = []
+
+    def __getattr__(self, name):
+        return getattr(self._tensor, name)
+
+    def __getitem__(self, index):
+        if not isinstance(index, tuple) or len(index) != 2 or index[0] != 0:
+            raise AssertionError(f"unexpected S3 tensor read index: {index!r}")
+        requested = index[1]
+        if isinstance(requested, int):
+            indices = [requested]
+        elif torch.is_tensor(requested):
+            indices = [int(value) for value in requested.reshape(-1).tolist()]
+        else:
+            indices = [int(value) for value in requested]
+        if not set(indices) <= self._selected_indices:
+            raise AssertionError(f"skipped S3 descriptor read: {indices!r}")
+        self.read_indices.extend(indices)
+        return self._tensor[index]
+
+    def __setitem__(self, index, value):
+        self._tensor[index] = value
+
+
 def _clone_gaussians(gaussians):
     return SimpleNamespace(
         means=gaussians.means.clone(),
@@ -600,3 +630,58 @@ def test_assignment_consensus_full_tile_fallback_restores_every_primitive_slot()
         ledger["traffic_bytes"]["assignment_consensus_fallback_selected_descriptor_read"]
         > 0
     )
+
+
+@pytest.mark.parametrize("primitives_per_pixel", (1, 2))
+def test_assignment_consensus_never_reads_skipped_s3_descriptors(
+    primitives_per_pixel,
+):
+    from saes.progressive_saes import ProgressiveSAES, apply_progressive_saes
+
+    source = _adapter_compatible_gaussians(
+        primitives_per_pixel=primitives_per_pixel
+    )
+    selected_positions = ProgressiveSAES.compute_probe_positions(4)
+    selected = [
+        (row * 4 + column) * primitives_per_pixel + slot
+        for slot in range(primitives_per_pixel)
+        for row, column in selected_positions
+    ]
+    if primitives_per_pixel == 2:
+        bad_slot = [
+            (row * 4 + column) * primitives_per_pixel + 1
+            for row, column in selected_positions
+        ]
+        source.means[0, bad_slot] = 0.0
+    guarded = SimpleNamespace(
+        means=_SelectedReadTensor(source.means, selected),
+        covariances=_SelectedReadTensor(source.covariances, selected),
+        harmonics=_SelectedReadTensor(source.harmonics, selected),
+        opacities=_SelectedReadTensor(source.opacities, selected),
+    )
+    depths = torch.full((1, 1, 16, primitives_per_pixel, 1), 2.0)
+    mask, stats, _ = apply_progressive_saes(
+        guarded,
+        4,
+        4,
+        feature_var_threshold=1.0,
+        depth_std_threshold=1.0,
+        features=torch.ones(1, 1, 2, 4, 4),
+        depths=depths,
+        context_extrinsics=torch.eye(4).reshape(1, 1, 4, 4),
+        context_intrinsics=torch.eye(3).reshape(1, 1, 3, 3),
+        materialization=MATERIALIZATION,
+        materialization_guard=False,
+    )
+
+    for field in ("means", "covariances", "harmonics", "opacities"):
+        observed = getattr(guarded, field).read_indices
+        assert observed
+        assert set(observed) <= set(selected)
+    if primitives_per_pixel == 1:
+        assert stats["level0_tiles"] == 1
+        assert mask.any()
+    else:
+        assert stats["full_tiles"] == 1
+        assert stats["assignment_consensus_fallback_tiles"] == 1
+        assert not mask.any()
