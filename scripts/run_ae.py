@@ -390,6 +390,11 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         )
     elif args.mode == "all":
         experiments = []
+        claimed_pair_filter = _claimed_pairs()
+        if pair_filter is not None:
+            claimed_pair_filter = tuple(
+                pair for pair in pair_filter if pair in claimed_pair_filter
+            )
         for workflow in ("quality", "speedup", "fsdr"):
             experiments.extend(
                 build_software_plan(
@@ -397,7 +402,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
                     args.output_root,
                     args.python,
                     num_samples,
-                    pair_filter,
+                    claimed_pair_filter,
                     True,
                     evidence_profile,
                 )

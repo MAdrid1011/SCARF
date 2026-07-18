@@ -187,14 +187,20 @@ def test_calibrate_mode_uses_the_locked_classic_profile(tmp_path, monkeypatch):
     assert all(command[0] == classic for command in plan["commands"])
 
 
-def test_pair_filter_intersects_each_composite_workflow(tmp_path):
-    all_plan = dry_run(
-        tmp_path / "all",
-        "all",
-        "--num-samples",
-        "1",
-        "--pairs",
-        "transplat/dl3dv",
+def test_pair_filter_intersects_each_composite_workflow(tmp_path, monkeypatch):
+    import scripts.run_ae as runner
+
+    status = runner.load_claim_status()
+    status["software_pairs"]["transplat/dl3dv"] = "CLAIMED"
+    monkeypatch.setattr(runner, "load_claim_status", lambda: status)
+    all_plan = runner.build_plan(
+        SimpleNamespace(
+            mode="all",
+            output_root=tmp_path / "all",
+            python=None,
+            num_samples=1,
+            pairs="transplat/dl3dv",
+        )
     )
     eval_plan = dry_run(
         tmp_path / "all-eval",
@@ -327,8 +333,23 @@ def test_full_fsdr_plan_remains_isolated_from_paper_targets(tmp_path):
     assert all("--expected-results" not in item["aggregate_command"] for item in plan["experiments"])
 
 
-def test_all_reuses_quality_runs_for_embedded_ablation_and_validation(tmp_path):
-    plan = dry_run(tmp_path, "all", "--num-samples", "2")
+def test_all_reuses_claimed_quality_runs_for_embedded_ablation_and_validation(
+    tmp_path, monkeypatch
+):
+    import scripts.run_ae as runner
+
+    status = runner.load_claim_status()
+    for pair in status["software_pairs"]:
+        status["software_pairs"][pair] = "CLAIMED"
+    monkeypatch.setattr(runner, "load_claim_status", lambda: status)
+    plan = runner.build_plan(
+        SimpleNamespace(
+            mode="all",
+            output_root=tmp_path,
+            python=None,
+            num_samples=2,
+        )
+    )
 
     assert len(plan["experiments"]) == 15
     assert {item["workflow"] for item in plan["experiments"]} == {"quality", "fsdr"}
@@ -337,6 +358,53 @@ def test_all_reuses_quality_runs_for_embedded_ablation_and_validation(tmp_path):
     command_text = [" ".join(command) for command in plan["commands"]]
     assert any("hardware/dram/run.sh" in command for command in command_text)
     assert command_text[-1].endswith(f"validate_ae.py --input {tmp_path}")
+
+
+def test_all_skips_unclaimed_software_but_executes_nonmodel_steps(
+    tmp_path, monkeypatch
+):
+    import scripts.run_ae as runner
+
+    status = runner.load_claim_status()
+    for pair in status["software_pairs"]:
+        status["software_pairs"][pair] = "NOT_CLAIMED_SAES_SPARSE_QUALITY_MISMATCH"
+    monkeypatch.setattr(runner, "load_claim_status", lambda: status)
+    plan = runner.build_plan(
+        SimpleNamespace(
+            mode="all",
+            output_root=tmp_path,
+            python=None,
+            num_samples=1,
+        )
+    )
+
+    assert plan["experiments"] == []
+    assert plan["dataset_commands"] == []
+    assert plan["software_claim_scope"] == {
+        "status": "NO_CLAIMED_PAIRS",
+        "pair_count": 0,
+        "diagnostic_results_are_claim_evidence": False,
+    }
+    command_text = [" ".join(command) for command in plan["commands"]]
+    assert any("scripts/run_rtl.sh" in command for command in command_text)
+    assert any("hardware/dram/run.sh" in command for command in command_text)
+    assert any("generate_report.py" in command for command in command_text)
+    assert any("validate_ae.py" in command for command in command_text)
+    assert not any(
+        marker in command
+        for command in command_text
+        for marker in ("demo.py", "run_pair.py", "verify_prepared_dataset.py")
+    )
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    assert runner.execute_plan(plan, tmp_path) == 0
+    assert calls == plan["commands"]
 
 
 def test_dram_mode_uses_only_the_labeled_smoke_vector(tmp_path):
