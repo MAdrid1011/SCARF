@@ -3521,7 +3521,10 @@ class ProgressiveSAES:
                             )
                             for index in non_probes.values():
                                 if not preserves_virtual_outputs:
-                                    gaussians_full.opacities[0, index] *= 0.0
+                                    # Deleted descriptors need no prior alpha.
+                                    # Assignment avoids reading skipped S3
+                                    # opacity before a target-free output commits.
+                                    gaussians_full.opacities[0, index] = 0.0
                                 modified_mask[index] = True
                             if not preserves_virtual_outputs:
                                 total_zeroed += len(non_probes)

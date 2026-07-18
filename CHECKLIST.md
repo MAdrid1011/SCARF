@@ -892,5 +892,7 @@ Verified on 2026-07-16 and 2026-07-17:
   output is committed as a post-hoc reference. Require PSD/finite,
   constant/one-hot, single-assignment, camera-equivariance, selected/skipped
   poison, fixed-mask/event, and atomic Full-fallback gates. Whatever its
-  outcome remains diagnostic-only and cannot authorize a quality/full DL3DV
-  retry.
+  outcome remains descriptor-only and cannot itself be reported as quality
+  evidence. A pass under its separately frozen directional gate may authorize
+  only the pre-registration of one fixed DL3DV sample-0 quality gate; a failed
+  or inconclusive audit authorizes neither that gate nor a full DL3DV retry.

@@ -19,6 +19,7 @@ from .model_loader import (
     MVSplatLoader,
     DepthSplatLoader,
     create_model_loader,
+    load_context_only_audit_data,
     load_target_free_calibration_data,
 )
 
@@ -30,5 +31,6 @@ __all__ = [
     'MVSplatLoader',
     'DepthSplatLoader',
     'create_model_loader',
+    'load_context_only_audit_data',
     'load_target_free_calibration_data',
 ]

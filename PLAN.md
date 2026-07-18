@@ -1838,3 +1838,54 @@
   counts, immutable Full slots, and valid-slot PSD. The focused tests plus all
   `tests/test_saes_*.py` pass (`181 passed`), but no target-free DL3DV
   descriptor audit, render, metric computation, or quality retry has run.
+
+## 37. Pre-Registered Multi-Context Directional Descriptor Audit
+
+- Audit id: `multicontext-tangent-target-free-audit-v1`. This is one fixed
+  TranSplat/DL3DV sample-0 descriptor audit, not a renderer or quality run.
+  It uses the fixed checkpoint SHA256
+  `89e43c205a04962e427801385d7d18e74cba063d05a76bf8b28e5fa746a4b69a`,
+  source-index SHA256
+  `eab21290cfab8eff12e208377b089b2a65e15f7ba44f7bb085963511354863f4`,
+  seed `0`, `tau_f=0.20`, `tau_d=0.10`, normalized-probe first-hit routing,
+  metric probe-depth routing, and the existing K/2K/Full policy. It may not
+  change sample, route, mask, threshold, seed, output count, or Full policy.
+- Input boundary: a new immutable sidecar contains only the two fixed context
+  RGB inputs and their two context camera records. It contains no target RGB,
+  target camera record, target index, renderer input, teacher artifact, or
+  quality-metric input. The returned audit batch has no `target` mapping before
+  context-device transfer; the audit entrypoint and pure metric helpers accept
+  context geometry only.
+- Two-phase execution: phase A materializes and hashes the current
+  `conditional-adapter-offset-attribute-transport-diagnostic` output and the
+  `multicontext-tangent-plane-diagnostic` output separately. It verifies equal
+  route mask, K/2K counts, Full slots, means, SH, opacity, and event counts,
+  plus PSD/finite and selected/skipped poison isolation, then writes both
+  commit manifests. Only after both manifests exist may phase B read dense
+  skipped S3 as a read-only post-hoc reference. No phase may invoke a decoder,
+  renderer, target camera, teacher oracle, expected-results file, optimizer,
+  quality metric, sample selection, or threshold fitting.
+- Post-hoc observables: for every populated L0/L1 tile group and each of the
+  two context cameras, compare current and tangent against the same dense tile
+  reference for projected optical mass (zeroth moment), coverage center (first
+  moment), projected covariance (second moment), footprint determinant and
+  log-ratio, covariance PSD, condition number, and tangent fit residual. The
+  projection is an unclipped positive-depth descriptor surrogate, not alpha
+  compositing or a rendering claim. Invalid depth, covariance, opacity, mass,
+  or determinant is explicit failure, never silently clamped into a pass.
+  Each observable records count, p50, p95, maximum, and candidate-minus-current
+  change.
+- Fixed directional gate: every populated L0/L1-by-context group must have no
+  p50 or p95 dense-reference error worse by more than 1%; the aggregate
+  projected-covariance error must decrease by at least 20%; projected
+  optical-mass error may not worsen; all structural, PSD/finite, poison,
+  Full-passthrough, and route/event invariants must pass; and no local helper
+  fallback may be treated as a successful fit. Empty groups or a no-op tangent
+  output are inconclusive and do not pass.
+- Branch rule: a pass is not quality evidence, but authorizes exactly one
+  separately pre-registered fixed DL3DV sample-0 quality gate. A second-moment
+  improvement with optical-mass regression permits only a deterministic
+  multi-context mass-scale constraint diagnosis. No dense-reference
+  second-moment improvement terminates this tangent candidate; substantial
+  local fallback requires geometry/identifiability repair. No branch permits
+  a threshold, seed, sample, or protocol change.

@@ -289,6 +289,85 @@ def load_target_free_calibration_data(
         loader._restore_cwd()
 
 
+def load_context_only_audit_data(
+    loader: Any,
+    model_bundle: ModelBundle,
+    *,
+    input_root: Path,
+) -> DataBundle:
+    """Construct one encoder batch from a context-camera-only audit sidecar.
+
+    Unlike the generic calibration path, this entrypoint never constructs a
+    target placeholder or target-camera tensor. It mirrors the TranSplat
+    context crop and patch shims directly because their batch wrappers require
+    a target mapping that this audit contract intentionally forbids.
+    """
+    from data.context_only_audit_input import load_context_only_audit_record
+
+    record = load_context_only_audit_record(input_root)
+    loader._setup_imports()
+    try:
+        context_images = _decode_calibration_context_images(record["context_images"])
+        source_height, source_width = context_images.shape[-2:]
+        extrinsics, intrinsics = _calibration_camera_geometry(record["context_cameras"])
+        context_indices = record["context_indices"]
+        if extrinsics.shape[0] != len(context_indices):
+            raise ValueError("context-only audit camera count does not match its context")
+
+        dataset_cfg = model_bundle.config.dataset
+        scale: torch.Tensor | float = 1.0
+        if len(context_indices) == 2 and bool(
+            getattr(dataset_cfg, "make_baseline_1", False)
+        ):
+            scale = (extrinsics[0, :3, 3] - extrinsics[1, :3, 3]).norm()
+            if float(scale) < float(getattr(dataset_cfg, "baseline_epsilon", 0.0)):
+                raise ValueError("context-only audit has insufficient baseline")
+            extrinsics[:, :3, 3] /= scale
+        near_value = float(getattr(dataset_cfg, "near", -1.0))
+        far_value = float(getattr(dataset_cfg, "far", -1.0))
+        near_value = 0.1 if near_value == -1.0 else near_value
+        far_value = 1000.0 if far_value == -1.0 else far_value
+        nf_scale: torch.Tensor | float = (
+            scale if bool(getattr(dataset_cfg, "baseline_scale_bounds", True)) else 1.0
+        )
+        context = {
+            "extrinsics": extrinsics.unsqueeze(0),
+            "intrinsics": intrinsics.unsqueeze(0),
+            "image": context_images.unsqueeze(0),
+            "near": torch.full((1, len(context_indices)), near_value) / nf_scale,
+            "far": torch.full((1, len(context_indices)), far_value) / nf_scale,
+            "index": torch.tensor(context_indices, dtype=torch.long).unsqueeze(0),
+        }
+
+        from src.dataset.shims.crop_shim import apply_crop_shim_to_views
+        from src.dataset.shims.patch_shim import apply_patch_shim_to_views
+
+        context = apply_crop_shim_to_views(
+            context, tuple(model_bundle.config.dataset.image_shape)
+        )
+        encoder_cfg = getattr(model_bundle.encoder, "cfg", None)
+        patch_size = int(getattr(encoder_cfg, "shim_patch_size", 1)) * int(
+            getattr(encoder_cfg, "downscale_factor", 1)
+        )
+        if patch_size < 1:
+            raise ValueError("context-only audit encoder has an invalid patch size")
+        context = apply_patch_shim_to_views(context, patch_size)
+        batch = {
+            "context": context,
+            "scene": [record["key"]],
+            "calibration": {
+                **record["input_identity"],
+                "target_rgb_accessed": False,
+                "target_camera_metadata_accessed": False,
+                "target_mapping_present": False,
+                "source_image_shape": [int(source_height), int(source_width)],
+            },
+        }
+        return DataBundle(batch=batch, data_shim=lambda value: value)
+    finally:
+        loader._restore_cwd()
+
+
 def _load_sequential_data(
     loader: Any,
     model_bundle: ModelBundle,
