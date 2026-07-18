@@ -790,8 +790,12 @@ Verified on 2026-07-16 and 2026-07-17:
   guard-threshold repair and do not retry quality.
 - [ ] Pre-register and test one assignment-consensus adapter pseudo-descriptor
   geometry candidate target-free. It must preserve fixed routing, thresholds,
-  primary-K/2K anchors, and selected-anchor-only S2/S3 access; no quality run
-  is authorized by this diagnostic alone.
+  primary-K/2K anchors, and selected-anchor-only S2/S3 access. It is a
+  virtual-output, non-paper-eligible diagnostic with zero compression; no
+  quality run is authorized by this diagnostic alone. Start synthetic-only:
+  lock consensus depth/offset/C2W/covariance equations, reject assignment
+  squaring, prove poison/PSD/route/event properties, and charge its separate
+  geometry arithmetic before registering a DL3DV audit.
 - [x] Add a fail-closed DL3DV training-calibration archive path: enumerate the
   authenticated official tree, freeze an evaluation-disjoint 24+8 plan before
   download, verify selected ZIP byte counts and upstream object ids, record

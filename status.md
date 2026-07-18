@@ -46,9 +46,10 @@
   same-order covariance/coverage error, so guard-threshold repair is rejected.
   The guard policy, thresholds, and failed quality gate remain frozen.
 - Next action: pre-register and test one selected-anchor-only
-  assignment-consensus pseudo-descriptor geometry correction target-free. Its
-  fixed one-sample quality result remains non-claim failure: PSNR loss 9.1865
-  dB, SSIM loss 0.12356, and LPIPS increase 0.18844 despite valid
+  assignment-consensus pseudo-descriptor virtual diagnostic target-free. It
+  cannot alter the sparse claim path, save Gaussians, or authorize quality.
+  The fixed one-sample quality result remains non-claim failure: PSNR loss
+  9.1865 dB, SSIM loss 0.12356, and LPIPS increase 0.18844 despite valid
   target-RGB-after-mask provenance. Do not publish or mark HotCRP ready until
   mandatory key results pass.
 - Active closure contract: retain the paper's routing mechanisms while adding

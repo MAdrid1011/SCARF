@@ -1585,21 +1585,47 @@
   position, the existing bilateral selected-anchor weights can form one
   pseudo descriptor: assignment-weighted selected-anchor depth and bounded
   adapter image-plane offset, lifted through that skipped position's C2W ray;
-  covariance uses the existing assignment-weighted first/second moment. This
-  is an implementation detail of the declared C2W-ray-aware moment matching,
-  not a new routing level or trainable component.
+  covariance uses one selected-anchor first/second moment. This is a new
+  virtual-output diagnostic, not a paper-result-eligible replacement for the
+  frozen sparse representative merge: applying its consensus descriptor again
+  to every receiving anchor would introduce an undeclared double-assignment
+  term.
 - Fixed target-free gate: retain sample 0, seed 0, tile size 4, tau_f=.20,
   tau_d=.10, normalized feature statistic, metric depth, primary-K L1
   reference, 2K anchors, and all existing numerical fail-closed checks. The
   candidate may use only S1, selected-anchor S2/S3, static context camera
   geometry, and the already-declared assignment; it must not read target RGB,
-  skipped S3 descriptors, paper results, or quality metrics. Test constant,
-  one-hot, PSD, C2W, assignment, and poison properties before exactly one
-  target-free DL3DV audit.
+  skipped S3 descriptors, paper results, or quality metrics. It writes only
+  virtual skipped outputs, leaves selected anchors untouched, reports zero
+  Gaussian compression, and is barred from claim/Functional modes and any
+  quality retry. Test constant, one-hot, PSD, C2W, assignment, and poison
+  properties before deciding whether a separately pre-registered target-free
+  DL3DV audit is justified.
+- Algebra and access contract: for selected anchors `q`, existing bilateral
+  weights `r_iq`, selected S2 depths `d_q`, recovered bounded adapter offsets
+  `o_q`, and skipped position `x_i`, construct
+  `d_i=sum_q r_iq*d_q`, `o_i=sum_q r_iq*o_q`, and
+  `m_i=LiftC2W(x_i,d_i,o_i)`. Let
+  `m_iq=LiftC2W(x_i,d_q,o_q)` and construct exactly one PSD covariance moment
+  `C_i=sym(sum_q r_iq*(C_q+(m_iq-m_i)(m_iq-m_i)^T))`, followed by the existing
+  eig-floor. SH and opacity remain their selected-anchor convex estimates.
+  The diagnostic writes `(m_i,C_i,SH_i,alpha_i)` only at skipped virtual
+  outputs and never applies `r_iq` again to a retained anchor, eliminating an
+  `r_ip*r_iq` term by construction. Its helper accepts only selected-anchor
+  tensors, selected positions, assignments, target positions, and context
+  camera geometry, so full depth/Gaussian tensors cannot be read accidentally.
+- Synthetic-only gate: prove constant and one-hot exactness; offset-before-ray
+  normalization under nonidentity C2W/intrinsics; PSD/finite and full-tile
+  fail-closed behavior; assignment simplex and anchor-permutation invariance;
+  selected-S2/S3 and skipped-S2/S3 poison invariance for L0 and L1; unchanged
+  route, mask, selected-anchor counts, and existing S2/S3 events. Record a
+  distinct nonzero consensus geometry arithmetic/traffic counter; do not
+  recycle the SH/opacity-only accounting counter or call the work free.
 - Abandonment: any selected-anchor access violation, non-finite/PSD failure,
   routing drift, or non-positive direct full-S3 attribute evidence stops this
-  branch. A target-free pass alone does not authorize a quality retry; that
-  decision remains blocked on the fixed failure record and disjoint calibration.
+  branch. A synthetic pass only permits a new target-free-audit preregistration;
+  a target-free pass alone does not authorize a quality retry, which remains
+  blocked on the fixed failure record and disjoint calibration.
 
 ## 34. DL3DV Training-Calibration Preparation
 
