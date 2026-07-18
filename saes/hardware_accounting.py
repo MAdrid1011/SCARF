@@ -24,7 +24,7 @@ from saes.probe_layout import (
 )
 
 
-LEDGER_VERSION = "saes-event-ledger-v1"
+LEDGER_VERSION = "saes-event-ledger-v2"
 DEFAULT_VECTOR_WIDTH = 64
 DEFAULT_STORAGE_BEAT_BYTES = 16
 
@@ -200,6 +200,77 @@ def build_saes_event_ledger(
             "the declared SAES tile path"
         )
 
+    consensus_pseudo_outputs = _count(
+        saes_stats, "assignment_consensus_pseudo_outputs"
+    )
+    consensus_anchor_pairs = _count(
+        saes_stats, "assignment_consensus_anchor_pairs"
+    )
+    consensus_offset_recoveries = _count(
+        saes_stats, "assignment_consensus_offset_recoveries"
+    )
+    consensus_target_lifts = _count(
+        saes_stats, "assignment_consensus_target_lifts"
+    )
+    consensus_fallback_tiles = _count(
+        saes_stats, "assignment_consensus_fallback_tiles"
+    )
+    consensus_l0_fallback_tiles = _count(
+        saes_stats, "assignment_consensus_l0_fallback_tiles"
+    )
+    consensus_l1_fallback_tiles = _count(
+        saes_stats, "assignment_consensus_l1_fallback_tiles"
+    )
+    if consensus_fallback_tiles > full_tiles:
+        raise ValueError("assignment_consensus_fallback_tiles exceeds full tiles")
+    if (
+        consensus_l0_fallback_tiles + consensus_l1_fallback_tiles
+        != consensus_fallback_tiles
+    ):
+        raise ValueError(
+            "assignment-consensus fallback level counters do not cover total fallbacks"
+        )
+    consensus_success = any(
+        (
+            consensus_pseudo_outputs,
+            consensus_anchor_pairs,
+            consensus_offset_recoveries,
+            consensus_target_lifts,
+        )
+    )
+    consensus_active = consensus_success or bool(consensus_fallback_tiles)
+    expected_consensus_anchor_pairs = (
+        l0_nonanchors * primary_probe_count
+        + l1_nonanchors * l1_anchor_count
+    )
+    if consensus_active and attribute_transport_pairs:
+        raise ValueError(
+            "assignment-consensus accounting must not reuse attribute transport"
+        )
+    if consensus_active:
+        if consensus_pseudo_outputs != total_nonanchors:
+            raise ValueError(
+                "assignment_consensus_pseudo_outputs is inconsistent with "
+                "the declared SAES tile path"
+            )
+        if consensus_anchor_pairs != expected_consensus_anchor_pairs:
+            raise ValueError(
+                "assignment_consensus_anchor_pairs is inconsistent with "
+                "the declared SAES tile path"
+            )
+        if consensus_offset_recoveries != retained_anchors:
+            raise ValueError(
+                "assignment_consensus_offset_recoveries is inconsistent with "
+                "the declared SAES tile path"
+            )
+        if consensus_target_lifts != (
+            consensus_pseudo_outputs + consensus_anchor_pairs
+        ):
+            raise ValueError(
+                "assignment_consensus_target_lifts must cover consensus and "
+                "per-anchor target lifts"
+            )
+
     guard_enabled = saes_stats.get("materialization_guard_enabled", False)
     if not isinstance(guard_enabled, bool):
         raise ValueError("materialization_guard_enabled must be boolean")
@@ -287,8 +358,44 @@ def build_saes_event_ledger(
 
     l0_assignment_cycles = _assignment_cycles(l0_nonanchors, primary_probe_count)
     l1_assignment_cycles = _assignment_cycles(l1_nonanchors, l1_anchor_count)
-    l0_moment_cycles = _moment_cycles(l0_nonanchors, primary_probe_count, l0_anchors)
-    l1_moment_cycles = _moment_cycles(l1_nonanchors, l1_anchor_count, l1_anchors)
+    fallback_l0_nonanchors = (
+        consensus_l0_fallback_tiles
+        * (tile_positions - primary_probe_count)
+        * primitives_per_pixel
+    )
+    fallback_l1_nonanchors = (
+        consensus_l1_fallback_tiles
+        * (tile_positions - l1_anchor_count)
+        * primitives_per_pixel
+    )
+    fallback_consensus_pseudo_outputs = (
+        fallback_l0_nonanchors + fallback_l1_nonanchors
+    )
+    fallback_consensus_anchor_pairs = (
+        fallback_l0_nonanchors * primary_probe_count
+        + fallback_l1_nonanchors * l1_anchor_count
+    )
+    fallback_consensus_offset_recoveries = primitives_per_pixel * (
+        consensus_l0_fallback_tiles * primary_probe_count
+        + consensus_l1_fallback_tiles * l1_anchor_count
+    )
+    fallback_consensus_target_lifts = (
+        fallback_consensus_pseudo_outputs + fallback_consensus_anchor_pairs
+    )
+    fallback_assignment_cycles = (
+        _assignment_cycles(fallback_l0_nonanchors, primary_probe_count)
+        + _assignment_cycles(fallback_l1_nonanchors, l1_anchor_count)
+    )
+    l0_moment_cycles = (
+        0
+        if consensus_success
+        else _moment_cycles(l0_nonanchors, primary_probe_count, l0_anchors)
+    )
+    l1_moment_cycles = (
+        0
+        if consensus_success
+        else _moment_cycles(l1_nonanchors, l1_anchor_count, l1_anchors)
+    )
     assignment_cycles = l0_assignment_cycles + l1_assignment_cycles
     moment_cycles = l0_moment_cycles + l1_moment_cycles
     # The standard moment charge includes the receiving-anchor update. The
@@ -298,6 +405,36 @@ def build_saes_event_ledger(
     attribute_transport_cycles = (
         attribute_transport_pairs * attribute_transport_chunks
     )
+    # The consensus diagnostic writes one virtual descriptor per skipped
+    # output.  Its C2W offset recovery, target ray lifts, geometry moment, and
+    # selected-anchor SH/opacity reductions are all charged analytically. This
+    # is not an RTL schedule or an S2/S3 saving claim.
+    charged_consensus_pseudo_outputs = (
+        consensus_pseudo_outputs + fallback_consensus_pseudo_outputs
+    )
+    charged_consensus_anchor_pairs = (
+        consensus_anchor_pairs + fallback_consensus_anchor_pairs
+    )
+    charged_consensus_offset_recoveries = (
+        consensus_offset_recoveries + fallback_consensus_offset_recoveries
+    )
+    charged_consensus_target_lifts = (
+        consensus_target_lifts + fallback_consensus_target_lifts
+    )
+    consensus_offset_recovery_cycles = (
+        charged_consensus_offset_recoveries * descriptor_chunks
+    )
+    consensus_target_lift_cycles = charged_consensus_target_lifts * descriptor_chunks
+    consensus_geometry_cycles = charged_consensus_anchor_pairs * descriptor_chunks
+    consensus_attribute_cycles = (
+        charged_consensus_anchor_pairs * attribute_transport_chunks
+    )
+    consensus_cycles = (
+        consensus_offset_recovery_cycles
+        + consensus_target_lift_cycles
+        + consensus_geometry_cycles
+        + consensus_attribute_cycles
+    )
 
     # Traffic is reported even where data can reuse an already-resident S1/S2
     # tile buffer.  Only the retained-descriptor read/rewrite and route record
@@ -305,12 +442,27 @@ def build_saes_event_ledger(
     # feature/depth reads as incremental would double count baseline S1/S2 IO.
     route_feature_read_bytes = total_tiles * primary_probe_count * feature_dim * 2
     assignment_feature_read_bytes = total_nonanchors * feature_dim * 2
+    consensus_fallback_assignment_feature_read_bytes = (
+        fallback_consensus_pseudo_outputs * feature_dim * 2
+    )
     probe_depth_read_bytes = (l1_tiles + full_tiles) * primary_probe_count * 2
     retained_descriptor_read_bytes = retained_anchors * descriptor_bytes
-    retained_descriptor_write_bytes = retained_anchors * descriptor_bytes
+    # The ordinary representative path rewrites each retained anchor after
+    # moment matching. The virtual consensus diagnostic leaves those selected
+    # outputs untouched and instead charges its materialized skipped outputs.
+    retained_descriptor_write_bytes = (
+        0 if consensus_success else retained_anchors * descriptor_bytes
+    )
     guard_descriptor_read_bytes = guard_anchor_descriptors * descriptor_bytes
     attribute_transport_read_bytes = attribute_transport_pairs * (
         descriptor_parts["harmonics_fp16"] + descriptor_parts["opacity_fp16"]
+    )
+    consensus_fallback_selected_descriptor_read_bytes = (
+        fallback_consensus_offset_recoveries * descriptor_bytes
+    )
+    consensus_depth_read_bytes = charged_consensus_offset_recoveries * 2
+    consensus_virtual_output_write_bytes = (
+        charged_consensus_pseudo_outputs * descriptor_bytes
     )
     route_record_write_bytes = total_tiles
     charged_storage_bytes = (
@@ -318,6 +470,9 @@ def build_saes_event_ledger(
         + retained_descriptor_write_bytes
         + guard_descriptor_read_bytes
         + attribute_transport_read_bytes
+        + consensus_fallback_selected_descriptor_read_bytes
+        + consensus_depth_read_bytes
+        + consensus_virtual_output_write_bytes
         + route_record_write_bytes
     )
     storage_transfer_cycles = _ceil_div(charged_storage_bytes, storage_beat_bytes)
@@ -328,8 +483,10 @@ def build_saes_event_ledger(
     serialized_accounting_cycles = (
         decision_cycles
         + assignment_cycles
+        + fallback_assignment_cycles
         + moment_cycles
         + attribute_transport_cycles
+        + consensus_cycles
         + storage_transfer_cycles
     )
 
@@ -370,6 +527,31 @@ def build_saes_event_ledger(
             ),
             **(
                 {
+                    "assignment_consensus_pseudo_outputs": consensus_pseudo_outputs,
+                    "assignment_consensus_anchor_pairs": consensus_anchor_pairs,
+                    "assignment_consensus_offset_recoveries": (
+                        consensus_offset_recoveries
+                    ),
+                    "assignment_consensus_target_lifts": consensus_target_lifts,
+                    "assignment_consensus_fallback_tiles": consensus_fallback_tiles,
+                    "assignment_consensus_l0_fallback_tiles": (
+                        consensus_l0_fallback_tiles
+                    ),
+                    "assignment_consensus_l1_fallback_tiles": (
+                        consensus_l1_fallback_tiles
+                    ),
+                    "assignment_consensus_fallback_attempted_pseudo_outputs": (
+                        fallback_consensus_pseudo_outputs
+                    ),
+                    "assignment_consensus_fallback_attempted_anchor_pairs": (
+                        fallback_consensus_anchor_pairs
+                    ),
+                }
+                if consensus_active
+                else {}
+            ),
+            **(
+                {
                     "l0_guard_checks": l0_guard_checks,
                     "l1_guard_checks": l1_guard_checks,
                     "l0_guard_rejections": l0_guard_rejections,
@@ -399,26 +581,43 @@ def build_saes_event_ledger(
             "l0_assignment": l0_assignment_cycles,
             "l1_assignment": l1_assignment_cycles,
             "assignment_total": assignment_cycles,
+            "assignment_consensus_fallback_assignment": fallback_assignment_cycles,
             "l0_moment_matching": l0_moment_cycles,
             "l1_moment_matching": l1_moment_cycles,
             "moment_matching_total": moment_cycles,
             "adapter_offset_attribute_reconstruction": attribute_transport_cycles,
+            "assignment_consensus_offset_recovery": consensus_offset_recovery_cycles,
+            "assignment_consensus_target_lift": consensus_target_lift_cycles,
+            "assignment_consensus_geometry": consensus_geometry_cycles,
+            "assignment_consensus_attribute_reduction": consensus_attribute_cycles,
+            "assignment_consensus_total": consensus_cycles,
             "storage_transfer": storage_transfer_cycles,
             "serialized_accounting_cycles": serialized_accounting_cycles,
         },
         "traffic_bytes": {
             "route_feature_read": route_feature_read_bytes,
             "assignment_feature_read": assignment_feature_read_bytes,
+            "assignment_consensus_fallback_assignment_feature_read": (
+                consensus_fallback_assignment_feature_read_bytes
+            ),
             "probe_depth_read": probe_depth_read_bytes,
             "retained_descriptor_read": retained_descriptor_read_bytes,
             "retained_descriptor_write": retained_descriptor_write_bytes,
             "materialization_guard_descriptor_read": guard_descriptor_read_bytes,
             "adapter_offset_attribute_transport_read": attribute_transport_read_bytes,
+            "assignment_consensus_fallback_selected_descriptor_read": (
+                consensus_fallback_selected_descriptor_read_bytes
+            ),
+            "assignment_consensus_depth_read": consensus_depth_read_bytes,
+            "assignment_consensus_virtual_output_write": (
+                consensus_virtual_output_write_bytes
+            ),
             "route_record_write": route_record_write_bytes,
             "charged_storage_total": charged_storage_bytes,
             "observed_total": (
                 route_feature_read_bytes
                 + assignment_feature_read_bytes
+                + consensus_fallback_assignment_feature_read_bytes
                 + probe_depth_read_bytes
                 + charged_storage_bytes
             ),
@@ -433,6 +632,14 @@ def build_saes_event_ledger(
                 "selected-anchor SH/opacity reconstruction is charged as "
                 "conservative FP16 descriptor reads plus VectorALU reduction; "
                 "it does not create an S2/S3 saving claim"
+            ),
+            "assignment_consensus_adapter_pseudo_descriptor": (
+                "virtual skipped descriptors are charged for selected-anchor "
+                "reads, S2 depth recovery, C2W geometry arithmetic, and full "
+                "descriptor writes. A fail-closed tile is conservatively charged "
+                "as one full virtual attempt before its dense fallback; this "
+                "diagnostic has zero compression and does not create an S2/S3 "
+                "saving claim"
             ),
             "rtl_cycle_equivalent": False,
         },

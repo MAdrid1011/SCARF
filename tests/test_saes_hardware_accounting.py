@@ -79,6 +79,67 @@ def test_event_ledger_charges_adapter_offset_attribute_reconstruction():
     )
 
 
+def test_event_ledger_charges_assignment_consensus_virtual_outputs():
+    from saes.hardware_accounting import build_saes_event_ledger
+
+    baseline = build_saes_event_ledger(
+        _mixed_stats(), feature_dim=128, tile_size=4, sh_degree=2
+    )
+    stats = _mixed_stats()
+    stats.update(
+        {
+            "assignment_consensus_pseudo_outputs": 12 + 8,
+            "assignment_consensus_anchor_pairs": 12 * 4 + 8 * 8,
+            "assignment_consensus_offset_recoveries": 4 + 8,
+            "assignment_consensus_target_lifts": (12 + 8) + (12 * 4 + 8 * 8),
+        }
+    )
+    consensus = build_saes_event_ledger(
+        stats, feature_dim=128, tile_size=4, sh_degree=2
+    )
+
+    assert consensus["events"]["assignment_consensus_pseudo_outputs"] == 20
+    assert consensus["events"]["assignment_consensus_anchor_pairs"] == 112
+    assert consensus["cycles"]["moment_matching_total"] == 0
+    assert consensus["cycles"]["assignment_consensus_total"] > 0
+    assert consensus["traffic_bytes"]["retained_descriptor_write"] == 0
+    assert consensus["traffic_bytes"]["assignment_consensus_depth_read"] == 12 * 2
+    assert consensus["traffic_bytes"]["assignment_consensus_virtual_output_write"] == (
+        20 * consensus["inputs"]["descriptor_bytes"]
+    )
+    assert (
+        consensus["cycles"]["serialized_accounting_cycles"]
+        > baseline["cycles"]["serialized_accounting_cycles"]
+    )
+
+
+def test_event_ledger_rejects_attribute_transport_on_consensus_fallback():
+    from saes.hardware_accounting import build_saes_event_ledger
+
+    stats = _mixed_stats()
+    stats["adapter_offset_attribute_transport_uses"] = 12 * 4 + 8 * 8
+    stats["assignment_consensus_fallback_tiles"] = 1
+    stats["assignment_consensus_l0_fallback_tiles"] = 1
+
+    with pytest.raises(ValueError, match="must not reuse attribute transport"):
+        build_saes_event_ledger(
+            stats, feature_dim=128, tile_size=4, sh_degree=2
+        )
+
+
+def test_event_ledger_rejects_missing_consensus_success_counters():
+    from saes.hardware_accounting import build_saes_event_ledger
+
+    stats = _mixed_stats()
+    stats["assignment_consensus_fallback_tiles"] = 1
+    stats["assignment_consensus_l0_fallback_tiles"] = 1
+
+    with pytest.raises(ValueError, match="pseudo_outputs is inconsistent"):
+        build_saes_event_ledger(
+            stats, feature_dim=128, tile_size=4, sh_degree=2
+        )
+
+
 def test_event_ledger_rejects_anchor_counts_that_do_not_match_the_route():
     from saes.hardware_accounting import build_saes_event_ledger
 

@@ -265,6 +265,7 @@ class ProgressiveSAES:
             "probe-spread-diagnostic",
             "transmittance-diagnostic",
             "virtual-reconstruction-diagnostic",
+            "assignment-consensus-adapter-pseudo-descriptor-diagnostic",
             LEGACY_L1_PRIMARY_DEPTH_REFERENCE_MATERIALIZATION,
             "conditional-anchor-transport-diagnostic",
             "conditional-adapter-offset-transport-diagnostic",
@@ -293,6 +294,10 @@ class ProgressiveSAES:
         # geometry, but reconstructs skipped SH/opacity from the declared
         # bilateral assignments before the receiving-anchor update.
         self.merge_semantics = (
+            "assignment-consensus-adapter-pseudo-descriptor"
+            if materialization
+            == "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
+            else
             "conditional-adapter-offset-attribute-transport"
             if materialization
             == "conditional-adapter-offset-attribute-transport-diagnostic"
@@ -413,6 +418,17 @@ class ProgressiveSAES:
             # obtains its non-anchor descriptor from fixed-function anchor
             # interpolation rather than an S3 network evaluation.
             'virtual_reconstructed_gaussians': 0,
+            # Assignment-consensus pseudo descriptors are virtual skipped
+            # outputs only. They do not modify selected anchors or establish a
+            # sparse-execution claim, so their geometry work is tracked apart
+            # from the historical SH/opacity attribute transport diagnostic.
+            'assignment_consensus_pseudo_outputs': 0,
+            'assignment_consensus_anchor_pairs': 0,
+            'assignment_consensus_offset_recoveries': 0,
+            'assignment_consensus_target_lifts': 0,
+            'assignment_consensus_fallback_tiles': 0,
+            'assignment_consensus_l0_fallback_tiles': 0,
+            'assignment_consensus_l1_fallback_tiles': 0,
             'covariance_psd_violations': 0,
             # Conditional optical-density transport is diagnostic until it
             # passes the target-free and image-quality gates.  These counters
@@ -590,34 +606,17 @@ class ProgressiveSAES:
             device=source_mean.device, dtype=source_mean.dtype
         ) + residual.unsqueeze(0)
 
-    def _adapter_offset_transport_means(
+    def _recover_adapter_offset(
         self,
         source_mean: torch.Tensor,
         source_depth: torch.Tensor,
         source_position: Tuple[int, int],
-        target_positions: List[Tuple[int, int]],
         *,
         view_index: int,
     ) -> torch.Tensor | None:
-        """Transport one anchor with TranSplat's image-plane-offset convention.
-
-        The Gaussian adapter first shifts a pixel centre by its predicted
-        sub-pixel image-plane offset, then unprojects and normalizes that ray.
-        Stage 3 exposes the resulting mean rather than the raw offset, so this
-        diagnostic recovers the offset from one *selected* anchor mean/depth
-        and the producer context camera.  It applies that same bounded offset
-        to each assigned pixel centre before normalizing the target ray.
-
-        This deliberately accepts no target-view data and no skipped S3
-        descriptor.  ``None`` is a fail-closed signal: a caller must keep the
-        tile Full rather than approximate the adapter with a world-space
-        residual when camera geometry, depth convention, or offset bounds do
-        not match the upstream adapter contract.
-        """
+        """Recover one selected anchor's bounded TranSplat image-plane offset."""
         if source_mean.shape != (3,) or source_depth.numel() != 1:
-            raise ValueError("adapter-offset transport requires one 3D source")
-        if not target_positions:
-            return source_mean.new_empty((0, 3))
+            raise ValueError("adapter-offset recovery requires one 3D source")
         if (
             self.context_extrinsics is None
             or self.context_intrinsics is None
@@ -628,14 +627,7 @@ class ProgressiveSAES:
             return None
 
         source_row, source_column = source_position
-        if (
-            not 0 <= source_row < self.H
-            or not 0 <= source_column < self.W
-            or any(
-                not 0 <= row < self.H or not 0 <= column < self.W
-                for row, column in target_positions
-            )
-        ):
+        if not 0 <= source_row < self.H or not 0 <= source_column < self.W:
             return None
 
         device = source_mean.device
@@ -668,10 +660,6 @@ class ProgressiveSAES:
         source_distance = camera_displacement.norm()
         if not bool(torch.isfinite(source_distance)) or bool(source_distance <= tiny):
             return None
-        # The upstream adapter applies Euclidean depth after unit-ray
-        # normalization.  Reject an incompatible retained descriptor instead
-        # of silently treating a z-depth or arbitrary world residual as an
-        # adapter offset.
         depth_tolerance = torch.maximum(
             depth.abs() * 1e-4,
             torch.as_tensor(1e-6, device=device, dtype=dtype),
@@ -692,15 +680,77 @@ class ProgressiveSAES:
             dtype=dtype,
         )
         offset = source_coordinate - source_centre
-        # EncoderTrans produces ``(sigmoid(raw_offset) - 0.5) * pixel_size``.
-        # Keep this diagnostic tied to that bounded contract rather than
-        # accepting a free world-space displacement.
         offset_limit = torch.tensor(
             (0.5 / self.W, 0.5 / self.H), device=device, dtype=dtype
         )
         offset_tolerance = torch.as_tensor(1e-6, device=device, dtype=dtype)
         if not bool(torch.isfinite(offset).all()) or bool(
             (offset.abs() > offset_limit + offset_tolerance).any()
+        ):
+            return None
+        return offset
+
+    def _lift_adapter_offsets(
+        self,
+        target_positions: List[Tuple[int, int]],
+        target_depths: torch.Tensor,
+        target_offsets: torch.Tensor,
+        *,
+        view_index: int,
+    ) -> torch.Tensor | None:
+        """Lift bounded adapter offsets at target pixels before ray normalization."""
+        if not target_positions:
+            return target_depths.new_empty((0, 3))
+        if (
+            self.context_extrinsics is None
+            or self.context_intrinsics is None
+            or self._camera_origins is None
+            or self.ray_depth_mode != "euclidean"
+            or not 0 <= view_index < self.view_count
+        ):
+            return None
+        if any(
+            not 0 <= row < self.H or not 0 <= column < self.W
+            for row, column in target_positions
+        ):
+            return None
+        if not torch.is_tensor(target_depths) or not torch.is_tensor(target_offsets):
+            raise ValueError("adapter-offset lift requires tensor depths and offsets")
+        target_depths = target_depths.reshape(-1)
+        if target_depths.numel() != len(target_positions):
+            raise ValueError("adapter-offset lift depth count must match target positions")
+        if target_offsets.shape != (len(target_positions), 2):
+            raise ValueError("adapter-offset lift offsets must match target positions")
+        if not torch.is_floating_point(target_depths):
+            return None
+
+        device = target_depths.device
+        dtype = target_depths.dtype
+        target_offsets = target_offsets.to(device=device, dtype=dtype)
+        tiny = torch.as_tensor(torch.finfo(dtype).eps, device=device, dtype=dtype)
+        if (
+            not bool(torch.isfinite(target_depths).all())
+            or not bool(torch.isfinite(target_offsets).all())
+            or bool((target_depths <= tiny).any())
+        ):
+            return None
+        offset_limit = torch.tensor(
+            (0.5 / self.W, 0.5 / self.H), device=device, dtype=dtype
+        )
+        offset_tolerance = torch.as_tensor(1e-6, device=device, dtype=dtype)
+        if bool((target_offsets.abs() > offset_limit + offset_tolerance).any()):
+            return None
+
+        extrinsic = self.context_extrinsics[0, view_index].to(device=device, dtype=dtype)
+        intrinsic = self.context_intrinsics[0, view_index].to(device=device, dtype=dtype)
+        if not bool(torch.isfinite(extrinsic).all()) or not bool(torch.isfinite(intrinsic).all()):
+            return None
+        try:
+            intrinsic_determinant = torch.linalg.det(intrinsic)
+        except RuntimeError:
+            return None
+        if not bool(torch.isfinite(intrinsic_determinant)) or bool(
+            intrinsic_determinant.abs() <= tiny
         ):
             return None
 
@@ -713,20 +763,15 @@ class ProgressiveSAES:
         target_centres = torch.stack(
             ((columns + 0.5) / self.W, (rows + 0.5) / self.H), dim=-1
         )
-        target_coordinates = target_centres + offset.unsqueeze(0)
         target_homogeneous = torch.cat(
             (
-                target_coordinates,
-                torch.ones(
-                    (len(target_positions), 1), device=device, dtype=dtype
-                ),
+                target_centres + target_offsets,
+                torch.ones((len(target_positions), 1), device=device, dtype=dtype),
             ),
             dim=-1,
         )
         try:
-            camera_directions = torch.linalg.solve(
-                intrinsic, target_homogeneous.mT
-            ).mT
+            camera_directions = torch.linalg.solve(intrinsic, target_homogeneous.mT).mT
         except RuntimeError:
             return None
         direction_norms = camera_directions.norm(dim=-1, keepdim=True)
@@ -737,9 +782,224 @@ class ProgressiveSAES:
         ):
             return None
         camera_directions = camera_directions / direction_norms
-        world_directions = torch.einsum("ij,nj->ni", rotation_c2w, camera_directions)
-        transported = origin.unsqueeze(0) + world_directions * depth.reshape(1, 1)
+        world_directions = torch.einsum(
+            "ij,nj->ni", extrinsic[:3, :3], camera_directions
+        )
+        transported = extrinsic[:3, 3].unsqueeze(0) + world_directions * target_depths.unsqueeze(1)
         return transported if bool(torch.isfinite(transported).all()) else None
+
+    def _adapter_offset_transport_means(
+        self,
+        source_mean: torch.Tensor,
+        source_depth: torch.Tensor,
+        source_position: Tuple[int, int],
+        target_positions: List[Tuple[int, int]],
+        *,
+        view_index: int,
+    ) -> torch.Tensor | None:
+        """Transport one anchor with TranSplat's image-plane-offset convention.
+
+        The Gaussian adapter first shifts a pixel centre by its predicted
+        sub-pixel image-plane offset, then unprojects and normalizes that ray.
+        Stage 3 exposes the resulting mean rather than the raw offset, so this
+        diagnostic recovers the offset from one *selected* anchor mean/depth
+        and the producer context camera.  It applies that same bounded offset
+        to each assigned pixel centre before normalizing the target ray.
+
+        This deliberately accepts no target-view data and no skipped S3
+        descriptor.  ``None`` is a fail-closed signal: a caller must keep the
+        tile Full rather than approximate the adapter with a world-space
+        residual when camera geometry, depth convention, or offset bounds do
+        not match the upstream adapter contract.
+        """
+        if source_mean.shape != (3,) or source_depth.numel() != 1:
+            raise ValueError("adapter-offset transport requires one 3D source")
+        if not target_positions:
+            return source_mean.new_empty((0, 3))
+        offset = self._recover_adapter_offset(
+            source_mean, source_depth, source_position, view_index=view_index
+        )
+        if offset is None:
+            return None
+        depth = source_depth.reshape(()).to(
+            device=source_mean.device, dtype=source_mean.dtype
+        )
+        return self._lift_adapter_offsets(
+            target_positions,
+            depth.expand(len(target_positions)),
+            offset.unsqueeze(0).expand(len(target_positions), -1),
+            view_index=view_index,
+        )
+
+    def _assignment_consensus_adapter_pseudo_geometry(
+        self,
+        selected_means: torch.Tensor,
+        selected_covariances: torch.Tensor,
+        selected_depths: torch.Tensor,
+        selected_positions: List[Tuple[int, int]],
+        assignment_matrix: torch.Tensor,
+        target_positions: List[Tuple[int, int]],
+        *,
+        view_index: int,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Build virtual skipped geometry from selected anchors only.
+
+        This helper deliberately accepts no full Gaussian/depth tensor.  For a
+        skipped position ``i`` and selected anchor ``q`` it evaluates the
+        pre-registered consensus descriptor once:
+
+        ``d_i = sum_q r_iq d_q`` and ``o_i = sum_q r_iq o_q``;
+        ``m_i = LiftC2W(x_i, d_i, o_i)``;
+        ``C_i = sum_q r_iq [C_q + (m_iq-m_i)(m_iq-m_i)^T]``.
+
+        The caller writes the returned virtual outputs directly.  It must not
+        feed them into the retained-anchor update loop, which would introduce
+        an undeclared second assignment factor.
+        """
+        if (
+            selected_means.ndim != 2
+            or selected_means.shape[1] != 3
+            or selected_covariances.shape
+            != (selected_means.shape[0], 3, 3)
+            or selected_depths.numel() != selected_means.shape[0]
+            or len(selected_positions) != selected_means.shape[0]
+            or assignment_matrix.shape
+            != (len(target_positions), selected_means.shape[0])
+            or not torch.is_floating_point(selected_means)
+        ):
+            return None
+
+        anchor_count = selected_means.shape[0]
+        target_count = len(target_positions)
+        if anchor_count < 1:
+            return None
+        if target_count == 0:
+            return (
+                selected_means.new_empty((0, 3)),
+                selected_covariances.new_empty((0, 3, 3)),
+            )
+        if (
+            self.context_extrinsics is None
+            or self.context_intrinsics is None
+            or self._camera_origins is None
+            or self.ray_depth_mode != "euclidean"
+            or not 0 <= view_index < self.view_count
+        ):
+            return None
+
+        device = selected_means.device
+        dtype = selected_means.dtype
+        selected_depths = selected_depths.reshape(-1).to(device=device, dtype=dtype)
+        selected_covariances = selected_covariances.to(device=device, dtype=dtype)
+        assignment_matrix = assignment_matrix.to(device=device, dtype=dtype)
+        if (
+            not bool(torch.isfinite(selected_means).all())
+            or not bool(torch.isfinite(selected_covariances).all())
+            or not bool(torch.isfinite(selected_depths).all())
+            or not bool(torch.isfinite(assignment_matrix).all())
+        ):
+            return None
+        tiny = torch.as_tensor(torch.finfo(dtype).eps, device=device, dtype=dtype)
+        if bool((selected_depths <= tiny).any()):
+            return None
+
+        # ``paper_assignment_weights`` emits a simplex row.  Do not repair an
+        # invalid caller-provided row by renormalising it: fail closed instead.
+        simplex_tolerance = torch.as_tensor(1e-5, device=device, dtype=dtype)
+        if (
+            bool((assignment_matrix < -simplex_tolerance).any())
+            or bool(
+                (assignment_matrix.sum(dim=1) - 1.0).abs().max()
+                > simplex_tolerance
+            )
+        ):
+            return None
+
+        selected_covariances = (
+            selected_covariances + selected_covariances.mT
+        ) * 0.5
+        try:
+            selected_eigenvalues = torch.linalg.eigvalsh(selected_covariances)
+        except RuntimeError:
+            return None
+        if (
+            not bool(torch.isfinite(selected_eigenvalues).all())
+            or bool((selected_eigenvalues < -1e-7).any())
+        ):
+            return None
+
+        offsets = []
+        for anchor_index, source_position in enumerate(selected_positions):
+            offset = self._recover_adapter_offset(
+                selected_means[anchor_index],
+                selected_depths[anchor_index],
+                source_position,
+                view_index=view_index,
+            )
+            if offset is None:
+                return None
+            offsets.append(offset)
+        selected_offsets = torch.stack(offsets, dim=0)
+
+        consensus_depths = assignment_matrix @ selected_depths
+        consensus_offsets = assignment_matrix @ selected_offsets
+        consensus_means = self._lift_adapter_offsets(
+            target_positions,
+            consensus_depths,
+            consensus_offsets,
+            view_index=view_index,
+        )
+        if consensus_means is None:
+            return None
+
+        conditional_means = []
+        for anchor_index in range(anchor_count):
+            lifted = self._lift_adapter_offsets(
+                target_positions,
+                selected_depths[anchor_index].expand(target_count),
+                selected_offsets[anchor_index].unsqueeze(0).expand(target_count, -1),
+                view_index=view_index,
+            )
+            if lifted is None:
+                return None
+            conditional_means.append(lifted)
+        conditional_means = torch.stack(conditional_means, dim=1)
+        displacements = conditional_means - consensus_means.unsqueeze(1)
+        second_moments = selected_covariances.unsqueeze(0) + torch.einsum(
+            "mki,mkj->mkij", displacements, displacements
+        )
+        consensus_covariances = torch.einsum(
+            "mk,mkij->mij", assignment_matrix, second_moments
+        )
+        consensus_covariances = (
+            consensus_covariances + consensus_covariances.mT
+        ) * 0.5
+        try:
+            eigenvalues, eigenvectors = torch.linalg.eigh(consensus_covariances)
+        except RuntimeError:
+            return None
+        if not bool(torch.isfinite(eigenvalues).all()):
+            return None
+        consensus_covariances = (
+            eigenvectors
+            @ torch.diag_embed(eigenvalues.clamp_min(1e-8))
+            @ eigenvectors.mT
+        )
+        consensus_covariances = (
+            consensus_covariances + consensus_covariances.mT
+        ) * 0.5
+        try:
+            output_eigenvalues = torch.linalg.eigvalsh(consensus_covariances)
+        except RuntimeError:
+            return None
+        if (
+            not bool(torch.isfinite(consensus_means).all())
+            or not bool(torch.isfinite(consensus_covariances).all())
+            or not bool(torch.isfinite(output_eigenvalues).all())
+            or bool((output_eigenvalues < -1e-7).any())
+        ):
+            return None
+        return consensus_means, consensus_covariances
 
     def _context_projected_footprint_scales(
         self,
@@ -1299,10 +1559,15 @@ class ProgressiveSAES:
             "assignment-weighted-optical-depth",
         ):
             raise ValueError(f"unsupported opacity aggregation: {opacity_aggregation}")
-        if output_style not in ("representative", "virtual-reconstruction"):
+        if output_style not in (
+            "representative",
+            "virtual-reconstruction",
+            "assignment-consensus-adapter-pseudo-descriptor",
+        ):
             raise ValueError(f"unsupported SAES output style: {output_style}")
         if merge_semantics not in (
             "assignment-mixture",
+            "assignment-consensus-adapter-pseudo-descriptor",
             "conditional-anchor-transport",
             "conditional-adapter-offset-transport",
             "conditional-adapter-offset-attribute-transport",
@@ -1316,6 +1581,21 @@ class ProgressiveSAES:
         ):
             raise ValueError(
                 "virtual reconstruction requires unconditional anchor interpolation"
+            )
+        if (
+            output_style == "assignment-consensus-adapter-pseudo-descriptor"
+            and merge_semantics != "assignment-consensus-adapter-pseudo-descriptor"
+        ):
+            raise ValueError(
+                "assignment-consensus pseudo descriptors require their isolated "
+                "virtual-output merge semantics"
+            )
+        if (
+            merge_semantics == "assignment-consensus-adapter-pseudo-descriptor"
+            and output_style != "assignment-consensus-adapter-pseudo-descriptor"
+        ):
+            raise ValueError(
+                "assignment-consensus merge semantics require virtual-only output"
             )
 
         means = gaussians_full.means[0]
@@ -1432,6 +1712,64 @@ class ProgressiveSAES:
             self.stats['assignment_weight_sum_error_max'] = max(
                 self.stats['assignment_weight_sum_error_max'], error
             )
+
+        if output_style == "assignment-consensus-adapter-pseudo-descriptor":
+            if not assignments:
+                return False
+            target_positions = [
+                (tile_y + local_y, tile_x + local_x)
+                for (local_y, local_x), _ in non_probe_items
+            ]
+            consensus_geometry = (
+                self._assignment_consensus_adapter_pseudo_geometry(
+                    source_means,
+                    source_covs,
+                    probe_depth_tensor,
+                    list(zip(probe_gy, probe_gx)),
+                    assignment_matrix,
+                    target_positions,
+                    view_index=view_index,
+                )
+            )
+            if consensus_geometry is None:
+                return True
+            consensus_means, consensus_covariances = consensus_geometry
+            flat_harmonics = source_harmonics.reshape(K, -1)
+            flat_opacities = source_opacities.reshape(K, -1)
+            if (
+                not bool(torch.isfinite(flat_opacities).all())
+                or bool((flat_opacities < 0.0).any())
+                or bool((flat_opacities > 1.0).any())
+            ):
+                return True
+            consensus_harmonics = assignment_matrix @ flat_harmonics
+            consensus_opacities = assignment_matrix @ flat_opacities
+            if (
+                not bool(torch.isfinite(consensus_harmonics).all())
+                or not bool(torch.isfinite(consensus_opacities).all())
+            ):
+                return True
+
+            # All candidate values are validated before this first write. The
+            # virtual descriptor is written once at its skipped position; it
+            # is intentionally never absorbed into a retained anchor.
+            harmonic_shape = source_harmonics.shape[1:]
+            opacity_shape = source_opacities.shape[1:]
+            for pseudo_index, (_, output_index) in enumerate(non_probe_items):
+                means[output_index] = consensus_means[pseudo_index]
+                covs[output_index] = consensus_covariances[pseudo_index]
+                harmonics[output_index] = consensus_harmonics[pseudo_index].reshape(
+                    harmonic_shape
+                )
+                opacities[output_index] = consensus_opacities[pseudo_index].reshape(
+                    opacity_shape
+                )
+            target_count = len(non_probe_items)
+            self.stats['assignment_consensus_pseudo_outputs'] += target_count
+            self.stats['assignment_consensus_anchor_pairs'] += target_count * K
+            self.stats['assignment_consensus_offset_recoveries'] += K
+            self.stats['assignment_consensus_target_lifts'] += target_count * (K + 1)
+            return False
 
         if merge_semantics in (
             "conditional-optical-mass",
@@ -2387,6 +2725,49 @@ class ProgressiveSAES:
                             else self.lightweight_positions
                         )
                         fallback_to_full = False
+                        consensus_tile_snapshot = None
+                        if self.materialization == (
+                            "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
+                        ):
+                            # A later primitive slot can still reject its
+                            # selected descriptors. Hold the whole tile until
+                            # every slot validates so this virtual diagnostic
+                            # is genuinely Full-or-nothing.
+                            tile_indices = torch.tensor(
+                                [
+                                    flat_index(
+                                        view,
+                                        (tile_y + local_y) * self.W
+                                        + tile_x
+                                        + local_x,
+                                        slot,
+                                    )
+                                    for slot in range(self.primitives_per_pixel)
+                                    for local_y in range(tile_size)
+                                    for local_x in range(tile_size)
+                                ],
+                                device=device,
+                                dtype=torch.long,
+                            )
+                            consensus_tile_snapshot = {
+                                'indices': tile_indices,
+                                'means': gaussians_full.means[0, tile_indices].clone(),
+                                'covariances': (
+                                    gaussians_full.covariances[0, tile_indices].clone()
+                                ),
+                                'harmonics': gaussians_full.harmonics[0, tile_indices].clone(),
+                                'opacities': gaussians_full.opacities[0, tile_indices].clone(),
+                                'modified_mask': modified_mask[tile_indices].clone(),
+                                'counters': {
+                                    key: self.stats[key]
+                                    for key in (
+                                        'assignment_consensus_pseudo_outputs',
+                                        'assignment_consensus_anchor_pairs',
+                                        'assignment_consensus_offset_recoveries',
+                                        'assignment_consensus_target_lifts',
+                                    )
+                                },
+                            }
                         for slot in range(self.primitives_per_pixel):
                             if self.materialization == "dense-diagnostic":
                                 materialized_positions = self.probe_positions
@@ -2396,9 +2777,10 @@ class ProgressiveSAES:
                             non_probes = non_anchor_map(slot, materialized_positions)
                             if self.materialization in (
                                 "representative",
-                                "transmittance-diagnostic",
-                                "virtual-reconstruction-diagnostic",
-                                "conditional-anchor-transport-diagnostic",
+                            "transmittance-diagnostic",
+                            "virtual-reconstruction-diagnostic",
+                            "assignment-consensus-adapter-pseudo-descriptor-diagnostic",
+                            "conditional-anchor-transport-diagnostic",
                                 "conditional-adapter-offset-transport-diagnostic",
                                 "conditional-adapter-offset-attribute-transport-diagnostic",
                                 "conditional-optical-mass-diagnostic",
@@ -2430,6 +2812,9 @@ class ProgressiveSAES:
                                         "virtual-reconstruction"
                                         if self.materialization
                                         == "virtual-reconstruction-diagnostic"
+                                        else "assignment-consensus-adapter-pseudo-descriptor"
+                                        if self.materialization
+                                        == "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
                                         else "representative"
                                     ),
                                     merge_semantics=self.merge_semantics,
@@ -2457,6 +2842,7 @@ class ProgressiveSAES:
                             preserves_virtual_outputs = self.materialization in (
                                 "dense-diagnostic",
                                 "virtual-reconstruction-diagnostic",
+                                "assignment-consensus-adapter-pseudo-descriptor-diagnostic",
                             )
                             for index in non_probes.values():
                                 if not preserves_virtual_outputs:
@@ -2465,6 +2851,25 @@ class ProgressiveSAES:
                             if not preserves_virtual_outputs:
                                 total_zeroed += len(non_probes)
                         if fallback_to_full:
+                            if consensus_tile_snapshot is not None:
+                                tile_indices = consensus_tile_snapshot['indices']
+                                gaussians_full.means[0, tile_indices] = (
+                                    consensus_tile_snapshot['means']
+                                )
+                                gaussians_full.covariances[0, tile_indices] = (
+                                    consensus_tile_snapshot['covariances']
+                                )
+                                gaussians_full.harmonics[0, tile_indices] = (
+                                    consensus_tile_snapshot['harmonics']
+                                )
+                                gaussians_full.opacities[0, tile_indices] = (
+                                    consensus_tile_snapshot['opacities']
+                                )
+                                modified_mask[tile_indices] = consensus_tile_snapshot[
+                                    'modified_mask'
+                                ]
+                                for key, value in consensus_tile_snapshot['counters'].items():
+                                    self.stats[key] = value
                             if self.merge_semantics in (
                                 "conditional-optical-mass",
                                 "conditional-projected-optical-mass",
@@ -2475,6 +2880,18 @@ class ProgressiveSAES:
                                 "conditional-adapter-offset-attribute-transport",
                             ):
                                 self.stats['adapter_offset_transport_fallback_tiles'] += 1
+                            elif self.merge_semantics == (
+                                "assignment-consensus-adapter-pseudo-descriptor"
+                            ):
+                                self.stats['assignment_consensus_fallback_tiles'] += 1
+                                if selected_level == 'L0':
+                                    self.stats[
+                                        'assignment_consensus_l0_fallback_tiles'
+                                    ] += 1
+                                else:
+                                    self.stats[
+                                        'assignment_consensus_l1_fallback_tiles'
+                                    ] += 1
                             self.stats['full_tiles'] += 1
                             self.stats['full_stage3_gaussians'] += (
                                 tile_size * tile_size * self.primitives_per_pixel
