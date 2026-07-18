@@ -273,6 +273,7 @@ class ProgressiveSAES:
             "conditional-adapter-offset-attribute-transport-diagnostic",
             "conditional-optical-mass-diagnostic",
             "conditional-projected-optical-mass-diagnostic",
+            "multicontext-tangent-plane-diagnostic",
         ):
             raise ValueError(f"unsupported SAES materialization: {materialization}")
         # The former diagnostic name represented the paper's actual L1
@@ -285,6 +286,9 @@ class ProgressiveSAES:
         if not isinstance(materialization_guard, bool):
             raise ValueError("materialization_guard must be boolean")
         self.materialization_guard = materialization_guard
+        self.multicontext_tangent_enabled = (
+            materialization == "multicontext-tangent-plane-diagnostic"
+        )
         # The paper's soft assignment associates a skipped position with its
         # receiving probe.  The historical implementation first formed an
         # unconditional mixture over *all* probes and then applied the same
@@ -303,8 +307,10 @@ class ProgressiveSAES:
             == "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
             else
             "conditional-adapter-offset-attribute-transport"
-            if materialization
-            == "conditional-adapter-offset-attribute-transport-diagnostic"
+            if materialization in (
+                "conditional-adapter-offset-attribute-transport-diagnostic",
+                "multicontext-tangent-plane-diagnostic",
+            )
             else
             "conditional-adapter-offset-transport"
             if materialization
@@ -450,6 +456,19 @@ class ProgressiveSAES:
             'same_budget_dense_oracle_projected_moment_construction_error_max': 0.0,
             'same_budget_dense_oracle_required_footprint_expansion_max': 1.0,
             'same_budget_dense_oracle_runtime_eligible': False,
+            # This candidate changes only a retained representative covariance
+            # after the ordinary selected-anchor construction. It is a
+            # target-free geometry diagnostic, not a router or saving claim.
+            'multicontext_tangent_enabled': self.multicontext_tangent_enabled,
+            'multicontext_tangent_attempts': 0,
+            'multicontext_tangent_accepted': 0,
+            'multicontext_tangent_local_fallbacks': 0,
+            'multicontext_tangent_context_camera_reads': 0,
+            'multicontext_tangent_constraint_count': 0,
+            'multicontext_tangent_contributor_count': 0,
+            'multicontext_tangent_residual_max': 0.0,
+            'multicontext_tangent_fallback_reasons': {},
+            'multicontext_tangent_runtime_eligible': False,
             'covariance_psd_violations': 0,
             # Conditional optical-density transport is diagnostic until it
             # passes the target-free and image-quality gates.  These counters
@@ -1250,6 +1269,72 @@ class ProgressiveSAES:
         )
         covariance = torch.einsum("n,nij->ij", weights, source_covariances)
         return (covariance + covariance.mT) * 0.5
+
+    def _multicontext_tangent_candidate(
+        self,
+        *,
+        output_mean: torch.Tensor,
+        local_covariance: torch.Tensor,
+        contributor_means: torch.Tensor,
+        contributor_covariances: torch.Tensor,
+        contributor_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return a context-only covariance candidate or the exact local value.
+
+        All contributors are already selected-anchor descriptors or local
+        pseudo descriptors derived from them. The helper cannot receive target
+        cameras, target RGB, or skipped Stage-3 attributes. A failed fit is a
+        covariance-only fallback to the current materialization, not a route
+        change or a new Full-policy decision.
+        """
+        if not self.multicontext_tangent_enabled:
+            return local_covariance
+        self.stats['multicontext_tangent_attempts'] += 1
+        self.stats['multicontext_tangent_contributor_count'] += int(
+            contributor_weights.numel()
+        )
+        if self.context_extrinsics is None or self.context_intrinsics is None:
+            reason = 'missing-context-geometry'
+            self.stats['multicontext_tangent_local_fallbacks'] += 1
+            reasons = self.stats['multicontext_tangent_fallback_reasons']
+            reasons[reason] = reasons.get(reason, 0) + 1
+            return local_covariance
+
+        from saes.multicontext_tangent import multicontext_tangent_covariance
+
+        context_extrinsics = self.context_extrinsics[0].to(
+            device=local_covariance.device, dtype=local_covariance.dtype
+        )
+        context_intrinsics = self.context_intrinsics[0].to(
+            device=local_covariance.device, dtype=local_covariance.dtype
+        )
+        self.stats['multicontext_tangent_context_camera_reads'] += int(
+            context_extrinsics.shape[0]
+        )
+        self.stats['multicontext_tangent_constraint_count'] += int(
+            context_extrinsics.shape[0] * 3
+        )
+        result = multicontext_tangent_covariance(
+            output_mean=output_mean,
+            local_covariance=local_covariance,
+            contributor_means=contributor_means,
+            contributor_covariances=contributor_covariances,
+            contributor_weights=contributor_weights,
+            context_extrinsics=context_extrinsics,
+            context_intrinsics=context_intrinsics,
+        )
+        if result.used_multicontext_fit:
+            self.stats['multicontext_tangent_accepted'] += 1
+            self.stats['multicontext_tangent_residual_max'] = max(
+                self.stats['multicontext_tangent_residual_max'],
+                float(result.residual_max or 0.0),
+            )
+            return result.covariance
+
+        self.stats['multicontext_tangent_local_fallbacks'] += 1
+        reasons = self.stats['multicontext_tangent_fallback_reasons']
+        reasons[result.reason] = reasons.get(result.reason, 0) + 1
+        return local_covariance
 
     def _same_budget_dense_oracle_plan(
         self,
@@ -2576,6 +2661,13 @@ class ProgressiveSAES:
             merged_covariance = (
                 merged_covariance + merged_covariance.mT
             ) * 0.5
+            merged_covariance = self._multicontext_tangent_candidate(
+                output_mean=merged_mean,
+                local_covariance=merged_covariance,
+                contributor_means=contributor_means,
+                contributor_covariances=contributor_covs,
+                contributor_weights=normalized,
+            )
 
             harmonic_shape = source_harmonics.shape[1:]
             merged_harmonics = torch.einsum(
@@ -3091,10 +3183,13 @@ class ProgressiveSAES:
                 'merge_semantics',
                 'materialization_guard_enabled',
                 'same_budget_dense_oracle_runtime_eligible',
+                'multicontext_tangent_enabled',
+                'multicontext_tangent_runtime_eligible',
             }:
                 self.stats[key] = 0
         self.stats['same_budget_dense_oracle_required_footprint_expansion_max'] = 1.0
         self.stats['same_budget_dense_oracle_failure_reasons'] = {}
+        self.stats['multicontext_tangent_fallback_reasons'] = {}
 
         tiles_h = self.H // self.initial_tile_size
         tiles_w = self.W // self.initial_tile_size
@@ -3330,6 +3425,7 @@ class ProgressiveSAES:
                                 "conditional-adapter-offset-attribute-transport-diagnostic",
                                 "conditional-optical-mass-diagnostic",
                                 "conditional-projected-optical-mass-diagnostic",
+                                "multicontext-tangent-plane-diagnostic",
                             ):
                                 # L1 routing uses only primary probes. After it
                                 # succeeds, its deterministic 2K positions are

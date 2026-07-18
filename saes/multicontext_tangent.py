@@ -391,7 +391,14 @@ def multicontext_tangent_covariance(
     if rank < 3:
         return _fallback(local_covariance, "rank-deficient-contexts")
     try:
-        solution = torch.linalg.lstsq(matrix, target.unsqueeze(1)).solution[:3, 0]
+        # The CPU default is pivoted QR, whose pivot choice can perturb this
+        # diagnostic's residual between identical calls. Full rank was checked
+        # above, so use the fixed unpivoted QR driver there; CUDA exposes the
+        # corresponding ``gels`` path as its only supported driver.
+        kwargs = {"driver": "gels"} if matrix.device.type == "cpu" else {}
+        solution = torch.linalg.lstsq(
+            matrix, target.unsqueeze(1), **kwargs
+        ).solution[:3, 0]
     except RuntimeError:
         return _fallback(local_covariance, "least-squares")
     if not bool(torch.isfinite(solution).all()):

@@ -872,6 +872,13 @@ Verified on 2026-07-16 and 2026-07-17:
   the 128-step post-hoc optimizer. Final teacher fidelity is `53.5922 dB`,
   `0.998050` SSIM, and `0.006741` LPIPS. This proves bounded-slot capacity,
   not target-free or runtime feasibility, and authorizes no quality retry.
+- [x] Implement the context-only tangent-plane covariance diagnostic and pass
+  its synthetic and route-invariance gates: projected-moment, camera-order,
+  rigid-transform, invalid-camera, PSD/finite, one-hot/constant, skipped
+  S2/S3 poison, fixed-mask/event, and Full-passthrough checks all pass. The
+  code changes only retained covariance and records
+  `runtime_eligible=false`; the full SAES test set passes (`181 passed`). No
+  DL3DV descriptor audit, render, metric, or quality retry is implied.
 - [ ] Pre-register exactly one context-only, target-free multi-view
   representative-moment audit before any new DL3DV quality measurement. Keep
   the fixed checkpoint, seed, router, thresholds, K/2K/Full mask,

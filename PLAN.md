@@ -1825,3 +1825,16 @@
   route/event counts, and atomic Full fallback. A synthetic pass permits at
   most one separately registered target-free descriptor audit, not a DL3DV
   quality or full-protocol run.
+- Implementation checkpoint (2026-07-18): the candidate is now materialized
+  only as `multicontext-tangent-plane-diagnostic`. It reuses the current
+  conditional selected-anchor construction and can replace only a retained
+  representative covariance with the context-projected tangent-plane fit.
+  The router, thresholds, K/2K mask, means, SH, opacity, Full passthrough,
+  and output count remain unchanged; its counters explicitly report
+  `runtime_eligible=false`. Synthetic helper tests cover projected moments,
+  camera order and rigid-transform equivariance, invalid/duplicate cameras,
+  PSD/finite, and one-hot/constant fallbacks. The materialization test covers
+  skipped S2/S3 poison invariance on valid slots, unchanged route/event
+  counts, immutable Full slots, and valid-slot PSD. The focused tests plus all
+  `tests/test_saes_*.py` pass (`181 passed`), but no target-free DL3DV
+  descriptor audit, render, metric computation, or quality retry has run.
