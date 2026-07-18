@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.result_record import build_quality_record, portable_command, write_result
+from scripts.execution_contract import execution_contract
 from scripts.validate_result import validate
 
 
@@ -286,6 +287,13 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
         raise ValueError("sample source indices must be unique")
     if sorted(execution_indices) != list(range(expected_count)):
         raise ValueError("sample execution indices must be unique and contiguous from zero")
+
+    execution_contracts = [execution_contract(record) for record in records]
+    if any(contract is not None for contract in execution_contracts):
+        if any(contract is None for contract in execution_contracts):
+            raise ValueError("sample provenance mismatch: execution_contract")
+        if any(contract != execution_contracts[0] for contract in execution_contracts[1:]):
+            raise ValueError("sample provenance mismatch: execution_contract")
 
     selections = [
         {

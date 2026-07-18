@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.validate_result import validate
+from scripts.execution_contract import require_paper_execution_contract
 
 
 METRICS = ("psnr_db", "ssim", "lpips")
@@ -110,6 +111,7 @@ def relative_check(claim: str, actual: float, target: float, tolerance: float) -
 
 
 def require_aggregate(result: dict[str, Any], pair: str) -> None:
+    require_paper_execution_contract(result, surface=f"AE validation for {pair}")
     evaluation = result.get("provenance", {}).get("evaluation", {})
     if evaluation.get("kind") != "dataset_aggregate":
         raise ValueError(f"{pair} is not a dataset aggregate")

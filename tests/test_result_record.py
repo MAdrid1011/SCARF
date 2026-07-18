@@ -82,6 +82,10 @@ def test_result_record_is_schema_valid_and_preserves_all_sections(tmp_path):
     assert record["events"]["fsdr"]["discrete_top1_available"] is False
     assert record["events"]["saes"]["total_tiles"] == 0
     assert record["energy"]["available"] is False
+    assert record["provenance"]["execution_contract"] == {
+        "run_class": "diagnostic",
+        "saes_materialization": "representative",
+    }
     assert record["provenance"]["checkpoint"]["path"].startswith("<external>/")
     output = tmp_path / "results.json"
     write_result(record, output)
@@ -98,6 +102,37 @@ def test_result_record_reports_signed_degradation_and_absolute_change(tmp_path):
     assert quality["change"]["psnr_signed_pct"] == -5.0
     assert quality["change"]["psnr_degradation_pct"] == 5.0
     assert quality["change"]["psnr_absolute_pct"] == 5.0
+
+
+def test_result_record_rejects_assignment_consensus_before_quality_recording():
+    from scripts.result_record import build_result_record
+
+    with pytest.raises(ValueError, match="cannot produce a normal"):
+        build_result_record(
+            model="transplat",
+            dataset="dl3dv",
+            checkpoint=Path("unused.ckpt"),
+            checkpoint_load={},
+            environment={},
+            dataset_manifest=Path("unused.json"),
+            dataset_representation="re10k-compatible-360x640-v1",
+            dataset_tree_sha256="0" * 64,
+            device={},
+            seed=0,
+            quality={},
+            quality_views=[],
+            baseline_cycles=0,
+            cycles={},
+            cycle_source="unused",
+            ablation={},
+            fsdr_saes={},
+            command=[],
+            runtime_assets={},
+            sample_identity={},
+            saes_materialization=(
+                "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
+            ),
+        )
 
 
 def test_result_record_preserves_explicit_v2_stage_and_event_evidence(tmp_path):

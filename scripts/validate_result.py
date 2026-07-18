@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.execution_contract import require_paper_execution_contract
+
 
 def _get(record: dict[str, Any], path: str) -> Any:
     value: Any = record
@@ -401,6 +403,7 @@ def _validate_v21_evidence(record: dict[str, Any]) -> None:
 
 
 def validate(record: dict[str, Any]) -> None:
+    require_paper_execution_contract(record, surface="result validation")
     schema_version = _get(record, "schema_version")
     if schema_version not in {"1.0", "2.0", "2.1"}:
         raise ValueError("schema_version must be 1.0, 2.0, or 2.1")

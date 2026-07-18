@@ -5,6 +5,8 @@ from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -242,6 +244,26 @@ def test_table2_never_substitutes_continuous_in_window_rate_for_discrete_top1(tm
     header = rows[0].split(",")
     top1_index = header.index("top1_coverage")
     assert all(row.split(",")[top1_index] == "" for row in rows[1:])
+
+
+def test_report_generator_rejects_assignment_consensus_result_input(tmp_path):
+    from scripts.generate_report import generate
+
+    output = tmp_path / "evidence"
+    report = tmp_path / "report"
+    write_fixture(output)
+    path = output / "quality" / "transplat_re10k" / "results.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["provenance"]["execution_contract"] = {
+        "run_class": "diagnostic",
+        "saes_materialization": (
+            "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
+        ),
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="assignment-consensus pseudo descriptors"):
+        generate(output, report)
 
 
 def test_hardware_report_handles_a_resource_downgrade_without_ppa_files(tmp_path):

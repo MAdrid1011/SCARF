@@ -101,6 +101,9 @@ from scripts.result_record import strict_stage_error
 
 # SCARF hardware clock frequency (MHz) — default 1 GHz, overridable via --freq
 SCARF_FREQ_MHZ = 1000
+ASSIGNMENT_CONSENSUS_PSEUDO_DESCRIPTOR_MATERIALIZATION = (
+    "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
+)
 
 
 def is_target_rgb_free_execution(args: argparse.Namespace) -> bool:
@@ -112,6 +115,15 @@ def is_target_rgb_free_execution(args: argparse.Namespace) -> bool:
         or args.saes_routing_audit
         or args.saes_hardware_audit
     )
+
+
+def _reject_assignment_consensus_rendering(materialization: str) -> None:
+    """Keep the virtual consensus diagnostic out of the rendering pipeline."""
+    if materialization == ASSIGNMENT_CONSENSUS_PSEUDO_DESCRIPTOR_MATERIALIZATION:
+        raise RuntimeError(
+            "assignment-consensus pseudo descriptors are a virtual-output "
+            "diagnostic only; they cannot render or compute quality metrics"
+        )
 
 
 # ============================================================
@@ -1261,6 +1273,7 @@ def main(argv=None):
     global CONFIG
     
     args = parse_demo_args(argv)
+    _reject_assignment_consensus_rendering(args.saes_materialization)
     strict_run = args.claim_run or args.functional_run or args.diagnostic_run
     from scripts.mechanism_config import (
         load_mechanism_config,
@@ -4429,6 +4442,12 @@ def main(argv=None):
             )
         ),
         fallback_stages=fallback_stages,
+        run_class=(
+            'claim'
+            if args.claim_run
+            else 'functional' if args.functional_run else 'diagnostic'
+        ),
+        saes_materialization=args.saes_materialization,
         stage_records=mmcu_stage_records(component_cycles),
         paper_result_eligible=(
             args.claim_run

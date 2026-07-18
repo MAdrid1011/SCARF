@@ -13,6 +13,11 @@ from importlib.metadata import version
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
+from scripts.execution_contract import (
+    ASSIGNMENT_CONSENSUS_PSEUDO_DESCRIPTOR_MATERIALIZATION,
+    REPRESENTATIVE_SAES_MATERIALIZATION,
+    build_execution_contract,
+)
 from scripts.mechanism_config import load_mechanism_config
 
 
@@ -673,6 +678,8 @@ def build_result_record(
     baseline_source: str = "diagnostic_device_timing",
     fallback_stages: list[str] | None = None,
     paper_result_eligible: bool | None = None,
+    run_class: str = "diagnostic",
+    saes_materialization: str = REPRESENTATIVE_SAES_MATERIALIZATION,
     evidence_class: str = "deterministic_execution",
     stage_records: Mapping[str, Any] | None = None,
     event_records: Mapping[str, Any] | None = None,
@@ -680,6 +687,27 @@ def build_result_record(
 ) -> dict[str, Any]:
     if not dataset_representation:
         raise ValueError("dataset representation must be recorded")
+    execution = build_execution_contract(
+        run_class=run_class,
+        saes_materialization=saes_materialization,
+    )
+    if (
+        execution["saes_materialization"]
+        == ASSIGNMENT_CONSENSUS_PSEUDO_DESCRIPTOR_MATERIALIZATION
+    ):
+        raise ValueError(
+            "assignment-consensus pseudo descriptors cannot produce a normal "
+            "quality/performance result record"
+        )
+    if (
+        execution["run_class"] in {"claim", "functional"}
+        and execution["saes_materialization"]
+        != REPRESENTATIVE_SAES_MATERIALIZATION
+    ):
+        raise ValueError(
+            "claim and functional result records require representative SAES "
+            "materialization"
+        )
     environment_digest = environment.get("digest_sha256")
     if (
         not isinstance(environment_digest, str)
@@ -779,10 +807,24 @@ def build_result_record(
     source = source_identity()
     functional_fixture = dataset_representation == "re10k-synthetic-functional-v1"
     if paper_result_eligible is None:
-        paper_result_eligible = not functional_fixture
+        paper_result_eligible = (
+            not functional_fixture
+            and execution["run_class"] == "claim"
+            and execution["saes_materialization"]
+            == REPRESENTATIVE_SAES_MATERIALIZATION
+        )
     elif not isinstance(paper_result_eligible, bool):
         raise ValueError("paper_result_eligible must be a boolean")
     paper_result_eligible = paper_result_eligible and not functional_fixture
+    if paper_result_eligible and (
+        execution["run_class"] != "claim"
+        or execution["saes_materialization"]
+        != REPRESENTATIVE_SAES_MATERIALIZATION
+    ):
+        raise ValueError(
+            "paper-result-eligible records require claim run class and "
+            "representative SAES materialization"
+        )
     _, mechanism = load_mechanism_config()
     if mechanism["status"] != "calibrated":
         paper_result_eligible = False
@@ -813,6 +855,7 @@ def build_result_record(
             "submodules": source["submodules"],
             "command": portable_command(command),
             "runtime_assets": dict(runtime_assets),
+            "execution_contract": execution,
             "seed": int(seed),
             "model": model,
             "environment": dict(environment),

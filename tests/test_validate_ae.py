@@ -67,6 +67,25 @@ def test_unfinalized_sample_protocol_is_a_failed_claim():
     assert not check["pass"]
 
 
+def test_ae_aggregate_boundary_rejects_assignment_consensus_records():
+    from scripts.validate_ae import require_aggregate
+
+    candidate = {
+        "provenance": {
+            "execution_contract": {
+                "run_class": "diagnostic",
+                "saes_materialization": (
+                    "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
+                ),
+            },
+            "evaluation": {"kind": "dataset_aggregate", "sample_count": 1},
+        }
+    }
+
+    with pytest.raises(ValueError, match="assignment-consensus pseudo descriptors"):
+        require_aggregate(candidate, "transplat/dl3dv")
+
+
 def test_clean_source_check_rejects_dirty_or_invalid_commits():
     from scripts.validate_ae import clean_source_check
 

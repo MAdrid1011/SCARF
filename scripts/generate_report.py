@@ -23,6 +23,7 @@ from hardware.iflow.paper_table4 import (
     TABLE4_METRICS,
     UNMODELED_COMPONENTS,
 )
+from scripts.execution_contract import require_paper_execution_contract
 
 
 STYLE = ROOT / "artifact/plot_style.mplstyle"
@@ -50,6 +51,11 @@ EVIDENCE_CLASSES = {
 
 def load(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def require_report_result(record: dict[str, Any], path: Path) -> None:
+    """Reject a diagnostic virtual-output result before it reaches a table."""
+    require_paper_execution_contract(record, surface=f"report input {path}")
 
 
 def sha256_file(path: Path) -> str:
@@ -179,6 +185,9 @@ def build_tables(
         )
         quality = load(quality_path)
         ablation = load(ablation_path) if ablation_path is not None else None
+        require_report_result(quality, quality_path)
+        if ablation is not None:
+            require_report_result(ablation, ablation_path)
         sources.append(quality_path)
         if ablation_path is not None:
             sources.append(ablation_path)
@@ -190,6 +199,7 @@ def build_tables(
         speed_path = find_pair_optional(output, pair, ("performance", "speedup", "orin"))
         if speed_path is not None:
             speed = load(speed_path)
+            require_report_result(speed, speed_path)
             if speed.get("performance", {}).get("baseline_source") == "orin_nx_cuda_events":
                 sources.append(speed_path)
                 speedup_rows.append(
@@ -573,6 +583,7 @@ def render_worstcase(output: Path, report_dir: Path) -> dict[str, Any] | None:
         axes[row, 3].axis("off")
 
         source_result = load(item["source_path"])
+        require_report_result(source_result, item["source_path"])
         ablation = source_result["ablation"]
         optimized_key = "asic_fsdr" if kind == "fsdr" else "asic_saes"
         stage_fields = ("eff_feature", "eff_dp_core", "eff_gauss_gen")
@@ -638,6 +649,7 @@ def render_utilization(
     source_data = []
     for path in paths:
         record = load(path)
+        require_report_result(record, path)
         provenance = record.get("provenance", {})
         model = provenance.get("model")
         dataset = provenance.get("dataset", {}).get("name")
@@ -974,6 +986,7 @@ def render_efficiency_proxy(
         if software_path is None or not dram_path.is_file():
             return None
         software = load(software_path)
+        require_report_result(software, software_path)
         dataset = software.get("provenance", {}).get("dataset", {})
         evaluation = software.get("provenance", {}).get("evaluation", {})
         if (

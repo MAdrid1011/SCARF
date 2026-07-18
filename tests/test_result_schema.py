@@ -246,6 +246,34 @@ def test_synthetic_functional_result_is_explicitly_not_paper_eligible(tmp_path):
     assert "eligibility" in result.stderr
 
 
+def test_assignment_consensus_execution_contract_cannot_validate_as_result(tmp_path):
+    payload = valid_result()
+    payload["provenance"]["execution_contract"] = {
+        "run_class": "diagnostic",
+        "saes_materialization": (
+            "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
+        ),
+    }
+
+    result = run_validator(tmp_path, payload)
+
+    assert result.returncode != 0
+    assert "assignment-consensus pseudo descriptors" in result.stderr
+
+
+def test_execution_contract_rejects_diagnostic_paper_eligibility(tmp_path):
+    payload = valid_result()
+    payload["provenance"]["execution_contract"] = {
+        "run_class": "diagnostic",
+        "saes_materialization": "representative",
+    }
+
+    result = run_validator(tmp_path, payload)
+
+    assert result.returncode != 0
+    assert "paper-result-eligible execution" in result.stderr
+
+
 @pytest.mark.parametrize(
     "mutation,expected",
     [

@@ -1,3 +1,4 @@
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +9,32 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DEMO = ROOT / "scripts" / "demo.py"
+
+
+def assignment_consensus_boundary() -> tuple[dict, ast.FunctionDef]:
+    tree = ast.parse(DEMO.read_text(encoding="utf-8"))
+    names = {
+        "ASSIGNMENT_CONSENSUS_PSEUDO_DESCRIPTOR_MATERIALIZATION",
+        "_reject_assignment_consensus_rendering",
+    }
+    nodes = [
+        node
+        for node in tree.body
+        if (
+            isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id in names for target in node.targets)
+        )
+        or (isinstance(node, ast.FunctionDef) and node.name in names)
+    ]
+    namespace: dict = {}
+    module = ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[]))
+    exec(compile(module, str(DEMO), "exec"), namespace)
+    main = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    return namespace, main
 
 
 def test_demo_help_exposes_public_ae_arguments():
@@ -238,6 +265,60 @@ def test_claim_run_rejects_dense_saes_diagnostic():
                 "dense-diagnostic",
             ]
         )
+
+
+def test_assignment_consensus_is_rejected_before_demo_pipeline():
+    namespace, main = assignment_consensus_boundary()
+    candidate = namespace["ASSIGNMENT_CONSENSUS_PSEUDO_DESCRIPTOR_MATERIALIZATION"]
+    reject = namespace["_reject_assignment_consensus_rendering"]
+
+    with pytest.raises(RuntimeError, match="cannot render or compute quality metrics"):
+        reject(candidate)
+
+    parse_index = next(
+        index
+        for index, statement in enumerate(main.body)
+        if isinstance(statement, ast.Assign)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Name)
+        and statement.value.func.id == "parse_demo_args"
+    )
+    guard_index = next(
+        index
+        for index, statement in enumerate(main.body)
+        if isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Name)
+        and statement.value.func.id == "_reject_assignment_consensus_rendering"
+    )
+    strict_run_index = next(
+        index
+        for index, statement in enumerate(main.body)
+        if isinstance(statement, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "strict_run"
+            for target in statement.targets
+        )
+    )
+    assert parse_index < guard_index < strict_run_index
+
+
+def test_assignment_consensus_guard_preserves_public_materializations():
+    from scripts.demo_cli import build_parser, parse_args
+
+    namespace, _ = assignment_consensus_boundary()
+    candidate = namespace["ASSIGNMENT_CONSENSUS_PSEUDO_DESCRIPTOR_MATERIALIZATION"]
+    reject = namespace["_reject_assignment_consensus_rendering"]
+    action = next(
+        item
+        for item in build_parser()._actions
+        if item.dest == "saes_materialization"
+    )
+    assert candidate not in action.choices
+    with pytest.raises(SystemExit):
+        parse_args(["--saes-materialization", candidate])
+    for materialization in action.choices:
+        assert reject(materialization) is None
 
 
 def test_probe_spread_materialization_is_non_claiming_only():

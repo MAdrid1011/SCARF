@@ -250,6 +250,22 @@ def test_v21_aggregate_preserves_execution_dependency_contract(tmp_path):
     assert record["events"]["saes"]["s2_s3_saving"] == {"s2": 0.0, "s3": 0.0}
 
 
+def test_aggregate_rejects_assignment_consensus_result_records(tmp_path):
+    from scripts.aggregate_results import aggregate
+
+    records = [sample_record(0), sample_record(1)]
+    for record in records:
+        record["provenance"]["execution_contract"] = {
+            "run_class": "diagnostic",
+            "saes_materialization": (
+                "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
+            ),
+        }
+
+    with pytest.raises(ValueError, match="assignment-consensus pseudo descriptors"):
+        aggregate(write_samples(tmp_path, records), 2)
+
+
 def test_aggregate_results_rejects_missing_or_duplicate_samples(tmp_path):
     from scripts.aggregate_results import aggregate
 
