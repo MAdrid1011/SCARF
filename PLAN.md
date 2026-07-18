@@ -1553,6 +1553,53 @@
   The next candidate must instead repair pseudo-descriptor geometry. If the
   partitions clearly separate, retain the finding as diagnostic-only and wait
   for disjoint calibration before any guard policy is considered.
+- Result (2026-07-18): the fixed run at source `42edcce` completed at
+  `outputs/ae_dl3dv_repair_diagnostics/
+  transplat_sample0_l1_primary_reference_guard_partition_audit_v1/` with
+  results SHA256 `dfb94a26923345ab8de0fb1d112a365160a40fc0816b47001f5286d628aa9dde`.
+  It records `8,192` tiles, canonical L0/L1/Full `760/2,172/5,260`, `1,058`
+  L0 and `2,878` L1 checks, zero skipped-S3 reads, and exact poisoned-clone
+  mask/trace/stats/retained-attribute invariance. The guard partitions are
+  `2,932` accepted, `937` rejected-to-Full, `4,323` noncandidate-Full, and
+  zero L0-rejected/L1-accepted by the declared nested-anchor guard structure.
+  Canonical Full passthroughs deliberately carry no sparse oracle samples.
+- Shadow comparison: labels remain tied to the canonical guard trace. For L0,
+  accepted versus rejected-to-Full shadow covariance/mean/SH/opacity p50 are
+  `0.8158/0.00373/0.01456/0.00838` versus
+  `0.9775/0.00784/0.06862/0.02798`; for L1 they are
+  `0.3523/0.000635/0.00661/0.00342` versus
+  `0.4421/0.000820/0.01776/0.00513`. SH/opacity rise for rejected subsets, but
+  dominant covariance and optical-depth errors remain the same order (L1
+  covariance p95 `0.812/0.913`; optical-depth p50 `0.50039/0.49836`). This is
+  target-free diagnostic evidence, not a claim of quality or speed.
+- Decision: `bad/stop` for guard-threshold repair and `good/iterate` for
+  pseudo-descriptor geometry diagnosis. Do not sweep or change the existing
+  guard, thresholds, seed, scene, or quality gate. Guard policy remains frozen
+  pending disjoint calibration; the only next implementation route is a
+  separately pre-registered pseudo-descriptor geometry correction.
+
+### 33.4 Assignment-Consensus Adapter Pseudo Descriptor
+
+- Hypothesis: the retained-attribute failure arises from representative
+  geometry/coverage rather than SH or opacity identity. For each skipped
+  position, the existing bilateral selected-anchor weights can form one
+  pseudo descriptor: assignment-weighted selected-anchor depth and bounded
+  adapter image-plane offset, lifted through that skipped position's C2W ray;
+  covariance uses the existing assignment-weighted first/second moment. This
+  is an implementation detail of the declared C2W-ray-aware moment matching,
+  not a new routing level or trainable component.
+- Fixed target-free gate: retain sample 0, seed 0, tile size 4, tau_f=.20,
+  tau_d=.10, normalized feature statistic, metric depth, primary-K L1
+  reference, 2K anchors, and all existing numerical fail-closed checks. The
+  candidate may use only S1, selected-anchor S2/S3, static context camera
+  geometry, and the already-declared assignment; it must not read target RGB,
+  skipped S3 descriptors, paper results, or quality metrics. Test constant,
+  one-hot, PSD, C2W, assignment, and poison properties before exactly one
+  target-free DL3DV audit.
+- Abandonment: any selected-anchor access violation, non-finite/PSD failure,
+  routing drift, or non-positive direct full-S3 attribute evidence stops this
+  branch. A target-free pass alone does not authorize a quality retry; that
+  decision remains blocked on the fixed failure record and disjoint calibration.
 
 ## 34. DL3DV Training-Calibration Preparation
 

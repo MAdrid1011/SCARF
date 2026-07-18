@@ -776,10 +776,22 @@ Verified on 2026-07-16 and 2026-07-17:
 - [ ] Diagnose the remaining materialization failure target-free before
   registering any new quality gate. The diagnosis must not read target RGB,
   select a new sample, change thresholds, or infer a quality tolerance.
-- [ ] Run the fixed guard-partition oracle audit with canonical guarded and
-  unguarded shadow clones. It must report only posthoc full-S3 attribute
-  distributions, preserve all target-free and poison invariants, and cannot
-  authorize a guard threshold change or quality retry.
+- [x] Run the fixed guard-partition oracle audit with canonical guarded and
+  unguarded shadow clones. Preserve
+  `transplat_sample0_l1_primary_reference_guard_partition_audit_v1/`
+  (results SHA256 `dfb94a26923345ab8de0fb1d112a365160a40fc0816b47001f5286d628aa9dde`,
+  source `42edcce`): all 8,192 scalar trace records agree with runtime route
+  and guard counters; poison leaves the mask, trace, statistics, and retained
+  attributes identical; no target RGB, skipped-S3 read, decoder, renderer, or
+  metric is used. The canonical result has 2,932 guard-accepted, 937
+  rejected-to-Full, 4,323 noncandidate-Full, and zero-by-construction
+  L0-rejected/L1-accepted tiles. The shadow keeps those labels, but dominant
+  covariance/coverage error remains the same order as accepted tiles; reject
+  guard-threshold repair and do not retry quality.
+- [ ] Pre-register and test one assignment-consensus adapter pseudo-descriptor
+  geometry candidate target-free. It must preserve fixed routing, thresholds,
+  primary-K/2K anchors, and selected-anchor-only S2/S3 access; no quality run
+  is authorized by this diagnostic alone.
 - [x] Add a fail-closed DL3DV training-calibration archive path: enumerate the
   authenticated official tree, freeze an evaluation-disjoint 24+8 plan before
   download, verify selected ZIP byte counts and upstream object ids, record

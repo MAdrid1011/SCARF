@@ -37,12 +37,20 @@
   but was stopped for sustained swap thrashing; it is
   `NOT_CLAIMED_RESOURCE_LIMIT` and cannot be used before complete reports
   exist. The standard flow remains gated on stable 48 GiB `MemAvailable`.
-- Next action: diagnose the failed adapter-offset attribute-transport candidate
-  from target-free evidence before any further quality gate. Its fixed
-  one-sample quality result is non-claim failure: PSNR loss 9.1865 dB, SSIM
-  loss 0.12356, and LPIPS increase 0.18844 despite valid target-RGB-after-mask
-  provenance. Do not publish or mark HotCRP ready until mandatory key results
-  pass.
+- Latest target-free diagnosis: the fixed guarded/shadow/poisoned DL3DV
+  guard-partition audit completed at source `42edcce` (results SHA256
+  `dfb94a26923345ab8de0fb1d112a365160a40fc0816b47001f5286d628aa9dde`).
+  All 8,192 traces match route/guard statistics, 26,496 skipped descriptors
+  pass poison invariance, and no target RGB or skipped S3 attribute is read.
+  The shadow's rejected-to-Full tiles have higher SH/opacity error but
+  same-order covariance/coverage error, so guard-threshold repair is rejected.
+  The guard policy, thresholds, and failed quality gate remain frozen.
+- Next action: pre-register and test one selected-anchor-only
+  assignment-consensus pseudo-descriptor geometry correction target-free. Its
+  fixed one-sample quality result remains non-claim failure: PSNR loss 9.1865
+  dB, SSIM loss 0.12356, and LPIPS increase 0.18844 despite valid
+  target-RGB-after-mask provenance. Do not publish or mark HotCRP ready until
+  mandatory key results pass.
 - Active closure contract: retain the paper's routing mechanisms while adding
   only disclosed engineering details. A disjoint 32-Re10K/32-ACID training
   calibration chooses one global FSDR validity tolerance and SAES bandwidth
