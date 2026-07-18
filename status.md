@@ -37,10 +37,12 @@
   but was stopped for sustained swap thrashing; it is
   `NOT_CLAIMED_RESOURCE_LIMIT` and cannot be used before complete reports
   exist. The standard flow remains gated on stable 48 GiB `MemAvailable`.
-- Next action: run the one pre-registered adapter-offset attribute-transport
-  quality gate, preserve its result, then either repair from target-free
-  evidence or resume the evaluation-disjoint calibration route. Do not publish
-  or mark HotCRP ready until mandatory key results pass.
+- Next action: diagnose the failed adapter-offset attribute-transport candidate
+  from target-free evidence before any further quality gate. Its fixed
+  one-sample quality result is non-claim failure: PSNR loss 9.1865 dB, SSIM
+  loss 0.12356, and LPIPS increase 0.18844 despite valid target-RGB-after-mask
+  provenance. Do not publish or mark HotCRP ready until mandatory key results
+  pass.
 - Active closure contract: retain the paper's routing mechanisms while adding
   only disclosed engineering details. A disjoint 32-Re10K/32-ACID training
   calibration chooses one global FSDR validity tolerance and SAES bandwidth

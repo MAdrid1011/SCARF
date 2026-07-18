@@ -765,12 +765,17 @@ Verified on 2026-07-16 and 2026-07-17:
   poison events, nonzero SH/opacity updates, and a charged 175,488-pair
   analytic attribute-reconstruction ledger. This is not a quality or saving
   claim.
-- [ ] Run exactly one pre-registered attribute-transport selected-output
+- [x] Run exactly one pre-registered attribute-transport selected-output
   quality gate in transplat_sample0_adapter_offset_attribute_transport_quality_v1/
   through scripts/saes_adapter_offset_attribute_transport_quality_gate.py.
-  The fixed sample, seed, thresholds, views, limits, and target-RGB-after-mask
-  boundary may not be changed. Any failure remains non-claim evidence and
-  prohibits DL3DV expansion.
+  Preserve SHA256 ef7535183d8c794b5a8458c0325363501b312f93b277912accaed09b2cd37308:
+  clean target-RGB-after-mask provenance, equal selected-head route and
+  retained attributes, but non-bit-identical decoder output plus PSNR loss
+  9.1865 dB, SSIM loss 0.12356, and LPIPS increase 0.18844. The fixed
+  candidate fails; no retry or DL3DV expansion is allowed.
+- [ ] Diagnose the remaining materialization failure target-free before
+  registering any new quality gate. The diagnosis must not read target RGB,
+  select a new sample, change thresholds, or infer a quality tolerance.
 - [x] Add a fail-closed DL3DV training-calibration archive path: enumerate the
   authenticated official tree, freeze an evaluation-disjoint 24+8 plan before
   download, verify selected ZIP byte counts and upstream object ids, record

@@ -1509,6 +1509,18 @@
   A failure is preserved and prohibits an 8/32/140-scene expansion; a pass
   still cannot claim S2/S3 savings until the separate real-execution contract
   passes.
+- Quality result: preserve
+  transplat_sample0_adapter_offset_attribute_transport_quality_v1/results.json
+  (SHA256 ef7535183d8c794b5a8458c0325363501b312f93b277912accaed09b2cd37308,
+  source 52cf399). Target RGB stayed outside the encoder and route until the
+  sparse mask committed. The selected-head replay has an equal route mask and
+  equivalent retained attributes, but the strict decoder comparison remains
+  non-bit-identical (maximum absolute delta 0.001048). More importantly, the
+  unchanged quality gate fails: PSNR 34.8391 -> 25.6526 (loss 9.1865 dB),
+  SSIM 0.97360 -> 0.85004 (loss 0.12356), and LPIPS 0.03276 -> 0.22120
+  (increase 0.18844). This candidate is non-claim failure evidence. Do not
+  retry it, change its fixed contract, or launch 8/32/140-scene work; the next
+  route must begin with a new target-free implementation diagnosis.
 
 ## 34. DL3DV Training-Calibration Preparation
 
