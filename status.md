@@ -45,11 +45,17 @@
   The shadow's rejected-to-Full tiles have higher SH/opacity error but
   same-order covariance/coverage error, so guard-threshold repair is rejected.
   The guard policy, thresholds, and failed quality gate remain frozen.
-- Next action: pre-register and test one selected-anchor-only
-  assignment-consensus pseudo-descriptor virtual diagnostic target-free. It
-  cannot alter the sparse claim path, save Gaussians, or authorize quality.
-  The fixed one-sample quality result remains non-claim failure: PSNR loss
-  9.1865 dB, SSIM loss 0.12356, and LPIPS increase 0.18844 despite valid
+- Latest synthetic gate: source `43dfd37` implements the selected-anchor-only
+  assignment-consensus pseudo-descriptor as a direct virtual skipped-output
+  diagnostic. `158` SAES tests pass, including alpha-1 constant exactness,
+  nonidentity C2W adapter geometry, no assignment squaring, L0/L1 poison and
+  route/event invariance, PSD/full-tile failure, and non-free aborted-work
+  accounting. It has zero compression and remains non-paper-eligible.
+- Next action: separately pre-register, but do not yet run, one fixed
+  target-free DL3DV virtual-output audit for this candidate. It cannot alter
+  the sparse claim path, save Gaussians, or authorize quality. The fixed
+  one-sample quality result remains non-claim failure: PSNR loss 9.1865 dB,
+  SSIM loss 0.12356, and LPIPS increase 0.18844 despite valid
   target-RGB-after-mask provenance. Do not publish or mark HotCRP ready until
   mandatory key results pass.
 - Active closure contract: retain the paper's routing mechanisms while adding

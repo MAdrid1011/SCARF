@@ -788,14 +788,17 @@ Verified on 2026-07-16 and 2026-07-17:
   L0-rejected/L1-accepted tiles. The shadow keeps those labels, but dominant
   covariance/coverage error remains the same order as accepted tiles; reject
   guard-threshold repair and do not retry quality.
-- [ ] Pre-register and test one assignment-consensus adapter pseudo-descriptor
-  geometry candidate target-free. It must preserve fixed routing, thresholds,
-  primary-K/2K anchors, and selected-anchor-only S2/S3 access. It is a
-  virtual-output, non-paper-eligible diagnostic with zero compression; no
-  quality run is authorized by this diagnostic alone. Start synthetic-only:
-  lock consensus depth/offset/C2W/covariance equations, reject assignment
-  squaring, prove poison/PSD/route/event properties, and charge its separate
-  geometry arithmetic before registering a DL3DV audit.
+- [x] Implement and pass the synthetic-only assignment-consensus
+  adapter-pseudo-descriptor geometry gate at source `43dfd37`: fixed routing,
+  thresholds, primary-K/2K anchors, selected-anchor-only S2/S3 access, direct
+  virtual skipped outputs, no assignment squaring, constant/one-hot/PSD/C2W,
+  L0/L1 selected/skipped poison, route/event, and atomic Full-fallback tests.
+  The path has zero compression and separately charged successful and aborted
+  geometry/traffic work. `158` SAES tests pass; this is non-paper-eligible and
+  does not authorize a quality run.
+- [ ] Separately pre-register a fixed target-free DL3DV virtual-output audit
+  for this candidate. Do not run it, read target RGB, retry quality, or expand
+  DL3DV until that contract and its audit-specific tests are committed.
 - [x] Add a fail-closed DL3DV training-calibration archive path: enumerate the
   authenticated official tree, freeze an evaluation-disjoint 24+8 plan before
   download, verify selected ZIP byte counts and upstream object ids, record

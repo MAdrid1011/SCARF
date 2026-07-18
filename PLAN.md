@@ -1626,6 +1626,19 @@
   branch. A synthetic pass only permits a new target-free-audit preregistration;
   a target-free pass alone does not authorize a quality retry, which remains
   blocked on the fixed failure record and disjoint calibration.
+- Synthetic result (2026-07-18, source `43dfd37`): the isolated virtual path
+  now accepts only selected means/covariances/S2 depths/positions, assignment
+  rows, skipped positions, and context-camera geometry. It writes skipped
+  descriptors directly, so the retained-anchor update cannot apply assignment
+  a second time. The full SAES test collection passed `158` tests (one upstream
+  `skvideo` deprecation warning), including constant and one-hot geometry,
+  exact alpha `1.0` constants, nonidentity TranSplat adapter geometry,
+  assignment-squaring rejection, anchor permutation, L0/L1 selected/skipped
+  poison, route/event equivalence, PSD/finite checks, and atomic multi-slot
+  Full fallback. The analytic ledger separately charges successful virtual
+  outputs and a conservative full virtual attempt before any fail-closed
+  fallback. No DL3DV audit, render, quality metric, target RGB read, or sparse
+  execution claim was run or created by this result.
 
 ## 34. DL3DV Training-Calibration Preparation
 
