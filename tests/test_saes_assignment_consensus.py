@@ -632,9 +632,13 @@ def test_assignment_consensus_full_tile_fallback_restores_every_primitive_slot()
     )
 
 
-@pytest.mark.parametrize("primitives_per_pixel", (1, 2))
+@pytest.mark.parametrize(
+    ("primitives_per_pixel", "materialization_guard"),
+    ((1, False), (1, True), (2, False), (2, True)),
+)
 def test_assignment_consensus_never_reads_skipped_s3_descriptors(
     primitives_per_pixel,
+    materialization_guard,
 ):
     from saes.progressive_saes import ProgressiveSAES, apply_progressive_saes
 
@@ -671,13 +675,15 @@ def test_assignment_consensus_never_reads_skipped_s3_descriptors(
         context_extrinsics=torch.eye(4).reshape(1, 1, 4, 4),
         context_intrinsics=torch.eye(3).reshape(1, 1, 3, 3),
         materialization=MATERIALIZATION,
-        materialization_guard=False,
+        materialization_guard=materialization_guard,
     )
 
     for field in ("means", "covariances", "harmonics", "opacities"):
         observed = getattr(guarded, field).read_indices
         assert observed
         assert set(observed) <= set(selected)
+    if materialization_guard:
+        assert stats["l0_guard_checks"] == 1
     if primitives_per_pixel == 1:
         assert stats["level0_tiles"] == 1
         assert mask.any()
@@ -685,3 +691,44 @@ def test_assignment_consensus_never_reads_skipped_s3_descriptors(
         assert stats["full_tiles"] == 1
         assert stats["assignment_consensus_fallback_tiles"] == 1
         assert not mask.any()
+
+
+@pytest.mark.parametrize("level", ("L0", "L1"))
+def test_assignment_consensus_full_probe_layout_is_a_valid_noop(level):
+    from saes.progressive_saes import apply_progressive_saes
+
+    source = _adapter_compatible_gaussians()
+    gaussians = SimpleNamespace(
+        means=source.means[:, :4].clone(),
+        covariances=source.covariances[:, :4].clone(),
+        harmonics=source.harmonics[:, :4].clone(),
+        opacities=source.opacities[:, :4].clone(),
+    )
+    original = _clone_gaussians(gaussians)
+    features = torch.ones(1, 1, 2, 2, 2)
+    feature_threshold = 1.0
+    if level == "L1":
+        # Equality with the strict first-hit threshold rejects L0 but leaves
+        # the uniform depth probes eligible for L1.
+        feature_threshold = 0.0
+    mask, stats, _ = apply_progressive_saes(
+        gaussians,
+        2,
+        2,
+        tile_size=2,
+        feature_var_threshold=feature_threshold,
+        depth_std_threshold=1.0,
+        features=features,
+        depths=torch.full((1, 1, 4, 1, 1), 2.0),
+        context_extrinsics=torch.eye(4).reshape(1, 1, 4, 4),
+        context_intrinsics=torch.eye(3).reshape(1, 1, 3, 3),
+        materialization=MATERIALIZATION,
+        materialization_guard=False,
+    )
+
+    assert stats["assignment_consensus_pseudo_outputs"] == 0
+    assert stats["level0_tiles"] == int(level == "L0")
+    assert stats["level1_tiles"] == int(level == "L1")
+    assert not mask.any()
+    for name in ("means", "covariances", "harmonics", "opacities"):
+        torch.testing.assert_close(getattr(gaussians, name), getattr(original, name))

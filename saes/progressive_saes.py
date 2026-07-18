@@ -2849,11 +2849,16 @@ class ProgressiveSAES:
                                 if is_assignment_consensus:
                                     fallback_to_full, consensus_plan = moment_result
                                     if not fallback_to_full:
-                                        if consensus_plan is None:
+                                        # A tile whose anchors cover every
+                                        # position has no skipped virtual
+                                        # output. That is a valid no-op, not a
+                                        # failed consensus plan.
+                                        if consensus_plan is None and non_probes:
                                             raise RuntimeError(
                                                 "assignment-consensus plan is missing"
                                             )
-                                        consensus_plans.append(consensus_plan)
+                                        if consensus_plan is not None:
+                                            consensus_plans.append(consensus_plan)
                                 else:
                                     fallback_to_full = moment_result
                                 if fallback_to_full:
@@ -2893,10 +2898,6 @@ class ProgressiveSAES:
                             if not preserves_virtual_outputs:
                                 total_zeroed += len(non_probes)
                         if is_assignment_consensus and not fallback_to_full:
-                            if len(consensus_plans) != self.primitives_per_pixel:
-                                raise RuntimeError(
-                                    "assignment-consensus did not plan every primitive slot"
-                                )
                             for consensus_plan in consensus_plans:
                                 self._commit_assignment_consensus_plan(
                                     gaussians_full, consensus_plan
