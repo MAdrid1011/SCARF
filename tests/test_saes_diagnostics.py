@@ -424,7 +424,7 @@ def test_materialization_attribute_audit_builds_selected_l1_anchor_oracle():
         features[0, 0, :, row, column] = torch.tensor(vector)
     depths = torch.ones(1, 1, 16, 1, 1)
 
-    _, stats, _ = apply_progressive_saes(
+    mask, stats, _ = apply_progressive_saes(
         sparse,
         H=4,
         W=4,
@@ -447,10 +447,12 @@ def test_materialization_attribute_audit_builds_selected_l1_anchor_oracle():
         depth_threshold=0.1,
         view_count=1,
         decision_semantics="current",
+        effective_mask=mask,
     )
 
     assert stats["level0_tiles"] == 0
     assert stats["level1_tiles"] == 1
+    assert record["route_source"] == "committed_sparse_output_mask"
     assert record["levels"]["L1"]["tiles"] == 1
     assert record["full_oracle_l1_anchor_semantics"].startswith("posthoc full Stage-3")
     for key in ("mean_relative", "covariance_relative", "harmonic_relative", "opacity_absolute"):
@@ -474,6 +476,41 @@ def test_materialization_attribute_audit_builds_selected_l1_anchor_oracle():
         assert mixture[key]["count"] == 1
         assert mixture[key]["maximum"] == pytest.approx(0.0, abs=1e-6)
     assert mixture["optical_depth_relative"]["p50"] == pytest.approx(0.5)
+
+
+def test_materialization_attribute_audit_accepts_adapter_offset_transport():
+    from scripts.saes_diagnostics import materialization_attribute_audit
+
+    original = SimpleNamespace(
+        means=torch.ones(1, 16, 3),
+        covariances=torch.eye(3).reshape(1, 1, 3, 3).repeat(1, 16, 1, 1),
+        harmonics=torch.full((1, 16, 3, 1), 0.5),
+        opacities=torch.full((1, 16), 0.25),
+    )
+    sparse = SimpleNamespace(
+        means=original.means.clone(),
+        covariances=original.covariances.clone(),
+        harmonics=original.harmonics.clone(),
+        opacities=original.opacities.clone(),
+    )
+
+    record = materialization_attribute_audit(
+        original,
+        sparse,
+        features=torch.ones(1, 1, 2, 4, 4),
+        depths=torch.ones(1, 1, 16, 1, 1),
+        height=4,
+        width=4,
+        tile_size=4,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+        view_count=1,
+        decision_semantics="current",
+        materialization="conditional-adapter-offset-transport-diagnostic",
+    )
+
+    assert record["materialization"] == "conditional-adapter-offset-transport-diagnostic"
+    assert record["route_source"] == "posthoc_s1_s2_reclassification"
 
 
 @pytest.mark.parametrize(

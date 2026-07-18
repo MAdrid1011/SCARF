@@ -561,6 +561,7 @@ def materialization_attribute_audit(
     view_count: int,
     decision_semantics: str,
     materialization: str = "representative",
+    effective_mask: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     """Compare sparse representatives to full Stage-3 attributes post hoc.
 
@@ -568,7 +569,11 @@ def materialization_attribute_audit(
     full tensor after the probe-only path has made its decisions, and never
     returns a routing signal or a parameter choice.  Its purpose is to locate
     which Gaussian-parameter family makes a sparse tile diverge before any
-    image-quality evaluation is considered.
+    image-quality evaluation is considered.  When ``effective_mask`` is
+    supplied, it is the already-committed sparse output mask and determines
+    the audited L0/L1 tiles.  This keeps a post-hoc oracle aligned with a
+    fail-closed materialization guard instead of recomputing an unguarded
+    route from S1/S2 statistics.
     """
     required = ("means", "covariances", "harmonics", "opacities")
     if any(not hasattr(value, name) for value in (original, sparse) for name in required):
@@ -583,6 +588,7 @@ def materialization_attribute_audit(
         "virtual-reconstruction-diagnostic",
         "l1-primary-depth-reference-diagnostic",
         "conditional-anchor-transport-diagnostic",
+        "conditional-adapter-offset-transport-diagnostic",
     ):
         raise ValueError(f"unsupported audited SAES materialization: {materialization}")
     virtual_reconstruction = materialization in {
@@ -599,6 +605,14 @@ def materialization_attribute_audit(
     ):
         raise ValueError("materialization audit received incompatible Gaussian layout")
     primitives_per_pixel = gaussian_count // position_count
+    if effective_mask is not None:
+        if not torch.is_tensor(effective_mask):
+            raise ValueError("effective sparse mask must be a tensor")
+        effective_mask = effective_mask.detach().to(
+            device=original.means.device, dtype=torch.bool
+        ).reshape(-1)
+        if effective_mask.numel() != gaussian_count:
+            raise ValueError("effective sparse mask has an incompatible Gaussian layout")
     statistic = {
         "probe-vector-first-hit": "raw-probe-vector-variance",
         "probe-channel-variance-first-hit": "raw-probe-mean-channel-variance",
@@ -740,6 +754,33 @@ def materialization_attribute_audit(
             ]
         )
 
+    def effective_tile_level(view: int, tile_y: int, tile_x: int) -> str | None:
+        """Decode the committed L0/L1/Full choice from a sparse output mask."""
+        if effective_mask is None:
+            return None
+        skipped_per_slot = []
+        for slot in range(primitives_per_pixel):
+            indices = torch.tensor(
+                [
+                    flat_index(view, tile_y + row, tile_x + column, slot)
+                    for row in range(tile_size)
+                    for column in range(tile_size)
+                ],
+                device=effective_mask.device,
+                dtype=torch.long,
+            )
+            skipped_per_slot.append(int(effective_mask[indices].sum().item()))
+        if len(set(skipped_per_slot)) != 1:
+            raise ValueError("effective sparse mask has inconsistent primitive slots")
+        skipped = skipped_per_slot[0]
+        if skipped == tile_size * tile_size - len(scorer.probe_positions):
+            return "L0"
+        if skipped == tile_size * tile_size - len(scorer.lightweight_positions):
+            return "L1"
+        if skipped == 0:
+            return None
+        raise ValueError("effective sparse mask has an unsupported tile pattern")
+
     tiles_h = height // tile_size
     tiles_w = width // tile_size
     for view in range(view_count):
@@ -749,30 +790,55 @@ def materialization_attribute_audit(
                 assignment_feature_variance = scorer._assignment_feature_variance(
                     feature_variance
                 )
-                if feature_variance < feature_threshold:
-                    level = "L0"
-                    retained_positions = scorer.probe_positions
-                elif scorer.check_depth_uniformity(
-                    depths,
-                    tile_row,
-                    tile_column,
-                    tile_size,
-                    height,
-                    width,
-                    depth_threshold,
-                    probe_positions=scorer.probe_positions,
-                    view_index=view,
-                    relative=False,
-                ):
-                    level = "L1"
-                    retained_positions = scorer.lightweight_positions
+                tile_y = tile_row * tile_size
+                tile_x = tile_column * tile_size
+                if effective_mask is None:
+                    if feature_variance < feature_threshold:
+                        level = "L0"
+                        retained_positions = scorer.probe_positions
+                    elif scorer.check_depth_uniformity(
+                        depths,
+                        tile_row,
+                        tile_column,
+                        tile_size,
+                        height,
+                        width,
+                        depth_threshold,
+                        probe_positions=scorer.probe_positions,
+                        view_index=view,
+                        relative=False,
+                    ):
+                        level = "L1"
+                        retained_positions = scorer.lightweight_positions
+                    else:
+                        continue
                 else:
-                    continue
+                    level = effective_tile_level(view, tile_y, tile_x)
+                    if level is None:
+                        continue
+                    if level == "L0" and feature_variance >= feature_threshold:
+                        raise ValueError("effective L0 mask contradicts the feature route")
+                    if level == "L1" and not scorer.check_depth_uniformity(
+                        depths,
+                        tile_row,
+                        tile_column,
+                        tile_size,
+                        height,
+                        width,
+                        depth_threshold,
+                        probe_positions=scorer.probe_positions,
+                        view_index=view,
+                        relative=False,
+                    ):
+                        raise ValueError("effective L1 mask contradicts the depth route")
+                    retained_positions = (
+                        scorer.probe_positions
+                        if level == "L0"
+                        else scorer.lightweight_positions
+                    )
                 errors = level_errors[level]
                 errors["tiles"] = int(errors["tiles"]) + 1
                 retained = set(retained_positions)
-                tile_y = tile_row * tile_size
-                tile_x = tile_column * tile_size
                 for local_y, local_x in retained_positions:
                     for slot in range(primitives_per_pixel):
                         index = flat_index(view, tile_y + local_y, tile_x + local_x, slot)
@@ -1315,6 +1381,9 @@ def materialization_attribute_audit(
         "kind": "saes_probe_materialization_attribute_audit",
         "paper_result_eligible": False,
         "routing_signal_used": False,
+        "route_source": (
+            "committed_sparse_output_mask" if effective_mask is not None else "posthoc_s1_s2_reclassification"
+        ),
         "full_stage3_reference_use": "posthoc-diagnostic-only",
         "materialization": materialization,
         "non_probe_comparison": (

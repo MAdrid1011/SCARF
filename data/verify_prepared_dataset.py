@@ -36,7 +36,11 @@ def verify_tree_manifest(root: Path, manifest_path: Path) -> dict[str, Any]:
     actual_paths = {
         path.relative_to(root).as_posix(): path
         for path in root.rglob("*")
-        if path.is_file() and path.resolve() != manifest_path
+        # ``build_dataset_manifest`` excludes every nested manifest so a
+        # composed target-free sidecar can verify its own manifest separately.
+        if path.is_file()
+        and path.resolve() != manifest_path
+        and path.name != ".scarf-manifest.json"
     }
     if set(actual_paths) != set(declared):
         missing = sorted(set(declared) - set(actual_paths))
