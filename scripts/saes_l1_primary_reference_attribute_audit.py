@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from math import isqrt
 import random
 import sys
 from pathlib import Path
@@ -102,6 +103,38 @@ def _load_audit_input(input_root: Path) -> tuple[dict[str, Any], dict[str, Any],
         raise ValueError("target-free audit input has no fixed selection file")
     tree = verify_tree_manifest(input_root, input_root / ".scarf-manifest.json")
     return record, sidecar, tree
+
+
+def _build_attribute_transport_ledger(
+    *,
+    stats: dict[str, Any],
+    source_gaussians: Any,
+    features: torch.Tensor,
+    height: int,
+    width: int,
+    view_count: int,
+) -> dict[str, Any]:
+    """Charge target-free fixed-function work from the committed SAES trace."""
+    from saes.hardware_accounting import build_saes_event_ledger
+
+    harmonic_shape = source_gaussians.harmonics.shape
+    if len(harmonic_shape) < 4 or harmonic_shape[-2] != 3:
+        raise RuntimeError("target-free audit received an unsupported SH layout")
+    coefficient_count = int(harmonic_shape[-1])
+    coefficient_root = isqrt(coefficient_count)
+    if coefficient_root * coefficient_root != coefficient_count:
+        raise RuntimeError("target-free audit received a non-square SH layout")
+    position_count = view_count * height * width
+    gaussian_count = int(source_gaussians.means.shape[1])
+    if gaussian_count % position_count:
+        raise RuntimeError("target-free audit received an incompatible Gaussian layout")
+    return build_saes_event_ledger(
+        stats,
+        feature_dim=int(features.shape[2]),
+        tile_size=TILE_SIZE,
+        sh_degree=coefficient_root - 1,
+        primitives_per_pixel=gaussian_count // position_count,
+    )
 
 
 def collect_attribute_audit(
@@ -214,6 +247,14 @@ def collect_attribute_audit(
         or stats["assignment_weight_sum_error_max"] > 1.0e-5
     ):
         raise RuntimeError("fixed target-free audit violated a numerical or access invariant")
+    hardware_accounting = _build_attribute_transport_ledger(
+        stats=stats,
+        source_gaussians=source_gaussians,
+        features=features,
+        height=height,
+        width=width,
+        view_count=views,
+    )
 
     oracle = materialization_attribute_audit(
         source_gaussians,
@@ -289,6 +330,7 @@ def collect_attribute_audit(
             "skipped_mask_sha256": _mask_sha256(mask),
         },
         "saes_stats": stats,
+        "hardware_accounting": hardware_accounting,
         "skipped_descriptor_poison_audit": {
             "poison_value": 1.0e4,
             "route_identical": True,

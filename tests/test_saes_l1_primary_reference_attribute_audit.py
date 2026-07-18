@@ -127,6 +127,20 @@ def test_fixed_attribute_audit_uses_a_target_free_loader_and_never_decodes_targe
         mask = torch.ones(16, dtype=torch.bool)
         mask[torch.tensor([0, 3, 12, 15])] = False
         return mask, {
+            "total_tiles_processed": 1,
+            "level0_tiles": 1,
+            "level1_tiles": 0,
+            "full_tiles": 0,
+            "l0_representatives": 4,
+            "l1_lightweight_anchors": 0,
+            "full_stage3_gaussians": 0,
+            "materialization_guard_enabled": False,
+            "adapter_offset_attribute_transport_uses": (
+                12 * 4
+                if kwargs["materialization"]
+                == audit.ATTRIBUTE_TRANSPORT_MATERIALIZATION
+                else 0
+            ),
             "covariance_psd_violations": 0,
             "guard_nonprobe_s3_attribute_reads": 0,
             "opacity_transmittance_error_max": 0.0,
@@ -158,6 +172,7 @@ def test_fixed_attribute_audit_uses_a_target_free_loader_and_never_decodes_targe
     assert record["execution_boundary"]["decoder_executed"] is False
     assert record["execution_boundary"]["quality_metrics_computed"] is False
     assert record["posthoc_full_stage3_oracle"]["route_source"] == "committed_sparse_output_mask"
+    assert record["hardware_accounting"]["target_rgb_accessed"] is False
     transport_record = audit.collect_attribute_audit(
         input_root=root,
         device=torch.device("cpu"),
@@ -169,6 +184,11 @@ def test_fixed_attribute_audit_uses_a_target_free_loader_and_never_decodes_targe
         audit.ATTRIBUTE_TRANSPORT_MATERIALIZATION
     )
     assert transport_record["retained_attribute_transport"]["enabled"] is True
+    assert (
+        transport_record["hardware_accounting"]["cycles"]
+        ["adapter_offset_attribute_reconstruction"]
+        > 0
+    )
     assert applied_materializations == [
         audit.MATERIALIZATION,
         audit.MATERIALIZATION,
