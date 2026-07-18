@@ -56,6 +56,7 @@ def _source_input(tmp_path: Path) -> Path:
         "status": "PASS",
         "model": "transplat",
         "dataset": "dl3dv",
+        "source_sample_index": 0,
         "target_rgb_included": False,
         "selected_sample": {"scene": scene, "context_indices": [0, 4]},
         "canonical_protocol": {
@@ -63,9 +64,7 @@ def _source_input(tmp_path: Path) -> Path:
             "sample_selection_sha256": "b" * 64,
         },
     }
-    (root / "audit-input.json").write_text(
-        json.dumps(source_record), encoding="utf-8"
-    )
+    (root / "audit-input.json").write_text(json.dumps(source_record), encoding="utf-8")
     manifest = build(root, "source", "fixture", "fixture")
     (root / ".scarf-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return root
@@ -139,7 +138,9 @@ def test_context_only_loader_never_returns_a_target_mapping(
             return None
 
     bundle = SimpleNamespace(
-        encoder=SimpleNamespace(cfg=SimpleNamespace(shim_patch_size=1, downscale_factor=1)),
+        encoder=SimpleNamespace(
+            cfg=SimpleNamespace(shim_patch_size=1, downscale_factor=1)
+        ),
         config=SimpleNamespace(
             dataset=SimpleNamespace(
                 image_shape=(8, 8),
@@ -157,3 +158,47 @@ def test_context_only_loader_never_returns_a_target_mapping(
     assert batch["context"]["extrinsics"].shape == (1, 2, 4, 4)
     assert batch["calibration"]["target_mapping_present"] is False
     assert batch["calibration"]["target_camera_metadata_accessed"] is False
+
+
+def test_context_only_validator_rejects_unexpected_payload_fields(tmp_path: Path):
+    from data.build_manifest import build
+    from data.context_only_audit_input import (
+        prepare_context_only_audit_input,
+        validate_context_only_audit_input,
+    )
+    from scripts.calibration_inputs import sha256_file
+
+    source = _source_input(tmp_path)
+    output = tmp_path / "context-only"
+    prepare_context_only_audit_input(source, output_root=output)
+    chunk_path = output / "sidecar" / "test" / "000000.torch"
+    chunk = torch.load(chunk_path, map_location="cpu")
+    chunk[0]["teacher_artifact"] = "forbidden"
+    torch.save(chunk, chunk_path)
+    audit_path = output / "audit-input.json"
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    audit["sidecar"]["record_sha256"] = sha256_file(chunk_path)
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+    manifest = build(output, "dl3dv-context-only-audit", "fixture", "fixture")
+    (output / ".scarf-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fixed contract"):
+        validate_context_only_audit_input(output)
+
+
+def test_context_only_validator_rejects_invalid_source_binding(tmp_path: Path):
+    from data.context_only_audit_input import (
+        prepare_context_only_audit_input,
+        validate_context_only_audit_input,
+    )
+
+    source = _source_input(tmp_path)
+    output = tmp_path / "context-only"
+    prepare_context_only_audit_input(source, output_root=output)
+    audit_path = output / "audit-input.json"
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    audit["source_binding"]["canonical_index_sha256"] = "not-a-sha"
+    audit_path.write_text(json.dumps(audit), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source binding"):
+        validate_context_only_audit_input(output)

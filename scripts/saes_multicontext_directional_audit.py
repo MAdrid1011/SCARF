@@ -11,6 +11,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable
+from types import SimpleNamespace
 
 import torch
 
@@ -19,16 +20,21 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from integration import create_model_loader, load_context_only_audit_data
-from saes.progressive_saes import apply_progressive_saes
-from saes.projected_optical_moment_audit import (
+from data.context_only_audit_input import validate_context_only_audit_input  # noqa: E402
+from data.frozen_audit_contract import (  # noqa: E402
+    require_fixed_file_sha256,
+    require_frozen_identity,
+)
+from integration import create_model_loader, load_context_only_audit_data  # noqa: E402
+from saes.progressive_saes import apply_progressive_saes  # noqa: E402
+from saes.projected_optical_moment_audit import (  # noqa: E402
     DirectionalTileComparison,
     compare_tile_directionally,
     evaluate_directional_gate,
     project_context_optical_moment,
 )
-from scripts.ae_config import resolve_experiment
-from scripts.result_record import cached_sha256_file, portable_command, source_identity, write_result
+from scripts.ae_config import resolve_experiment  # noqa: E402
+from scripts.result_record import portable_command, source_identity, write_result  # noqa: E402
 
 
 AUDIT_ID = "multicontext-tangent-target-free-audit-v1"
@@ -43,6 +49,84 @@ DECISION_SEMANTICS = "probe-normalized-std-first-hit"
 DEPTH_ROUTING_SEMANTICS = "metric-depth-standard-deviation"
 CURRENT_MATERIALIZATION = "conditional-adapter-offset-attribute-transport-diagnostic"
 TANGENT_MATERIALIZATION = "multicontext-tangent-plane-diagnostic"
+EXPECTED_CHECKPOINT_SHA256 = (
+    "89e43c205a04962e427801385d7d18e74cba063d05a76bf8b28e5fa746a4b69a"
+)
+FIXED_INPUT_IDENTITY = {
+    "scene": "032dee9fb0a8bc1b90871dc5fe950080d0bcd3caf166447f44e60ca50ac04ec7",
+    "context_indices": [0, 9],
+    "tree_sha256": "a177ebdf7b4871b834bddfa6bf29ab5029ebaa4c2d421ec5a5ac3f8bd09f5605",
+    "manifest_sha256": "7e2ed40dc31f200de97fa82820d0d41624c9ed1afcf1eebdd86a4779ee44b748",
+    "audit_input_sha256": "f2517a362230bb4f8a764bf131df268e49e8b99ecdd906f3a7cac72000cc81e0",
+    "source_sample_index": 0,
+    "sidecar": {
+        "index_sha256": "61cdc12b1933d5f7d33731af052cab974f0289341fc753f666d57c61f7a41d44",
+        "record_sha256": "f168fce8c9161844c9bbe1a0da5db214d950e8312a263d588a444f10f4e645c2",
+    },
+    "source_binding": {
+        "source_audit_input_sha256": "cfa8cd54c216d9f59558dd19c7d3c519a517b583ec10acc30dc757d75abb12d2",
+        "source_audit_tree_sha256": "9ca213607a9765bee781bd8df3f156c557600932a9cf5e9ef92ed14b60286625",
+        "canonical_index_sha256": "eab21290cfab8eff12e208377b089b2a65e15f7ba44f7bb085963511354863f4",
+        "canonical_sample_selection_sha256": "a2b432a5513cec757bc7f5a03c8f424029a856b02fb6a22125a21a61b71cb63e",
+        "source_sidecar_tree_sha256": "ae043f7584dec864af7a29d5f0c74a871974e627e36b0e23de955c7141b82fd9",
+    },
+}
+SENTINEL_SPECS = (
+    (
+        "finite-sentinel-a",
+        {
+            "means": 1.0e4,
+            "covariances": -1.0e4,
+            "harmonics": 1.0e4,
+            "opacities": 0.99,
+            "depth": 1.0e4,
+        },
+    ),
+    (
+        "finite-sentinel-b",
+        {
+            "means": -2.0e4,
+            "covariances": 2.0e4,
+            "harmonics": -2.0e4,
+            "opacities": 0.01,
+            "depth": -2.0e4,
+        },
+    ),
+)
+
+
+class _SelectedReadTensor:
+    """Allow selected S3 reads and any output write during a sentinel replay."""
+
+    def __init__(self, tensor: torch.Tensor, allowed_indices: torch.Tensor):
+        self._tensor = tensor
+        self._allowed_indices = {
+            int(index) for index in allowed_indices.detach().cpu().reshape(-1).tolist()
+        }
+        self.read_indices: list[int] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._tensor, name)
+
+    def __getitem__(self, index: Any) -> Any:
+        if not isinstance(index, tuple) or len(index) != 2 or index[0] != 0:
+            raise AssertionError(f"unexpected S3 tensor read index: {index!r}")
+        requested = index[1]
+        if isinstance(requested, int):
+            indices = [requested]
+        elif torch.is_tensor(requested):
+            indices = [
+                int(value) for value in requested.detach().cpu().reshape(-1).tolist()
+            ]
+        else:
+            indices = [int(value) for value in requested]
+        if not set(indices) <= self._allowed_indices:
+            raise AssertionError(f"skipped S3 descriptor read: {indices!r}")
+        self.read_indices.extend(indices)
+        return self._tensor[index]
+
+    def __setitem__(self, index: Any, value: Any) -> None:
+        self._tensor[index] = value
 
 
 def _sha256_file(path: Path) -> str:
@@ -75,7 +159,11 @@ def _capture_encoder_execution(
     def capture(_module: Any, inputs: tuple[Any, ...], output: Any) -> None:
         if not inputs or not torch.is_tensor(inputs[0]) or inputs[0].ndim != 5:
             raise RuntimeError("depth predictor did not receive [B,V,C,H,W] features")
-        if not isinstance(output, tuple) or not output or not torch.is_tensor(output[0]):
+        if (
+            not isinstance(output, tuple)
+            or not output
+            or not torch.is_tensor(output[0])
+        ):
             raise RuntimeError("depth predictor did not emit a depth tensor")
         captured["features"] = inputs[0].detach().clone()
         captured["depths"] = output[0].detach().clone()
@@ -101,7 +189,16 @@ def _tile_indices(
     gpp: int,
 ) -> torch.Tensor:
     values = [
-        ((view * height * width + (tile_row * TILE_SIZE + row) * width + tile_column * TILE_SIZE + column) * gpp + slot)
+        (
+            (
+                view * height * width
+                + (tile_row * TILE_SIZE + row) * width
+                + tile_column * TILE_SIZE
+                + column
+            )
+            * gpp
+            + slot
+        )
         for row in range(TILE_SIZE)
         for column in range(TILE_SIZE)
         for slot in range(gpp)
@@ -147,9 +244,7 @@ def _build_commit_payload(
     """Serialize only committed descriptors, never deleted dense S3 slots."""
     if gaussians.means.shape[0] != 1:
         raise ValueError("directional audit supports exactly one batch item")
-    gpp, remainder = divmod(
-        int(gaussians.means.shape[1]), view_count * height * width
-    )
+    gpp, remainder = divmod(int(gaussians.means.shape[1]), view_count * height * width)
     if remainder or gpp < 1 or mask.numel() != gaussians.means.shape[1]:
         raise ValueError("candidate layout does not match the fixed context grid")
     retained = torch.nonzero(~mask, as_tuple=False).flatten()
@@ -194,16 +289,16 @@ def _write_descriptor_commit(
         "path": path.name,
         "sha256": _sha256_file(path),
         "byte_count": path.stat().st_size,
-        "modified_mask_sha256": hashlib.sha256(
-            mask.numpy().tobytes()
-        ).hexdigest(),
+        "modified_mask_sha256": hashlib.sha256(mask.numpy().tobytes()).hexdigest(),
         "retained_descriptor_count": int(payload["retained_indices"].numel()),
         "full_descriptor_count": int(payload["full_indices"].numel()),
         "contains_deleted_dense_s3": False,
     }
 
 
-def _load_descriptor_commit(directory: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+def _load_descriptor_commit(
+    directory: Path, manifest: dict[str, Any]
+) -> dict[str, Any]:
     path = directory / str(manifest["path"])
     if not path.is_file() or _sha256_file(path) != manifest["sha256"]:
         raise RuntimeError("phase-A descriptor commit hash mismatch")
@@ -233,7 +328,9 @@ def _load_descriptor_commit(directory: Path, manifest: dict[str, Any]) -> dict[s
     return payload
 
 
-def _lookup_committed(payload: dict[str, Any], indices: torch.Tensor) -> dict[str, torch.Tensor]:
+def _lookup_committed(
+    payload: dict[str, Any], indices: torch.Tensor
+) -> dict[str, torch.Tensor]:
     retained = payload["retained_indices"]
     indices = indices.detach().cpu().to(dtype=torch.long)
     locations = torch.searchsorted(retained, indices)
@@ -346,67 +443,179 @@ def _phase_a_invariants(
     }
 
 
-def _poison_skipped_descriptors(gaussians: Any, mask: torch.Tensor) -> None:
+def _poison_skipped_descriptors(
+    gaussians: Any, mask: torch.Tensor, *, sentinel: dict[str, float]
+) -> None:
     skipped = torch.nonzero(mask, as_tuple=False).flatten()
-    for name, value in (
-        ("means", 1.0e4),
-        ("covariances", -1.0e4),
-        ("harmonics", 1.0e4),
-        ("opacities", 0.99),
-    ):
-        getattr(gaussians, name)[0, skipped] = value
+    for name in ("means", "covariances", "harmonics", "opacities"):
+        getattr(gaussians, name)[0, skipped] = sentinel[name]
 
 
 def _poison_skipped_depths(
-    depths: torch.Tensor, mask: torch.Tensor, *, height: int, width: int, gpp: int
+    depths: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    height: int,
+    width: int,
+    gpp: int,
+    value: float,
 ) -> None:
     positions = torch.unique(torch.nonzero(mask, as_tuple=False).flatten() // gpp)
     per_view = height * width
     for position in positions.tolist():
         view, pixel = divmod(position, per_view)
         if depths.ndim == 5:
-            depths[0, view, pixel] = 1.0e4
+            depths[0, view, pixel] = value
         elif depths.ndim == 4:
             row, column = divmod(pixel, width)
-            depths[0, view, row, column] = 1.0e4
+            depths[0, view, row, column] = value
         else:
             raise RuntimeError("audit cannot poison an unsupported S2 depth layout")
 
 
-def _poison_invariants(
-    tangent: dict[str, Any], poisoned: dict[str, Any]
-) -> dict[str, Any]:
-    if not torch.equal(tangent["modified_mask"], poisoned["modified_mask"]):
-        raise RuntimeError("skipped poison changed the route mask")
-    if not torch.equal(tangent["retained_indices"], poisoned["retained_indices"]):
-        raise RuntimeError("skipped poison changed retained output slots")
-    if _shared_stats(tangent["saes_stats"]) != _shared_stats(poisoned["saes_stats"]):
-        raise RuntimeError("skipped poison changed non-diagnostic event counts")
+def _assert_payload_identical(
+    reference: dict[str, Any], candidate: dict[str, Any], *, label: str
+) -> dict[str, float]:
+    """Require a sentinel replay to reproduce every committed phase-A value."""
+    for key in (
+        "materialization",
+        "height",
+        "width",
+        "view_count",
+        "primitives_per_pixel",
+        "saes_stats",
+        "tile_trace",
+    ):
+        if reference[key] != candidate[key]:
+            raise RuntimeError(f"{label} changed committed {key}")
+    for key in ("modified_mask", "retained_indices", "full_indices"):
+        if not torch.equal(reference[key], candidate[key]):
+            raise RuntimeError(f"{label} changed committed {key}")
     deltas = {}
-    for name in ("means", "harmonics", "opacities"):
-        delta = _maximum_delta(tangent[name], poisoned[name])
-        if delta != 0.0:
-            raise RuntimeError(f"skipped poison changed retained {name}")
-        deltas[name] = delta
-    covariance_delta = _maximum_delta(tangent["covariances"], poisoned["covariances"])
-    if covariance_delta > 1.0e-5:
-        raise RuntimeError("skipped poison changed retained covariance")
-    tangent_full = _lookup_committed(tangent, tangent["full_indices"])
-    poisoned_full = _lookup_committed(poisoned, poisoned["full_indices"])
     for name in ("means", "covariances", "harmonics", "opacities"):
-        if not torch.equal(tangent_full[name], poisoned_full[name]):
-            raise RuntimeError(f"skipped poison changed Full {name}")
+        delta = _maximum_delta(reference[name], candidate[name])
+        if delta != 0.0:
+            raise RuntimeError(f"{label} changed committed {name}")
+        deltas[name] = delta
+    reference_full = _lookup_committed(reference, reference["full_indices"])
+    candidate_full = _lookup_committed(candidate, candidate["full_indices"])
+    for name in ("means", "covariances", "harmonics", "opacities"):
+        if not torch.equal(reference_full[name], candidate_full[name]):
+            raise RuntimeError(f"{label} changed Full {name}")
+    return deltas
+
+
+def _wrap_selected_s3_reads(
+    gaussians: Any, selected_indices: torch.Tensor
+) -> tuple[Any, dict[str, _SelectedReadTensor]]:
+    fields = {
+        name: _SelectedReadTensor(getattr(gaussians, name), selected_indices)
+        for name in ("means", "covariances", "harmonics", "opacities")
+    }
+    return SimpleNamespace(**fields), fields
+
+
+def _run_sentinel_replay(
+    *,
+    model: Any,
+    context: dict[str, Any],
+    reference: dict[str, Any],
+    sentinel_name: str,
+    sentinel: dict[str, float],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run one selected-read-guarded replay with finite skipped S2/S3 sentinels."""
+    gaussians, features, depths = _capture_encoder_execution(model, context)
+    _, views, _, height, width = context["image"].shape
+    mask = reference["modified_mask"].to(device=gaussians.means.device)
+    selected = torch.nonzero(~mask, as_tuple=False).flatten()
+    _poison_skipped_descriptors(gaussians, mask, sentinel=sentinel)
+    _poison_skipped_depths(
+        depths,
+        mask,
+        height=height,
+        width=width,
+        gpp=int(reference["primitives_per_pixel"]),
+        value=sentinel["depth"],
+    )
+    guarded, fields = _wrap_selected_s3_reads(gaussians, selected)
+    trace: list[dict[str, Any]] = []
+    replay_mask, replay_stats, _ = apply_progressive_saes(
+        guarded,
+        height,
+        width,
+        tile_size=TILE_SIZE,
+        feature_var_threshold=FEATURE_THRESHOLD,
+        depth_std_threshold=DEPTH_THRESHOLD,
+        features=features,
+        depths=depths,
+        view_count=views,
+        materialization=TANGENT_MATERIALIZATION,
+        decision_semantics=DECISION_SEMANTICS,
+        context_extrinsics=context["extrinsics"],
+        context_intrinsics=context["intrinsics"],
+        depth_routing_semantics=DEPTH_ROUTING_SEMANTICS,
+        depth_near=context["near"],
+        depth_far=context["far"],
+        tile_trace=trace,
+    )
+    payload = _build_commit_payload(
+        gaussians=gaussians,
+        mask=replay_mask,
+        stats=replay_stats,
+        tile_trace=trace,
+        materialization=TANGENT_MATERIALIZATION,
+        height=height,
+        width=width,
+        view_count=views,
+    )
+    deltas = _assert_payload_identical(reference, payload, label=sentinel_name)
+    reads = {}
+    for name, field in fields.items():
+        if not field.read_indices:
+            raise RuntimeError(f"{sentinel_name} did not read selected {name}")
+        reads[name] = {
+            "read_count": len(field.read_indices),
+            "selected_only": True,
+        }
+    return payload, {
+        "sentinel": sentinel_name,
+        "route_trace_identical": True,
+        "all_stats_identical": True,
+        "committed_outputs_identical": True,
+        "full_outputs_identical": True,
+        "maximum_absolute_delta": deltas,
+        "selected_s3_read_guard": reads,
+    }
+
+
+def _two_sentinel_selected_only_invariants(
+    *, model: Any, context: dict[str, Any], reference: dict[str, Any]
+) -> dict[str, Any]:
+    """Prove the committed tangent output ignores two finite skipped sentinels."""
+    replays = []
+    evidence = []
+    for name, sentinel in SENTINEL_SPECS:
+        replay, record = _run_sentinel_replay(
+            model=model,
+            context=context,
+            reference=reference,
+            sentinel_name=name,
+            sentinel=sentinel,
+        )
+        replays.append(replay)
+        evidence.append(record)
+    _assert_payload_identical(
+        replays[0], replays[1], label="two finite skipped sentinels"
+    )
     return {
-        "route_mask_identical": True,
-        "retained_slots_identical": True,
-        "non_diagnostic_event_counts_identical": True,
-        "full_slots_identical": True,
-        "retained_maximum_absolute_delta": {
-            **deltas,
-            "covariances": covariance_delta,
-        },
-        "skipped_s2_poisoned": True,
-        "skipped_s3_poisoned": True,
+        "sentinel_count": len(SENTINEL_SPECS),
+        "finite_s2_s3_sentinels": [name for name, _ in SENTINEL_SPECS],
+        "route_trace_identical": True,
+        "all_stats_identical": True,
+        "committed_outputs_identical": True,
+        "full_outputs_identical": True,
+        "selected_s3_read_guard_enforced": True,
+        "replays": evidence,
     }
 
 
@@ -415,7 +624,9 @@ def _materialize_candidate(
     model: Any,
     context: dict[str, Any],
     materialization: str,
-) -> tuple[Any, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[
+    Any, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any], list[dict[str, Any]]
+]:
     gaussians, features, depths = _capture_encoder_execution(model, context)
     _, views, _, height, width = context["image"].shape
     trace: list[dict[str, Any]] = []
@@ -441,8 +652,26 @@ def _materialize_candidate(
     return gaussians, features, depths, mask, stats, trace
 
 
-def _load_encoder_context(input_root: Path, device: torch.device) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
+def _require_fixed_audit_input(input_root: Path) -> dict[str, Any]:
+    """Validate and bind the portable sidecar to this one registered audit."""
+    identity = validate_context_only_audit_input(input_root)
+    return require_frozen_identity(
+        identity,
+        FIXED_INPUT_IDENTITY,
+        label="multicontext tangent audit input",
+    )
+
+
+def _load_encoder_context(
+    input_root: Path, device: torch.device
+) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    input_identity = _require_fixed_audit_input(input_root)
     experiment = resolve_experiment(MODEL, DATASET, ROOT)
+    checkpoint_sha256 = require_fixed_file_sha256(
+        experiment.checkpoint,
+        EXPECTED_CHECKPOINT_SHA256,
+        label="multicontext tangent audit checkpoint",
+    )
     loader = create_model_loader(MODEL)
     bundle = loader.load_model(
         str(experiment.checkpoint),
@@ -451,20 +680,41 @@ def _load_encoder_context(input_root: Path, device: torch.device) -> tuple[Any, 
         hydra_overrides=experiment.hydra_overrides,
         encoder_only=True,
     )
+    if bundle.decoder is not None:
+        raise RuntimeError(
+            "target-free directional audit unexpectedly constructed a decoder"
+        )
     data = load_context_only_audit_data(loader, bundle, input_root=input_root)
     if "target" in data.batch:
         raise RuntimeError("context-only audit loader returned a target mapping")
+    loaded_identity = require_frozen_identity(
+        data.batch["calibration"],
+        FIXED_INPUT_IDENTITY,
+        label="loaded multicontext tangent audit input",
+    )
+    if loaded_identity != input_identity:
+        raise RuntimeError(
+            "context-only audit loader changed its frozen input identity"
+        )
     model = bundle.model
     model.eval()
     context = {
         key: value.to(bundle.device) if torch.is_tensor(value) else value
         for key, value in data.batch["context"].items()
     }
-    return model, context, data.batch["calibration"], {
-        "checkpoint_path": str(experiment.checkpoint),
-        "environment_profile": experiment.environment_profile,
-        "native_encoder_device": str(bundle.device),
-    }
+    return (
+        model,
+        context,
+        loaded_identity,
+        {
+            "checkpoint_path": str(experiment.checkpoint),
+            "checkpoint_sha256": checkpoint_sha256,
+            "environment_profile": experiment.environment_profile,
+            "native_encoder_device": str(bundle.device),
+            "encoder_only": True,
+            "decoder_constructed": False,
+        },
+    )
 
 
 def _serialize_moment(moment: Any) -> dict[str, Any]:
@@ -490,15 +740,23 @@ def _serialize_comparison(comparison: DirectionalTileComparison) -> dict[str, An
         "valid": comparison.valid,
         "reason": comparison.reason,
         "dense": _serialize_moment(comparison.dense),
-        "current": asdict(comparison.current) if comparison.current is not None else None,
-        "candidate": asdict(comparison.candidate) if comparison.candidate is not None else None,
+        "current": asdict(comparison.current)
+        if comparison.current is not None
+        else None,
+        "candidate": asdict(comparison.candidate)
+        if comparison.candidate is not None
+        else None,
     }
 
 
-def _condition_summaries(comparisons: Iterable[DirectionalTileComparison]) -> dict[str, Any]:
+def _condition_summaries(
+    comparisons: Iterable[DirectionalTileComparison],
+) -> dict[str, Any]:
     grouped: dict[tuple[str, int], list[DirectionalTileComparison]] = {}
     for comparison in comparisons:
-        grouped.setdefault((comparison.level, comparison.context_index), []).append(comparison)
+        grouped.setdefault((comparison.level, comparison.context_index), []).append(
+            comparison
+        )
     result: dict[str, Any] = {}
     for (level, context), records in sorted(grouped.items()):
         values = {"dense": [], "current": [], "candidate": []}
@@ -606,21 +864,33 @@ def _posthoc_dense_comparisons(
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
-    path.write_text(json.dumps(_json_value(value), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(_json_value(value), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def collect_directional_audit(
     *, input_root: Path, output_dir: Path, device: torch.device
 ) -> dict[str, Any]:
     """Run the single pre-registered descriptor audit without rendering."""
-    model, context, input_identity, execution = _load_encoder_context(input_root, device)
+    model, context, input_identity, execution = _load_encoder_context(
+        input_root, device
+    )
     _, views, _, height, width = context["image"].shape
     if views != 2 or "target" in context:
         raise RuntimeError("audit context violates its two-view target-free contract")
     phase_dir = output_dir / "phase_a"
     phase_dir.mkdir(parents=True, exist_ok=False)
 
-    current_raw, _current_features, _current_depths, current_mask, current_stats, current_trace = _materialize_candidate(
+    (
+        current_raw,
+        _current_features,
+        _current_depths,
+        current_mask,
+        current_stats,
+        current_trace,
+    ) = _materialize_candidate(
         model=model, context=context, materialization=CURRENT_MATERIALIZATION
     )
     current_payload = _build_commit_payload(
@@ -636,7 +906,14 @@ def collect_directional_audit(
     current_manifest = _write_descriptor_commit(phase_dir, "current", current_payload)
     del current_raw, _current_features, _current_depths
 
-    tangent_raw, _tangent_features, _tangent_depths, tangent_mask, tangent_stats, tangent_trace = _materialize_candidate(
+    (
+        tangent_raw,
+        _tangent_features,
+        _tangent_depths,
+        tangent_mask,
+        tangent_stats,
+        tangent_trace,
+    ) = _materialize_candidate(
         model=model, context=context, materialization=TANGENT_MATERIALIZATION
     )
     tangent_payload = _build_commit_payload(
@@ -665,61 +942,28 @@ def collect_directional_audit(
 
     # Reloading hash-bound sparse commits is the hard boundary before phase B.
     phase_manifest = json.loads(phase_manifest_path.read_text(encoding="utf-8"))
-    if phase_manifest.get("status") != "COMMITTED" or phase_manifest.get(
-        "dense_skipped_s3_reference_read"
-    ) is not False:
+    if (
+        phase_manifest.get("status") != "COMMITTED"
+        or phase_manifest.get("dense_skipped_s3_reference_read") is not False
+    ):
         raise RuntimeError("phase-A commit manifest is invalid")
     current = _load_descriptor_commit(phase_dir, phase_manifest["current"])
     tangent = _load_descriptor_commit(phase_dir, phase_manifest["tangent"])
     structural = _phase_a_invariants(current, tangent)
 
-    poison_raw, poison_features, poison_depths = _capture_encoder_execution(model, context)
-    _poison_skipped_descriptors(poison_raw, current_mask)
-    _poison_skipped_depths(
-        poison_depths,
-        current_mask,
-        height=height,
-        width=width,
-        gpp=int(current["primitives_per_pixel"]),
+    selected_only_invariance = _two_sentinel_selected_only_invariants(
+        model=model,
+        context=context,
+        reference=tangent,
     )
-    poison_trace: list[dict[str, Any]] = []
-    poison_mask, poison_stats, _ = apply_progressive_saes(
-        poison_raw,
-        height,
-        width,
-        tile_size=TILE_SIZE,
-        feature_var_threshold=FEATURE_THRESHOLD,
-        depth_std_threshold=DEPTH_THRESHOLD,
-        features=poison_features,
-        depths=poison_depths,
-        view_count=views,
-        materialization=TANGENT_MATERIALIZATION,
-        decision_semantics=DECISION_SEMANTICS,
-        context_extrinsics=context["extrinsics"],
-        context_intrinsics=context["intrinsics"],
-        depth_routing_semantics=DEPTH_ROUTING_SEMANTICS,
-        depth_near=context["near"],
-        depth_far=context["far"],
-        tile_trace=poison_trace,
-    )
-    poisoned = _build_commit_payload(
-        gaussians=poison_raw,
-        mask=poison_mask,
-        stats=poison_stats,
-        tile_trace=poison_trace,
-        materialization=TANGENT_MATERIALIZATION,
-        height=height,
-        width=width,
-        view_count=views,
-    )
-    poison = _poison_invariants(tangent, poisoned)
-    del poison_raw, poison_features, poison_depths, poisoned
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     # Phase B begins only here: the following capture is the first dense-S3
     # reference read and is never passed back into routing or materialization.
-    dense_reference, _dense_features, _dense_depths = _capture_encoder_execution(model, context)
+    dense_reference, _dense_features, _dense_depths = _capture_encoder_execution(
+        model, context
+    )
     context_extrinsics = context["extrinsics"][0].detach().cpu()
     context_intrinsics = context["intrinsics"][0].detach().cpu()
     comparisons = _posthoc_dense_comparisons(
@@ -728,15 +972,21 @@ def collect_directional_audit(
         tangent=tangent,
         context_extrinsics=context_extrinsics,
         context_intrinsics=context_intrinsics,
-        context_indices=[int(value) for value in context["index"][0].detach().cpu().tolist()],
+        context_indices=[
+            int(value) for value in context["index"][0].detach().cpu().tolist()
+        ],
     )
     del dense_reference, _dense_features, _dense_depths, model, context
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gate = evaluate_directional_gate(comparisons)
-    fallback_count = int(tangent["saes_stats"].get("multicontext_tangent_local_fallbacks", 0))
+    fallback_count = int(
+        tangent["saes_stats"].get("multicontext_tangent_local_fallbacks", 0)
+    )
     accepted_count = int(tangent["saes_stats"].get("multicontext_tangent_accepted", 0))
-    quality_gate_authorized = bool(gate.passed and accepted_count > 0 and fallback_count == 0)
+    quality_gate_authorized = bool(
+        gate.passed and accepted_count > 0 and fallback_count == 0
+    )
     result = {
         "schema_version": "1.0",
         "kind": "saes_multicontext_tangent_target_free_directional_audit",
@@ -778,7 +1028,7 @@ def collect_directional_audit(
             "current": current_manifest,
             "tangent": tangent_manifest,
             "structural_invariants": structural,
-            "poison_invariants": poison,
+            "selected_only_s3_invariance": selected_only_invariance,
             "current_stats": current["saes_stats"],
             "tangent_stats": tangent["saes_stats"],
         },
@@ -805,11 +1055,13 @@ def collect_directional_audit(
                         name: asdict(summary) for name, summary in cell.current.items()
                     },
                     "candidate": {
-                        name: asdict(summary) for name, summary in cell.candidate.items()
+                        name: asdict(summary)
+                        for name, summary in cell.candidate.items()
                     },
                     "candidate_minus_current": {
                         name: {
-                            key: getattr(cell.candidate[name], key) - getattr(cell.current[name], key)
+                            key: getattr(cell.candidate[name], key)
+                            - getattr(cell.current[name], key)
                             for key in ("mean", "p50", "p95", "maximum")
                         }
                         for name in cell.current
@@ -821,11 +1073,17 @@ def collect_directional_audit(
             ],
         },
         "tangent_fit": {
-            "attempts": int(tangent["saes_stats"].get("multicontext_tangent_attempts", 0)),
+            "attempts": int(
+                tangent["saes_stats"].get("multicontext_tangent_attempts", 0)
+            ),
             "accepted": accepted_count,
             "local_fallbacks": fallback_count,
-            "fallback_reasons": tangent["saes_stats"].get("multicontext_tangent_fallback_reasons", {}),
-            "residual_max": tangent["saes_stats"].get("multicontext_tangent_residual_max"),
+            "fallback_reasons": tangent["saes_stats"].get(
+                "multicontext_tangent_fallback_reasons", {}
+            ),
+            "residual_max": tangent["saes_stats"].get(
+                "multicontext_tangent_residual_max"
+            ),
             "all_attempts_fitted": fallback_count == 0 and accepted_count > 0,
         },
         "quality_gate_authorized": quality_gate_authorized,
@@ -836,7 +1094,7 @@ def collect_directional_audit(
             if not gate.passed
             else "repair-local-identifiability-before-any-quality-gate"
         ),
-        "checkpoint_sha256": cached_sha256_file(Path(execution["checkpoint_path"])),
+        "checkpoint_sha256": execution["checkpoint_sha256"],
         "source": source_identity(),
     }
     return result

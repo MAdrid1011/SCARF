@@ -65,7 +65,10 @@ def paper_assignment_weights(
     variance.  L1 reuses that bilateral term and multiplies it by the paper's
     probe-depth reliability factor, expressed in log space before softmax.
     """
-    if spatial_distances.ndim != 1 or feature_distances.shape != spatial_distances.shape:
+    if (
+        spatial_distances.ndim != 1
+        or feature_distances.shape != spatial_distances.shape
+    ):
         raise ValueError("assignment distances must be equal-length vectors")
     if not math.isfinite(feature_variance) or feature_variance < 0.0:
         raise ValueError("feature_variance must be finite and nonnegative")
@@ -73,7 +76,10 @@ def paper_assignment_weights(
         raise ValueError("assignment level must be L0 or L1")
     if beta_x <= 0.0 or beta_f <= 0.0:
         raise ValueError("assignment bandwidths must be positive")
-    if not torch.isfinite(spatial_distances).all() or not torch.isfinite(feature_distances).all():
+    if (
+        not torch.isfinite(spatial_distances).all()
+        or not torch.isfinite(feature_distances).all()
+    ):
         raise ValueError("assignment distances must be finite")
 
     logits = -(
@@ -92,14 +98,13 @@ def paper_assignment_weights(
                 device=probe_depths.device, dtype=probe_depths.dtype
             )
         )
-        if (
-            reference_depths.numel() < 1
-            or not torch.isfinite(reference_depths).all()
-        ):
+        if reference_depths.numel() < 1 or not torch.isfinite(reference_depths).all():
             raise ValueError("L1 depth reference must contain finite values")
         depth_mean = reference_depths.mean()
         depth_std = reference_depths.std(unbiased=False)
-        logits = logits - (probe_depths - depth_mean).abs() / (beta_d * depth_std + 1e-8)
+        logits = logits - (probe_depths - depth_mean).abs() / (
+            beta_d * depth_std + 1e-8
+        )
     return torch.softmax(logits, dim=0)
 
 
@@ -190,9 +195,17 @@ class ProgressiveSAES:
             else 0,
             ray_depth_mode=ray_depth_mode,
         )
-        if not isinstance(view_index, int) or not 0 <= view_index < context_extrinsics.shape[1]:
+        if (
+            not isinstance(view_index, int)
+            or not 0 <= view_index < context_extrinsics.shape[1]
+        ):
             raise ValueError("camera view index is out of range")
-        if height <= 0 or width <= 0 or not 0 <= row < height or not 0 <= column < width:
+        if (
+            height <= 0
+            or width <= 0
+            or not 0 <= row < height
+            or not 0 <= column < width
+        ):
             raise ValueError("camera pixel coordinate is out of range")
         if not torch.is_tensor(depth) or depth.numel() != 1:
             raise ValueError("camera depth must be a scalar tensor")
@@ -208,7 +221,9 @@ class ProgressiveSAES:
             context_intrinsics[0, view_index], coordinate
         )
         if ray_depth_mode == "euclidean":
-            camera_direction = camera_direction / camera_direction.norm().clamp_min(1e-8)
+            camera_direction = camera_direction / camera_direction.norm().clamp_min(
+                1e-8
+            )
         else:
             denominator = camera_direction[2]
             if denominator.abs() < 1e-8:
@@ -247,13 +262,13 @@ class ProgressiveSAES:
         self.W = W
         self.initial_tile_size = initial_tile_size
         # L0: tighter default so only truly flat/uniform regions early-stop.
-        self.feature_var_threshold = (feature_var_threshold
-                                      if feature_var_threshold is not None
-                                      else 0.004)
+        self.feature_var_threshold = (
+            feature_var_threshold if feature_var_threshold is not None else 0.004
+        )
         # L1: 4% relative depth std allows depth-uniform tiles to be caught.
-        self.depth_std_threshold = (depth_std_threshold
-                                    if depth_std_threshold is not None
-                                    else 0.04)
+        self.depth_std_threshold = (
+            depth_std_threshold if depth_std_threshold is not None else 0.04
+        )
         self.cross_check_threshold = cross_check_threshold
         if view_count < 1 or primitives_per_pixel < 1:
             raise ValueError("view_count and primitives_per_pixel must be positive")
@@ -301,28 +316,22 @@ class ProgressiveSAES:
         self.merge_semantics = (
             "same-budget-dense-oracle"
             if materialization == "same-budget-dense-oracle-diagnostic"
-            else
-            "assignment-consensus-adapter-pseudo-descriptor"
+            else "assignment-consensus-adapter-pseudo-descriptor"
             if materialization
             == "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
-            else
-            "conditional-adapter-offset-attribute-transport"
-            if materialization in (
+            else "conditional-adapter-offset-attribute-transport"
+            if materialization
+            in (
                 "conditional-adapter-offset-attribute-transport-diagnostic",
                 "multicontext-tangent-plane-diagnostic",
             )
-            else
-            "conditional-adapter-offset-transport"
-            if materialization
-            == "conditional-adapter-offset-transport-diagnostic"
-            else
-            "conditional-projected-optical-mass"
+            else "conditional-adapter-offset-transport"
+            if materialization == "conditional-adapter-offset-transport-diagnostic"
+            else "conditional-projected-optical-mass"
             if materialization == "conditional-projected-optical-mass-diagnostic"
-            else
-            "conditional-optical-mass"
+            else "conditional-optical-mass"
             if materialization == "conditional-optical-mass-diagnostic"
-            else
-            "conditional-anchor-transport"
+            else "conditional-anchor-transport"
             if materialization == "conditional-anchor-transport-diagnostic"
             else "assignment-mixture"
         )
@@ -336,9 +345,15 @@ class ProgressiveSAES:
             "probe-channel-variance-first-hit",
             "probe-normalized-std-first-hit",
         ):
-            raise ValueError(f"unsupported SAES decision semantics: {decision_semantics}")
+            raise ValueError(
+                f"unsupported SAES decision semantics: {decision_semantics}"
+            )
         self.decision_semantics = decision_semantics
-        for label, value in (("beta_x", beta_x), ("beta_f", beta_f), ("beta_d", beta_d)):
+        for label, value in (
+            ("beta_x", beta_x),
+            ("beta_f", beta_f),
+            ("beta_d", beta_d),
+        ):
             if (
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
@@ -382,8 +397,7 @@ class ProgressiveSAES:
         )
         _probe_set = set(self.probe_positions)
         self.non_probe_positions: List[Tuple[int, int]] = [
-            (r, c) for r in range(T) for c in range(T)
-            if (r, c) not in _probe_set
+            (r, c) for r in range(T) for c in range(T) if (r, c) not in _probe_set
         ]
 
         # Backward-compatible class-level aliases (read by external tooling)
@@ -392,114 +406,114 @@ class ProgressiveSAES:
 
         # Statistics
         self.stats: Dict = {
-            'decision_semantics': self.decision_semantics,
-            'l1_depth_reference': self.l1_depth_reference,
-            'merge_semantics': self.merge_semantics,
-            'feature_statistic': (
-                'raw-probe-mean-channel-variance'
-                if self.decision_semantics == 'probe-channel-variance-first-hit'
-                else 'raw-probe-vector-variance'
-                if self.decision_semantics == 'probe-vector-first-hit'
-                else 'normalized-probe-vector-standard-deviation'
-                if self.decision_semantics == 'probe-normalized-std-first-hit'
-                else 'normalized-probe-total-variance'
+            "decision_semantics": self.decision_semantics,
+            "l1_depth_reference": self.l1_depth_reference,
+            "merge_semantics": self.merge_semantics,
+            "feature_statistic": (
+                "raw-probe-mean-channel-variance"
+                if self.decision_semantics == "probe-channel-variance-first-hit"
+                else "raw-probe-vector-variance"
+                if self.decision_semantics == "probe-vector-first-hit"
+                else "normalized-probe-vector-standard-deviation"
+                if self.decision_semantics == "probe-normalized-std-first-hit"
+                else "normalized-probe-total-variance"
             ),
-            'camera_aware_moment_matching': context_extrinsics is not None,
-            'total_tiles_processed': 0,
-            'level0_tiles': 0,
-            'level1_tiles': 0,
-            'full_tiles': 0,
-            'level0_pixels': 0,
-            'level1_pixels': 0,
-            'pixels_original': 0,
-            'total_modified_pixels': 0,
-            'effective_gaussians': 0,
-            'zeroed_gaussians': 0,
-            'l0_representatives': 0,
-            'l1_lightweight_anchors': 0,
-            'full_stage3_gaussians': 0,
-            'assignment_weight_sum_error_max': 0.0,
-            'opacity_transmittance_error_max': 0.0,
+            "camera_aware_moment_matching": context_extrinsics is not None,
+            "total_tiles_processed": 0,
+            "level0_tiles": 0,
+            "level1_tiles": 0,
+            "full_tiles": 0,
+            "level0_pixels": 0,
+            "level1_pixels": 0,
+            "pixels_original": 0,
+            "total_modified_pixels": 0,
+            "effective_gaussians": 0,
+            "zeroed_gaussians": 0,
+            "l0_representatives": 0,
+            "l1_lightweight_anchors": 0,
+            "full_stage3_gaussians": 0,
+            "assignment_weight_sum_error_max": 0.0,
+            "opacity_transmittance_error_max": 0.0,
             # Only the diagnostic optical-depth path uses this identity.  It
             # measures arithmetic agreement with the selected-anchor
             # surrogate, not agreement with withheld Stage-3 outputs.
-            'optical_depth_assignment_error_max': 0.0,
+            "optical_depth_assignment_error_max": 0.0,
             # Virtual reconstruction retains a descriptor at every pixel but
             # obtains its non-anchor descriptor from fixed-function anchor
             # interpolation rather than an S3 network evaluation.
-            'virtual_reconstructed_gaussians': 0,
+            "virtual_reconstructed_gaussians": 0,
             # Assignment-consensus pseudo descriptors are virtual skipped
             # outputs only. They do not modify selected anchors or establish a
             # sparse-execution claim, so their geometry work is tracked apart
             # from the historical SH/opacity attribute transport diagnostic.
-            'assignment_consensus_pseudo_outputs': 0,
-            'assignment_consensus_anchor_pairs': 0,
-            'assignment_consensus_offset_recoveries': 0,
-            'assignment_consensus_target_lifts': 0,
-            'assignment_consensus_fallback_tiles': 0,
-            'assignment_consensus_l0_fallback_tiles': 0,
-            'assignment_consensus_l1_fallback_tiles': 0,
+            "assignment_consensus_pseudo_outputs": 0,
+            "assignment_consensus_anchor_pairs": 0,
+            "assignment_consensus_offset_recoveries": 0,
+            "assignment_consensus_target_lifts": 0,
+            "assignment_consensus_fallback_tiles": 0,
+            "assignment_consensus_l0_fallback_tiles": 0,
+            "assignment_consensus_l1_fallback_tiles": 0,
             # This post-hoc diagnostic may read every dense Stage-3 descriptor
             # in a candidate tile, but it must still render only the paper's
             # K/2K retained outputs.  It is deliberately non-runtime and
             # cannot support a paper result or an S2/S3 saving claim.
-            'same_budget_dense_oracle_tiles': 0,
-            'same_budget_dense_oracle_l0_tiles': 0,
-            'same_budget_dense_oracle_l1_tiles': 0,
-            'same_budget_dense_oracle_fallback_tiles': 0,
-            'same_budget_dense_oracle_full_stage3_reads': 0,
-            'same_budget_dense_oracle_output_gaussians': 0,
-            'same_budget_dense_oracle_failure_reasons': {},
+            "same_budget_dense_oracle_tiles": 0,
+            "same_budget_dense_oracle_l0_tiles": 0,
+            "same_budget_dense_oracle_l1_tiles": 0,
+            "same_budget_dense_oracle_fallback_tiles": 0,
+            "same_budget_dense_oracle_full_stage3_reads": 0,
+            "same_budget_dense_oracle_output_gaussians": 0,
+            "same_budget_dense_oracle_failure_reasons": {},
             # These verify the local first-order construction only. Renderer
             # fidelity is measured separately by the committed image run.
-            'same_budget_dense_oracle_mass_construction_error_max': 0.0,
-            'same_budget_dense_oracle_projected_moment_construction_error_max': 0.0,
-            'same_budget_dense_oracle_required_footprint_expansion_max': 1.0,
-            'same_budget_dense_oracle_runtime_eligible': False,
+            "same_budget_dense_oracle_mass_construction_error_max": 0.0,
+            "same_budget_dense_oracle_projected_moment_construction_error_max": 0.0,
+            "same_budget_dense_oracle_required_footprint_expansion_max": 1.0,
+            "same_budget_dense_oracle_runtime_eligible": False,
             # This candidate changes only a retained representative covariance
             # after the ordinary selected-anchor construction. It is a
             # target-free geometry diagnostic, not a router or saving claim.
-            'multicontext_tangent_enabled': self.multicontext_tangent_enabled,
-            'multicontext_tangent_attempts': 0,
-            'multicontext_tangent_accepted': 0,
-            'multicontext_tangent_local_fallbacks': 0,
-            'multicontext_tangent_context_camera_reads': 0,
-            'multicontext_tangent_constraint_count': 0,
-            'multicontext_tangent_contributor_count': 0,
-            'multicontext_tangent_residual_max': 0.0,
-            'multicontext_tangent_fallback_reasons': {},
-            'multicontext_tangent_runtime_eligible': False,
-            'covariance_psd_violations': 0,
+            "multicontext_tangent_enabled": self.multicontext_tangent_enabled,
+            "multicontext_tangent_attempts": 0,
+            "multicontext_tangent_accepted": 0,
+            "multicontext_tangent_local_fallbacks": 0,
+            "multicontext_tangent_context_camera_reads": 0,
+            "multicontext_tangent_constraint_count": 0,
+            "multicontext_tangent_contributor_count": 0,
+            "multicontext_tangent_residual_max": 0.0,
+            "multicontext_tangent_fallback_reasons": {},
+            "multicontext_tangent_runtime_eligible": False,
+            "covariance_psd_violations": 0,
             # Conditional optical-density transport is diagnostic until it
             # passes the target-free and image-quality gates.  These counters
             # make its mass accounting and any Full fallback explicit.
-            'conditional_mass_conservation_error_max': 0.0,
-            'conditional_assignment_uses': 0,
-            'conditional_mass_fallback_tiles': 0,
-            'conditional_range_fallback_tiles': 0,
+            "conditional_mass_conservation_error_max": 0.0,
+            "conditional_assignment_uses": 0,
+            "conditional_mass_fallback_tiles": 0,
+            "conditional_range_fallback_tiles": 0,
             # This diagnostic reconstructs the producer's bounded image-plane
             # offset from a selected anchor and applies it before normalizing
             # the target C2W ray.  It is fail-closed when that reconstruction
             # cannot be justified from selected-anchor/context inputs alone.
-            'adapter_offset_transport_uses': 0,
-            'adapter_offset_transport_fallback_tiles': 0,
+            "adapter_offset_transport_uses": 0,
+            "adapter_offset_transport_fallback_tiles": 0,
             # The attribute-transport diagnostic reconstructs skipped SH and
             # opacity from the existing bilateral assignment matrix. This
             # counts selected-anchor attribute pairs for the conservative
             # analytic ledger; it is not an S2/S3 saving counter.
-            'adapter_offset_attribute_transport_uses': 0,
+            "adapter_offset_attribute_transport_uses": 0,
             # This is Control logic for the paper's existing probe-only
             # materialization path. It inspects only the selected native
             # anchors before their moments are merged; it is not a fourth
             # routing level or a Table 4 module.
-            'l0_guard_checks': 0,
-            'l0_guard_rejections': 0,
-            'l1_guard_checks': 0,
-            'l1_guard_rejections': 0,
-            'l1_guard_attempts_after_l0_rejection': 0,
-            'guard_anchor_attribute_reads': 0,
-            'guard_nonprobe_s3_attribute_reads': 0,
-            'materialization_guard_enabled': self.materialization_guard,
+            "l0_guard_checks": 0,
+            "l0_guard_rejections": 0,
+            "l1_guard_checks": 0,
+            "l1_guard_rejections": 0,
+            "l1_guard_attempts_after_l0_rejection": 0,
+            "guard_anchor_attribute_reads": 0,
+            "guard_nonprobe_s3_attribute_reads": 0,
+            "materialization_guard_enabled": self.materialization_guard,
         }
 
     def _build_camera_rays(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -511,9 +525,7 @@ class ProgressiveSAES:
         rows = (torch.arange(self.H, device=device, dtype=dtype) + 0.5) / self.H
         columns = (torch.arange(self.W, device=device, dtype=dtype) + 0.5) / self.W
         grid_y, grid_x = torch.meshgrid(rows, columns, indexing="ij")
-        coordinates = torch.stack(
-            (grid_x, grid_y, torch.ones_like(grid_x)), dim=-1
-        )
+        coordinates = torch.stack((grid_x, grid_y, torch.ones_like(grid_x)), dim=-1)
         camera_directions = torch.einsum(
             "vij,hwj->vhwi",
             torch.linalg.inv(self.context_intrinsics[0]),
@@ -541,13 +553,11 @@ class ProgressiveSAES:
     ) -> torch.Tensor:
         if self._camera_origins is None or self._camera_directions is None:
             raise RuntimeError("camera geometry was not configured")
-        return (
-            self._camera_origins[view_index]
-            + self._camera_directions[view_index, row, column]
-            * depth.to(
-                device=self._camera_directions.device,
-                dtype=self._camera_directions.dtype,
-            )
+        return self._camera_origins[view_index] + self._camera_directions[
+            view_index, row, column
+        ] * depth.to(
+            device=self._camera_directions.device,
+            dtype=self._camera_directions.dtype,
         )
 
     def _camera_aware_interpolated_mean(
@@ -642,9 +652,14 @@ class ProgressiveSAES:
         origin = self._camera_origins[view_index].to(
             device=source_mean.device, dtype=source_mean.dtype
         )
-        return origin.unsqueeze(0) + directions * source_depth.reshape(1, 1).to(
-            device=source_mean.device, dtype=source_mean.dtype
-        ) + residual.unsqueeze(0)
+        return (
+            origin.unsqueeze(0)
+            + directions
+            * source_depth.reshape(1, 1).to(
+                device=source_mean.device, dtype=source_mean.dtype
+            )
+            + residual.unsqueeze(0)
+        )
 
     def _recover_adapter_offset(
         self,
@@ -675,15 +690,23 @@ class ProgressiveSAES:
         if not torch.is_floating_point(source_mean):
             return None
         depth = source_depth.reshape(()).to(device=device, dtype=dtype)
-        if not bool(torch.isfinite(source_mean).all()) or not bool(torch.isfinite(depth)):
+        if not bool(torch.isfinite(source_mean).all()) or not bool(
+            torch.isfinite(depth)
+        ):
             return None
         tiny = torch.as_tensor(torch.finfo(dtype).eps, device=device, dtype=dtype)
         if bool(depth <= tiny):
             return None
 
-        extrinsic = self.context_extrinsics[0, view_index].to(device=device, dtype=dtype)
-        intrinsic = self.context_intrinsics[0, view_index].to(device=device, dtype=dtype)
-        if not bool(torch.isfinite(extrinsic).all()) or not bool(torch.isfinite(intrinsic).all()):
+        extrinsic = self.context_extrinsics[0, view_index].to(
+            device=device, dtype=dtype
+        )
+        intrinsic = self.context_intrinsics[0, view_index].to(
+            device=device, dtype=dtype
+        )
+        if not bool(torch.isfinite(extrinsic).all()) or not bool(
+            torch.isfinite(intrinsic).all()
+        ):
             return None
         try:
             intrinsic_determinant = torch.linalg.det(intrinsic)
@@ -708,9 +731,8 @@ class ProgressiveSAES:
             return None
         camera_direction = camera_displacement / source_distance
         source_homogeneous = intrinsic @ camera_direction
-        if (
-            not bool(torch.isfinite(source_homogeneous).all())
-            or bool(source_homogeneous[2].abs() <= tiny)
+        if not bool(torch.isfinite(source_homogeneous).all()) or bool(
+            source_homogeneous[2].abs() <= tiny
         ):
             return None
         source_coordinate = source_homogeneous[:2] / source_homogeneous[2]
@@ -758,7 +780,9 @@ class ProgressiveSAES:
             raise ValueError("adapter-offset lift requires tensor depths and offsets")
         target_depths = target_depths.reshape(-1)
         if target_depths.numel() != len(target_positions):
-            raise ValueError("adapter-offset lift depth count must match target positions")
+            raise ValueError(
+                "adapter-offset lift depth count must match target positions"
+            )
         if target_offsets.shape != (len(target_positions), 2):
             raise ValueError("adapter-offset lift offsets must match target positions")
         if not torch.is_floating_point(target_depths):
@@ -781,9 +805,15 @@ class ProgressiveSAES:
         if bool((target_offsets.abs() > offset_limit + offset_tolerance).any()):
             return None
 
-        extrinsic = self.context_extrinsics[0, view_index].to(device=device, dtype=dtype)
-        intrinsic = self.context_intrinsics[0, view_index].to(device=device, dtype=dtype)
-        if not bool(torch.isfinite(extrinsic).all()) or not bool(torch.isfinite(intrinsic).all()):
+        extrinsic = self.context_extrinsics[0, view_index].to(
+            device=device, dtype=dtype
+        )
+        intrinsic = self.context_intrinsics[0, view_index].to(
+            device=device, dtype=dtype
+        )
+        if not bool(torch.isfinite(extrinsic).all()) or not bool(
+            torch.isfinite(intrinsic).all()
+        ):
             return None
         try:
             intrinsic_determinant = torch.linalg.det(intrinsic)
@@ -825,7 +855,9 @@ class ProgressiveSAES:
         world_directions = torch.einsum(
             "ij,nj->ni", extrinsic[:3, :3], camera_directions
         )
-        transported = extrinsic[:3, 3].unsqueeze(0) + world_directions * target_depths.unsqueeze(1)
+        transported = extrinsic[:3, 3].unsqueeze(
+            0
+        ) + world_directions * target_depths.unsqueeze(1)
         return transported if bool(torch.isfinite(transported).all()) else None
 
     def _adapter_offset_transport_means(
@@ -911,10 +943,10 @@ class ProgressiveSAES:
             gaussians_full.opacities[0, output_index] = consensus_opacities[
                 pseudo_index
             ].reshape(opacity_shape)
-        self.stats['assignment_consensus_pseudo_outputs'] += target_count
-        self.stats['assignment_consensus_anchor_pairs'] += target_count * anchor_count
-        self.stats['assignment_consensus_offset_recoveries'] += anchor_count
-        self.stats['assignment_consensus_target_lifts'] += target_count * (
+        self.stats["assignment_consensus_pseudo_outputs"] += target_count
+        self.stats["assignment_consensus_anchor_pairs"] += target_count * anchor_count
+        self.stats["assignment_consensus_offset_recoveries"] += anchor_count
+        self.stats["assignment_consensus_target_lifts"] += target_count * (
             anchor_count + 1
         )
 
@@ -946,8 +978,7 @@ class ProgressiveSAES:
         if (
             selected_means.ndim != 2
             or selected_means.shape[1] != 3
-            or selected_covariances.shape
-            != (selected_means.shape[0], 3, 3)
+            or selected_covariances.shape != (selected_means.shape[0], 3, 3)
             or selected_depths.numel() != selected_means.shape[0]
             or len(selected_positions) != selected_means.shape[0]
             or assignment_matrix.shape
@@ -993,25 +1024,18 @@ class ProgressiveSAES:
         # ``paper_assignment_weights`` emits a simplex row.  Do not repair an
         # invalid caller-provided row by renormalising it: fail closed instead.
         simplex_tolerance = torch.as_tensor(1e-5, device=device, dtype=dtype)
-        if (
-            bool((assignment_matrix < -simplex_tolerance).any())
-            or bool(
-                (assignment_matrix.sum(dim=1) - 1.0).abs().max()
-                > simplex_tolerance
-            )
+        if bool((assignment_matrix < -simplex_tolerance).any()) or bool(
+            (assignment_matrix.sum(dim=1) - 1.0).abs().max() > simplex_tolerance
         ):
             return None
 
-        selected_covariances = (
-            selected_covariances + selected_covariances.mT
-        ) * 0.5
+        selected_covariances = (selected_covariances + selected_covariances.mT) * 0.5
         try:
             selected_eigenvalues = torch.linalg.eigvalsh(selected_covariances)
         except RuntimeError:
             return None
-        if (
-            not bool(torch.isfinite(selected_eigenvalues).all())
-            or bool((selected_eigenvalues < -1e-7).any())
+        if not bool(torch.isfinite(selected_eigenvalues).all()) or bool(
+            (selected_eigenvalues < -1e-7).any()
         ):
             return None
 
@@ -1058,9 +1082,7 @@ class ProgressiveSAES:
         consensus_covariances = torch.einsum(
             "mk,mkij->mij", assignment_matrix, second_moments
         )
-        consensus_covariances = (
-            consensus_covariances + consensus_covariances.mT
-        ) * 0.5
+        consensus_covariances = (consensus_covariances + consensus_covariances.mT) * 0.5
         try:
             eigenvalues, eigenvectors = torch.linalg.eigh(consensus_covariances)
         except RuntimeError:
@@ -1072,9 +1094,7 @@ class ProgressiveSAES:
             @ torch.diag_embed(eigenvalues.clamp_min(1e-8))
             @ eigenvectors.mT
         )
-        consensus_covariances = (
-            consensus_covariances + consensus_covariances.mT
-        ) * 0.5
+        consensus_covariances = (consensus_covariances + consensus_covariances.mT) * 0.5
         try:
             output_eigenvalues = torch.linalg.eigvalsh(consensus_covariances)
         except RuntimeError:
@@ -1114,8 +1134,12 @@ class ProgressiveSAES:
             return None
         dtype = means.dtype
         device = means.device
-        extrinsic = self.context_extrinsics[0, view_index].to(device=device, dtype=dtype)
-        intrinsic = self.context_intrinsics[0, view_index].to(device=device, dtype=dtype)
+        extrinsic = self.context_extrinsics[0, view_index].to(
+            device=device, dtype=dtype
+        )
+        intrinsic = self.context_intrinsics[0, view_index].to(
+            device=device, dtype=dtype
+        )
         rotation_c2w = extrinsic[:3, :3]
         camera_points = torch.einsum(
             "ij,nj->ni", rotation_c2w.mT, means - extrinsic[:3, 3]
@@ -1143,17 +1167,21 @@ class ProgressiveSAES:
             camera_covariances,
             image_jacobian,
         )
-        projected_covariances = (
-            projected_covariances + projected_covariances.mT
-        ) * 0.5
+        projected_covariances = (projected_covariances + projected_covariances.mT) * 0.5
         eigenvalues, eigenvectors = torch.linalg.eigh(projected_covariances)
-        if not bool(torch.isfinite(eigenvalues).all()) or bool((eigenvalues < -1e-7).any()):
+        if not bool(torch.isfinite(eigenvalues).all()) or bool(
+            (eigenvalues < -1e-7).any()
+        ):
             return None
-        projected_covariances = eigenvectors @ torch.diag_embed(
-            eigenvalues.clamp_min(tiny)
-        ) @ eigenvectors.mT
+        projected_covariances = (
+            eigenvectors
+            @ torch.diag_embed(eigenvalues.clamp_min(tiny))
+            @ eigenvectors.mT
+        )
         determinants = torch.linalg.det(projected_covariances)
-        if not bool(torch.isfinite(determinants).all()) or bool((determinants <= 0.0).any()):
+        if not bool(torch.isfinite(determinants).all()) or bool(
+            (determinants <= 0.0).any()
+        ):
             return None
         return torch.sqrt(determinants)
 
@@ -1163,7 +1191,10 @@ class ProgressiveSAES:
         covariances: torch.Tensor,
         *,
         view_index: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        | None
+    ):
         """Project world-space Gaussian moments into one producer camera.
 
         The dense oracle uses this only after a full Stage-3 pass.  Keeping the
@@ -1182,8 +1213,12 @@ class ProgressiveSAES:
             return None
         dtype = means.dtype
         device = means.device
-        extrinsic = self.context_extrinsics[0, view_index].to(device=device, dtype=dtype)
-        intrinsic = self.context_intrinsics[0, view_index].to(device=device, dtype=dtype)
+        extrinsic = self.context_extrinsics[0, view_index].to(
+            device=device, dtype=dtype
+        )
+        intrinsic = self.context_intrinsics[0, view_index].to(
+            device=device, dtype=dtype
+        )
         rotation_c2w = extrinsic[:3, :3]
         camera_points = torch.einsum(
             "ij,nj->ni", rotation_c2w.mT, means - extrinsic[:3, 3]
@@ -1195,9 +1230,8 @@ class ProgressiveSAES:
 
         homogeneous = torch.einsum("ij,nj->ni", intrinsic, camera_points)
         homogeneous_depth = homogeneous[:, 2]
-        if (
-            not bool(torch.isfinite(homogeneous).all())
-            or bool((homogeneous_depth.abs() <= tiny).any())
+        if not bool(torch.isfinite(homogeneous).all()) or bool(
+            (homogeneous_depth.abs() <= tiny).any()
         ):
             return None
         centers = homogeneous[:, :2] / homogeneous_depth.unsqueeze(1)
@@ -1221,9 +1255,7 @@ class ProgressiveSAES:
             camera_covariances,
             image_jacobian,
         )
-        projected_covariances = (
-            projected_covariances + projected_covariances.mT
-        ) * 0.5
+        projected_covariances = (projected_covariances + projected_covariances.mT) * 0.5
         try:
             eigenvalues, eigenvectors = torch.linalg.eigh(projected_covariances)
         except RuntimeError:
@@ -1234,9 +1266,11 @@ class ProgressiveSAES:
             or bool((eigenvalues < -1e-7).any())
         ):
             return None
-        projected_covariances = eigenvectors @ torch.diag_embed(
-            eigenvalues.clamp_min(tiny)
-        ) @ eigenvectors.mT
+        projected_covariances = (
+            eigenvectors
+            @ torch.diag_embed(eigenvalues.clamp_min(tiny))
+            @ eigenvectors.mT
+        )
         return (
             centers,
             projected_covariances,
@@ -1289,14 +1323,14 @@ class ProgressiveSAES:
         """
         if not self.multicontext_tangent_enabled:
             return local_covariance
-        self.stats['multicontext_tangent_attempts'] += 1
-        self.stats['multicontext_tangent_contributor_count'] += int(
+        self.stats["multicontext_tangent_attempts"] += 1
+        self.stats["multicontext_tangent_contributor_count"] += int(
             contributor_weights.numel()
         )
         if self.context_extrinsics is None or self.context_intrinsics is None:
-            reason = 'missing-context-geometry'
-            self.stats['multicontext_tangent_local_fallbacks'] += 1
-            reasons = self.stats['multicontext_tangent_fallback_reasons']
+            reason = "missing-context-geometry"
+            self.stats["multicontext_tangent_local_fallbacks"] += 1
+            reasons = self.stats["multicontext_tangent_fallback_reasons"]
             reasons[reason] = reasons.get(reason, 0) + 1
             return local_covariance
 
@@ -1308,10 +1342,10 @@ class ProgressiveSAES:
         context_intrinsics = self.context_intrinsics[0].to(
             device=local_covariance.device, dtype=local_covariance.dtype
         )
-        self.stats['multicontext_tangent_context_camera_reads'] += int(
+        self.stats["multicontext_tangent_context_camera_reads"] += int(
             context_extrinsics.shape[0]
         )
-        self.stats['multicontext_tangent_constraint_count'] += int(
+        self.stats["multicontext_tangent_constraint_count"] += int(
             context_extrinsics.shape[0] * 3
         )
         result = multicontext_tangent_covariance(
@@ -1324,15 +1358,15 @@ class ProgressiveSAES:
             context_intrinsics=context_intrinsics,
         )
         if result.used_multicontext_fit:
-            self.stats['multicontext_tangent_accepted'] += 1
-            self.stats['multicontext_tangent_residual_max'] = max(
-                self.stats['multicontext_tangent_residual_max'],
+            self.stats["multicontext_tangent_accepted"] += 1
+            self.stats["multicontext_tangent_residual_max"] = max(
+                self.stats["multicontext_tangent_residual_max"],
                 float(result.residual_max or 0.0),
             )
             return result.covariance
 
-        self.stats['multicontext_tangent_local_fallbacks'] += 1
-        reasons = self.stats['multicontext_tangent_fallback_reasons']
+        self.stats["multicontext_tangent_local_fallbacks"] += 1
+        reasons = self.stats["multicontext_tangent_fallback_reasons"]
         reasons[result.reason] = reasons.get(result.reason, 0) + 1
         return local_covariance
 
@@ -1363,9 +1397,7 @@ class ProgressiveSAES:
             self._same_budget_dense_oracle_last_failure = reason
             return None
 
-        source_indices = list(probe_indices) + [
-            index for _, index in non_probe_items
-        ]
+        source_indices = list(probe_indices) + [index for _, index in non_probe_items]
         source_positions = list(retained_positions) + [
             position for position, _ in non_probe_items
         ]
@@ -1399,9 +1431,8 @@ class ProgressiveSAES:
             covariance_eigenvalues = torch.linalg.eigvalsh(covariances)
         except RuntimeError:
             return reject("dense-covariance-eigendecomposition")
-        if (
-            not bool(torch.isfinite(covariance_eigenvalues).all())
-            or bool((covariance_eigenvalues < -1e-7).any())
+        if not bool(torch.isfinite(covariance_eigenvalues).all()) or bool(
+            (covariance_eigenvalues < -1e-7).any()
         ):
             return reject("dense-covariance-psd")
 
@@ -1418,17 +1449,15 @@ class ProgressiveSAES:
             projected_determinants = torch.linalg.det(projected_covariances)
         except RuntimeError:
             return reject("projected-footprint-determinant")
-        if (
-            not bool(torch.isfinite(projected_determinants).all())
-            or bool((projected_determinants <= tiny).any())
+        if not bool(torch.isfinite(projected_determinants).all()) or bool(
+            (projected_determinants <= tiny).any()
         ):
             return reject("projected-footprint-determinant")
         source_areas = torch.sqrt(projected_determinants)
         source_tau = -torch.log1p(-flat_opacities[:, 0])
         source_mass = source_tau * source_areas
-        if (
-            not bool(torch.isfinite(source_mass).all())
-            or bool((source_mass < 0.0).any())
+        if not bool(torch.isfinite(source_mass).all()) or bool(
+            (source_mass < 0.0).any()
         ):
             return reject("source-optical-mass")
         if assignment_matrix.numel() and (
@@ -1455,8 +1484,12 @@ class ProgressiveSAES:
         tau_max = -torch.log1p(-alpha_max)
         if not bool(torch.isfinite(tau_max)) or bool(tau_max <= tiny):
             return reject("selected-opacity-range")
-        intrinsic = self.context_intrinsics[0, view_index].to(device=device, dtype=dtype)
-        extrinsic = self.context_extrinsics[0, view_index].to(device=device, dtype=dtype)
+        intrinsic = self.context_intrinsics[0, view_index].to(
+            device=device, dtype=dtype
+        )
+        extrinsic = self.context_extrinsics[0, view_index].to(
+            device=device, dtype=dtype
+        )
         output_means = []
         output_covariances = []
         output_harmonics = []
@@ -1476,8 +1509,7 @@ class ProgressiveSAES:
             target_projected_covariance = torch.einsum(
                 "n,nij->ij",
                 normalized,
-                projected_covariances
-                + torch.einsum("ni,nj->nij", centered, centered),
+                projected_covariances + torch.einsum("ni,nj->nij", centered, centered),
             )
             target_projected_covariance = (
                 target_projected_covariance + target_projected_covariance.mT
@@ -1488,14 +1520,15 @@ class ProgressiveSAES:
                 )
             except RuntimeError:
                 return reject("projected-second-moment-eigendecomposition")
-            if (
-                not bool(torch.isfinite(target_eigenvalues).all())
-                or bool((target_eigenvalues < -1e-7).any())
+            if not bool(torch.isfinite(target_eigenvalues).all()) or bool(
+                (target_eigenvalues < -1e-7).any()
             ):
                 return reject("projected-second-moment-psd")
-            target_projected_covariance = target_eigenvectors @ torch.diag(
-                target_eigenvalues.clamp_min(tiny)
-            ) @ target_eigenvectors.mT
+            target_projected_covariance = (
+                target_eigenvectors
+                @ torch.diag(target_eigenvalues.clamp_min(tiny))
+                @ target_eigenvectors.mT
+            )
             target_area = torch.sqrt(torch.linalg.det(target_projected_covariance))
             if not bool(torch.isfinite(target_area)) or bool(target_area <= tiny):
                 return reject("projected-second-moment-area")
@@ -1511,9 +1544,8 @@ class ProgressiveSAES:
             if bool(raw_alpha > alpha_max):
                 required_area = total_mass / tau_max
                 footprint_expansion = required_area / target_area
-                if (
-                    not bool(torch.isfinite(footprint_expansion))
-                    or bool(footprint_expansion < 1.0)
+                if not bool(torch.isfinite(footprint_expansion)) or bool(
+                    footprint_expansion < 1.0
                 ):
                     return reject("required-footprint-expansion")
                 target_projected_covariance = (
@@ -1582,14 +1614,15 @@ class ProgressiveSAES:
                 )
             except RuntimeError:
                 return reject("output-covariance-eigendecomposition")
-            if (
-                not bool(torch.isfinite(output_eigenvalues).all())
-                or bool((output_eigenvalues < -1e-7).any())
+            if not bool(torch.isfinite(output_eigenvalues).all()) or bool(
+                (output_eigenvalues < -1e-7).any()
             ):
                 return reject("output-covariance-psd")
-            camera_covariance = output_eigenvectors @ torch.diag(
-                output_eigenvalues.clamp_min(tiny)
-            ) @ output_eigenvectors.mT
+            camera_covariance = (
+                output_eigenvectors
+                @ torch.diag(output_eigenvalues.clamp_min(tiny))
+                @ output_eigenvectors.mT
+            )
             observed_projected_covariance = (
                 output_jacobian @ camera_covariance @ output_jacobian.mT
             )
@@ -1662,24 +1695,24 @@ class ProgressiveSAES:
         gaussians_full.covariances[0, output_indices] = plan["covariances"]
         gaussians_full.harmonics[0, output_indices] = plan["harmonics"]
         gaussians_full.opacities[0, output_indices] = plan["opacities"]
-        self.stats['same_budget_dense_oracle_output_gaussians'] += plan[
+        self.stats["same_budget_dense_oracle_output_gaussians"] += plan[
             "output_gaussians"
         ]
-        self.stats['same_budget_dense_oracle_mass_construction_error_max'] = max(
-            self.stats['same_budget_dense_oracle_mass_construction_error_max'],
-            plan['mass_error_max'],
+        self.stats["same_budget_dense_oracle_mass_construction_error_max"] = max(
+            self.stats["same_budget_dense_oracle_mass_construction_error_max"],
+            plan["mass_error_max"],
         )
         self.stats[
-            'same_budget_dense_oracle_projected_moment_construction_error_max'
+            "same_budget_dense_oracle_projected_moment_construction_error_max"
         ] = max(
             self.stats[
-                'same_budget_dense_oracle_projected_moment_construction_error_max'
+                "same_budget_dense_oracle_projected_moment_construction_error_max"
             ],
-            plan['projected_moment_error_max'],
+            plan["projected_moment_error_max"],
         )
-        self.stats['same_budget_dense_oracle_required_footprint_expansion_max'] = max(
-            self.stats['same_budget_dense_oracle_required_footprint_expansion_max'],
-            plan['required_footprint_expansion_max'],
+        self.stats["same_budget_dense_oracle_required_footprint_expansion_max"] = max(
+            self.stats["same_budget_dense_oracle_required_footprint_expansion_max"],
+            plan["required_footprint_expansion_max"],
         )
 
     def _assignment_feature_variance(self, decision_statistic: float) -> float:
@@ -1687,7 +1720,9 @@ class ProgressiveSAES:
         if math.isinf(decision_statistic) and decision_statistic > 0.0:
             return decision_statistic
         if not math.isfinite(decision_statistic) or decision_statistic < 0.0:
-            raise ValueError("feature decision statistic must be finite and nonnegative")
+            raise ValueError(
+                "feature decision statistic must be finite and nonnegative"
+            )
         if self.decision_semantics == "probe-normalized-std-first-hit":
             return float(decision_statistic) ** 2
         return float(decision_statistic)
@@ -1706,10 +1741,16 @@ class ProgressiveSAES:
         explicit without adding a routing signal or changing its threshold.
         """
         if depths.dim() not in (4, 5) or depths.shape[:2] != near.shape:
-            raise ValueError("depths and near bounds must share [batch, view] dimensions")
+            raise ValueError(
+                "depths and near bounds must share [batch, view] dimensions"
+            )
         if far.shape != near.shape:
             raise ValueError("near and far bounds must have identical shapes")
-        if not torch.isfinite(depths).all() or not torch.isfinite(near).all() or not torch.isfinite(far).all():
+        if (
+            not torch.isfinite(depths).all()
+            or not torch.isfinite(near).all()
+            or not torch.isfinite(far).all()
+        ):
             raise ValueError("depth values and bounds must be finite")
         if (depths <= 0).any() or (near <= 0).any() or (far <= near).any():
             raise ValueError("inverse-depth normalization requires 0 < near < far")
@@ -1731,7 +1772,7 @@ class ProgressiveSAES:
         threshold: float = 0.02,
         per_view: bool = False,
         statistic: str = "current-channel-std",
-    ) -> Tuple[Dict[Tuple[int, int], float], 'torch.Tensor']:
+    ) -> Tuple[Dict[Tuple[int, int], float], "torch.Tensor"]:
         """
         Classify tiles by feature variance from S1 feature maps.
 
@@ -1749,7 +1790,7 @@ class ProgressiveSAES:
         if not per_view:
             feat = feat.mean(dim=0, keepdim=True)
         feat_up = F.interpolate(
-            feat, size=(h, w), mode='bilinear', align_corners=False
+            feat, size=(h, w), mode="bilinear", align_corners=False
         )  # [V, C, H, W] or [1, C, H, W]
         feat_norm = feat_up / (feat_up.norm(dim=1, keepdim=True) + 1e-8)
 
@@ -1765,7 +1806,8 @@ class ProgressiveSAES:
             raise ValueError(f"unsupported feature statistic: {statistic}")
         statistic_features = (
             feat_up
-            if statistic in {
+            if statistic
+            in {
                 "raw-probe-vector-variance",
                 "raw-probe-mean-channel-variance",
             }
@@ -1849,7 +1891,7 @@ class ProgressiveSAES:
         tile_y, tile_x = th * tile_size, tw * tile_size
         probe_depths = []
 
-        for (ly, lx) in probe_positions:
+        for ly, lx in probe_positions:
             gy, gx = tile_y + ly, tile_x + lx
             if gy >= h or gx >= w:
                 return False
@@ -1871,8 +1913,9 @@ class ProgressiveSAES:
             return False
 
         d_mean = sum(probe_depths) / len(probe_depths)
-        d_std = (sum((d - d_mean) ** 2 for d in probe_depths)
-                 / len(probe_depths)) ** 0.5
+        d_std = (
+            sum((d - d_mean) ** 2 for d in probe_depths) / len(probe_depths)
+        ) ** 0.5
         if not relative:
             return d_std < threshold
         ordered = sorted(probe_depths)
@@ -1930,23 +1973,35 @@ class ProgressiveSAES:
 
                 cov1 = covs[idx_i].flatten()
                 cov2 = covs[idx_j].flatten()
-                cov_sim = (F.cosine_similarity(
-                    cov1.unsqueeze(0), cov2.unsqueeze(0)).item() + 1) / 2
+                cov_sim = (
+                    F.cosine_similarity(cov1.unsqueeze(0), cov2.unsqueeze(0)).item() + 1
+                ) / 2
 
                 sh1 = harmo[idx_i].flatten()
                 sh2 = harmo[idx_j].flatten()
-                sh_sim = (F.cosine_similarity(
-                    sh1.unsqueeze(0), sh2.unsqueeze(0)).item() + 1) / 2
+                sh_sim = (
+                    F.cosine_similarity(sh1.unsqueeze(0), sh2.unsqueeze(0)).item() + 1
+                ) / 2
 
-                op1 = (opacs[idx_i].item() if opacs[idx_i].dim() == 0
-                       else opacs[idx_i].squeeze().item())
-                op2 = (opacs[idx_j].item() if opacs[idx_j].dim() == 0
-                       else opacs[idx_j].squeeze().item())
+                op1 = (
+                    opacs[idx_i].item()
+                    if opacs[idx_i].dim() == 0
+                    else opacs[idx_i].squeeze().item()
+                )
+                op2 = (
+                    opacs[idx_j].item()
+                    if opacs[idx_j].dim() == 0
+                    else opacs[idx_j].squeeze().item()
+                )
                 opacity_sim = 1.0 - min(abs(op1 - op2), 1.0)
 
                 if include_position:
-                    pair_sim = (0.3 * cov_sim + 0.3 * sh_sim
-                                + 0.15 * opacity_sim + 0.25 * pos_sim)
+                    pair_sim = (
+                        0.3 * cov_sim
+                        + 0.3 * sh_sim
+                        + 0.15 * opacity_sim
+                        + 0.25 * pos_sim
+                    )
                 else:
                     pair_sim = 0.4 * cov_sim + 0.4 * sh_sim + 0.2 * opacity_sim
                 total_sim += pair_sim
@@ -1982,8 +2037,8 @@ class ProgressiveSAES:
             h_flat_actual = actual_h.flatten()
             if h_flat_actual.norm() > 1e-8 and h_flat_pred.norm() > 1e-8:
                 h_sim = F.cosine_similarity(
-                    h_flat_pred.unsqueeze(0),
-                    h_flat_actual.unsqueeze(0)).item()
+                    h_flat_pred.unsqueeze(0), h_flat_actual.unsqueeze(0)
+                ).item()
                 max_err = max(max_err, 1.0 - max(h_sim, 0.0))
 
             pred_c = sum(covs[o] for o in others) / len(others)
@@ -1992,8 +2047,8 @@ class ProgressiveSAES:
             c_flat_actual = actual_c.flatten()
             if c_flat_actual.norm() > 1e-8 and c_flat_pred.norm() > 1e-8:
                 c_sim = F.cosine_similarity(
-                    c_flat_pred.unsqueeze(0),
-                    c_flat_actual.unsqueeze(0)).item()
+                    c_flat_pred.unsqueeze(0), c_flat_actual.unsqueeze(0)
+                ).item()
                 max_err = max(max_err, 1.0 - max(c_sim, 0.0))
 
         return max_err
@@ -2025,18 +2080,21 @@ class ProgressiveSAES:
         a fail-closed Control decision.  It neither changes feature/depth
         routing nor accesses a non-anchor Gaussian descriptor.
         """
-        if level not in {'L0', 'L1'}:
-            raise ValueError('materialization guard level must be L0 or L1')
+        if level not in {"L0", "L1"}:
+            raise ValueError("materialization guard level must be L0 or L1")
         if (
             not isinstance(anchor_indices, list)
             or len(anchor_indices) < 2
-            or any(isinstance(index, bool) or not isinstance(index, int) for index in anchor_indices)
+            or any(
+                isinstance(index, bool) or not isinstance(index, int)
+                for index in anchor_indices
+            )
             or len(anchor_indices) != len(set(anchor_indices))
         ):
-            raise ValueError('materialization guard requires unique anchor indices')
+            raise ValueError("materialization guard requires unique anchor indices")
         count = gaussians_full.means.shape[1]
         if any(index < 0 or index >= count for index in anchor_indices):
-            raise ValueError('materialization guard anchor index is out of range')
+            raise ValueError("materialization guard anchor index is out of range")
 
         # Index every source tensor once with the declared anchor list. No
         # non-probe index is formed here, which makes poisoning skipped S3
@@ -2081,26 +2139,26 @@ class ProgressiveSAES:
                 opacity_distances.append(
                     float((opacities[first] - opacities[second]).abs().max().item())
                 )
-        covariance_minimum = min(covariance_cosines, default=float('-inf'))
-        harmonic_minimum = min(harmonic_cosines, default=float('-inf'))
-        opacity_maximum = max(opacity_distances, default=float('inf'))
+        covariance_minimum = min(covariance_cosines, default=float("-inf"))
+        harmonic_minimum = min(harmonic_cosines, default=float("-inf"))
+        opacity_maximum = max(opacity_distances, default=float("inf"))
         return {
-            'level': level,
-            'anchor_indices': list(anchor_indices),
-            'anchor_count': len(anchor_indices),
-            'covariance_cosine_minimum': covariance_minimum,
-            'harmonic_cosine_minimum': harmonic_minimum,
-            'opacity_distance_maximum': opacity_maximum,
-            'covariance_cosine_threshold': 0.7,
-            'harmonic_cosine_threshold': 0.7,
-            'opacity_distance_threshold': 0.2,
-            'passed': bool(
+            "level": level,
+            "anchor_indices": list(anchor_indices),
+            "anchor_count": len(anchor_indices),
+            "covariance_cosine_minimum": covariance_minimum,
+            "harmonic_cosine_minimum": harmonic_minimum,
+            "opacity_distance_maximum": opacity_maximum,
+            "covariance_cosine_threshold": 0.7,
+            "harmonic_cosine_threshold": 0.7,
+            "opacity_distance_threshold": 0.2,
+            "passed": bool(
                 finite
                 and covariance_minimum >= 0.7
                 and harmonic_minimum >= 0.7
                 and opacity_maximum <= 0.2
             ),
-            'nonprobe_s3_attribute_reads': 0,
+            "nonprobe_s3_attribute_reads": 0,
         }
 
     # ------------------------------------------------------------------ #
@@ -2213,6 +2271,9 @@ class ProgressiveSAES:
             output_style == "assignment-consensus-adapter-pseudo-descriptor"
         )
         is_same_budget_dense_oracle = output_style == "same-budget-dense-oracle"
+        selected_only_s3 = is_assignment_consensus or merge_semantics == (
+            "conditional-adapter-offset-attribute-transport"
+        )
         if defer_assignment_consensus_plan and not is_assignment_consensus:
             raise ValueError(
                 "only assignment-consensus virtual outputs may defer a tile plan"
@@ -2223,7 +2284,7 @@ class ProgressiveSAES:
             )
 
         gaussian_dtype = gaussians_full.means.dtype
-        if not is_assignment_consensus:
+        if not selected_only_s3:
             means = gaussians_full.means[0]
             covs = gaussians_full.covariances[0]
             harmonics = gaussians_full.harmonics[0]
@@ -2246,9 +2307,11 @@ class ProgressiveSAES:
             gy, gx = probe_gy[k], probe_gx[k]
             probe_feats.append(
                 view_features[:, gy, gx]
-                if (view_features is not None
+                if (
+                    view_features is not None
                     and gy < view_features.shape[1]
-                    and gx < view_features.shape[2])
+                    and gx < view_features.shape[2]
+                )
                 else None
             )
             if depths is not None:
@@ -2279,9 +2342,10 @@ class ProgressiveSAES:
                 )
             depth_reference_tensor = probe_depth_tensor[:primary_count]
 
-        if is_assignment_consensus:
-            # Select before indexing the batch dimension. This branch must not
-            # materialize a view of skipped S3 descriptors even transiently.
+        if selected_only_s3:
+            # Select before indexing the batch dimension. These target-free
+            # paths must not materialize a view of skipped S3 descriptors even
+            # transiently; their output writes below are likewise direct.
             source_means = gaussians_full.means[0, probe_indices].clone()
             source_covs = gaussians_full.covariances[0, probe_indices].clone()
             source_harmonics = gaussians_full.harmonics[0, probe_indices].clone()
@@ -2297,11 +2361,13 @@ class ProgressiveSAES:
         for (local_y, local_x), _ in non_probe_items:
             gy = tile_y + local_y
             gx = tile_x + local_x
-            feature_i = (view_features[:, gy, gx]
-                  if view_features is not None
-                  and gy < view_features.shape[1]
-                  and gx < view_features.shape[2]
-                  else None)
+            feature_i = (
+                view_features[:, gy, gx]
+                if view_features is not None
+                and gy < view_features.shape[1]
+                and gx < view_features.shape[2]
+                else None
+            )
             spatial_distances = [
                 ((gy - probe_gy[k]) / coordinate_scale) ** 2
                 + ((gx - probe_gx[k]) / coordinate_scale) ** 2
@@ -2323,7 +2389,9 @@ class ProgressiveSAES:
                     torch.tensor(
                         spatial_distances, device=device, dtype=gaussian_dtype
                     ),
-                    torch.tensor(feature_distances, device=device, dtype=gaussian_dtype),
+                    torch.tensor(
+                        feature_distances, device=device, dtype=gaussian_dtype
+                    ),
                     feature_variance=feature_variance,
                     beta_x=self.beta_x,
                     beta_f=self.beta_f,
@@ -2342,11 +2410,9 @@ class ProgressiveSAES:
             else torch.empty(0, K, device=device, dtype=gaussian_dtype)
         )
         if assignment_matrix.numel():
-            error = float(
-                (assignment_matrix.sum(dim=1) - 1.0).abs().max().item()
-            )
-            self.stats['assignment_weight_sum_error_max'] = max(
-                self.stats['assignment_weight_sum_error_max'], error
+            error = float((assignment_matrix.sum(dim=1) - 1.0).abs().max().item())
+            self.stats["assignment_weight_sum_error_max"] = max(
+                self.stats["assignment_weight_sum_error_max"], error
             )
 
         if output_style == "assignment-consensus-adapter-pseudo-descriptor":
@@ -2356,16 +2422,14 @@ class ProgressiveSAES:
                 (tile_y + local_y, tile_x + local_x)
                 for (local_y, local_x), _ in non_probe_items
             ]
-            consensus_geometry = (
-                self._assignment_consensus_adapter_pseudo_geometry(
-                    source_means,
-                    source_covs,
-                    probe_depth_tensor,
-                    list(zip(probe_gy, probe_gx)),
-                    assignment_matrix,
-                    target_positions,
-                    view_index=view_index,
-                )
+            consensus_geometry = self._assignment_consensus_adapter_pseudo_geometry(
+                source_means,
+                source_covs,
+                probe_depth_tensor,
+                list(zip(probe_gy, probe_gx)),
+                assignment_matrix,
+                target_positions,
+                view_index=view_index,
             )
             if consensus_geometry is None:
                 return (True, None) if defer_assignment_consensus_plan else True
@@ -2380,9 +2444,8 @@ class ProgressiveSAES:
                 return (True, None) if defer_assignment_consensus_plan else True
             consensus_harmonics = assignment_matrix @ flat_harmonics
             consensus_opacities = assignment_matrix @ flat_opacities
-            if (
-                not bool(torch.isfinite(consensus_harmonics).all())
-                or not bool(torch.isfinite(consensus_opacities).all())
+            if not bool(torch.isfinite(consensus_harmonics).all()) or not bool(
+                torch.isfinite(consensus_opacities).all()
             ):
                 return (True, None) if defer_assignment_consensus_plan else True
 
@@ -2415,11 +2478,7 @@ class ProgressiveSAES:
                 view_index=view_index,
             )
             if plan is None:
-                return (
-                    (True, None)
-                    if defer_same_budget_dense_oracle_plan
-                    else True
-                )
+                return (True, None) if defer_same_budget_dense_oracle_plan else True
             if defer_same_budget_dense_oracle_plan:
                 return False, plan
             self._commit_same_budget_dense_oracle_plan(gaussians_full, plan)
@@ -2515,25 +2574,24 @@ class ProgressiveSAES:
                     .any()
                     .item()
                 ):
-                    self.stats['covariance_psd_violations'] += 1
+                    self.stats["covariance_psd_violations"] += 1
                 means[output_index] = pseudo_means[pseudo_index]
                 covs[output_index] = reconstructed_covariance
                 harmonics[output_index] = pseudo_harmonics[pseudo_index].reshape(
                     harmonic_shape
                 )
-                opacities[output_index] = pseudo_opacities[pseudo_index].clamp(
-                    0.0, 1.0 - 1e-6
-                ).reshape(opacity_shape)
-            self.stats['virtual_reconstructed_gaussians'] += len(non_probe_items)
+                opacities[output_index] = (
+                    pseudo_opacities[pseudo_index]
+                    .clamp(0.0, 1.0 - 1e-6)
+                    .reshape(opacity_shape)
+                )
+            self.stats["virtual_reconstructed_gaussians"] += len(non_probe_items)
             return
 
         adapter_offset_conditional_means = None
-        if (
-            assignments
-            and merge_semantics in (
-                "conditional-adapter-offset-transport",
-                "conditional-adapter-offset-attribute-transport",
-            )
+        if assignments and merge_semantics in (
+            "conditional-adapter-offset-transport",
+            "conditional-adapter-offset-attribute-transport",
         ):
             target_positions = [
                 (tile_y + local_y, tile_x + local_x)
@@ -2554,9 +2612,9 @@ class ProgressiveSAES:
                 if transported is None:
                     return True
                 adapter_offset_conditional_means.append(transported)
-            self.stats['adapter_offset_transport_uses'] += K * len(non_probe_items)
+            self.stats["adapter_offset_transport_uses"] += K * len(non_probe_items)
             if merge_semantics == "conditional-adapter-offset-attribute-transport":
-                self.stats['adapter_offset_attribute_transport_uses'] += int(
+                self.stats["adapter_offset_attribute_transport_uses"] += int(
                     assignment_matrix.numel()
                 )
 
@@ -2564,9 +2622,11 @@ class ProgressiveSAES:
             absorbed = (
                 assignment_matrix[:, probe_offset]
                 if assignments
-                else torch.empty(0, device=device, dtype=means.dtype)
+                else torch.empty(0, device=device, dtype=gaussian_dtype)
             )
-            weights = torch.cat((torch.ones(1, device=device, dtype=means.dtype), absorbed))
+            weights = torch.cat(
+                (torch.ones(1, device=device, dtype=gaussian_dtype), absorbed)
+            )
             normalized = weights / weights.sum().clamp_min(1e-8)
             if assignments and merge_semantics in (
                 "conditional-anchor-transport",
@@ -2576,7 +2636,8 @@ class ProgressiveSAES:
                 target_positions = [position for position, _ in non_probe_items]
                 conditional_means = (
                     adapter_offset_conditional_means[probe_offset]
-                    if merge_semantics in (
+                    if merge_semantics
+                    in (
                         "conditional-adapter-offset-transport",
                         "conditional-adapter-offset-attribute-transport",
                     )
@@ -2591,18 +2652,24 @@ class ProgressiveSAES:
                         view_index=view_index,
                     )
                 )
-                conditional_covariances = source_covs[probe_offset].unsqueeze(0).expand(
-                    len(non_probe_items), -1, -1
+                conditional_covariances = (
+                    source_covs[probe_offset]
+                    .unsqueeze(0)
+                    .expand(len(non_probe_items), -1, -1)
                 )
                 if merge_semantics == "conditional-adapter-offset-attribute-transport":
                     conditional_harmonics = pseudo_harmonics
                     conditional_opacities = pseudo_opacities
                 else:
-                    conditional_harmonics = flat_harmonics[probe_offset].unsqueeze(0).expand(
-                        len(non_probe_items), -1
+                    conditional_harmonics = (
+                        flat_harmonics[probe_offset]
+                        .unsqueeze(0)
+                        .expand(len(non_probe_items), -1)
                     )
-                    conditional_opacities = flat_opacities[probe_offset].unsqueeze(0).expand(
-                        len(non_probe_items), -1
+                    conditional_opacities = (
+                        flat_opacities[probe_offset]
+                        .unsqueeze(0)
+                        .expand(len(non_probe_items), -1)
                     )
                 contributor_means = torch.cat(
                     (source_means[probe_offset].unsqueeze(0), conditional_means), dim=0
@@ -2628,9 +2695,7 @@ class ProgressiveSAES:
                     else source_means[probe_offset].unsqueeze(0)
                 )
                 contributor_covs = (
-                    torch.stack(
-                        [source_covs[probe_offset], *pseudo_covariances], dim=0
-                    )
+                    torch.stack([source_covs[probe_offset], *pseudo_covariances], dim=0)
                     if assignments
                     else source_covs[probe_offset].unsqueeze(0)
                 )
@@ -2655,12 +2720,8 @@ class ProgressiveSAES:
             second_moment = contributor_covs + torch.einsum(
                 "ni,nj->nij", centered, centered
             )
-            merged_covariance = torch.einsum(
-                "n,nij->ij", normalized, second_moment
-            )
-            merged_covariance = (
-                merged_covariance + merged_covariance.mT
-            ) * 0.5
+            merged_covariance = torch.einsum("n,nij->ij", normalized, second_moment)
+            merged_covariance = (merged_covariance + merged_covariance.mT) * 0.5
             merged_covariance = self._multicontext_tangent_candidate(
                 output_mean=merged_mean,
                 local_covariance=merged_covariance,
@@ -2674,9 +2735,7 @@ class ProgressiveSAES:
                 "n,nk->k", normalized, contributor_harmonics
             ).reshape(harmonic_shape)
             merged_harmonics = torch.maximum(
-                torch.minimum(
-                    merged_harmonics, source_harmonics.amax(dim=0)
-                ),
+                torch.minimum(merged_harmonics, source_harmonics.amax(dim=0)),
                 source_harmonics.amin(dim=0),
             )
 
@@ -2706,8 +2765,10 @@ class ProgressiveSAES:
                     source_optical_depth[probe_offset] + absorbed_optical_depth
                 )
                 merged_opacity = (
-                    -torch.expm1(-merged_optical_depth)
-                ).clamp(0.0, 1.0 - 1e-6).reshape(opacity_shape)
+                    (-torch.expm1(-merged_optical_depth))
+                    .clamp(0.0, 1.0 - 1e-6)
+                    .reshape(opacity_shape)
+                )
             else:
                 # Section 3 specifies a range-constrained opacity average. The
                 # pseudo Gaussian contributes with the same assignment weight
@@ -2722,23 +2783,37 @@ class ProgressiveSAES:
                 else:
                     opacity_upper = contributor_opacities.amax(dim=0)
                     opacity_lower = contributor_opacities.amin(dim=0)
-                merged_opacity = torch.maximum(
-                    torch.minimum(merged_opacity, opacity_upper),
-                    opacity_lower,
-                ).clamp(0.0, 1.0 - 1e-6).reshape(opacity_shape)
+                merged_opacity = (
+                    torch.maximum(
+                        torch.minimum(merged_opacity, opacity_upper),
+                        opacity_lower,
+                    )
+                    .clamp(0.0, 1.0 - 1e-6)
+                    .reshape(opacity_shape)
+                )
 
             eigenvalues, eigenvectors = torch.linalg.eigh(merged_covariance)
             eigenvalues = eigenvalues.clamp_min(1e-8)
             merged_covariance = eigenvectors @ torch.diag(eigenvalues) @ eigenvectors.mT
             if bool((torch.linalg.eigvalsh(merged_covariance) < -1e-7).any().item()):
-                self.stats['covariance_psd_violations'] += 1
+                self.stats["covariance_psd_violations"] += 1
 
-            means[probe_index] = merged_mean
-            covs[probe_index] = merged_covariance
-            harmonics[probe_index] = merged_harmonics
-            opacities[probe_index] = merged_opacity
+            if selected_only_s3:
+                gaussians_full.means[0, probe_index] = merged_mean
+                gaussians_full.covariances[0, probe_index] = merged_covariance
+                gaussians_full.harmonics[0, probe_index] = merged_harmonics
+                gaussians_full.opacities[0, probe_index] = merged_opacity
+            else:
+                means[probe_index] = merged_mean
+                covs[probe_index] = merged_covariance
+                harmonics[probe_index] = merged_harmonics
+                opacities[probe_index] = merged_opacity
 
-        output_opacities = opacities[probe_indices].reshape(K, -1)
+        output_opacities = (
+            gaussians_full.opacities[0, probe_indices].reshape(K, -1)
+            if selected_only_s3
+            else opacities[probe_indices].reshape(K, -1)
+        )
         if opacity_aggregation == "assignment-weighted-optical-depth":
             observed_optical_depth = -torch.log1p(
                 -output_opacities.clamp(0.0, 1.0 - 1e-6)
@@ -2748,12 +2823,14 @@ class ProgressiveSAES:
                 "assignment-mixture",
                 "conditional-adapter-offset-attribute-transport",
             ):
-                expected_optical_depth = expected_optical_depth + pseudo_optical_depth.sum()
+                expected_optical_depth = (
+                    expected_optical_depth + pseudo_optical_depth.sum()
+                )
             aggregation_error = float(
                 (observed_optical_depth - expected_optical_depth).abs().item()
             )
-            self.stats['optical_depth_assignment_error_max'] = max(
-                self.stats['optical_depth_assignment_error_max'], aggregation_error
+            self.stats["optical_depth_assignment_error_max"] = max(
+                self.stats["optical_depth_assignment_error_max"], aggregation_error
             )
         residual = 1.0 - output_opacities
         residual_error = float(
@@ -2761,8 +2838,8 @@ class ProgressiveSAES:
             .max()
             .item()
         )
-        self.stats['opacity_transmittance_error_max'] = max(
-            self.stats['opacity_transmittance_error_max'], residual_error
+        self.stats["opacity_transmittance_error_max"] = max(
+            self.stats["opacity_transmittance_error_max"], residual_error
         )
         return False
 
@@ -2808,9 +2885,7 @@ class ProgressiveSAES:
             return True
         eye = torch.eye(3, device=device, dtype=dtype)
         eps = torch.as_tensor(1e-8, device=device, dtype=dtype)
-        source_covariances = (
-            source_covariances + source_covariances.mT
-        ) * 0.5
+        source_covariances = (source_covariances + source_covariances.mT) * 0.5
         source_eigenvalues = torch.linalg.eigvalsh(source_covariances)
         if not bool(torch.isfinite(source_eigenvalues).all()) or bool(
             (source_eigenvalues < -1e-7).any()
@@ -2837,7 +2912,9 @@ class ProgressiveSAES:
             return True
         source_tau = -torch.log1p(-source_alpha)
         source_mass = source_tau[:, 0] * source_scales
-        if not bool(torch.isfinite(source_mass).all()) or bool((source_mass < 0.0).any()):
+        if not bool(torch.isfinite(source_mass).all()) or bool(
+            (source_mass < 0.0).any()
+        ):
             return True
 
         target_positions = [
@@ -2847,7 +2924,9 @@ class ProgressiveSAES:
         mass_error_max = 0.0
         for probe_offset, probe_index in enumerate(probe_indices):
             assignment = assignment_matrix[:, probe_offset]
-            if not bool(torch.isfinite(assignment).all()) or bool((assignment < 0.0).any()):
+            if not bool(torch.isfinite(assignment).all()) or bool(
+                (assignment < 0.0).any()
+            ):
                 return True
             conditional_means = self._anchor_conditioned_transport_means(
                 source_means[probe_offset],
@@ -2869,15 +2948,18 @@ class ProgressiveSAES:
             contributor_means = torch.cat(
                 (source_means[probe_offset].unsqueeze(0), conditional_means), dim=0
             )
-            contributor_covariances = source_covariances[probe_offset].unsqueeze(0).expand(
-                contributor_means.shape[0], -1, -1
+            contributor_covariances = (
+                source_covariances[probe_offset]
+                .unsqueeze(0)
+                .expand(contributor_means.shape[0], -1, -1)
             )
             merged_mean = torch.einsum("n,ni->i", normalized, contributor_means)
             centered = contributor_means - merged_mean
             merged_covariance = torch.einsum(
                 "n,nij->ij",
                 normalized,
-                contributor_covariances + torch.einsum("ni,nj->nij", centered, centered),
+                contributor_covariances
+                + torch.einsum("ni,nj->nij", centered, centered),
             )
             merged_covariance = (merged_covariance + merged_covariance.mT) * 0.5
             eigenvalues, eigenvectors = torch.linalg.eigh(merged_covariance)
@@ -2885,9 +2967,13 @@ class ProgressiveSAES:
                 (eigenvalues < -1e-7).any()
             ):
                 return True
-            merged_covariance = eigenvectors @ torch.diag(eigenvalues.clamp_min(eps)) @ eigenvectors.mT
+            merged_covariance = (
+                eigenvectors @ torch.diag(eigenvalues.clamp_min(eps)) @ eigenvectors.mT
+            )
             merged_determinant = torch.linalg.det(merged_covariance + eps * eye)
-            if not bool(torch.isfinite(merged_determinant)) or bool(merged_determinant <= 0.0):
+            if not bool(torch.isfinite(merged_determinant)) or bool(
+                merged_determinant <= 0.0
+            ):
                 return True
             merged_scale = (
                 self._context_projected_footprint_scales(
@@ -2909,9 +2995,7 @@ class ProgressiveSAES:
                 return True
             observed_mass = merged_tau * merged_scale
             mass_error = float((observed_mass - total_mass).abs().item())
-            mass_tolerance = float(
-                (1e-6 + 1e-5 * total_mass.detach().abs()).item()
-            )
+            mass_tolerance = float((1e-6 + 1e-5 * total_mass.detach().abs()).item())
             if mass_error > mass_tolerance:
                 return True
             mass_error_max = max(mass_error_max, mass_error)
@@ -2929,9 +3013,9 @@ class ProgressiveSAES:
             covariances[probe_index] = covariance
             harmonics[probe_index] = harmonic
             opacities[probe_index] = alpha.reshape_as(opacities[probe_index])
-        self.stats['conditional_assignment_uses'] += int(assignment_matrix.numel())
-        self.stats['conditional_mass_conservation_error_max'] = max(
-            self.stats['conditional_mass_conservation_error_max'], mass_error_max
+        self.stats["conditional_assignment_uses"] += int(assignment_matrix.numel())
+        self.stats["conditional_mass_conservation_error_max"] = max(
+            self.stats["conditional_mass_conservation_error_max"], mass_error_max
         )
         return False
 
@@ -3003,10 +3087,7 @@ class ProgressiveSAES:
             raw = []
             for index in range(count):
                 spatial = math.exp(
-                    -(
-                        (gy - probe_y[index]) ** 2
-                        + (gx - probe_x[index]) ** 2
-                    )
+                    -((gy - probe_y[index]) ** 2 + (gx - probe_x[index]) ** 2)
                     / (spatial_bandwidth_sq + 1e-8)
                 )
                 probe_feature = probe_features[index]
@@ -3053,22 +3134,27 @@ class ProgressiveSAES:
             addition += torch.eye(3, device=device, dtype=dtype) * 1e-6
             covariances[probe_index] += addition
 
-
     # ------------------------------------------------------------------ #
     # Deprecated / legacy                                                   #
     # ------------------------------------------------------------------ #
 
-    def replicate_tile(self, gaussians_full, tile_y: int, tile_x: int,
-                       probe_idx: int, other_indices: List[int]):
+    def replicate_tile(
+        self,
+        gaussians_full,
+        tile_y: int,
+        tile_x: int,
+        probe_idx: int,
+        other_indices: List[int],
+    ):
         """Legacy Level 0: replicate single probe to all other pixels (dead code)."""
-        covs  = gaussians_full.covariances
+        covs = gaussians_full.covariances
         harmo = gaussians_full.harmonics
         opacs = gaussians_full.opacities
-        p_cov  = covs[0, probe_idx]
+        p_cov = covs[0, probe_idx]
         p_harm = harmo[0, probe_idx]
         p_opac = opacs[0, probe_idx]
         for idx in other_indices:
-            covs[0, idx]  = p_cov * 1.02
+            covs[0, idx] = p_cov * 1.02
             harmo[0, idx] = p_harm
             opacs[0, idx] = p_opac
 
@@ -3095,20 +3181,16 @@ class ProgressiveSAES:
             y = local_y / 3.0
             x = local_x / 3.0
             weights = torch.tensor(
-                [(1-y)*(1-x), (1-y)*x, y*(1-x), y*x],
+                [(1 - y) * (1 - x), (1 - y) * x, y * (1 - x), y * x],
                 device=covariances.device,
                 dtype=covariances.dtype,
             )
-            covariances[index] = torch.einsum(
-                "n,nij->ij", weights, probe_covariances
-            )
+            covariances[index] = torch.einsum("n,nij->ij", weights, probe_covariances)
             merged_harmonics = torch.einsum(
                 "n,nk->k", weights, probe_harmonics.reshape(4, -1)
             ).reshape(probe_harmonics.shape[1:])
             merged_norm = merged_harmonics.norm().clamp_min(1e-8)
-            merged_harmonics *= torch.clamp(
-                harmonic_norm / merged_norm, 0.9, 1.1
-            )
+            merged_harmonics *= torch.clamp(harmonic_norm / merged_norm, 0.9, 1.1)
             harmonics[index] = merged_harmonics
             merged_opacity = torch.einsum(
                 "n,nk->k", weights, probe_opacities.reshape(4, -1)
@@ -3130,7 +3212,7 @@ class ProgressiveSAES:
         routing_depths=None,
         feat_norm=None,
         tile_trace: List[Dict] | None = None,
-    ) -> Tuple['torch.Tensor', Dict]:
+    ) -> Tuple["torch.Tensor", Dict]:
         """
         Multi-level SAES v4 tile processing (Dataflow-aligned, L0+L1 only).
 
@@ -3155,12 +3237,16 @@ class ProgressiveSAES:
             self._camera_directions is not None
             and self._camera_directions.device != device
         ):
-            raise ValueError("camera geometry and Gaussian tensors must share one device")
+            raise ValueError(
+                "camera geometry and Gaussian tensors must share one device"
+            )
         if (
             self._camera_directions is not None
             and self._camera_directions.dtype != gaussians_full.means.dtype
         ):
-            raise ValueError("camera geometry and Gaussian tensors must share one dtype")
+            raise ValueError(
+                "camera geometry and Gaussian tensors must share one dtype"
+            )
         position_count = self.view_count * self.H * self.W
         expected_gaussians = position_count * self.primitives_per_pixel
         if gaussian_count != expected_gaussians:
@@ -3170,26 +3256,24 @@ class ProgressiveSAES:
             )
 
         routing_depths = depths if routing_depths is None else routing_depths
-        modified_mask = torch.zeros(
-            gaussian_count, dtype=torch.bool, device=device
-        )
+        modified_mask = torch.zeros(gaussian_count, dtype=torch.bool, device=device)
         for key in self.stats:
             if key not in {
-                'decision_semantics',
-                'feature_statistic',
-                'depth_statistic',
-                'camera_aware_moment_matching',
-                'l1_depth_reference',
-                'merge_semantics',
-                'materialization_guard_enabled',
-                'same_budget_dense_oracle_runtime_eligible',
-                'multicontext_tangent_enabled',
-                'multicontext_tangent_runtime_eligible',
+                "decision_semantics",
+                "feature_statistic",
+                "depth_statistic",
+                "camera_aware_moment_matching",
+                "l1_depth_reference",
+                "merge_semantics",
+                "materialization_guard_enabled",
+                "same_budget_dense_oracle_runtime_eligible",
+                "multicontext_tangent_enabled",
+                "multicontext_tangent_runtime_eligible",
             }:
                 self.stats[key] = 0
-        self.stats['same_budget_dense_oracle_required_footprint_expansion_max'] = 1.0
-        self.stats['same_budget_dense_oracle_failure_reasons'] = {}
-        self.stats['multicontext_tangent_fallback_reasons'] = {}
+        self.stats["same_budget_dense_oracle_required_footprint_expansion_max"] = 1.0
+        self.stats["same_budget_dense_oracle_failure_reasons"] = {}
+        self.stats["multicontext_tangent_fallback_reasons"] = {}
 
         tiles_h = self.H // self.initial_tile_size
         tiles_w = self.W // self.initial_tile_size
@@ -3198,14 +3282,13 @@ class ProgressiveSAES:
 
         def flat_index(view: int, pixel: int, primitive_slot: int) -> int:
             return (
-                (view * self.H * self.W + pixel) * self.primitives_per_pixel
-                + primitive_slot
-            )
+                view * self.H * self.W + pixel
+            ) * self.primitives_per_pixel + primitive_slot
 
         for view in range(self.view_count):
             for th in range(tiles_h):
                 for tw in range(tiles_w):
-                    self.stats['total_tiles_processed'] += 1
+                    self.stats["total_tiles_processed"] += 1
                     tile_y = th * tile_size
                     tile_x = tw * tile_size
 
@@ -3239,10 +3322,10 @@ class ProgressiveSAES:
                     feature_key = (view, th, tw)
                     feature_variance = (
                         tile_variances.get(
-                            feature_key, tile_variances.get((th, tw), float('inf'))
+                            feature_key, tile_variances.get((th, tw), float("inf"))
                         )
                         if tile_variances is not None
-                        else float('inf')
+                        else float("inf")
                     )
                     assignment_feature_variance = self._assignment_feature_variance(
                         feature_variance
@@ -3282,33 +3365,34 @@ class ProgressiveSAES:
                                 gaussians_full, anchor_indices, level=level
                             )
                             records.append(record)
-                            self.stats['guard_anchor_attribute_reads'] += 3 * len(
+                            self.stats["guard_anchor_attribute_reads"] += 3 * len(
                                 anchor_indices
                             )
-                            self.stats['guard_nonprobe_s3_attribute_reads'] += record[
-                                'nonprobe_s3_attribute_reads'
+                            self.stats["guard_nonprobe_s3_attribute_reads"] += record[
+                                "nonprobe_s3_attribute_reads"
                             ]
-                        passed = all(record['passed'] for record in records)
+                        passed = all(record["passed"] for record in records)
                         if tile_trace is not None:
                             tile_guard_checks.append(
                                 {
-                                    'level': level,
-                                    'anchor_count': len(positions) * self.primitives_per_pixel,
-                                    'passed': passed,
-                                    'covariance_cosine_minimum': min(
-                                        record['covariance_cosine_minimum']
+                                    "level": level,
+                                    "anchor_count": len(positions)
+                                    * self.primitives_per_pixel,
+                                    "passed": passed,
+                                    "covariance_cosine_minimum": min(
+                                        record["covariance_cosine_minimum"]
                                         for record in records
                                     ),
-                                    'harmonic_cosine_minimum': min(
-                                        record['harmonic_cosine_minimum']
+                                    "harmonic_cosine_minimum": min(
+                                        record["harmonic_cosine_minimum"]
                                         for record in records
                                     ),
-                                    'opacity_distance_maximum': max(
-                                        record['opacity_distance_maximum']
+                                    "opacity_distance_maximum": max(
+                                        record["opacity_distance_maximum"]
                                         for record in records
                                     ),
-                                    'nonprobe_s3_attribute_reads': sum(
-                                        record['nonprobe_s3_attribute_reads']
+                                    "nonprobe_s3_attribute_reads": sum(
+                                        record["nonprobe_s3_attribute_reads"]
                                         for record in records
                                     ),
                                 }
@@ -3319,58 +3403,61 @@ class ProgressiveSAES:
                     tile_guard_checks: List[Dict] = []
                     if feature_variance < self.feature_var_threshold:
                         if not self.materialization_guard:
-                            selected_level = 'L0'
+                            selected_level = "L0"
                         else:
-                            self.stats['l0_guard_checks'] += 1
-                            if materialization_guard_passes(self.probe_positions, 'L0'):
-                                selected_level = 'L0'
+                            self.stats["l0_guard_checks"] += 1
+                            if materialization_guard_passes(self.probe_positions, "L0"):
+                                selected_level = "L0"
                             else:
-                                self.stats['l0_guard_rejections'] += 1
+                                self.stats["l0_guard_rejections"] += 1
                                 # A rejected L0 materialization still follows the
                                 # paper's second probe test. It is not silently
                                 # conflated with Full until the L1 guard rejects.
-                                self.stats['l1_guard_attempts_after_l0_rejection'] += 1
+                                self.stats["l1_guard_attempts_after_l0_rejection"] += 1
                                 if depth_route_passes():
-                                    self.stats['l1_guard_checks'] += 1
+                                    self.stats["l1_guard_checks"] += 1
                                     if materialization_guard_passes(
-                                        self.lightweight_positions, 'L1'
+                                        self.lightweight_positions, "L1"
                                     ):
-                                        selected_level = 'L1'
+                                        selected_level = "L1"
                                     else:
-                                        self.stats['l1_guard_rejections'] += 1
+                                        self.stats["l1_guard_rejections"] += 1
                     elif depth_route_passes():
                         if not self.materialization_guard:
-                            selected_level = 'L1'
+                            selected_level = "L1"
                         else:
-                            self.stats['l1_guard_checks'] += 1
+                            self.stats["l1_guard_checks"] += 1
                             if materialization_guard_passes(
-                                self.lightweight_positions, 'L1'
+                                self.lightweight_positions, "L1"
                             ):
-                                selected_level = 'L1'
+                                selected_level = "L1"
                             else:
-                                self.stats['l1_guard_rejections'] += 1
+                                self.stats["l1_guard_rejections"] += 1
                     if tile_trace is not None:
                         tile_trace.append(
                             {
-                                'view_index': view,
-                                'tile_row': th,
-                                'tile_column': tw,
-                                'feature_variance': float(feature_variance),
-                                'feature_candidate': bool(
+                                "view_index": view,
+                                "tile_row": th,
+                                "tile_column": tw,
+                                "feature_variance": float(feature_variance),
+                                "feature_candidate": bool(
                                     feature_variance < self.feature_var_threshold
                                 ),
-                                'depth_candidate': depth_candidate,
-                                'guard_enabled': self.materialization_guard,
-                                'guard_checks': tile_guard_checks,
-                                'routing_level_before_materialization': (
-                                    selected_level if selected_level is not None else 'Full'
+                                "depth_candidate": depth_candidate,
+                                "guard_enabled": self.materialization_guard,
+                                "guard_checks": tile_guard_checks,
+                                "routing_level_before_materialization": (
+                                    selected_level
+                                    if selected_level is not None
+                                    else "Full"
                                 ),
                             }
                         )
 
                     if selected_level is not None:
                         if (
-                            self.materialization in (
+                            self.materialization
+                            in (
                                 "conditional-optical-mass-diagnostic",
                                 "conditional-projected-optical-mass-diagnostic",
                             )
@@ -3379,16 +3466,16 @@ class ProgressiveSAES:
                             # The mass rule is defined only for the submitted
                             # one-opacity-per-primitive layout.  Preserve the
                             # tile as Full instead of inventing a vector-alpha rule.
-                            self.stats['conditional_mass_fallback_tiles'] += 1
-                            self.stats['full_tiles'] += 1
-                            self.stats['full_stage3_gaussians'] += (
+                            self.stats["conditional_mass_fallback_tiles"] += 1
+                            self.stats["full_tiles"] += 1
+                            self.stats["full_stage3_gaussians"] += (
                                 tile_size * tile_size * self.primitives_per_pixel
                             )
-                            self.stats['pixels_original'] += tile_size * tile_size
+                            self.stats["pixels_original"] += tile_size * tile_size
                             continue
                         retained_positions = (
                             self.probe_positions
-                            if selected_level == 'L0'
+                            if selected_level == "L0"
                             else self.lightweight_positions
                         )
                         fallback_to_full = False
@@ -3404,9 +3491,9 @@ class ProgressiveSAES:
                             # This diagnostic reads each dense Stage-3 slot
                             # after a route candidate is fixed, including a
                             # candidate that subsequently fails closed.
-                            self.stats['same_budget_dense_oracle_full_stage3_reads'] += (
-                                tile_size * tile_size * self.primitives_per_pixel
-                            )
+                            self.stats[
+                                "same_budget_dense_oracle_full_stage3_reads"
+                            ] += tile_size * tile_size * self.primitives_per_pixel
                         for slot in range(self.primitives_per_pixel):
                             if self.materialization == "dense-diagnostic":
                                 materialized_positions = self.probe_positions
@@ -3416,11 +3503,11 @@ class ProgressiveSAES:
                             non_probes = non_anchor_map(slot, materialized_positions)
                             if self.materialization in (
                                 "representative",
-                            "transmittance-diagnostic",
-                            "virtual-reconstruction-diagnostic",
-                            "assignment-consensus-adapter-pseudo-descriptor-diagnostic",
-                            "same-budget-dense-oracle-diagnostic",
-                            "conditional-anchor-transport-diagnostic",
+                                "transmittance-diagnostic",
+                                "virtual-reconstruction-diagnostic",
+                                "assignment-consensus-adapter-pseudo-descriptor-diagnostic",
+                                "same-budget-dense-oracle-diagnostic",
+                                "conditional-anchor-transport-diagnostic",
                                 "conditional-adapter-offset-transport-diagnostic",
                                 "conditional-adapter-offset-attribute-transport-diagnostic",
                                 "conditional-optical-mass-diagnostic",
@@ -3446,7 +3533,8 @@ class ProgressiveSAES:
                                     retained_positions=materialized_positions,
                                     opacity_aggregation=(
                                         "assignment-weighted-optical-depth"
-                                        if self.materialization == "transmittance-diagnostic"
+                                        if self.materialization
+                                        == "transmittance-diagnostic"
                                         else "range-constrained-average"
                                     ),
                                     output_style=(
@@ -3544,116 +3632,126 @@ class ProgressiveSAES:
                                     gaussians_full.opacities[0, output_index] *= 0.0
                                     modified_mask[output_index] = True
                                     total_zeroed += 1
-                            self.stats['same_budget_dense_oracle_tiles'] += 1
+                            self.stats["same_budget_dense_oracle_tiles"] += 1
                             if tile_trace is not None:
-                                tile_trace[-1]['oracle_materialization'] = 'compressed'
+                                tile_trace[-1]["oracle_materialization"] = "compressed"
                         if fallback_to_full:
                             if self.merge_semantics in (
                                 "conditional-optical-mass",
                                 "conditional-projected-optical-mass",
                             ):
-                                self.stats['conditional_mass_fallback_tiles'] += 1
+                                self.stats["conditional_mass_fallback_tiles"] += 1
                             elif self.merge_semantics in (
                                 "conditional-adapter-offset-transport",
                                 "conditional-adapter-offset-attribute-transport",
                             ):
-                                self.stats['adapter_offset_transport_fallback_tiles'] += 1
+                                self.stats[
+                                    "adapter_offset_transport_fallback_tiles"
+                                ] += 1
                             elif self.merge_semantics == (
                                 "assignment-consensus-adapter-pseudo-descriptor"
                             ):
-                                self.stats['assignment_consensus_fallback_tiles'] += 1
-                                if selected_level == 'L0':
+                                self.stats["assignment_consensus_fallback_tiles"] += 1
+                                if selected_level == "L0":
                                     self.stats[
-                                        'assignment_consensus_l0_fallback_tiles'
+                                        "assignment_consensus_l0_fallback_tiles"
                                     ] += 1
                                 else:
                                     self.stats[
-                                        'assignment_consensus_l1_fallback_tiles'
+                                        "assignment_consensus_l1_fallback_tiles"
                                     ] += 1
                             elif self.merge_semantics == "same-budget-dense-oracle":
-                                self.stats['same_budget_dense_oracle_fallback_tiles'] += 1
-                                reason = getattr(
-                                    self,
-                                    '_same_budget_dense_oracle_last_failure',
-                                    None,
-                                ) or 'unknown'
+                                self.stats[
+                                    "same_budget_dense_oracle_fallback_tiles"
+                                ] += 1
+                                reason = (
+                                    getattr(
+                                        self,
+                                        "_same_budget_dense_oracle_last_failure",
+                                        None,
+                                    )
+                                    or "unknown"
+                                )
                                 reasons = self.stats[
-                                    'same_budget_dense_oracle_failure_reasons'
+                                    "same_budget_dense_oracle_failure_reasons"
                                 ]
                                 reasons[reason] = reasons.get(reason, 0) + 1
                                 if tile_trace is not None:
-                                    tile_trace[-1]['oracle_materialization'] = 'full-fallback'
-                                    tile_trace[-1]['oracle_failure_reason'] = reason
-                            self.stats['full_tiles'] += 1
-                            self.stats['full_stage3_gaussians'] += (
+                                    tile_trace[-1]["oracle_materialization"] = (
+                                        "full-fallback"
+                                    )
+                                    tile_trace[-1]["oracle_failure_reason"] = reason
+                            self.stats["full_tiles"] += 1
+                            self.stats["full_stage3_gaussians"] += (
                                 tile_size * tile_size * self.primitives_per_pixel
                             )
-                            self.stats['pixels_original'] += tile_size * tile_size
+                            self.stats["pixels_original"] += tile_size * tile_size
                             continue
 
                         pixel_count = tile_size * tile_size - len(retained_positions)
-                        if selected_level == 'L0':
-                            self.stats['level0_tiles'] += 1
-                            self.stats['level0_pixels'] += pixel_count
-                            self.stats['l0_representatives'] += (
+                        if selected_level == "L0":
+                            self.stats["level0_tiles"] += 1
+                            self.stats["level0_pixels"] += pixel_count
+                            self.stats["l0_representatives"] += (
                                 len(retained_positions) * self.primitives_per_pixel
                             )
                             if is_same_budget_dense_oracle:
-                                self.stats['same_budget_dense_oracle_l0_tiles'] += 1
+                                self.stats["same_budget_dense_oracle_l0_tiles"] += 1
                         else:
-                            self.stats['level1_tiles'] += 1
-                            self.stats['level1_pixels'] += pixel_count
-                            self.stats['l1_lightweight_anchors'] += (
+                            self.stats["level1_tiles"] += 1
+                            self.stats["level1_pixels"] += pixel_count
+                            self.stats["l1_lightweight_anchors"] += (
                                 len(retained_positions) * self.primitives_per_pixel
                             )
                             if is_same_budget_dense_oracle:
-                                self.stats['same_budget_dense_oracle_l1_tiles'] += 1
-                        self.stats['pixels_original'] += len(retained_positions)
+                                self.stats["same_budget_dense_oracle_l1_tiles"] += 1
+                        self.stats["pixels_original"] += len(retained_positions)
                         continue
 
-                    self.stats['full_tiles'] += 1
-                    self.stats['full_stage3_gaussians'] += (
+                    self.stats["full_tiles"] += 1
+                    self.stats["full_stage3_gaussians"] += (
                         tile_size * tile_size * self.primitives_per_pixel
                     )
-                    self.stats['pixels_original'] += tile_size * tile_size
+                    self.stats["pixels_original"] += tile_size * tile_size
 
-        total_tiles = max(1, self.stats['total_tiles_processed'])
-        self.stats['total_modified_pixels'] = (
-            self.stats['level0_pixels'] + self.stats['level1_pixels']
+        total_tiles = max(1, self.stats["total_tiles_processed"])
+        self.stats["total_modified_pixels"] = (
+            self.stats["level0_pixels"] + self.stats["level1_pixels"]
         )
-        self.stats['zeroed_gaussians'] = total_zeroed
-        self.stats['effective_gaussians'] = max(0, gaussian_count - total_zeroed)
-        self.stats['full_s2_evaluations'] = (
-            self.stats['total_tiles_processed']
+        self.stats["zeroed_gaussians"] = total_zeroed
+        self.stats["effective_gaussians"] = max(0, gaussian_count - total_zeroed)
+        self.stats["full_s2_evaluations"] = (
+            self.stats["total_tiles_processed"]
             * tile_size
             * tile_size
             * self.primitives_per_pixel
             * self.num_depth_candidates
         )
-        self.stats['executed_s2_evaluations'] = (
-            self.stats['l0_representatives']
-            + self.stats['l1_lightweight_anchors']
-            + self.stats['full_stage3_gaussians']
+        self.stats["executed_s2_evaluations"] = (
+            self.stats["l0_representatives"]
+            + self.stats["l1_lightweight_anchors"]
+            + self.stats["full_stage3_gaussians"]
         ) * self.num_depth_candidates
-        self.stats['s2_evaluations_available'] = True
+        self.stats["s2_evaluations_available"] = True
 
-        self.stats['level0_ratio'] = self.stats['level0_tiles'] / total_tiles
-        self.stats['level1_ratio'] = self.stats['level1_tiles'] / total_tiles
-        self.stats['full_ratio'] = self.stats['full_tiles'] / total_tiles
-        self.stats['early_stop_ratio'] = 1.0 - self.stats['full_ratio']
-        self.stats['modification_ratio'] = (
-            self.stats['total_modified_pixels'] / position_count
+        self.stats["level0_ratio"] = self.stats["level0_tiles"] / total_tiles
+        self.stats["level1_ratio"] = self.stats["level1_tiles"] / total_tiles
+        self.stats["full_ratio"] = self.stats["full_tiles"] / total_tiles
+        self.stats["early_stop_ratio"] = 1.0 - self.stats["full_ratio"]
+        self.stats["modification_ratio"] = (
+            self.stats["total_modified_pixels"] / position_count
             if position_count > 0
             else 0.0
         )
 
         # Backward-compatible keys
-        self.stats['early_stop_phase1'] = (self.stats['level0_tiles'] +
-                                           self.stats['level1_tiles'])
-        self.stats['early_stop_phase2']    = 0
-        self.stats['full_processed']       = self.stats['full_tiles']
-        self.stats['pixels_interpolated']  = self.stats['total_modified_pixels']
-        self.stats['interpolation_ratio']  = self.stats['modification_ratio']
+        self.stats["early_stop_phase1"] = (
+            self.stats["level0_tiles"] + self.stats["level1_tiles"]
+        )
+        self.stats["early_stop_phase2"] = 0
+        self.stats["full_processed"] = self.stats["full_tiles"]
+        self.stats["pixels_interpolated"] = self.stats["total_modified_pixels"]
+        self.stats["interpolation_ratio"] = self.stats["modification_ratio"]
 
         return modified_mask, self.stats
 
@@ -3661,6 +3759,7 @@ class ProgressiveSAES:
 # -------------------------------------------------------------------- #
 # Public API                                                              #
 # -------------------------------------------------------------------- #
+
 
 def apply_progressive_saes(
     gaussians_full,
@@ -3673,7 +3772,7 @@ def apply_progressive_saes(
     features=None,
     depths=None,
     cross_check_threshold: float = 0.015,
-    feat_norm=None,            # pre-computed [C, H, W]; computed internally if None
+    feat_norm=None,  # pre-computed [C, H, W]; computed internally if None
     collect_continue_pixels: bool = False,
     view_count: int = None,
     materialization: str = "representative",
@@ -3690,7 +3789,7 @@ def apply_progressive_saes(
     depth_far: torch.Tensor | None = None,
     materialization_guard: bool = True,
     tile_trace: List[Dict] | None = None,
-) -> Tuple['torch.Tensor', Dict, List]:
+) -> Tuple["torch.Tensor", Dict, List]:
     """
     Apply progressive SAES v4 (Dataflow-aligned, L0+L1) to Gaussians.
 
@@ -3716,7 +3815,9 @@ def apply_progressive_saes(
         "metric-depth-standard-deviation",
         "inverse-depth-candidate-coordinate-standard-deviation",
     ):
-        raise ValueError(f"unsupported depth routing semantics: {depth_routing_semantics}")
+        raise ValueError(
+            f"unsupported depth routing semantics: {depth_routing_semantics}"
+        )
     if (depth_near is None) != (depth_far is None):
         raise ValueError("depth_near and depth_far must be provided together")
     if (
@@ -3724,13 +3825,15 @@ def apply_progressive_saes(
         == "inverse-depth-candidate-coordinate-standard-deviation"
         and (depth_near is None or depth_far is None)
     ):
-        raise ValueError("inverse-depth candidate routing requires depth_near and depth_far")
+        raise ValueError(
+            "inverse-depth candidate routing requires depth_near and depth_far"
+        )
 
     gaussian_count = gaussians_full.means.shape[1]
     if view_count is None:
-        if features is not None and hasattr(features, 'dim') and features.dim() == 5:
+        if features is not None and hasattr(features, "dim") and features.dim() == 5:
             view_count = int(features.shape[1])
-        elif depths is not None and hasattr(depths, 'dim') and depths.dim() >= 4:
+        elif depths is not None and hasattr(depths, "dim") and depths.dim() >= 4:
             view_count = int(depths.shape[1])
         else:
             view_count = 1
@@ -3745,11 +3848,15 @@ def apply_progressive_saes(
     tile_variances = None
     _feat_norm = feat_norm  # use caller-supplied if available
 
-    if features is not None and hasattr(features, 'shape'):
+    if features is not None and hasattr(features, "shape"):
         _tv, _fn = ProgressiveSAES.classify_tiles_by_features(
-            features, H, W, tile_size,
-            threshold=(feature_var_threshold
-                       if feature_var_threshold is not None else 0.012),
+            features,
+            H,
+            W,
+            tile_size,
+            threshold=(
+                feature_var_threshold if feature_var_threshold is not None else 0.012
+            ),
             per_view=True,
             statistic=(
                 "raw-probe-vector-variance"
@@ -3766,7 +3873,9 @@ def apply_progressive_saes(
             _feat_norm = _fn
 
     saes = ProgressiveSAES(
-        H, W, tile_size,
+        H,
+        W,
+        tile_size,
         feature_var_threshold=feature_var_threshold,
         depth_std_threshold=depth_std_threshold,
         cross_check_threshold=cross_check_threshold,
@@ -3792,9 +3901,10 @@ def apply_progressive_saes(
         == "inverse-depth-candidate-coordinate-standard-deviation"
         else depths
     )
-    saes.stats['depth_statistic'] = depth_routing_semantics
+    saes.stats["depth_statistic"] = depth_routing_semantics
     modified_mask, stats = saes.process_all_tiles(
-        gaussians_full, gpp,
+        gaussians_full,
+        gpp,
         tile_variances=tile_variances,
         depths=depths,
         routing_depths=routing_depths,

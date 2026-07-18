@@ -44,11 +44,10 @@ def _gaussians():
     count = len(means)
     return SimpleNamespace(
         means=torch.stack(means).unsqueeze(0),
-        covariances=torch.eye(3).reshape(1, 1, 3, 3).repeat(1, count, 1, 1)
-        * 0.01,
-        harmonics=torch.linspace(0.1, 0.3, count).reshape(1, count, 1, 1).repeat(
-            1, 1, 3, 2
-        ),
+        covariances=torch.eye(3).reshape(1, 1, 3, 3).repeat(1, count, 1, 1) * 0.01,
+        harmonics=torch.linspace(0.1, 0.3, count)
+        .reshape(1, count, 1, 1)
+        .repeat(1, 1, 3, 2),
         opacities=torch.full((1, count), 0.25),
     )
 
@@ -99,7 +98,11 @@ def _indices_for_left_tile(*, include_probes):
         if ((row, column) in probes) == include_probes
     ]
     return torch.tensor(
-        [view * H * W + row * W + column for view in range(VIEWS) for row, column in positions]
+        [
+            view * H * W + row * W + column
+            for view in range(VIEWS)
+            for row, column in positions
+        ]
     )
 
 
@@ -204,9 +207,31 @@ def test_multicontext_tangent_materialization_preserves_route_full_slots_and_sel
         torch.testing.assert_close(
             getattr(poisoned, name)[0, full], getattr(original, name)[0, full]
         )
-    assert bool(
-        (torch.linalg.eigvalsh(tangent.covariances[0, valid]) >= -1e-7).all()
+    assert bool((torch.linalg.eigvalsh(tangent.covariances[0, valid]) >= -1e-7).all())
+    assert bool((torch.linalg.eigvalsh(poisoned.covariances[0, valid]) >= -1e-7).all())
+
+
+@pytest.mark.parametrize(
+    "materialization", (BASE_MATERIALIZATION, TANGENT_MATERIALIZATION)
+)
+def test_selected_only_s3_read_guard_accepts_current_and_tangent_paths(materialization):
+    from saes.progressive_saes import apply_progressive_saes
+    from scripts.saes_multicontext_directional_audit import _wrap_selected_s3_reads
+
+    source = _gaussians()
+    expected = _clone(source)
+    options = _options()
+    expected_mask, _, _ = apply_progressive_saes(
+        expected, H, W, materialization=materialization, **options
     )
-    assert bool(
-        (torch.linalg.eigvalsh(poisoned.covariances[0, valid]) >= -1e-7).all()
+    selected = torch.nonzero(~expected_mask, as_tuple=False).flatten()
+    guarded, fields = _wrap_selected_s3_reads(source, selected)
+
+    actual_mask, _, _ = apply_progressive_saes(
+        guarded, H, W, materialization=materialization, **options
     )
+
+    assert torch.equal(actual_mask, expected_mask)
+    for field in fields.values():
+        assert field.read_indices
+        assert set(field.read_indices) <= set(selected.tolist())

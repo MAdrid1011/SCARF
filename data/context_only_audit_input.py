@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -19,6 +20,44 @@ from scripts.calibration_inputs import (
 
 INPUT_KIND = "scarf_context_only_audit_input_v1"
 RECORD_KIND = "scarf_context_only_audit_record_v1"
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_INPUT_FIELDS = frozenset(
+    (
+        "schema_version",
+        "kind",
+        "status",
+        "paper_result_eligible",
+        "model",
+        "dataset",
+        "source_sample_index",
+        "fixed_context",
+        "source_binding",
+        "sidecar",
+        "target_rgb_included",
+        "target_camera_metadata_included",
+        "target_index_included",
+    )
+)
+_RECORD_FIELDS = frozenset(
+    (
+        "schema_version",
+        "kind",
+        "key",
+        "context_indices",
+        "context_cameras",
+        "context_images",
+    )
+)
+_SOURCE_BINDING_FIELDS = frozenset(
+    (
+        "source_audit_input_sha256",
+        "source_audit_tree_sha256",
+        "canonical_index_sha256",
+        "canonical_sample_selection_sha256",
+        "source_sidecar_tree_sha256",
+    )
+)
+_SIDECAR_FIELDS = frozenset(("index_sha256", "record_sha256"))
 
 
 def _load_json(path: Path, label: str) -> dict[str, Any]:
@@ -35,11 +74,20 @@ def _indices(value: Any, label: str) -> list[int]:
     if (
         not isinstance(value, list)
         or not value
-        or any(isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in value)
+        or any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0
+            for index in value
+        )
         or len(value) != len(set(value))
     ):
         raise ValueError(f"context-only audit has invalid {label}")
     return list(value)
+
+
+def _sha256(value: Any, label: str) -> str:
+    if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
+        raise ValueError(f"context-only audit has an invalid {label}")
+    return value
 
 
 def _copy_context_image(value: Any) -> Any:
@@ -59,6 +107,7 @@ def _source_contract(source_root: Path) -> tuple[dict[str, Any], list[int], str]
         or source.get("status") != "PASS"
         or source.get("model") != "transplat"
         or source.get("dataset") != "dl3dv"
+        or source.get("source_sample_index") != 0
         or source.get("target_rgb_included") is not False
     ):
         raise ValueError("source audit input violates the fixed DL3DV contract")
@@ -69,8 +118,13 @@ def _source_contract(source_root: Path) -> tuple[dict[str, Any], list[int], str]
     if len(context_indices) != 2:
         raise ValueError("context-only audit requires exactly two context views")
     protocol = source.get("canonical_protocol")
-    if not isinstance(protocol, dict) or not isinstance(protocol.get("source_index_sha256"), str):
+    if not isinstance(protocol, dict):
         raise ValueError("source audit input lacks a canonical index hash")
+    _sha256(protocol.get("source_index_sha256"), "source canonical index hash")
+    _sha256(
+        protocol.get("sample_selection_sha256"),
+        "source canonical sample-selection hash",
+    )
     return source, context_indices, str(selected["scene"])
 
 
@@ -86,7 +140,9 @@ def prepare_context_only_audit_input(
     source_root = Path(source_root).resolve()
     output_root = Path(output_root).resolve()
     if output_root.exists():
-        raise FileExistsError(f"context-only audit output already exists: {output_root}")
+        raise FileExistsError(
+            f"context-only audit output already exists: {output_root}"
+        )
     source, context_indices, scene = _source_contract(source_root)
     source_sidecar_identity = validate_target_free_input_root(
         source_root / "sidecar", "dl3dv"
@@ -95,10 +151,16 @@ def prepare_context_only_audit_input(
     if dense_record.get("context_indices") != context_indices:
         raise ValueError("source context indices do not match the fixed selection")
     cameras = torch.as_tensor(dense_record.get("cameras"), dtype=torch.float32)
-    if cameras.ndim != 2 or cameras.shape[1] != 18 or max(context_indices) >= cameras.shape[0]:
+    if (
+        cameras.ndim != 2
+        or cameras.shape[1] != 18
+        or max(context_indices) >= cameras.shape[0]
+    ):
         raise ValueError("source audit sidecar has invalid camera geometry")
     context_images = dense_record.get("context_images")
-    if not isinstance(context_images, list) or len(context_images) != len(context_indices):
+    if not isinstance(context_images, list) or len(context_images) != len(
+        context_indices
+    ):
         raise ValueError("source audit sidecar has invalid context images")
 
     payload = {
@@ -133,7 +195,9 @@ def prepare_context_only_audit_input(
             "source_audit_tree_sha256": verify_tree_manifest(
                 source_root, source_root / ".scarf-manifest.json"
             )["tree_sha256"],
-            "canonical_index_sha256": source["canonical_protocol"]["source_index_sha256"],
+            "canonical_index_sha256": source["canonical_protocol"][
+                "source_index_sha256"
+            ],
             "canonical_sample_selection_sha256": source["canonical_protocol"].get(
                 "sample_selection_sha256"
             ),
@@ -185,51 +249,64 @@ def validate_context_only_audit_input(root: Path) -> dict[str, Any]:
     root = Path(root).resolve()
     audit = _load_json(root / "audit-input.json", "context-only audit input")
     if (
-        audit.get("kind") != INPUT_KIND
+        set(audit) != _INPUT_FIELDS
+        or audit.get("schema_version") != "1.0"
+        or audit.get("kind") != INPUT_KIND
         or audit.get("status") != "PASS"
+        or audit.get("paper_result_eligible") is not False
         or audit.get("model") != "transplat"
         or audit.get("dataset") != "dl3dv"
+        or audit.get("source_sample_index") != 0
         or audit.get("target_rgb_included") is not False
         or audit.get("target_camera_metadata_included") is not False
         or audit.get("target_index_included") is not False
     ):
         raise ValueError("context-only audit input violates its isolation contract")
     fixed = audit.get("fixed_context")
-    if not isinstance(fixed, dict) or not isinstance(fixed.get("scene"), str):
+    if (
+        not isinstance(fixed, dict)
+        or set(fixed) != {"scene", "context_indices"}
+        or not isinstance(fixed.get("scene"), str)
+        or not fixed["scene"]
+    ):
         raise ValueError("context-only audit input has no fixed scene")
     context_indices = _indices(fixed.get("context_indices"), "context indices")
     if len(context_indices) != 2:
         raise ValueError("context-only audit input needs two context indices")
     sidecar = audit.get("sidecar")
-    if not isinstance(sidecar, dict):
+    if not isinstance(sidecar, dict) or set(sidecar) != _SIDECAR_FIELDS:
         raise ValueError("context-only audit input has no sidecar identity")
+    for key in _SIDECAR_FIELDS:
+        _sha256(sidecar.get(key), f"sidecar {key}")
+    source_binding = audit.get("source_binding")
+    if (
+        not isinstance(source_binding, dict)
+        or set(source_binding) != _SOURCE_BINDING_FIELDS
+    ):
+        raise ValueError("context-only audit input has an invalid source binding")
+    for key in _SOURCE_BINDING_FIELDS:
+        _sha256(source_binding.get(key), f"source binding {key}")
     test_root = root / "sidecar" / "test"
     index = _load_json(test_root / "index.json", "context-only audit sidecar index")
     if set(index) != {fixed["scene"]}:
         raise ValueError("context-only audit sidecar index has the wrong scene")
     chunk_path = _safe_chunk_path(test_root, index[fixed["scene"]])
-    if (
-        sidecar.get("index_sha256") != sha256_file(test_root / "index.json")
-        or sidecar.get("record_sha256") != sha256_file(chunk_path)
-    ):
+    if sidecar.get("index_sha256") != sha256_file(
+        test_root / "index.json"
+    ) or sidecar.get("record_sha256") != sha256_file(chunk_path):
         raise ValueError("context-only audit sidecar identity mismatch")
     chunk = torch.load(chunk_path, map_location="cpu")
     if not isinstance(chunk, list) or len(chunk) != 1 or not isinstance(chunk[0], dict):
         raise ValueError("context-only audit chunk is invalid")
     payload = chunk[0]
-    forbidden = {
-        key
-        for key in payload
-        if "target" in key.lower() or key in {"cameras", "images"}
-    }
-    if forbidden:
-        raise ValueError("context-only audit payload carries target-side fields")
     if (
-        payload.get("kind") != RECORD_KIND
+        set(payload) != _RECORD_FIELDS
+        or payload.get("schema_version") != "1.0"
+        or payload.get("kind") != RECORD_KIND
         or payload.get("key") != fixed["scene"]
         or payload.get("context_indices") != context_indices
     ):
-        raise ValueError("context-only audit payload does not match its fixed context")
+        raise ValueError("context-only audit payload does not match its fixed contract")
     cameras = payload.get("context_cameras")
     images = payload.get("context_images")
     if (
@@ -249,6 +326,9 @@ def validate_context_only_audit_input(root: Path) -> dict[str, Any]:
         "tree_sha256": tree["tree_sha256"],
         "manifest_sha256": tree["manifest_sha256"],
         "audit_input_sha256": sha256_file(root / "audit-input.json"),
+        "source_sample_index": int(audit["source_sample_index"]),
+        "source_binding": dict(source_binding),
+        "sidecar": dict(sidecar),
         "target_rgb_accessed": False,
         "target_camera_metadata_accessed": False,
     }

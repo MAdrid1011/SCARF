@@ -1,3 +1,4 @@
+import copy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -95,7 +96,9 @@ def _payload(*, tangent=False):
     )
 
 
-def test_phase_a_commits_only_retained_descriptors_and_preserves_full_slots(tmp_path: Path):
+def test_phase_a_commits_only_retained_descriptors_and_preserves_full_slots(
+    tmp_path: Path,
+):
     from scripts.saes_multicontext_directional_audit import (
         _load_descriptor_commit,
         _phase_a_invariants,
@@ -134,7 +137,9 @@ def test_phase_a_rejects_route_event_and_full_slot_drift():
     full_drift = _payload(tangent=True)
     full_location = int(full_drift["full_indices"][0].item())
     retained_location = int(
-        torch.searchsorted(full_drift["retained_indices"], torch.tensor(full_location)).item()
+        torch.searchsorted(
+            full_drift["retained_indices"], torch.tensor(full_location)
+        ).item()
     )
     full_drift["covariances"][retained_location, 0, 0] = 0.03
     with pytest.raises(RuntimeError, match="Full covariances"):
@@ -167,3 +172,81 @@ def test_psd_check_accepts_roundoff_symmetric_reconstruction():
     )
     covariance = basis @ torch.diag(torch.tensor((0.01, 0.02, 0.03))) @ basis.mT
     _assert_psd(covariance.unsqueeze(0), "roundoff")
+
+
+def test_sentinel_payload_equality_rejects_trace_counter_and_output_drift():
+    from scripts.saes_multicontext_directional_audit import _assert_payload_identical
+
+    reference = _payload()
+    candidate = _payload()
+    assert _assert_payload_identical(reference, candidate, label="sentinel") == {
+        "means": 0.0,
+        "covariances": 0.0,
+        "harmonics": 0.0,
+        "opacities": 0.0,
+    }
+
+    trace_drift = _payload()
+    trace_drift["tile_trace"][0]["routing_level_before_materialization"] = "L1"
+    with pytest.raises(RuntimeError, match="tile_trace"):
+        _assert_payload_identical(reference, trace_drift, label="sentinel")
+
+    counter_drift = _payload()
+    counter_drift["saes_stats"]["full_tiles"] = 2
+    with pytest.raises(RuntimeError, match="saes_stats"):
+        _assert_payload_identical(reference, counter_drift, label="sentinel")
+
+    output_drift = _payload()
+    output_drift["covariances"][0, 0, 0] = 0.03
+    with pytest.raises(RuntimeError, match="covariances"):
+        _assert_payload_identical(reference, output_drift, label="sentinel")
+
+
+def test_directional_audit_rejects_any_nonfrozen_input_identity(monkeypatch):
+    import scripts.saes_multicontext_directional_audit as audit
+
+    identity = copy.deepcopy(audit.FIXED_INPUT_IDENTITY)
+    monkeypatch.setattr(
+        audit, "validate_context_only_audit_input", lambda _root: identity
+    )
+    assert audit._require_fixed_audit_input(Path("inputs/fixed")) == identity
+
+    identity["source_binding"]["canonical_index_sha256"] = "0" * 64
+    with pytest.raises(RuntimeError, match="canonical_index_sha256"):
+        audit._require_fixed_audit_input(Path("inputs/fixed"))
+
+
+def test_checkpoint_hash_is_verified_before_model_loading(monkeypatch):
+    import scripts.saes_multicontext_directional_audit as audit
+
+    def bad_checkpoint(*_args, **_kwargs):
+        raise RuntimeError("bad checkpoint")
+
+    monkeypatch.setattr(
+        audit,
+        "_require_fixed_audit_input",
+        lambda _root: copy.deepcopy(audit.FIXED_INPUT_IDENTITY),
+    )
+    monkeypatch.setattr(
+        audit,
+        "resolve_experiment",
+        lambda *_args: SimpleNamespace(
+            checkpoint=Path("checkpoints/fixed.ckpt"),
+            experiment="re10k",
+            hydra_overrides=(),
+            environment_profile="classic",
+        ),
+    )
+    monkeypatch.setattr(
+        audit,
+        "require_fixed_file_sha256",
+        bad_checkpoint,
+    )
+    monkeypatch.setattr(
+        audit,
+        "create_model_loader",
+        lambda *_args: pytest.fail("model loader ran before checkpoint validation"),
+    )
+
+    with pytest.raises(RuntimeError, match="bad checkpoint"):
+        audit._load_encoder_context(Path("inputs/fixed"), torch.device("cpu"))
