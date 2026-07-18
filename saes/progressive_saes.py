@@ -443,6 +443,7 @@ class ProgressiveSAES:
             'same_budget_dense_oracle_fallback_tiles': 0,
             'same_budget_dense_oracle_full_stage3_reads': 0,
             'same_budget_dense_oracle_output_gaussians': 0,
+            'same_budget_dense_oracle_failure_reasons': {},
             # These verify the local first-order construction only. Renderer
             # fidelity is measured separately by the committed image run.
             'same_budget_dense_oracle_mass_construction_error_max': 0.0,
@@ -1271,6 +1272,12 @@ class ProgressiveSAES:
         It contains no target RGB or target-view input.
         """
         count = len(probe_indices)
+        self._same_budget_dense_oracle_last_failure = None
+
+        def reject(reason: str) -> None:
+            self._same_budget_dense_oracle_last_failure = reason
+            return None
+
         source_indices = list(probe_indices) + [
             index for _, index in non_probe_items
         ]
@@ -1284,7 +1291,7 @@ class ProgressiveSAES:
             or len(source_positions) != source_count
             or assignment_matrix.shape != (len(non_probe_items), count)
         ):
-            return None
+            return reject("input-contract")
 
         means = gaussians_full.means[0, source_indices].clone()
         covariances = gaussians_full.covariances[0, source_indices].clone()
@@ -1296,28 +1303,28 @@ class ProgressiveSAES:
             or not bool(torch.isfinite(harmonics).all())
             or not bool(torch.isfinite(opacities).all())
         ):
-            return None
+            return reject("nonfinite-dense-descriptor")
         flat_opacities = opacities.reshape(source_count, -1)
         if flat_opacities.shape[1] != 1 or bool(
             ((flat_opacities < 0.0) | (flat_opacities >= 1.0)).any()
         ):
-            return None
+            return reject("opacity-domain")
         covariances = (covariances + covariances.mT) * 0.5
         try:
             covariance_eigenvalues = torch.linalg.eigvalsh(covariances)
         except RuntimeError:
-            return None
+            return reject("dense-covariance-eigendecomposition")
         if (
             not bool(torch.isfinite(covariance_eigenvalues).all())
             or bool((covariance_eigenvalues < -1e-7).any())
         ):
-            return None
+            return reject("dense-covariance-psd")
 
         projected = self._context_projected_moments(
             means, covariances, view_index=view_index
         )
         if projected is None:
-            return None
+            return reject("producer-projection-geometry")
         centers, projected_covariances, camera_points, _, rotation_c2w = projected
         dtype = means.dtype
         device = means.device
@@ -1325,12 +1332,12 @@ class ProgressiveSAES:
         try:
             projected_determinants = torch.linalg.det(projected_covariances)
         except RuntimeError:
-            return None
+            return reject("projected-footprint-determinant")
         if (
             not bool(torch.isfinite(projected_determinants).all())
             or bool((projected_determinants <= tiny).any())
         ):
-            return None
+            return reject("projected-footprint-determinant")
         source_areas = torch.sqrt(projected_determinants)
         source_tau = -torch.log1p(-flat_opacities[:, 0])
         source_mass = source_tau * source_areas
@@ -1338,13 +1345,13 @@ class ProgressiveSAES:
             not bool(torch.isfinite(source_mass).all())
             or bool((source_mass < 0.0).any())
         ):
-            return None
+            return reject("source-optical-mass")
         if assignment_matrix.numel() and (
             not bool(torch.isfinite(assignment_matrix).all())
             or bool((assignment_matrix < 0.0).any())
             or bool((assignment_matrix.sum(dim=1) - 1.0).abs().max() > 1e-5)
         ):
-            return None
+            return reject("assignment-simplex")
 
         # Each selected output keeps its own dense descriptor with unit
         # ownership.  Every skipped descriptor contributes its optical mass
@@ -1362,7 +1369,7 @@ class ProgressiveSAES:
         alpha_max = selected_opacities.amax()
         tau_max = -torch.log1p(-alpha_max)
         if not bool(torch.isfinite(tau_max)) or bool(tau_max <= tiny):
-            return None
+            return reject("selected-opacity-range")
         intrinsic = self.context_intrinsics[0, view_index].to(device=device, dtype=dtype)
         extrinsic = self.context_extrinsics[0, view_index].to(device=device, dtype=dtype)
         output_means = []
@@ -1377,7 +1384,7 @@ class ProgressiveSAES:
             mass_weights = ownership[anchor] * source_mass
             total_mass = mass_weights.sum()
             if not bool(torch.isfinite(total_mass)) or bool(total_mass <= tiny):
-                return None
+                return reject("zero-cluster-optical-mass")
             normalized = mass_weights / total_mass
             center = torch.einsum("n,ni->i", normalized, centers)
             centered = centers - center.unsqueeze(0)
@@ -1395,22 +1402,22 @@ class ProgressiveSAES:
                     target_projected_covariance
                 )
             except RuntimeError:
-                return None
+                return reject("projected-second-moment-eigendecomposition")
             if (
                 not bool(torch.isfinite(target_eigenvalues).all())
                 or bool((target_eigenvalues < -1e-7).any())
             ):
-                return None
+                return reject("projected-second-moment-psd")
             target_projected_covariance = target_eigenvectors @ torch.diag(
                 target_eigenvalues.clamp_min(tiny)
             ) @ target_eigenvectors.mT
             target_area = torch.sqrt(torch.linalg.det(target_projected_covariance))
             if not bool(torch.isfinite(target_area)) or bool(target_area <= tiny):
-                return None
+                return reject("projected-second-moment-area")
             raw_tau = total_mass / target_area
             raw_alpha = -torch.expm1(-raw_tau)
             if not bool(torch.isfinite(raw_alpha)) or bool(raw_alpha < 0.0):
-                return None
+                return reject("raw-opacity")
 
             # The range constraint remains anchored to actual selected outputs.
             # If the cluster needs more footprint to avoid exceeding that
@@ -1423,7 +1430,7 @@ class ProgressiveSAES:
                     not bool(torch.isfinite(footprint_expansion))
                     or bool(footprint_expansion < 1.0)
                 ):
-                    return None
+                    return reject("required-footprint-expansion")
                 target_projected_covariance = (
                     target_projected_covariance * footprint_expansion
                 )
@@ -1435,7 +1442,7 @@ class ProgressiveSAES:
                 or bool(output_alpha < alpha_min - 1e-5)
                 or bool(output_alpha > alpha_max + 1e-5)
             ):
-                return None
+                return reject("selected-opacity-range")
 
             # Reconstruct a 3D covariance whose local image-plane projection
             # matches the weighted 2D moment.  The null-space component keeps
@@ -1447,14 +1454,14 @@ class ProgressiveSAES:
             try:
                 camera_ray = torch.linalg.solve(intrinsic, homogeneous_center)
             except RuntimeError:
-                return None
+                return reject("output-camera-ray")
             if (
                 not bool(torch.isfinite(camera_ray).all())
                 or bool(camera_ray[2].abs() <= tiny)
                 or not bool(torch.isfinite(depth))
                 or bool(depth <= tiny)
             ):
-                return None
+                return reject("output-camera-geometry")
             camera_mean = camera_ray / camera_ray[2] * depth
             normalized_jacobian = torch.zeros((2, 3), device=device, dtype=dtype)
             normalized_jacobian[0, 0] = depth.reciprocal()
@@ -1465,13 +1472,13 @@ class ProgressiveSAES:
             try:
                 singular_values = torch.linalg.svdvals(output_jacobian)
             except RuntimeError:
-                return None
+                return reject("output-projection-svd")
             if (
                 singular_values.numel() != 2
                 or not bool(torch.isfinite(singular_values).all())
                 or bool(singular_values[-1] <= tiny)
             ):
-                return None
+                return reject("output-projection-condition")
             output_pseudoinverse = torch.linalg.pinv(output_jacobian)
             ray_direction = camera_mean / camera_mean.norm().clamp_min(tiny)
             depth_variance = torch.einsum(
@@ -1489,12 +1496,12 @@ class ProgressiveSAES:
                     camera_covariance
                 )
             except RuntimeError:
-                return None
+                return reject("output-covariance-eigendecomposition")
             if (
                 not bool(torch.isfinite(output_eigenvalues).all())
                 or bool((output_eigenvalues < -1e-7).any())
             ):
-                return None
+                return reject("output-covariance-psd")
             camera_covariance = output_eigenvectors @ torch.diag(
                 output_eigenvalues.clamp_min(tiny)
             ) @ output_eigenvectors.mT
@@ -1520,7 +1527,7 @@ class ProgressiveSAES:
                 or mass_error > mass_tolerance
                 or projected_error > 1e-3
             ):
-                return None
+                return reject("construction-consistency")
 
             flat_harmonic = torch.einsum(
                 "n,nk->k", normalized, harmonics.reshape(source_count, -1)
@@ -3087,6 +3094,7 @@ class ProgressiveSAES:
             }:
                 self.stats[key] = 0
         self.stats['same_budget_dense_oracle_required_footprint_expansion_max'] = 1.0
+        self.stats['same_budget_dense_oracle_failure_reasons'] = {}
 
         tiles_h = self.H // self.initial_tile_size
         tiles_w = self.W // self.initial_tile_size
@@ -3438,6 +3446,8 @@ class ProgressiveSAES:
                                     modified_mask[output_index] = True
                                     total_zeroed += 1
                             self.stats['same_budget_dense_oracle_tiles'] += 1
+                            if tile_trace is not None:
+                                tile_trace[-1]['oracle_materialization'] = 'compressed'
                         if fallback_to_full:
                             if self.merge_semantics in (
                                 "conditional-optical-mass",
@@ -3463,6 +3473,18 @@ class ProgressiveSAES:
                                     ] += 1
                             elif self.merge_semantics == "same-budget-dense-oracle":
                                 self.stats['same_budget_dense_oracle_fallback_tiles'] += 1
+                                reason = getattr(
+                                    self,
+                                    '_same_budget_dense_oracle_last_failure',
+                                    None,
+                                ) or 'unknown'
+                                reasons = self.stats[
+                                    'same_budget_dense_oracle_failure_reasons'
+                                ]
+                                reasons[reason] = reasons.get(reason, 0) + 1
+                                if tile_trace is not None:
+                                    tile_trace[-1]['oracle_materialization'] = 'full-fallback'
+                                    tile_trace[-1]['oracle_failure_reason'] = reason
                             self.stats['full_tiles'] += 1
                             self.stats['full_stage3_gaussians'] += (
                                 tile_size * tile_size * self.primitives_per_pixel

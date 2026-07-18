@@ -129,6 +129,9 @@ def test_same_budget_dense_oracle_fails_closed_without_partial_writes():
     assert stats["same_budget_dense_oracle_tiles"] == 0
     assert stats["same_budget_dense_oracle_fallback_tiles"] == 1
     assert stats["same_budget_dense_oracle_full_stage3_reads"] == 16
+    assert stats["same_budget_dense_oracle_failure_reasons"] == {
+        "nonfinite-dense-descriptor": 1
+    }
     assert stats["full_tiles"] == 1
     assert stats["effective_gaussians"] == 16
     assert not bool(modified.any())
