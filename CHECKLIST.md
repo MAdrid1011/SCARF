@@ -803,9 +803,9 @@ Verified on 2026-07-16 and 2026-07-17:
   `164` passed; the path has zero compression, separately charged successful
   and aborted geometry/traffic work, is non-paper-eligible, and does not
   authorize a quality run.
-- [ ] Separately pre-register a fixed target-free DL3DV virtual-output audit
-  for this candidate. Do not run it, read target RGB, retry quality, or expand
-  DL3DV until that contract and its audit-specific tests are committed.
+- [x] Defer the zero-compression virtual-output audit. Its synthetic result is
+  preserved, but it is not the capacity follow-up and cannot authorize a
+  quality retry or DL3DV expansion.
 - [x] Add a fail-closed DL3DV training-calibration archive path: enumerate the
   authenticated official tree, freeze an evaluation-disjoint 24+8 plan before
   download, verify selected ZIP byte counts and upstream object ids, record
@@ -863,3 +863,27 @@ Verified on 2026-07-16 and 2026-07-17:
   candidate must be target-free until it passes synthetic/descriptor gates,
   or use only the official evaluation-disjoint training calibration once
   upstream `DL3DV-ALL-480P` authorization is granted.
+- [x] Complete the fixed K/2K render-teacher capacity diagnostic in
+  `transplat_sample0_same_budget_render_teacher_oracle_v3_frozen_contract/`
+  (results SHA256 `e4c110a087c8f19126f235a88091383e9b85e34d713ffd70a5960ad91e5ae295`,
+  source `ce9349c`). It freezes input identity, mask hashes, and
+  `131072/9432/4792/116848` dense/removed/representative/Full accounting;
+  target RGB is removed before encoding and only dense renderer output teaches
+  the 128-step post-hoc optimizer. Final teacher fidelity is `53.5922 dB`,
+  `0.998050` SSIM, and `0.006741` LPIPS. This proves bounded-slot capacity,
+  not target-free or runtime feasibility, and authorizes no quality retry.
+- [ ] Pre-register exactly one context-only, target-free multi-view
+  representative-moment audit before any new DL3DV quality measurement. Keep
+  the fixed checkpoint, seed, router, thresholds, K/2K/Full mask,
+  representative count, Full passthrough slots, and event accounting; compare
+  the current single-producer merge with a deterministic context-projected /
+  tangent-plane first/second-moment construction using only context cameras,
+  selected anchors, and existing assignments. Remove target RGB and target
+  camera metadata before device transfer; do not render, decode, compute
+  quality metrics, inspect expected results, optimize parameters, select a
+  sample, or fit a threshold. Dense skipped S3 may be read only after candidate
+  output is committed as a post-hoc reference. Require PSD/finite,
+  constant/one-hot, single-assignment, camera-equivariance, selected/skipped
+  poison, fixed-mask/event, and atomic Full-fallback gates. Whatever its
+  outcome remains diagnostic-only and cannot authorize a quality/full DL3DV
+  retry.

@@ -1771,3 +1771,57 @@
   paper-compatible materialization hypothesis that first passes synthetic and
   descriptor-property gates; neither route may use evaluation RGB, metrics,
   sample choice, or threshold fitting.
+
+## 36. Fixed K/2K Render-Teacher Capacity Diagnostic
+
+- Research question: with the already frozen DL3DV/TranSplat sample-0 mask and
+  output budget, is the failure caused by insufficient K/2K representation
+  capacity, or by the current target-free representative construction?
+- Fixed contract: use the evaluation-index SHA256
+  `eab21290cfab8eff12e208377b089b2a65e15f7ba44f7bb085963511354863f4`,
+  checkpoint SHA256
+  `89e43c205a04962e427801385d7d18e74cba063d05a76bf8b28e5fa746a4b69a`,
+  scene `032dee...60ca50ac04ec7`, context `[0,9]`, target indices `[1,3,5,7]`,
+  seed 0, and the committed K/2K/Full partition. Target RGB is removed before
+  encoding; detached dense renderer outputs, not RGB, are the fixed post-hoc
+  teacher. Only the 4,792 representative slots are optimized for exactly 128
+  Adam steps. The route, Full descriptors, deleted slots, target-camera set,
+  and output count are immutable. This is capacity evidence only, never a
+  runtime implementation, paper result, or quality retry.
+- Binding result: preserve
+  `outputs/ae_dl3dv_repair_diagnostics/
+  transplat_sample0_same_budget_render_teacher_oracle_v3_frozen_contract/`
+  (results SHA256
+  `e4c110a087c8f19126f235a88091383e9b85e34d713ffd70a5960ad91e5ae295`,
+  source `ce9349c`). Input identity, the modified-mask SHA256
+  `8e5df2...e8e4333e`, the representative-mask SHA256
+  `13384c...c414726`, and `131072 / 9432 / 4792 / 116848` dense / removed /
+  representative / Full counts all match their frozen values. Every Full
+  descriptor is exact before and after compaction and immutable throughout the
+  optimizer. The loss falls from `4.978138e-4` to `4.405215e-6`; final dense
+  teacher fidelity is `53.5922 dB`, `0.998050` SSIM, and `0.006741` LPIPS.
+  Optimized-representative and teacher file hashes are verified against the
+  result record. No target RGB, quality metric, sparse execution, or saving
+  claim is present.
+- Interpretation: K/2K capacity is sufficient under this bounded,
+  target-camera post-hoc teacher, while the fixed drop-only / merge-only /
+  drop+merge attribution establishes that removal coverage and occlusion, not
+  representative parameter capacity alone, dominate the current loss. This is
+  not a target-free construction and does not prove that a paper-compatible
+  sparse path can attain that fidelity.
+- Next gate: before any quality retry, pre-register exactly one target-free,
+  target-camera-free multi-context representative-moment audit. It must
+  preserve the current route, sample, seed, thresholds, K/2K mask, Full
+  fallback, and event accounting; compare the current single-producer merge
+  with a deterministic context-projected/tangent-plane first/second-moment
+  construction using only selected-anchor S3, S1/S2, existing assignments, and
+  static context-camera geometry. The candidate must reject target camera
+  metadata, RGB, teacher renders, metrics, parameter optimization, sample
+  selection, and threshold fitting. Dense skipped S3 is permitted only after
+  the candidate output is committed as a post-hoc reference, never as a
+  candidate input. Synthetic gates must prove constant/one-hot behavior,
+  PSD/finite covariance, single assignment, context-view permutation or
+  equivariance where applicable, selected/skipped poison invariance, unchanged
+  route/event counts, and atomic Full fallback. A synthetic pass permits at
+  most one separately registered target-free descriptor audit, not a DL3DV
+  quality or full-protocol run.
