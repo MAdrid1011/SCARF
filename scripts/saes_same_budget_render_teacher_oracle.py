@@ -465,7 +465,7 @@ def collect_render_teacher_oracle(*, device: torch.device, output_dir: Path) -> 
             if step == 0 or (step + 1) % 16 == 0 or step + 1 == STEPS:
                 print(json.dumps({"stage": "render_teacher_oracle", "step": step + 1, "loss": loss_value}))
         elapsed_seconds = time.monotonic() - start
-        final_compact = module.compose().detach()
+        final_compact = _clone_gaussians(module.compose())
         module.assert_immutable_slots(final_compact)
         final_parameter_hashes = module.parameter_hashes()
         with torch.no_grad():
@@ -597,8 +597,10 @@ def main(argv: list[str] | None = None) -> int:
         torch.cuda.manual_seed_all(SEED)
     try:
         record = collect_render_teacher_oracle(device=device, output_dir=args.output_dir)
-    except Exception:
-        (args.output_dir / "FAILED.txt").write_text("render teacher oracle failed\n", encoding="utf-8")
+    except Exception as exc:
+        (args.output_dir / "FAILED.txt").write_text(
+            f"{type(exc).__name__}: {exc}\n", encoding="utf-8"
+        )
         raise
     destination = args.output_dir / "results.json"
     destination.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
