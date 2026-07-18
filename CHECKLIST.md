@@ -879,7 +879,7 @@ Verified on 2026-07-16 and 2026-07-17:
   code changes only retained covariance and records
   `runtime_eligible=false`; the full SAES test set passes (`181 passed`). No
   DL3DV descriptor audit, render, metric, or quality retry is implied.
-- [ ] Pre-register exactly one context-only, target-free multi-view
+- [x] Pre-register and execute exactly one context-only, target-free multi-view
   representative-moment audit before any new DL3DV quality measurement. Keep
   the fixed checkpoint, seed, router, thresholds, K/2K/Full mask,
   representative count, Full passthrough slots, and event accounting; compare
@@ -896,3 +896,16 @@ Verified on 2026-07-16 and 2026-07-17:
   evidence. A pass under its separately frozen directional gate may authorize
   only the pre-registration of one fixed DL3DV sample-0 quality gate; a failed
   or inconclusive audit authorizes neither that gate nor a full DL3DV retry.
+  The preserved execution at
+  `transplat_sample0_multicontext_tangent_target_free_audit_v1/` is a negative,
+  non-authorizing result: aggregate covariance error worsened by `0.02354%`
+  instead of improving by `>=20%`, and it recorded `1,158` local fallbacks.
+  It did not render or compute quality. Its fixed-input and selected-only-S3
+  enforcement was insufficient for a clean gate, so it is retained honestly
+  as a diagnostic and the tangent candidate is retired rather than rerun.
+- [ ] Before any distinct future descriptor candidate is audited, harden the
+  audit harness to pre-enforce the exact context-only input/source/checkpoint
+  binding and to prove selected-only S3 access with an allowlisted payload,
+  two finite sentinels, trace/counter equality, and committed-output equality.
+  This item cannot authorize a quality retry, a threshold sweep, or revival of
+  the retired tangent candidate.

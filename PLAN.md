@@ -1889,3 +1889,34 @@
   second-moment improvement terminates this tangent candidate; substantial
   local fallback requires geometry/identifiability repair. No branch permits
   a threshold, seed, sample, or protocol change.
+- Execution record (2026-07-18): the one launched run is preserved at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_multicontext_tangent_target_free_audit_v1/`
+  with `results.json` SHA256
+  `a98371e3755fc568f6baef1b94934c3fc61fa65c5108a63c72cb19f4ec2044f8` and
+  phase-A manifest SHA256
+  `18169c7800378a79ed20ca2f077ca5f05d706f45ecfb538ab53db324f239e015`.
+  It did not render, decode, access target RGB/camera metadata, access a
+  teacher or expected results, or compute a quality metric. The two committed
+  outputs had the same route-mask SHA256
+  `d495532166ea723923d1c6f00e8b60b940544d99eaf1aa680a3d6afc474c3a11`, and
+  the recorded Full, means, SH, opacity, route/event, PSD, and poison checks
+  passed before the post-hoc dense read.
+- Negative outcome and stop decision: the post-hoc aggregate projected
+  covariance relative error changed from `0.0542566969` to `0.0542694710`
+  (`-0.02354%` decrease, rather than the required `>=20%` decrease), although
+  optical-mass relative error narrowly improved from `0.1721075829` to
+  `0.1720729075`. It also recorded `1,158` local
+  `invalid-context-projection` fallbacks. `quality_gate_authorized=false`.
+  The tangent candidate is therefore retired: do not tune its residual,
+  threshold, seed, sample, or mask, and do not run a quality retry.
+- Evidence-integrity boundary: this negative run is retained as a
+  non-authorizing diagnostic, not promoted as a clean pre-quality gate. The
+  input sidecar itself was context-only and its recorded tree SHA256 was
+  `a177ebdf7b4871b834bddfa6bf29ab5029ebaa4c2d421ec5a5ac3f8bd09f5605`, but
+  the runner only recorded rather than pre-enforced the fixed input and
+  checkpoint bindings, and its selected-only S3 proof used a single poison
+  behavior check rather than an instrumented access boundary. Before any
+  distinct future candidate receives a new descriptor audit, harden those
+  controls with an exact input allowlist/source binding, pre-load hash checks,
+  and two-sentinel selected-only access instrumentation. This does not reopen
+  or rerun the retired tangent candidate.
