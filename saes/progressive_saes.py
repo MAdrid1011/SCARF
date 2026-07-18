@@ -266,6 +266,7 @@ class ProgressiveSAES:
             "transmittance-diagnostic",
             "virtual-reconstruction-diagnostic",
             "assignment-consensus-adapter-pseudo-descriptor-diagnostic",
+            "same-budget-dense-oracle-diagnostic",
             LEGACY_L1_PRIMARY_DEPTH_REFERENCE_MATERIALIZATION,
             "conditional-anchor-transport-diagnostic",
             "conditional-adapter-offset-transport-diagnostic",
@@ -294,6 +295,9 @@ class ProgressiveSAES:
         # geometry, but reconstructs skipped SH/opacity from the declared
         # bilateral assignments before the receiving-anchor update.
         self.merge_semantics = (
+            "same-budget-dense-oracle"
+            if materialization == "same-budget-dense-oracle-diagnostic"
+            else
             "assignment-consensus-adapter-pseudo-descriptor"
             if materialization
             == "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
@@ -429,6 +433,22 @@ class ProgressiveSAES:
             'assignment_consensus_fallback_tiles': 0,
             'assignment_consensus_l0_fallback_tiles': 0,
             'assignment_consensus_l1_fallback_tiles': 0,
+            # This post-hoc diagnostic may read every dense Stage-3 descriptor
+            # in a candidate tile, but it must still render only the paper's
+            # K/2K retained outputs.  It is deliberately non-runtime and
+            # cannot support a paper result or an S2/S3 saving claim.
+            'same_budget_dense_oracle_tiles': 0,
+            'same_budget_dense_oracle_l0_tiles': 0,
+            'same_budget_dense_oracle_l1_tiles': 0,
+            'same_budget_dense_oracle_fallback_tiles': 0,
+            'same_budget_dense_oracle_full_stage3_reads': 0,
+            'same_budget_dense_oracle_output_gaussians': 0,
+            # These verify the local first-order construction only. Renderer
+            # fidelity is measured separately by the committed image run.
+            'same_budget_dense_oracle_mass_construction_error_max': 0.0,
+            'same_budget_dense_oracle_projected_moment_construction_error_max': 0.0,
+            'same_budget_dense_oracle_required_footprint_expansion_max': 1.0,
+            'same_budget_dense_oracle_runtime_eligible': False,
             'covariance_psd_violations': 0,
             # Conditional optical-density transport is diagnostic until it
             # passes the target-free and image-quality gates.  These counters
@@ -1117,6 +1137,94 @@ class ProgressiveSAES:
             return None
         return torch.sqrt(determinants)
 
+    def _context_projected_moments(
+        self,
+        means: torch.Tensor,
+        covariances: torch.Tensor,
+        *,
+        view_index: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """Project world-space Gaussian moments into one producer camera.
+
+        The dense oracle uses this only after a full Stage-3 pass.  Keeping the
+        projection here makes the oracle's coverage calculation share the
+        same C2W/intrinsics convention as the runtime diagnostic rather than
+        approximating image footprint with 3D covariance volume.
+        """
+        if (
+            self.context_extrinsics is None
+            or self.context_intrinsics is None
+            or means.ndim != 2
+            or means.shape[1] != 3
+            or covariances.shape != (means.shape[0], 3, 3)
+            or not 0 <= view_index < self.view_count
+        ):
+            return None
+        dtype = means.dtype
+        device = means.device
+        extrinsic = self.context_extrinsics[0, view_index].to(device=device, dtype=dtype)
+        intrinsic = self.context_intrinsics[0, view_index].to(device=device, dtype=dtype)
+        rotation_c2w = extrinsic[:3, :3]
+        camera_points = torch.einsum(
+            "ij,nj->ni", rotation_c2w.mT, means - extrinsic[:3, 3]
+        )
+        depth = camera_points[:, 2]
+        tiny = torch.as_tensor(torch.finfo(dtype).tiny, device=device, dtype=dtype)
+        if not bool(torch.isfinite(camera_points).all()) or bool((depth <= tiny).any()):
+            return None
+
+        homogeneous = torch.einsum("ij,nj->ni", intrinsic, camera_points)
+        homogeneous_depth = homogeneous[:, 2]
+        if (
+            not bool(torch.isfinite(homogeneous).all())
+            or bool((homogeneous_depth.abs() <= tiny).any())
+        ):
+            return None
+        centers = homogeneous[:, :2] / homogeneous_depth.unsqueeze(1)
+
+        normalized_jacobian = torch.zeros(
+            (means.shape[0], 2, 3), device=device, dtype=dtype
+        )
+        normalized_jacobian[:, 0, 0] = depth.reciprocal()
+        normalized_jacobian[:, 1, 1] = depth.reciprocal()
+        normalized_jacobian[:, 0, 2] = -camera_points[:, 0] / depth.square()
+        normalized_jacobian[:, 1, 2] = -camera_points[:, 1] / depth.square()
+        image_jacobian = torch.einsum(
+            "ij,njk->nik", intrinsic[:2, :2], normalized_jacobian
+        )
+        camera_covariances = torch.einsum(
+            "ij,njk,kl->nil", rotation_c2w.mT, covariances, rotation_c2w
+        )
+        projected_covariances = torch.einsum(
+            "nij,njk,nlk->nil",
+            image_jacobian,
+            camera_covariances,
+            image_jacobian,
+        )
+        projected_covariances = (
+            projected_covariances + projected_covariances.mT
+        ) * 0.5
+        try:
+            eigenvalues, eigenvectors = torch.linalg.eigh(projected_covariances)
+        except RuntimeError:
+            return None
+        if (
+            not bool(torch.isfinite(centers).all())
+            or not bool(torch.isfinite(eigenvalues).all())
+            or bool((eigenvalues < -1e-7).any())
+        ):
+            return None
+        projected_covariances = eigenvectors @ torch.diag_embed(
+            eigenvalues.clamp_min(tiny)
+        ) @ eigenvectors.mT
+        return (
+            centers,
+            projected_covariances,
+            camera_points,
+            image_jacobian,
+            rotation_c2w,
+        )
+
     @staticmethod
     def _interpolate_intrinsic_covariance(
         source_covariances: torch.Tensor, weights: torch.Tensor
@@ -1141,6 +1249,346 @@ class ProgressiveSAES:
         )
         covariance = torch.einsum("n,nij->ij", weights, source_covariances)
         return (covariance + covariance.mT) * 0.5
+
+    def _same_budget_dense_oracle_plan(
+        self,
+        gaussians_full,
+        *,
+        probe_indices: List[int],
+        non_probe_items: List[Tuple[Tuple[int, int], int]],
+        retained_positions: List[Tuple[int, int]],
+        assignment_matrix: torch.Tensor,
+        tile_y: int,
+        tile_x: int,
+        view_index: int,
+    ) -> Dict | None:
+        """Build a post-hoc K/2K projected-moment reduction plan.
+
+        This is deliberately an oracle, not a runtime implementation: it may
+        consume full Stage-3 attributes at every tile position after the dense
+        encoder has completed.  The returned plan nevertheless writes only the
+        preselected L0 K or L1 2K output slots and removes every other slot.
+        It contains no target RGB or target-view input.
+        """
+        count = len(probe_indices)
+        source_indices = list(probe_indices) + [
+            index for _, index in non_probe_items
+        ]
+        source_positions = list(retained_positions) + [
+            position for position, _ in non_probe_items
+        ]
+        source_count = len(source_indices)
+        if (
+            count < 1
+            or len(retained_positions) != count
+            or len(source_positions) != source_count
+            or assignment_matrix.shape != (len(non_probe_items), count)
+        ):
+            return None
+
+        means = gaussians_full.means[0, source_indices].clone()
+        covariances = gaussians_full.covariances[0, source_indices].clone()
+        harmonics = gaussians_full.harmonics[0, source_indices].clone()
+        opacities = gaussians_full.opacities[0, source_indices].clone()
+        if (
+            not bool(torch.isfinite(means).all())
+            or not bool(torch.isfinite(covariances).all())
+            or not bool(torch.isfinite(harmonics).all())
+            or not bool(torch.isfinite(opacities).all())
+        ):
+            return None
+        flat_opacities = opacities.reshape(source_count, -1)
+        if flat_opacities.shape[1] != 1 or bool(
+            ((flat_opacities < 0.0) | (flat_opacities >= 1.0)).any()
+        ):
+            return None
+        covariances = (covariances + covariances.mT) * 0.5
+        try:
+            covariance_eigenvalues = torch.linalg.eigvalsh(covariances)
+        except RuntimeError:
+            return None
+        if (
+            not bool(torch.isfinite(covariance_eigenvalues).all())
+            or bool((covariance_eigenvalues < -1e-7).any())
+        ):
+            return None
+
+        projected = self._context_projected_moments(
+            means, covariances, view_index=view_index
+        )
+        if projected is None:
+            return None
+        centers, projected_covariances, camera_points, _, rotation_c2w = projected
+        dtype = means.dtype
+        device = means.device
+        tiny = torch.as_tensor(torch.finfo(dtype).tiny, device=device, dtype=dtype)
+        try:
+            projected_determinants = torch.linalg.det(projected_covariances)
+        except RuntimeError:
+            return None
+        if (
+            not bool(torch.isfinite(projected_determinants).all())
+            or bool((projected_determinants <= tiny).any())
+        ):
+            return None
+        source_areas = torch.sqrt(projected_determinants)
+        source_tau = -torch.log1p(-flat_opacities[:, 0])
+        source_mass = source_tau * source_areas
+        if (
+            not bool(torch.isfinite(source_mass).all())
+            or bool((source_mass < 0.0).any())
+        ):
+            return None
+        if assignment_matrix.numel() and (
+            not bool(torch.isfinite(assignment_matrix).all())
+            or bool((assignment_matrix < 0.0).any())
+            or bool((assignment_matrix.sum(dim=1) - 1.0).abs().max() > 1e-5)
+        ):
+            return None
+
+        # Each selected output keeps its own dense descriptor with unit
+        # ownership.  Every skipped descriptor contributes its optical mass
+        # exactly once across the existing bilateral assignment simplex.
+        ownership = torch.cat(
+            (
+                torch.eye(count, device=device, dtype=dtype),
+                assignment_matrix.mT,
+            ),
+            dim=1,
+        )
+        selected_opacities = flat_opacities[:count, 0]
+        selected_harmonics = harmonics[:count].reshape(count, -1)
+        alpha_min = selected_opacities.amin()
+        alpha_max = selected_opacities.amax()
+        tau_max = -torch.log1p(-alpha_max)
+        if not bool(torch.isfinite(tau_max)) or bool(tau_max <= tiny):
+            return None
+        intrinsic = self.context_intrinsics[0, view_index].to(device=device, dtype=dtype)
+        extrinsic = self.context_extrinsics[0, view_index].to(device=device, dtype=dtype)
+        output_means = []
+        output_covariances = []
+        output_harmonics = []
+        output_opacities = []
+        mass_error_max = 0.0
+        projected_moment_error_max = 0.0
+        footprint_expansion_max = 1.0
+
+        for anchor in range(count):
+            mass_weights = ownership[anchor] * source_mass
+            total_mass = mass_weights.sum()
+            if not bool(torch.isfinite(total_mass)) or bool(total_mass <= tiny):
+                return None
+            normalized = mass_weights / total_mass
+            center = torch.einsum("n,ni->i", normalized, centers)
+            centered = centers - center.unsqueeze(0)
+            target_projected_covariance = torch.einsum(
+                "n,nij->ij",
+                normalized,
+                projected_covariances
+                + torch.einsum("ni,nj->nij", centered, centered),
+            )
+            target_projected_covariance = (
+                target_projected_covariance + target_projected_covariance.mT
+            ) * 0.5
+            try:
+                target_eigenvalues, target_eigenvectors = torch.linalg.eigh(
+                    target_projected_covariance
+                )
+            except RuntimeError:
+                return None
+            if (
+                not bool(torch.isfinite(target_eigenvalues).all())
+                or bool((target_eigenvalues < -1e-7).any())
+            ):
+                return None
+            target_projected_covariance = target_eigenvectors @ torch.diag(
+                target_eigenvalues.clamp_min(tiny)
+            ) @ target_eigenvectors.mT
+            target_area = torch.sqrt(torch.linalg.det(target_projected_covariance))
+            if not bool(torch.isfinite(target_area)) or bool(target_area <= tiny):
+                return None
+            raw_tau = total_mass / target_area
+            raw_alpha = -torch.expm1(-raw_tau)
+            if not bool(torch.isfinite(raw_alpha)) or bool(raw_alpha < 0.0):
+                return None
+
+            # The range constraint remains anchored to actual selected outputs.
+            # If the cluster needs more footprint to avoid exceeding that
+            # opacity, expand tangential covariance rather than inventing alpha.
+            footprint_expansion = torch.ones((), device=device, dtype=dtype)
+            if bool(raw_alpha > alpha_max):
+                required_area = total_mass / tau_max
+                footprint_expansion = required_area / target_area
+                if (
+                    not bool(torch.isfinite(footprint_expansion))
+                    or bool(footprint_expansion < 1.0)
+                ):
+                    return None
+                target_projected_covariance = (
+                    target_projected_covariance * footprint_expansion
+                )
+                target_area = target_area * footprint_expansion
+            output_tau = total_mass / target_area
+            output_alpha = -torch.expm1(-output_tau)
+            if (
+                not bool(torch.isfinite(output_alpha))
+                or bool(output_alpha < alpha_min - 1e-5)
+                or bool(output_alpha > alpha_max + 1e-5)
+            ):
+                return None
+
+            # Reconstruct a 3D covariance whose local image-plane projection
+            # matches the weighted 2D moment.  The null-space component keeps
+            # the full-source depth variance without perturbing that projection.
+            depth = torch.einsum("n,n->", normalized, camera_points[:, 2])
+            homogeneous_center = torch.cat(
+                (center, torch.ones(1, device=device, dtype=dtype))
+            )
+            try:
+                camera_ray = torch.linalg.solve(intrinsic, homogeneous_center)
+            except RuntimeError:
+                return None
+            if (
+                not bool(torch.isfinite(camera_ray).all())
+                or bool(camera_ray[2].abs() <= tiny)
+                or not bool(torch.isfinite(depth))
+                or bool(depth <= tiny)
+            ):
+                return None
+            camera_mean = camera_ray / camera_ray[2] * depth
+            normalized_jacobian = torch.zeros((2, 3), device=device, dtype=dtype)
+            normalized_jacobian[0, 0] = depth.reciprocal()
+            normalized_jacobian[1, 1] = depth.reciprocal()
+            normalized_jacobian[0, 2] = -camera_mean[0] / depth.square()
+            normalized_jacobian[1, 2] = -camera_mean[1] / depth.square()
+            output_jacobian = intrinsic[:2, :2] @ normalized_jacobian
+            try:
+                singular_values = torch.linalg.svdvals(output_jacobian)
+            except RuntimeError:
+                return None
+            if (
+                singular_values.numel() != 2
+                or not bool(torch.isfinite(singular_values).all())
+                or bool(singular_values[-1] <= tiny)
+            ):
+                return None
+            output_pseudoinverse = torch.linalg.pinv(output_jacobian)
+            ray_direction = camera_mean / camera_mean.norm().clamp_min(tiny)
+            depth_variance = torch.einsum(
+                "n,n->", normalized, (camera_points[:, 2] - depth).square()
+            )
+            camera_covariance = (
+                output_pseudoinverse
+                @ target_projected_covariance
+                @ output_pseudoinverse.mT
+                + depth_variance * torch.outer(ray_direction, ray_direction)
+            )
+            camera_covariance = (camera_covariance + camera_covariance.mT) * 0.5
+            try:
+                output_eigenvalues, output_eigenvectors = torch.linalg.eigh(
+                    camera_covariance
+                )
+            except RuntimeError:
+                return None
+            if (
+                not bool(torch.isfinite(output_eigenvalues).all())
+                or bool((output_eigenvalues < -1e-7).any())
+            ):
+                return None
+            camera_covariance = output_eigenvectors @ torch.diag(
+                output_eigenvalues.clamp_min(tiny)
+            ) @ output_eigenvectors.mT
+            observed_projected_covariance = (
+                output_jacobian @ camera_covariance @ output_jacobian.mT
+            )
+            observed_projected_covariance = (
+                observed_projected_covariance + observed_projected_covariance.mT
+            ) * 0.5
+            projected_error = float(
+                (observed_projected_covariance - target_projected_covariance)
+                .abs()
+                .max()
+                .item()
+            )
+            observed_area = torch.sqrt(torch.linalg.det(observed_projected_covariance))
+            observed_mass = output_tau * observed_area
+            mass_error = float((observed_mass - total_mass).abs().item())
+            mass_tolerance = float((1e-6 + 1e-5 * total_mass.abs()).item())
+            if (
+                not bool(torch.isfinite(observed_area))
+                or bool(observed_area <= tiny)
+                or mass_error > mass_tolerance
+                or projected_error > 1e-3
+            ):
+                return None
+
+            flat_harmonic = torch.einsum(
+                "n,nk->k", normalized, harmonics.reshape(source_count, -1)
+            )
+            flat_harmonic = torch.maximum(
+                torch.minimum(flat_harmonic, selected_harmonics.amax(dim=0)),
+                selected_harmonics.amin(dim=0),
+            )
+            world_mean = rotation_c2w @ camera_mean + extrinsic[:3, 3]
+            world_covariance = rotation_c2w @ camera_covariance @ rotation_c2w.mT
+            world_covariance = (world_covariance + world_covariance.mT) * 0.5
+            output_means.append(world_mean)
+            output_covariances.append(world_covariance)
+            output_harmonics.append(flat_harmonic.reshape_as(harmonics[0]))
+            output_opacities.append(output_alpha.reshape_as(opacities[0]))
+            mass_error_max = max(mass_error_max, mass_error)
+            projected_moment_error_max = max(
+                projected_moment_error_max, projected_error
+            )
+            footprint_expansion_max = max(
+                footprint_expansion_max, float(footprint_expansion.item())
+            )
+
+        output_mass = sum(
+            float((ownership[index] * source_mass).sum().item())
+            for index in range(count)
+        )
+        source_mass_total = float(source_mass.sum().item())
+        mass_error_max = max(mass_error_max, abs(output_mass - source_mass_total))
+        return {
+            "output_indices": tuple(probe_indices),
+            "zero_indices": tuple(index for _, index in non_probe_items),
+            "means": torch.stack(output_means),
+            "covariances": torch.stack(output_covariances),
+            "harmonics": torch.stack(output_harmonics),
+            "opacities": torch.stack(output_opacities),
+            "output_gaussians": count,
+            "mass_error_max": mass_error_max,
+            "projected_moment_error_max": projected_moment_error_max,
+            "required_footprint_expansion_max": footprint_expansion_max,
+        }
+
+    def _commit_same_budget_dense_oracle_plan(self, gaussians_full, plan: Dict) -> None:
+        """Commit a validated oracle plan after every tile slot has succeeded."""
+        output_indices = list(plan["output_indices"])
+        gaussians_full.means[0, output_indices] = plan["means"]
+        gaussians_full.covariances[0, output_indices] = plan["covariances"]
+        gaussians_full.harmonics[0, output_indices] = plan["harmonics"]
+        gaussians_full.opacities[0, output_indices] = plan["opacities"]
+        self.stats['same_budget_dense_oracle_output_gaussians'] += plan[
+            "output_gaussians"
+        ]
+        self.stats['same_budget_dense_oracle_mass_construction_error_max'] = max(
+            self.stats['same_budget_dense_oracle_mass_construction_error_max'],
+            plan['mass_error_max'],
+        )
+        self.stats[
+            'same_budget_dense_oracle_projected_moment_construction_error_max'
+        ] = max(
+            self.stats[
+                'same_budget_dense_oracle_projected_moment_construction_error_max'
+            ],
+            plan['projected_moment_error_max'],
+        )
+        self.stats['same_budget_dense_oracle_required_footprint_expansion_max'] = max(
+            self.stats['same_budget_dense_oracle_required_footprint_expansion_max'],
+            plan['required_footprint_expansion_max'],
+        )
 
     def _assignment_feature_variance(self, decision_statistic: float) -> float:
         """Convert the decision statistic to the paper kernel's variance unit."""
@@ -1585,6 +2033,7 @@ class ProgressiveSAES:
         output_style: str = "representative",
         merge_semantics: str = "assignment-mixture",
         defer_assignment_consensus_plan: bool = False,
+        defer_same_budget_dense_oracle_plan: bool = False,
     ):
         """Absorb a tile using only selected-anchor Stage-3 attributes.
 
@@ -1601,7 +2050,14 @@ class ProgressiveSAES:
         device = gaussians_full.means.device
         K = len(probe_indices)
         if K < 1:
-            return (True, None) if defer_assignment_consensus_plan else None
+            return (
+                (True, None)
+                if (
+                    defer_assignment_consensus_plan
+                    or defer_same_budget_dense_oracle_plan
+                )
+                else None
+            )
         if opacity_aggregation not in (
             "range-constrained-average",
             "assignment-weighted-optical-depth",
@@ -1611,11 +2067,13 @@ class ProgressiveSAES:
             "representative",
             "virtual-reconstruction",
             "assignment-consensus-adapter-pseudo-descriptor",
+            "same-budget-dense-oracle",
         ):
             raise ValueError(f"unsupported SAES output style: {output_style}")
         if merge_semantics not in (
             "assignment-mixture",
             "assignment-consensus-adapter-pseudo-descriptor",
+            "same-budget-dense-oracle",
             "conditional-anchor-transport",
             "conditional-adapter-offset-transport",
             "conditional-adapter-offset-attribute-transport",
@@ -1645,12 +2103,31 @@ class ProgressiveSAES:
             raise ValueError(
                 "assignment-consensus merge semantics require virtual-only output"
             )
+        if (
+            output_style == "same-budget-dense-oracle"
+            and merge_semantics != "same-budget-dense-oracle"
+        ):
+            raise ValueError(
+                "same-budget dense oracle requires its isolated merge semantics"
+            )
+        if (
+            merge_semantics == "same-budget-dense-oracle"
+            and output_style != "same-budget-dense-oracle"
+        ):
+            raise ValueError(
+                "same-budget dense-oracle merge semantics require oracle output"
+            )
         is_assignment_consensus = (
             output_style == "assignment-consensus-adapter-pseudo-descriptor"
         )
+        is_same_budget_dense_oracle = output_style == "same-budget-dense-oracle"
         if defer_assignment_consensus_plan and not is_assignment_consensus:
             raise ValueError(
                 "only assignment-consensus virtual outputs may defer a tile plan"
+            )
+        if defer_same_budget_dense_oracle_plan and not is_same_budget_dense_oracle:
+            raise ValueError(
+                "only same-budget dense-oracle outputs may defer a tile plan"
             )
 
         gaussian_dtype = gaussians_full.means.dtype
@@ -1832,6 +2309,28 @@ class ProgressiveSAES:
             if defer_assignment_consensus_plan:
                 return False, plan
             self._commit_assignment_consensus_plan(gaussians_full, plan)
+            return False
+
+        if output_style == "same-budget-dense-oracle":
+            plan = self._same_budget_dense_oracle_plan(
+                gaussians_full,
+                probe_indices=probe_indices,
+                non_probe_items=non_probe_items,
+                retained_positions=retained_positions,
+                assignment_matrix=assignment_matrix,
+                tile_y=tile_y,
+                tile_x=tile_x,
+                view_index=view_index,
+            )
+            if plan is None:
+                return (
+                    (True, None)
+                    if defer_same_budget_dense_oracle_plan
+                    else True
+                )
+            if defer_same_budget_dense_oracle_plan:
+                return False, plan
+            self._commit_same_budget_dense_oracle_plan(gaussians_full, plan)
             return False
 
         if merge_semantics in (
@@ -2584,8 +3083,10 @@ class ProgressiveSAES:
                 'l1_depth_reference',
                 'merge_semantics',
                 'materialization_guard_enabled',
+                'same_budget_dense_oracle_runtime_eligible',
             }:
                 self.stats[key] = 0
+        self.stats['same_budget_dense_oracle_required_footprint_expansion_max'] = 1.0
 
         tiles_h = self.H // self.initial_tile_size
         tiles_w = self.W // self.initial_tile_size
@@ -2791,7 +3292,18 @@ class ProgressiveSAES:
                         is_assignment_consensus = self.materialization == (
                             "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
                         )
+                        is_same_budget_dense_oracle = self.materialization == (
+                            "same-budget-dense-oracle-diagnostic"
+                        )
                         consensus_plans = []
+                        dense_oracle_plans = []
+                        if is_same_budget_dense_oracle:
+                            # This diagnostic reads each dense Stage-3 slot
+                            # after a route candidate is fixed, including a
+                            # candidate that subsequently fails closed.
+                            self.stats['same_budget_dense_oracle_full_stage3_reads'] += (
+                                tile_size * tile_size * self.primitives_per_pixel
+                            )
                         for slot in range(self.primitives_per_pixel):
                             if self.materialization == "dense-diagnostic":
                                 materialized_positions = self.probe_positions
@@ -2804,6 +3316,7 @@ class ProgressiveSAES:
                             "transmittance-diagnostic",
                             "virtual-reconstruction-diagnostic",
                             "assignment-consensus-adapter-pseudo-descriptor-diagnostic",
+                            "same-budget-dense-oracle-diagnostic",
                             "conditional-anchor-transport-diagnostic",
                                 "conditional-adapter-offset-transport-diagnostic",
                                 "conditional-adapter-offset-attribute-transport-diagnostic",
@@ -2839,26 +3352,37 @@ class ProgressiveSAES:
                                         else "assignment-consensus-adapter-pseudo-descriptor"
                                         if self.materialization
                                         == "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
+                                        else "same-budget-dense-oracle"
+                                        if self.materialization
+                                        == "same-budget-dense-oracle-diagnostic"
                                         else "representative"
                                     ),
                                     merge_semantics=self.merge_semantics,
                                     defer_assignment_consensus_plan=(
                                         is_assignment_consensus
                                     ),
+                                    defer_same_budget_dense_oracle_plan=(
+                                        is_same_budget_dense_oracle
+                                    ),
                                 )
-                                if is_assignment_consensus:
-                                    fallback_to_full, consensus_plan = moment_result
+                                if (
+                                    is_assignment_consensus
+                                    or is_same_budget_dense_oracle
+                                ):
+                                    fallback_to_full, deferred_plan = moment_result
                                     if not fallback_to_full:
                                         # A tile whose anchors cover every
-                                        # position has no skipped virtual
-                                        # output. That is a valid no-op, not a
-                                        # failed consensus plan.
-                                        if consensus_plan is None and non_probes:
+                                        # position has no skipped output. That
+                                        # is a valid no-op, not a failed plan.
+                                        if deferred_plan is None and non_probes:
                                             raise RuntimeError(
-                                                "assignment-consensus plan is missing"
+                                                "deferred SAES diagnostic plan is missing"
                                             )
-                                        if consensus_plan is not None:
-                                            consensus_plans.append(consensus_plan)
+                                        if deferred_plan is not None:
+                                            if is_assignment_consensus:
+                                                consensus_plans.append(deferred_plan)
+                                            else:
+                                                dense_oracle_plans.append(deferred_plan)
                                 else:
                                     fallback_to_full = moment_result
                                 if fallback_to_full:
@@ -2881,10 +3405,10 @@ class ProgressiveSAES:
                                 self._dense_interpolate_non_probes(
                                     gaussians_full, probes, non_probes
                                 )
-                            if is_assignment_consensus:
+                            if is_assignment_consensus or is_same_budget_dense_oracle:
                                 # Plans are committed only after every slot
-                                # validates, so no skipped S3 descriptor needs
-                                # a rollback snapshot.
+                                # validates, so no failed tile needs a rollback
+                                # snapshot before it remains Full.
                                 continue
                             preserves_virtual_outputs = self.materialization in (
                                 "dense-diagnostic",
@@ -2904,6 +3428,16 @@ class ProgressiveSAES:
                                 )
                                 for output_index in consensus_plan["output_indices"]:
                                     modified_mask[output_index] = True
+                        if is_same_budget_dense_oracle and not fallback_to_full:
+                            for dense_oracle_plan in dense_oracle_plans:
+                                self._commit_same_budget_dense_oracle_plan(
+                                    gaussians_full, dense_oracle_plan
+                                )
+                                for output_index in dense_oracle_plan["zero_indices"]:
+                                    gaussians_full.opacities[0, output_index] *= 0.0
+                                    modified_mask[output_index] = True
+                                    total_zeroed += 1
+                            self.stats['same_budget_dense_oracle_tiles'] += 1
                         if fallback_to_full:
                             if self.merge_semantics in (
                                 "conditional-optical-mass",
@@ -2927,6 +3461,8 @@ class ProgressiveSAES:
                                     self.stats[
                                         'assignment_consensus_l1_fallback_tiles'
                                     ] += 1
+                            elif self.merge_semantics == "same-budget-dense-oracle":
+                                self.stats['same_budget_dense_oracle_fallback_tiles'] += 1
                             self.stats['full_tiles'] += 1
                             self.stats['full_stage3_gaussians'] += (
                                 tile_size * tile_size * self.primitives_per_pixel
@@ -2941,12 +3477,16 @@ class ProgressiveSAES:
                             self.stats['l0_representatives'] += (
                                 len(retained_positions) * self.primitives_per_pixel
                             )
+                            if is_same_budget_dense_oracle:
+                                self.stats['same_budget_dense_oracle_l0_tiles'] += 1
                         else:
                             self.stats['level1_tiles'] += 1
                             self.stats['level1_pixels'] += pixel_count
                             self.stats['l1_lightweight_anchors'] += (
                                 len(retained_positions) * self.primitives_per_pixel
                             )
+                            if is_same_budget_dense_oracle:
+                                self.stats['same_budget_dense_oracle_l1_tiles'] += 1
                         self.stats['pixels_original'] += len(retained_positions)
                         continue
 
