@@ -912,11 +912,14 @@ Verified on 2026-07-16 and 2026-07-17:
   read count, never as selected-only execution. This cannot authorize a
   quality retry, a threshold sweep, or revival of the retired tangent
   candidate.
-- [ ] Run the zero-output strict-FP32 initial-compact smoke in a fresh CUDA
-  process. It must pass fixed input/checkpoint hashes, the two-sentinel access
-  preflight, exact partition, finite/immutable Full slots, and one target
-  view shape/finite check without target RGB, teacher metrics, optimizer, or
-  an output artifact.
+- [x] Run the zero-output strict-FP32 initial-compact smoke in a fresh CUDA
+  process. The 2026-07-18 command exited `0` with no output artifact, target
+  RGB, teacher metric, or optimizer. It passed fixed input/checkpoint hashes,
+  both selected-only sentinels, exact `131072/9432/4792/116848` partition,
+  immutable Full slots, and finite target-view-0 `[3,256,256]` render. Its
+  transient terminal log SHA256 is
+  `ef3501040e0b5d92420fbcd8c2c9e27a2c9dbf59eadae7423d839071e2686475`;
+  the record separately reports the non-runtime 46,896 full-S3 oracle reads.
 - [ ] Run exactly one frozen render-teacher representative-parameter
   attribution at
   `transplat_sample0_same_budget_render_teacher_parameter_attribution_v2/`.

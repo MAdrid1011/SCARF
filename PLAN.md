@@ -1975,6 +1975,14 @@
   the common preflight, exact frozen partition, finite descriptors, Full-slot
   passthrough, and `[3,H,W]` finite render shape before the unique twelve-
   variant run is permitted.
+- Smoke result: the 2026-07-18 fresh-process run exited `0` and emitted no
+  result artifact. It passed the fixed `131072/9432/4792/116848` partition,
+  two-sentinel selected-only preflight, immutable Full slots, and finite
+  `[3,256,256]` target-view-0 render with `target_rgb_accessed=false`,
+  `teacher_metrics_computed=false`, and `optimizer_executed=false`. The
+  transient terminal capture SHA256 was
+  `ef3501040e0b5d92420fbcd8c2c9e27a2c9dbf59eadae7423d839071e2686475`.
+  Its observed `46,896` dense-oracle S3 reads remain explicitly non-runtime.
 - Isolation boundary: target RGB must not be loaded, decoded, transferred, or
   passed to any model component. The only target-side input is the frozen
   target-camera metadata needed to render against the saved dense-render
