@@ -936,18 +936,21 @@ Verified on 2026-07-16 and 2026-07-17:
   selected-only S3 proof a shared mandatory precondition for every later frozen
   selected-output or descriptor audit in this line. The dense teacher remains
   an explicit non-runtime full-S3 exception.
-- [ ] Run exactly one frozen render-teacher representative-parameter technical
-  replay at
+- [x] Complete the sole frozen render-teacher representative-parameter
+  technical replay at
   `transplat_sample0_same_budget_render_teacher_parameter_attribution_v3/`.
-  It is a v3 execution identity over the immutable v2 scientific protocol:
-  use only the frozen oracle assets, partition, seed, twelve variants and
-  teacher-only metric contract. The clean-source v3 smoke has passed; the
-  execution must map dense global representatives to compact local slots and
-  verify the mapping before any render. Reject any source, artifact,
-  partition, camera, Full-slot, index-domain, teacher-fidelity, target-RGB, or
-  optimizer-boundary violation. A failure ends this attribution campaign; a
-  completion is capacity evidence only and cannot launch a new materialization
-  candidate or any DL3DV quality gate.
+  Results SHA256:
+  `9a69293a8f482f44573b2fe75f312dbce7b59196f2b79f5d2cd82037130679e4`.
+  The clean-source v3 run passed all index, partition, sentinel, Full-slot,
+  and frozen-teacher controls with all twelve variants, no target RGB and no
+  optimizer. Its direct-teacher attribution requires all four representative
+  families for full recovery: the best proper subset, all-teacher-minus-SH,
+  still loses `5.430664 dB`; all other omissions lose `10.134862`--`14.336210`
+  dB. This is capacity evidence only, not a GT quality result.
+- [x] Close the frozen teacher-attribution campaign. No untrained
+  materialization correction, tangent rerun, or DL3DV quality run is authorized
+  by v3. Any later route must be separately registered as evaluation-disjoint
+  joint-family calibration or a more conservative Full fallback.
 - [x] Preserve the aborted `...parameter_attribution_v1/` record rather than
   overwriting it. It ended before any direct-teacher metric with a CUDA
   device-side assert; its retained record does not determine the cause. The

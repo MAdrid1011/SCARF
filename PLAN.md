@@ -2044,14 +2044,46 @@
   directory. A v3 technical failure terminates this attribution campaign; it
   does not authorize a fourth replay, a tangent rerun, a new materialization
   candidate, or any DL3DV quality measurement.
-- Decision after the one run: if mean+covariance supplies the dominant
-  restoration, the next permitted idea is selected-only multi-context joint
-  geometry/coverage moments. If opacity+covariance dominates, use a joint
-  zero-order optical-mass and second-order footprint constraint. If SH is
-  materially necessary under the all-minus-SH control, any future idea must
-  include selected-anchor appearance residual transport. If no proper subset
-  materially restores teacher fidelity and all four families are necessary,
-  treat untrained closed-form aggregation as inadequate and consider only
-  evaluation-disjoint lightweight calibration or a more conservative Full
-  fallback. None of these branches authorizes an implementation, a second
-  candidate, or a DL3DV quality run in this campaign.
+- v3 result: the sole technical replay completed at clean commit
+  `1cc60352c970f664de32c9e2d74c2246480ec0b6`. Preserve
+  `transplat_sample0_same_budget_render_teacher_parameter_attribution_v3/`
+  `results.json` SHA256
+  `9a69293a8f482f44573b2fe75f312dbce7b59196f2b79f5d2cd82037130679e4`
+  and `run.log` SHA256
+  `c00547a6e4b701154854216ed054f562aaedfc9904748766486a004745a445f0`.
+  It passed the frozen partition, two-sentinel preflight, Full passthrough,
+  clean-source, and both teacher sanity controls. It records twelve exact
+  variants, `target_rgb_accessed=false`, `optimizer_executed=false`,
+  `runtime_execution=false`, and teacher-only rather than GT metrics.
+
+  | Variant | Teacher PSNR | Teacher SSIM | Teacher LPIPS | PSNR restoration |
+  | --- | ---: | ---: | ---: | ---: |
+  | initial compact | 33.029510 | 0.945800 | 0.108249 | 0.000 |
+  | teacher mean | 34.158823 | 0.958224 | 0.090064 | 0.055 |
+  | teacher covariance | 36.195093 | 0.966472 | 0.081981 | 0.154 |
+  | teacher opacity | 37.865929 | 0.975760 | 0.062142 | 0.235 |
+  | teacher SH | 33.577666 | 0.947715 | 0.105821 | 0.027 |
+  | teacher mean + covariance | 37.931542 | 0.978598 | 0.060133 | 0.238 |
+  | teacher opacity + SH | 38.891367 | 0.977193 | 0.060021 | 0.285 |
+  | all teacher | 53.591911 | 0.998050 | 0.006741 | 1.000 |
+  | all teacher minus mean | 43.457049 | 0.989562 | 0.032748 | 0.507 |
+  | all teacher minus covariance | 41.835992 | 0.988770 | 0.033355 | 0.428 |
+  | all teacher minus opacity | 39.255701 | 0.980447 | 0.056870 | 0.303 |
+  | all teacher minus SH | 48.161247 | 0.997526 | 0.007774 | 0.736 |
+
+  The L0/L1 representative counts are `2320/2472`. Their p50 relative
+  parameter changes are mean `0.002928/0.001365`, covariance
+  `0.291985/0.200652`, opacity `0.220807/0.178141`, and SH
+  `0.006370/0.016864`; p95 and maxima remain in the immutable JSON record.
+- Decision after v3: every family is necessary for full teacher recovery. The
+  strongest leave-one-out losses are opacity (`14.336210 dB`), covariance
+  (`11.755919 dB`), and mean (`10.134862 dB`); removing SH still leaves a
+  material `5.430664 dB` gap. No single-family or registered two-family
+  substitute restores even 29% of the span. This refutes the current hope that
+  a no-training closed-form aggregate can recover the frozen same-budget
+  teacher by repairing only geometry or covariance. The attribution campaign
+  is closed: no new materialization candidate, tangent rerun, or DL3DV quality
+  run is authorized. The only future routes consistent with this evidence are
+  evaluation-disjoint lightweight calibration of all necessary families or a
+  more conservative Full fallback, each requiring a separately registered
+  plan and gate.
