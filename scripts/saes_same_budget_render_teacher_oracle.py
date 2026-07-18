@@ -50,6 +50,29 @@ PARAMETER_EPSILON = 1e-5
 CHOLESKY_DIAGONAL_MULTIPLIER = 2.0
 ATTRIBUTE_NAMES = ("means", "covariances", "harmonics", "opacities")
 
+# This diagnostic is intentionally pinned to one public DL3DV sample.  A new
+# input selection or routing partition is a different diagnostic, not a retry.
+FIXED_INPUT_IDENTITY = {
+    "checkpoint_sha256": "89e43c205a04962e427801385d7d18e74cba063d05a76bf8b28e5fa746a4b69a",
+    "evaluation_index_sha256": "eab21290cfab8eff12e208377b089b2a65e15f7ba44f7bb085963511354863f4",
+    "scene": "032dee9fb0a8bc1b90871dc5fe950080d0bcd3caf166447f44e60ca50ac04ec7",
+    "context_indices": [0, 9],
+    "target_indices": [1, 3, 5, 7],
+    "context_shape": [1, 2, 3, 256, 256],
+    "teacher_views": 4,
+}
+FIXED_PARTITION = {
+    "full_gaussians": 131072,
+    "removed_gaussians": 9432,
+    "representative_gaussians": 4792,
+    "full_passthrough_gaussians": 116848,
+    "retained_gaussians": 121640,
+    "l0_representatives": 2320,
+    "l1_lightweight_anchors": 2472,
+    "modified_mask_sha256": "8e5df2e54ee8a4f9dede8b8d375defc2e27e48029a75ab5c8f9c88f5e8e4333e",
+    "representative_mask_sha256": "13384c57310d8831d3476858f4bbc8837dfbbcb666bcfe31e34a9cc60c414726",
+}
+
 
 def _sha256_tensor(tensor: torch.Tensor) -> str:
     value = tensor.detach().contiguous().to(device="cpu")
@@ -89,6 +112,102 @@ def _representative_mask(
     result = torch.zeros_like(modified)
     result[indices] = True
     return result
+
+
+def _assert_fixed_input_identity(
+    *,
+    batch: dict[str, Any],
+    context: dict[str, Any],
+    target: dict[str, torch.Tensor],
+    checkpoint_sha256: str,
+    evaluation_index_sha256: str,
+) -> dict[str, Any]:
+    """Fail closed if this diagnostic no longer receives its fixed sample."""
+    observed = {
+        "checkpoint_sha256": checkpoint_sha256,
+        "evaluation_index_sha256": evaluation_index_sha256,
+        "scene": str(batch["scene"][0]),
+        "context_indices": [int(value) for value in batch["context"]["index"][0].tolist()],
+        "target_indices": [int(value) for value in batch["target"]["index"][0].tolist()],
+        "context_shape": list(context["image"].shape),
+        "teacher_views": int(target["extrinsics"].shape[1]),
+    }
+    if observed != FIXED_INPUT_IDENTITY:
+        raise RuntimeError(
+            "render teacher oracle input identity drifted from its fixed contract: "
+            f"{observed}"
+        )
+    return observed
+
+
+def _assert_fixed_partition(
+    *,
+    dense: Any,
+    canonical: Any,
+    modified: torch.Tensor,
+    representative_mask: torch.Tensor,
+    stats: dict[str, Any],
+    expected: dict[str, Any] = FIXED_PARTITION,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Validate the fixed K/2K/Full partition and untouched Full descriptors."""
+    if (
+        modified.ndim != 1
+        or modified.dtype != torch.bool
+        or representative_mask.shape != modified.shape
+        or representative_mask.dtype != torch.bool
+        or int(dense.means.shape[1]) != modified.numel()
+    ):
+        raise RuntimeError("render teacher oracle partition has an invalid dense layout")
+    if bool((modified & representative_mask).any()):
+        raise RuntimeError("render teacher oracle removed a representative slot")
+
+    full_mask = ~(modified | representative_mask)
+    observed = {
+        "full_gaussians": int(dense.means.shape[1]),
+        "removed_gaussians": int(modified.sum().item()),
+        "representative_gaussians": int(representative_mask.sum().item()),
+        "full_passthrough_gaussians": int(full_mask.sum().item()),
+        "retained_gaussians": int((~modified).sum().item()),
+        "l0_representatives": int(stats["l0_representatives"]),
+        "l1_lightweight_anchors": int(stats["l1_lightweight_anchors"]),
+        "modified_mask_sha256": _sha256_mask(modified),
+        "representative_mask_sha256": _sha256_mask(representative_mask),
+    }
+    if observed != expected:
+        raise RuntimeError(
+            "render teacher oracle partition drifted from the pre-registered "
+            f"K/2K/Full contract: {observed}"
+        )
+    for name in ATTRIBUTE_NAMES:
+        if not torch.equal(
+            getattr(canonical, name)[:, full_mask], getattr(dense, name)[:, full_mask]
+        ):
+            raise RuntimeError(f"same-budget oracle mutated Full passthrough {name}")
+    return full_mask, observed
+
+
+def _assert_compact_full_passthrough(
+    *,
+    compact: Any,
+    dense: Any,
+    full_global_mask: torch.Tensor,
+    global_to_local: torch.Tensor,
+) -> torch.Tensor:
+    """Confirm compaction retained every verified Full descriptor unchanged."""
+    full_global = torch.nonzero(full_global_mask, as_tuple=False).flatten()
+    full_local = global_to_local[full_global]
+    if (
+        bool((full_local < 0).any())
+        or full_local.numel() != full_global.numel()
+        or torch.unique(full_local).numel() != full_local.numel()
+    ):
+        raise RuntimeError("same-budget oracle dropped or aliased a Full passthrough slot")
+    for name in ATTRIBUTE_NAMES:
+        if not torch.equal(
+            getattr(compact, name)[0, full_local], getattr(dense, name)[0, full_global]
+        ):
+            raise RuntimeError(f"compacted oracle changed Full passthrough {name}")
+    return full_local
 
 
 def _producer_tile_indices(
@@ -314,21 +433,34 @@ def _parameter_gradient_report(module: BoundedRepresentativeParameters) -> dict[
     return report
 
 
+def _final_representative_values(
+    final_compact: Any, representative_local: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    """Detach the exact representative values that produced the final render."""
+    return {
+        name: getattr(final_compact, name)[0, representative_local].detach().clone()
+        for name in ATTRIBUTE_NAMES
+    }
+
+
 def _save_oracle_artifacts(
     output_dir: Path,
     *,
     representative_global: torch.Tensor,
-    module: BoundedRepresentativeParameters,
+    final_representative_values: dict[str, torch.Tensor],
     teacher: torch.Tensor,
 ) -> dict[str, dict[str, Any]]:
-    values = module.representative_values()
-    names = ("means", "covariances", "harmonics", "opacities")
+    if set(final_representative_values) != set(ATTRIBUTE_NAMES):
+        raise RuntimeError("render teacher oracle cannot serialize an incomplete final state")
     representative_path = output_dir / "optimized_representatives.pt"
     teacher_path = output_dir / "dense_render_teacher.pt"
     torch.save(
         {
             "global_indices": representative_global.detach().cpu(),
-            **{name: value.detach().cpu() for name, value in zip(names, values)},
+            **{
+                name: final_representative_values[name].detach().cpu()
+                for name in ATTRIBUTE_NAMES
+            },
         },
         representative_path,
     )
@@ -340,6 +472,7 @@ def _save_oracle_artifacts(
             "path": representative_path.name,
             "sha256": cached_sha256_file(representative_path),
             "count": int(representative_global.numel()),
+            "values_sha256": _sha256_tensors(final_representative_values),
         },
         "dense_render_teacher": {
             "path": teacher_path.name,
@@ -358,6 +491,12 @@ def collect_render_teacher_oracle(*, device: torch.device, output_dir: Path) -> 
 
     experiment = resolve_experiment("transplat", "dl3dv", ROOT)
     selection = resolve_claim_selection("transplat", "dl3dv", ROOT)
+    checkpoint_sha256 = cached_sha256_file(experiment.checkpoint)
+    evaluation_index_sha256 = cached_sha256_file(selection.index_path)
+    if checkpoint_sha256 != FIXED_INPUT_IDENTITY["checkpoint_sha256"]:
+        raise RuntimeError("render teacher oracle checkpoint drifted from its fixed contract")
+    if evaluation_index_sha256 != FIXED_INPUT_IDENTITY["evaluation_index_sha256"]:
+        raise RuntimeError("render teacher oracle evaluation index drifted from its fixed contract")
     model, batch, _cfg, loaded_device = load_model_and_data(
         "transplat",
         dataset_name="dl3dv",
@@ -377,6 +516,13 @@ def collect_render_teacher_oracle(*, device: torch.device, output_dir: Path) -> 
     _, views, _, height, width = context["image"].shape
     if context["image"].shape[0] != 1:
         raise RuntimeError("render teacher oracle requires batch size one")
+    input_identity = _assert_fixed_input_identity(
+        batch=batch,
+        context=context,
+        target=target,
+        checkpoint_sha256=checkpoint_sha256,
+        evaluation_index_sha256=evaluation_index_sha256,
+    )
 
     with strict_fp32_convolution_execution() as numerical_execution:
         dense, features, depths = _capture_encoder_execution(model, context)
@@ -397,10 +543,17 @@ def collect_render_teacher_oracle(*, device: torch.device, output_dir: Path) -> 
         accounting = _oracle_output_accounting(
             modified=modified, stats=stats, full_gaussians=full_gaussians
         )
-        representative_global = torch.nonzero(
-            _representative_mask(modified, views=views, height=height, width=width),
-            as_tuple=False,
-        ).flatten()
+        representative_global_mask = _representative_mask(
+            modified, views=views, height=height, width=width
+        )
+        full_global_mask, partition = _assert_fixed_partition(
+            dense=dense,
+            canonical=canonical,
+            modified=modified,
+            representative_mask=representative_global_mask,
+            stats=stats,
+        )
+        representative_global = torch.nonzero(representative_global_mask, as_tuple=False).flatten()
         if representative_global.numel() != int(stats["same_budget_dense_oracle_output_gaussians"]):
             raise RuntimeError("render oracle representative count disagrees with K/2K ledger")
         retained = ~modified
@@ -414,6 +567,12 @@ def collect_render_teacher_oracle(*, device: torch.device, output_dir: Path) -> 
         representative_local = global_to_local[representative_global]
         if bool((representative_local < 0).any()):
             raise RuntimeError("a representative was removed from the compact oracle output")
+        full_local = _assert_compact_full_passthrough(
+            compact=compact,
+            dense=dense,
+            full_global_mask=full_global_mask,
+            global_to_local=global_to_local,
+        )
         module = BoundedRepresentativeParameters(
             compact,
             dense,
@@ -468,6 +627,9 @@ def collect_render_teacher_oracle(*, device: torch.device, output_dir: Path) -> 
         final_compact = _clone_gaussians(module.compose())
         module.assert_immutable_slots(final_compact)
         final_parameter_hashes = module.parameter_hashes()
+        final_representative_values = _final_representative_values(
+            final_compact, representative_local
+        )
         with torch.no_grad():
             final_images = torch.stack(
                 [_render_one(model, final_compact, target, view, (height, width)) for view in range(target["extrinsics"].shape[1])]
@@ -481,7 +643,7 @@ def collect_render_teacher_oracle(*, device: torch.device, output_dir: Path) -> 
     artifacts = _save_oracle_artifacts(
         output_dir,
         representative_global=representative_global,
-        module=module,
+        final_representative_values=final_representative_values,
         teacher=teacher,
     )
     return {
@@ -492,9 +654,14 @@ def collect_render_teacher_oracle(*, device: torch.device, output_dir: Path) -> 
         "model": "transplat",
         "dataset": "dl3dv",
         "sample_index": 0,
-        "scene": str(batch["scene"][0]),
-        "context_indices": [int(value) for value in batch["context"]["index"][0].tolist()],
-        "target_indices": [int(value) for value in batch["target"]["index"][0].tolist()],
+        "scene": input_identity["scene"],
+        "context_indices": input_identity["context_indices"],
+        "target_indices": input_identity["target_indices"],
+        "fixed_input_identity": {
+            "expected": FIXED_INPUT_IDENTITY,
+            "observed": input_identity,
+            "verified": True,
+        },
         "target_rgb_provenance": {
             "loaded_by_native_dataloader": native_target_rgb_loaded,
             "removed_before_encoder": True,
@@ -516,12 +683,19 @@ def collect_render_teacher_oracle(*, device: torch.device, output_dir: Path) -> 
             "tile_size": 4,
             "materialization": MATERIALIZATION,
             "committed_modified_mask_sha256": _sha256_mask(modified),
-            "representative_global_mask_sha256": _sha256_mask(
-                _representative_mask(modified, views=views, height=height, width=width)
-            ),
+            "representative_global_mask_sha256": _sha256_mask(representative_global_mask),
             "stats": stats,
         },
         "same_budget_output_accounting": accounting,
+        "fixed_partition": {
+            "expected": FIXED_PARTITION,
+            "observed": partition,
+            "full_passthrough_mask_sha256": _sha256_mask(full_global_mask),
+            "full_passthrough_verified_before_compaction": True,
+            "full_passthrough_verified_after_compaction": True,
+            "full_passthrough_local_count": int(full_local.numel()),
+            "full_slots_immutable_during_optimization": True,
+        },
         "optimizer": {
             "kind": "Adam",
             "steps": STEPS,
@@ -550,6 +724,9 @@ def collect_render_teacher_oracle(*, device: torch.device, output_dir: Path) -> 
         "teacher": {
             "camera_metadata_sha256": _camera_metadata_sha256(target),
             "render_sha256": _sha256_tensor(teacher),
+            "final_rendered_representatives_sha256": _sha256_tensors(
+                final_representative_values
+            ),
             "initial_fidelity": _teacher_fidelity(initial_images, teacher),
             "final_fidelity": _teacher_fidelity(final_images, teacher),
             "initial_compact_reconstruction": initial_reconstruction,
@@ -559,11 +736,11 @@ def collect_render_teacher_oracle(*, device: torch.device, output_dir: Path) -> 
             "seed": SEED,
             "checkpoint": {
                 "path": str(experiment.checkpoint),
-                "sha256": cached_sha256_file(experiment.checkpoint),
+                "sha256": checkpoint_sha256,
             },
             "evaluation_index": {
                 "path": str(selection.index_path),
-                "sha256": cached_sha256_file(selection.index_path),
+                "sha256": evaluation_index_sha256,
             },
             "source": source_identity(),
             "numerical_execution": numerical_execution,
