@@ -149,6 +149,7 @@ def test_fixed_attribute_audit_uses_a_target_free_loader_and_never_decodes_targe
     record = audit.collect_attribute_audit(input_root=root, device=torch.device("cpu"))
 
     assert calls[0][1]["calibration_target_free"] is True
+    assert calls[0][1]["encoder_only"] is True
     assert calls[0][1]["dataset_root"] == root / "sidecar"
     assert record["target_rgb_accessed"] is False
     assert record["execution_boundary"]["decoder_executed"] is False

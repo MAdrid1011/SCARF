@@ -900,6 +900,7 @@ def load_model_and_data(
     num_samples: int = 1,
     sample_index: int = 0,
     calibration_target_free: bool = False,
+    encoder_only: bool = False,
 ):
     """
     Load model and data using the model loader abstraction.
@@ -915,6 +916,8 @@ def load_model_and_data(
     if checkpoint_path is None:
         checkpoint_path = SCARF_ROOT / model_type / 'checkpoints' / 're10k.ckpt'
     checkpoint_path = Path(checkpoint_path).resolve()
+    if encoder_only and model_type != 'transplat':
+        raise ValueError("encoder-only loading currently supports only transplat")
     
     # Check if checkpoint exists
     if not checkpoint_path.is_file():
@@ -932,18 +935,21 @@ def load_model_and_data(
         experiment_name,
         tuple(hydra_overrides),
         str(device) if device is not None else "auto",
+        encoder_only,
     )
     cached = _MODEL_BUNDLE_CACHE.get(cache_key)
     if cached is None:
         loader = create_model_loader(model_type)
-        model_bundle = loader.load_model(
-            str(checkpoint_path),
-            device=device,
-            experiment_name=experiment_name,
-            dataset_root=dataset_root,
-            evaluation_index=evaluation_index,
-            hydra_overrides=tuple(hydra_overrides),
-        )
+        load_kwargs = {
+            "device": device,
+            "experiment_name": experiment_name,
+            "dataset_root": dataset_root,
+            "evaluation_index": evaluation_index,
+            "hydra_overrides": tuple(hydra_overrides),
+        }
+        if encoder_only:
+            load_kwargs["encoder_only"] = True
+        model_bundle = loader.load_model(str(checkpoint_path), **load_kwargs)
         _MODEL_BUNDLE_CACHE[cache_key] = (loader, model_bundle)
     else:
         loader, model_bundle = cached

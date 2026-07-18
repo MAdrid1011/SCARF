@@ -96,6 +96,42 @@ class DataBundle:
     data_shim: Any
 
 
+class EncoderOnlyModel:
+    """Checkpoint-compatible encoder proxy for target-free audits."""
+
+    def __init__(self, encoder: Any):
+        self.encoder = encoder
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            f"encoder.{key}": value
+            for key, value in self.encoder.state_dict().items()
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any], strict: bool = False) -> Any:
+        from types import SimpleNamespace
+
+        prefix = "encoder."
+        encoder_state = {
+            key[len(prefix):]: value
+            for key, value in state_dict.items()
+            if key.startswith(prefix)
+        }
+        incompatible = self.encoder.load_state_dict(encoder_state, strict=strict)
+        return SimpleNamespace(
+            missing_keys=[f"encoder.{key}" for key in incompatible.missing_keys],
+            unexpected_keys=[f"encoder.{key}" for key in incompatible.unexpected_keys],
+        )
+
+    def to(self, device: torch.device) -> "EncoderOnlyModel":
+        self.encoder.to(device)
+        return self
+
+    def eval(self) -> "EncoderOnlyModel":
+        self.encoder.eval()
+        return self
+
+
 def _decode_calibration_context_images(images: list[Any]) -> torch.Tensor:
     """Decode only declared context images from a target-free sidecar."""
     from PIL import Image
@@ -410,8 +446,9 @@ class TransplatLoader(BaseModelLoader):
         dataset_root: Optional[Path] = None,
         evaluation_index: Optional[Path] = None,
         hydra_overrides: Tuple[str, ...] = (),
+        encoder_only: bool = False,
     ) -> ModelBundle:
-        """Load TranSplat model."""
+        """Load TranSplat, optionally without decoder/loss construction."""
         checkpoint_path = str(Path(checkpoint_path).resolve())
         config_path = str(Path(config_path).resolve()) if config_path is not None else None
         dataset_root = Path(dataset_root).resolve() if dataset_root is not None else None
@@ -422,11 +459,7 @@ class TransplatLoader(BaseModelLoader):
         
         try:
             from src.config import load_typed_root_config
-            from src.model.model_wrapper import ModelWrapper
             from src.model.encoder import get_encoder
-            from src.model.decoder import get_decoder
-            from src.loss import get_losses
-            from src.misc.step_tracker import StepTracker
             from src.global_cfg import set_cfg
             from hydra import compose, initialize_config_dir
             from hydra.core.global_hydra import GlobalHydra
@@ -464,16 +497,26 @@ class TransplatLoader(BaseModelLoader):
             set_cfg(cfg_dict)
             cfg = load_typed_root_config(cfg_dict)
             
-            # Build model
+            # Target-free SAES audits only need the encoder's S1/S2/S3 output.
+            # Avoid constructing the decoder, loss collection, and evaluator,
+            # which can initialize LPIPS despite no target image being present.
             encoder, encoder_visualizer = get_encoder(cfg.model.encoder)
-            decoder = get_decoder(cfg.model.decoder, cfg.dataset)
-            losses = get_losses(cfg.loss)
-            step_tracker = StepTracker()
-            
-            model = ModelWrapper(
-                cfg.optimizer, cfg.test, cfg.train,
-                encoder, encoder_visualizer, decoder, losses, step_tracker
-            )
+            if encoder_only:
+                model = EncoderOnlyModel(encoder)
+                decoder = None
+            else:
+                from src.loss import get_losses
+                from src.misc.step_tracker import StepTracker
+                from src.model.decoder import get_decoder
+                from src.model.model_wrapper import ModelWrapper
+
+                decoder = get_decoder(cfg.model.decoder, cfg.dataset)
+                losses = get_losses(cfg.loss)
+                step_tracker = StepTracker()
+                model = ModelWrapper(
+                    cfg.optimizer, cfg.test, cfg.train,
+                    encoder, encoder_visualizer, decoder, losses, step_tracker
+                )
             
             # Load weights
             load_checkpoint_state(model, ckpt)
@@ -483,7 +526,7 @@ class TransplatLoader(BaseModelLoader):
             
             return ModelBundle(
                 encoder=model.encoder,
-                decoder=model.decoder,
+                decoder=decoder,
                 model=model,
                 config=cfg,
                 device=device,

@@ -112,6 +112,7 @@ def collect_attribute_audit(*, input_root: Path, device: torch.device) -> dict[s
         num_samples=1,
         sample_index=SAMPLE_INDEX,
         calibration_target_free=True,
+        encoder_only=True,
     )
     if "image" in batch.get("target", {}):
         raise RuntimeError("target-free audit batch contains target RGB before encoder execution")

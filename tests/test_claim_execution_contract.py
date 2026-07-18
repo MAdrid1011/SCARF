@@ -31,6 +31,7 @@ def test_all_model_loaders_accept_an_evaluation_index(monkeypatch):
     fake_torch = SimpleNamespace(
         device=type("device", (), {}),
         Tensor=type("Tensor", (), {}),
+        nn=SimpleNamespace(Module=object),
         hub=SimpleNamespace(load=lambda *args, **kwargs: None),
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
@@ -46,6 +47,7 @@ def test_all_model_loaders_accept_an_evaluation_index(monkeypatch):
             parameters = inspect.signature(loader.load_model).parameters
             assert "evaluation_index" in parameters
             assert "hydra_overrides" in parameters
+        assert "encoder_only" in inspect.signature(module.TransplatLoader.load_model).parameters
     finally:
         sys.modules.pop("integration.model_loader", None)
         sys.modules.pop("integration", None)

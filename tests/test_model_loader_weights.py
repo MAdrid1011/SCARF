@@ -27,3 +27,14 @@ def test_checkpoint_loader_rejects_empty_or_shape_mismatched_state():
         load_checkpoint_state(
             model, {"state_dict": {"weight": torch.ones(7, 7)}}
         )
+
+
+def test_encoder_only_wrapper_preserves_checkpoint_key_prefixes():
+    from integration.model_loader import EncoderOnlyModel, load_checkpoint_state
+
+    model = EncoderOnlyModel(torch.nn.Linear(3, 2))
+    state = {key: value.clone() for key, value in model.state_dict().items()}
+    report = load_checkpoint_state(model, {"state_dict": state})
+
+    assert set(state) == {"encoder.weight", "encoder.bias"}
+    assert report["matched_checkpoint_numel_fraction"] == 1.0
