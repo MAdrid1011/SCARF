@@ -909,3 +909,13 @@ Verified on 2026-07-16 and 2026-07-17:
   two finite sentinels, trace/counter equality, and committed-output equality.
   This item cannot authorize a quality retry, a threshold sweep, or revival of
   the retired tangent candidate.
+- [ ] Run exactly one frozen render-teacher representative-parameter
+  attribution at
+  `transplat_sample0_same_budget_render_teacher_parameter_attribution_v1/`.
+  Use only the v3 `optimized_representatives.pt` and saved dense-render teacher
+  under the fixed partition. Measure the twelve pre-registered descriptor
+  family substitutions and leave-one-family-out controls against the teacher,
+  including L0/L1 relative-change summaries. Reject any artifact, partition,
+  camera, Full-slot, teacher-fidelity, target-RGB, or optimizer-boundary
+  violation. This is a capacity diagnostic only and cannot launch a new
+  materialization candidate or any DL3DV quality gate.

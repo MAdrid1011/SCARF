@@ -1920,3 +1920,54 @@
   controls with an exact input allowlist/source binding, pre-load hash checks,
   and two-sentinel selected-only access instrumentation. This does not reopen
   or rerun the retired tangent candidate.
+
+## 38. Frozen Render-Teacher Parameter Attribution
+
+- Campaign id: `same-budget-render-teacher-parameter-attribution-v1`. This is
+  one post-hoc capacity diagnostic answering which representative descriptor
+  families the already-computed teacher needed. It is not a materialization
+  candidate, a quality gate, a calibration run, or a runtime claim.
+- Frozen inputs: accept only the v3 render-teacher oracle record SHA256
+  `e4c110a087c8f19126f235a88091383e9b85e34d713ffd70a5960ad91e5ae295`, its
+  fixed partition (`131072/9432/4792/116848` dense/removed/representative/Full),
+  `optimized_representatives.pt` SHA256
+  `9a784eff7a2c9150aa0f5fece4a32d667dc98666991049bfeace0dc34e7433d6`, and
+  `dense_render_teacher.pt` SHA256
+  `0d766a203ad00aff6596405ac3d35a04c93b92e95806c9b01d1fdf17a2193597`.
+  Reconstruct only the frozen initial compact representation and replace
+  saved representative values; never invoke an optimizer or recalculate a
+  teacher. The checkpoint, evaluation index, context sidecar, target-camera
+  metadata hash, route mask, K/2K budget, removed slots, and Full slots must
+  all be verified before rendering.
+- Isolation boundary: target RGB must not be loaded, decoded, transferred, or
+  passed to any model component. The only target-side input is the frozen
+  target-camera metadata needed to render against the saved dense-render
+  teacher; the resulting PSNR/SSIM/LPIPS are direct teacher-fidelity metrics,
+  never GT quality metrics. The run records `optimizer_executed=false`,
+  `quality_gate_authorized=false`, and `paper_result_eligible=false`.
+- Fixed variants (exactly twelve, no optimizer and no user-selectable family):
+  initial compact; teacher `mean`; teacher `covariance`; teacher `opacity`;
+  teacher `SH`; teacher `mean+covariance`; teacher `opacity+SH`; all four
+  teacher parameter families; and all-teacher-minus-`mean`, minus-`covariance`,
+  minus-`opacity`, and minus-`SH`. Covariance is one atomic family because
+  the archived oracle stores final covariance values, not separable Cholesky
+  optimizer coordinates.
+- Measurements: every variant reports per-view and mean direct-teacher
+  PSNR/SSIM/LPIPS plus MSE. The all-teacher control must reproduce the frozen
+  `53.5922 dB`, `0.998050` SSIM, and `0.006741` LPIPS record within the fixed
+  numerical tolerance; the initial compact control must reproduce the frozen
+  pre-optimization baseline. For L0 and L1 separately, report count and
+  p50/p95/maximum absolute and relative changes from frozen initial to saved
+  teacher values for mean, covariance, opacity, and SH. Full slots must be
+  bit-identical for every variant.
+- Decision after the one run: if mean+covariance supplies the dominant
+  restoration, the next permitted idea is selected-only multi-context joint
+  geometry/coverage moments. If opacity+covariance dominates, use a joint
+  zero-order optical-mass and second-order footprint constraint. If SH is
+  materially necessary under the all-minus-SH control, any future idea must
+  include selected-anchor appearance residual transport. If no proper subset
+  materially restores teacher fidelity and all four families are necessary,
+  treat untrained closed-form aggregation as inadequate and consider only
+  evaluation-disjoint lightweight calibration or a more conservative Full
+  fallback. None of these branches authorizes an implementation, a second
+  candidate, or a DL3DV quality run in this campaign.
