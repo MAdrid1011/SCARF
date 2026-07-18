@@ -589,6 +589,7 @@ def materialization_attribute_audit(
         "l1-primary-depth-reference-diagnostic",
         "conditional-anchor-transport-diagnostic",
         "conditional-adapter-offset-transport-diagnostic",
+        "conditional-adapter-offset-attribute-transport-diagnostic",
     ):
         raise ValueError(f"unsupported audited SAES materialization: {materialization}")
     virtual_reconstruction = materialization in {

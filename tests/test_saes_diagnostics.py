@@ -478,7 +478,14 @@ def test_materialization_attribute_audit_builds_selected_l1_anchor_oracle():
     assert mixture["optical_depth_relative"]["p50"] == pytest.approx(0.5)
 
 
-def test_materialization_attribute_audit_accepts_adapter_offset_transport():
+@pytest.mark.parametrize(
+    "materialization",
+    (
+        "conditional-adapter-offset-transport-diagnostic",
+        "conditional-adapter-offset-attribute-transport-diagnostic",
+    ),
+)
+def test_materialization_attribute_audit_accepts_adapter_offset_transport(materialization):
     from scripts.saes_diagnostics import materialization_attribute_audit
 
     original = SimpleNamespace(
@@ -506,10 +513,10 @@ def test_materialization_attribute_audit_accepts_adapter_offset_transport():
         depth_threshold=0.1,
         view_count=1,
         decision_semantics="current",
-        materialization="conditional-adapter-offset-transport-diagnostic",
+        materialization=materialization,
     )
 
-    assert record["materialization"] == "conditional-adapter-offset-transport-diagnostic"
+    assert record["materialization"] == materialization
     assert record["route_source"] == "posthoc_s1_s2_reclassification"
 
 

@@ -120,7 +120,10 @@ def test_fixed_attribute_audit_uses_a_target_free_loader_and_never_decodes_targe
     features = torch.ones(1, 1, 2, 4, 4)
     depths = torch.ones(1, 1, 16, 1, 1)
 
+    applied_materializations = []
+
     def fake_apply(gaussians, *args, **kwargs):
+        applied_materializations.append(kwargs["materialization"])
         mask = torch.ones(16, dtype=torch.bool)
         mask[torch.tensor([0, 3, 12, 15])] = False
         return mask, {
@@ -155,6 +158,23 @@ def test_fixed_attribute_audit_uses_a_target_free_loader_and_never_decodes_targe
     assert record["execution_boundary"]["decoder_executed"] is False
     assert record["execution_boundary"]["quality_metrics_computed"] is False
     assert record["posthoc_full_stage3_oracle"]["route_source"] == "committed_sparse_output_mask"
+    transport_record = audit.collect_attribute_audit(
+        input_root=root,
+        device=torch.device("cpu"),
+        materialization=audit.ATTRIBUTE_TRANSPORT_MATERIALIZATION,
+        audit_kind=audit.ATTRIBUTE_TRANSPORT_AUDIT_KIND,
+    )
+    assert transport_record["kind"] == audit.ATTRIBUTE_TRANSPORT_AUDIT_KIND
+    assert transport_record["fixed_contract"]["materialization"] == (
+        audit.ATTRIBUTE_TRANSPORT_MATERIALIZATION
+    )
+    assert transport_record["retained_attribute_transport"]["enabled"] is True
+    assert applied_materializations == [
+        audit.MATERIALIZATION,
+        audit.MATERIALIZATION,
+        audit.ATTRIBUTE_TRANSPORT_MATERIALIZATION,
+        audit.ATTRIBUTE_TRANSPORT_MATERIALIZATION,
+    ]
 
 
 def test_fixed_attribute_audit_cli_rejects_model_and_threshold_overrides():
@@ -169,6 +189,26 @@ def test_fixed_attribute_audit_cli_rejects_model_and_threshold_overrides():
                 "outputs/fixed",
                 "--saes-fv",
                 "0.3",
+            ]
+        )
+    assert exc.value.code == 2
+
+
+def test_attribute_transport_audit_cli_has_no_materialization_override():
+    from scripts import saes_l1_primary_reference_attribute_transport_audit as audit
+
+    assert audit.MATERIALIZATION == (
+        "conditional-adapter-offset-attribute-transport-diagnostic"
+    )
+    with pytest.raises(SystemExit) as exc:
+        audit.main(
+            [
+                "--input-root",
+                "inputs/fixed",
+                "--output-dir",
+                "outputs/fixed",
+                "--materialization",
+                "conditional-adapter-offset-transport-diagnostic",
             ]
         )
     assert exc.value.code == 2

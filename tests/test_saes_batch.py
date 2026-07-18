@@ -1990,3 +1990,195 @@ def test_claim_path_uses_absolute_probe_depth_standard_deviation():
     assert stats["level0_tiles"] == 0
     assert stats["level1_tiles"] == 0
     assert stats["full_tiles"] == 1
+
+
+def test_adapter_offset_attribute_transport_preserves_constant_sh_and_opacity():
+    from saes.progressive_saes import apply_progressive_saes
+
+    gaussians = _adapter_compatible_gaussians()
+    probes = torch.tensor((0, 3, 12, 15))
+    non_probes = torch.tensor(
+        [index for index in range(16) if index not in probes.tolist()]
+    )
+    gaussians.harmonics[:] = 0.375
+    gaussians.opacities[:] = 0.25
+
+    mask, stats, _ = apply_progressive_saes(
+        gaussians,
+        4,
+        4,
+        feature_var_threshold=1.0,
+        depth_std_threshold=1.0,
+        features=torch.ones(1, 1, 2, 4, 4),
+        depths=torch.full((1, 1, 16, 1, 1), 2.0),
+        context_extrinsics=torch.eye(4).reshape(1, 1, 4, 4),
+        context_intrinsics=torch.eye(3).reshape(1, 1, 3, 3),
+        materialization="conditional-adapter-offset-attribute-transport-diagnostic",
+        materialization_guard=False,
+    )
+
+    assert stats["merge_semantics"] == "conditional-adapter-offset-attribute-transport"
+    assert stats["adapter_offset_transport_uses"] == 12 * 4
+    assert stats["adapter_offset_attribute_transport_uses"] == 12 * 4
+    assert mask[non_probes].all()
+    torch.testing.assert_close(
+        gaussians.harmonics[0, probes],
+        torch.full_like(gaussians.harmonics[0, probes], 0.375),
+    )
+    torch.testing.assert_close(
+        gaussians.opacities[0, probes],
+        torch.full_like(gaussians.opacities[0, probes], 0.25),
+    )
+
+
+def test_adapter_offset_attribute_transport_updates_only_from_selected_anchor_attributes():
+    from saes.progressive_saes import apply_progressive_saes
+
+    baseline = _adapter_compatible_gaussians()
+    poisoned = _adapter_compatible_gaussians()
+    probes = torch.tensor((0, 3, 12, 15))
+    non_probes = torch.tensor(
+        [index for index in range(16) if index not in probes.tolist()]
+    )
+    source_harmonics = torch.tensor((0.10, 0.20, 0.40, 0.80)).reshape(4, 1, 1)
+    source_harmonics = source_harmonics.expand(-1, 3, 1).clone()
+    source_opacities = torch.tensor((0.10, 0.20, 0.40, 0.80))
+    for gaussians in (baseline, poisoned):
+        gaussians.harmonics[0, probes] = source_harmonics
+        gaussians.opacities[0, probes] = source_opacities
+    poisoned.means[0, non_probes] = 1.0e4
+    poisoned.covariances[0, non_probes] = -1.0e4
+    poisoned.harmonics[0, non_probes] = 1.0e4
+    poisoned.opacities[0, non_probes] = 0.99
+    options = {
+        "feature_var_threshold": 1.0,
+        "depth_std_threshold": 1.0,
+        "features": torch.ones(1, 1, 2, 4, 4),
+        "depths": torch.full((1, 1, 16, 1, 1), 2.0),
+        "context_extrinsics": torch.eye(4).reshape(1, 1, 4, 4),
+        "context_intrinsics": torch.eye(3).reshape(1, 1, 3, 3),
+        "materialization": "conditional-adapter-offset-attribute-transport-diagnostic",
+        "materialization_guard": False,
+    }
+
+    baseline_mask, baseline_stats, _ = apply_progressive_saes(
+        baseline, 4, 4, **options
+    )
+    poisoned_mask, poisoned_stats, _ = apply_progressive_saes(
+        poisoned, 4, 4, **options
+    )
+
+    expected_harmonics = (
+        source_harmonics + 3.0 * source_harmonics.mean(dim=0)
+    ) / 4.0
+    expected_opacities = (
+        source_opacities + 3.0 * source_opacities.mean()
+    ) / 4.0
+    assert baseline_mask[non_probes].all()
+    assert torch.equal(baseline_mask, poisoned_mask)
+    assert baseline_stats == poisoned_stats
+    torch.testing.assert_close(
+        baseline.harmonics[0, probes], expected_harmonics, atol=1.0e-6, rtol=1.0e-6
+    )
+    torch.testing.assert_close(
+        baseline.opacities[0, probes], expected_opacities, atol=1.0e-6, rtol=1.0e-6
+    )
+    assert not torch.allclose(baseline.harmonics[0, probes], source_harmonics)
+    assert not torch.allclose(baseline.opacities[0, probes], source_opacities)
+    for tensor, source in (
+        (baseline.harmonics[0, probes], source_harmonics),
+        (baseline.opacities[0, probes], source_opacities),
+    ):
+        assert torch.all(tensor >= source.amin(dim=0))
+        assert torch.all(tensor <= source.amax(dim=0))
+    assert baseline_stats["assignment_weight_sum_error_max"] <= 1.0e-6
+    assert baseline_stats["opacity_transmittance_error_max"] <= 1.0e-6
+    assert baseline_stats["covariance_psd_violations"] == 0
+    for name in ("means", "covariances", "harmonics", "opacities"):
+        torch.testing.assert_close(
+            getattr(baseline, name)[0, probes],
+            getattr(poisoned, name)[0, probes],
+        )
+
+
+def test_adapter_offset_attribute_transport_preserves_l1_route_and_charges_reconstruction():
+    from saes.hardware_accounting import build_saes_event_ledger
+    from saes.progressive_saes import apply_progressive_saes
+
+    adapter_path = _adapter_compatible_gaussians()
+    attribute_path = _adapter_compatible_gaussians()
+    features = torch.zeros(1, 1, 2, 4, 4)
+    for (row, column), value in {
+        (0, 0): (1.0, 0.0),
+        (0, 3): (0.0, 1.0),
+        (3, 0): (-1.0, 0.0),
+        (3, 3): (0.0, -1.0),
+    }.items():
+        features[0, 0, :, row, column] = torch.tensor(value)
+    options = {
+        "feature_var_threshold": 0.2,
+        "depth_std_threshold": 0.1,
+        "features": features,
+        "depths": torch.full((1, 1, 16, 1, 1), 2.0),
+        "context_extrinsics": torch.eye(4).reshape(1, 1, 4, 4),
+        "context_intrinsics": torch.eye(3).reshape(1, 1, 3, 3),
+        "materialization_guard": False,
+    }
+    adapter_mask, adapter_stats, _ = apply_progressive_saes(
+        adapter_path,
+        4,
+        4,
+        materialization="conditional-adapter-offset-transport-diagnostic",
+        **options,
+    )
+    attribute_mask, attribute_stats, _ = apply_progressive_saes(
+        attribute_path,
+        4,
+        4,
+        materialization="conditional-adapter-offset-attribute-transport-diagnostic",
+        **options,
+    )
+
+    assert torch.equal(attribute_mask, adapter_mask)
+    for key in (
+        "level0_tiles",
+        "level1_tiles",
+        "full_tiles",
+        "l0_representatives",
+        "l1_lightweight_anchors",
+        "full_stage3_gaussians",
+        "executed_s2_evaluations",
+    ):
+        assert attribute_stats[key] == adapter_stats[key]
+    assert attribute_stats["level0_tiles"] == 0
+    assert attribute_stats["level1_tiles"] == 1
+    assert attribute_stats["l1_lightweight_anchors"] == 8
+    assert attribute_stats["l1_depth_reference"] == "primary-probes"
+    assert attribute_stats["adapter_offset_attribute_transport_uses"] == 8 * 8
+    retained = (~attribute_mask).nonzero(as_tuple=False).flatten()
+    torch.testing.assert_close(
+        attribute_path.means[0, retained], adapter_path.means[0, retained]
+    )
+    torch.testing.assert_close(
+        attribute_path.covariances[0, retained], adapter_path.covariances[0, retained]
+    )
+
+    adapter_ledger = build_saes_event_ledger(
+        adapter_stats, feature_dim=2, tile_size=4, sh_degree=0
+    )
+    attribute_ledger = build_saes_event_ledger(
+        attribute_stats, feature_dim=2, tile_size=4, sh_degree=0
+    )
+    for key in ("l0_tiles", "l1_tiles", "full_tiles", "total_nonanchors"):
+        assert attribute_ledger["events"][key] == adapter_ledger["events"][key]
+    assert attribute_ledger["events"]["adapter_offset_attribute_transport_pairs"] == 64
+    assert adapter_ledger["cycles"]["adapter_offset_attribute_reconstruction"] == 0
+    assert attribute_ledger["cycles"]["adapter_offset_attribute_reconstruction"] > 0
+    assert (
+        attribute_ledger["traffic_bytes"]["adapter_offset_attribute_transport_read"]
+        > 0
+    )
+    assert (
+        attribute_ledger["cycles"]["serialized_accounting_cycles"]
+        > adapter_ledger["cycles"]["serialized_accounting_cycles"]
+    )

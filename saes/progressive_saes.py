@@ -268,6 +268,7 @@ class ProgressiveSAES:
             LEGACY_L1_PRIMARY_DEPTH_REFERENCE_MATERIALIZATION,
             "conditional-anchor-transport-diagnostic",
             "conditional-adapter-offset-transport-diagnostic",
+            "conditional-adapter-offset-attribute-transport-diagnostic",
             "conditional-optical-mass-diagnostic",
             "conditional-projected-optical-mass-diagnostic",
         ):
@@ -287,10 +288,18 @@ class ProgressiveSAES:
         # unconditional mixture over *all* probes and then applied the same
         # assignment again while updating each probe.  This diagnostic instead
         # transports each selected anchor conditionally to its assigned target
-        # position, avoiding an undocumented r_i,p * r_i,q cross-anchor term.
+        # position, avoiding an undocumented r_i,p * r_i,q cross-anchor term
+        # for geometry.  The attribute-transport diagnostic retains that
+        # geometry, but reconstructs skipped SH/opacity from the declared
+        # bilateral assignments before the receiving-anchor update.
         self.merge_semantics = (
+            "conditional-adapter-offset-attribute-transport"
+            if materialization
+            == "conditional-adapter-offset-attribute-transport-diagnostic"
+            else
             "conditional-adapter-offset-transport"
-            if materialization == "conditional-adapter-offset-transport-diagnostic"
+            if materialization
+            == "conditional-adapter-offset-transport-diagnostic"
             else
             "conditional-projected-optical-mass"
             if materialization == "conditional-projected-optical-mass-diagnostic"
@@ -418,6 +427,11 @@ class ProgressiveSAES:
             # cannot be justified from selected-anchor/context inputs alone.
             'adapter_offset_transport_uses': 0,
             'adapter_offset_transport_fallback_tiles': 0,
+            # The attribute-transport diagnostic reconstructs skipped SH and
+            # opacity from the existing bilateral assignment matrix. This
+            # counts selected-anchor attribute pairs for the conservative
+            # analytic ledger; it is not an S2/S3 saving counter.
+            'adapter_offset_attribute_transport_uses': 0,
             # This is Control logic for the paper's existing probe-only
             # materialization path. It inspects only the selected native
             # anchors before their moments are merged; it is not a fourth
@@ -1291,6 +1305,7 @@ class ProgressiveSAES:
             "assignment-mixture",
             "conditional-anchor-transport",
             "conditional-adapter-offset-transport",
+            "conditional-adapter-offset-attribute-transport",
             "conditional-optical-mass",
             "conditional-projected-optical-mass",
         ):
@@ -1450,6 +1465,17 @@ class ProgressiveSAES:
         pseudo_opacities = None
         pseudo_optical_depth = None
         pseudo_covariances = []
+        if assignments and merge_semantics in (
+            "assignment-mixture",
+            "conditional-adapter-offset-attribute-transport",
+        ):
+            # The paper's range-constrained SH/opacity average is evaluated
+            # from selected anchors only.  The attribute-transport diagnostic
+            # uses these convex skipped-descriptor estimates while leaving the
+            # adapter-offset geometry path below unchanged.
+            pseudo_harmonics = assignment_matrix @ flat_harmonics
+            pseudo_opacities = assignment_matrix @ flat_opacities
+            pseudo_optical_depth = assignment_matrix @ source_optical_depth
         if merge_semantics == "assignment-mixture" and assignments:
             pseudo_means = assignment_matrix @ source_means
             if self._camera_directions is not None:
@@ -1470,9 +1496,6 @@ class ProgressiveSAES:
                     ],
                     dim=0,
                 )
-            pseudo_harmonics = assignment_matrix @ flat_harmonics
-            pseudo_opacities = assignment_matrix @ flat_opacities
-            pseudo_optical_depth = assignment_matrix @ source_optical_depth
             pseudo_covariances = [
                 self._interpolate_intrinsic_covariance(source_covs, row)
                 for row in assignment_matrix
@@ -1515,7 +1538,10 @@ class ProgressiveSAES:
         adapter_offset_conditional_means = None
         if (
             assignments
-            and merge_semantics == "conditional-adapter-offset-transport"
+            and merge_semantics in (
+                "conditional-adapter-offset-transport",
+                "conditional-adapter-offset-attribute-transport",
+            )
         ):
             target_positions = [
                 (tile_y + local_y, tile_x + local_x)
@@ -1537,6 +1563,10 @@ class ProgressiveSAES:
                     return True
                 adapter_offset_conditional_means.append(transported)
             self.stats['adapter_offset_transport_uses'] += K * len(non_probe_items)
+            if merge_semantics == "conditional-adapter-offset-attribute-transport":
+                self.stats['adapter_offset_attribute_transport_uses'] += int(
+                    assignment_matrix.numel()
+                )
 
         for probe_offset, probe_index in enumerate(probe_indices):
             absorbed = (
@@ -1549,11 +1579,15 @@ class ProgressiveSAES:
             if assignments and merge_semantics in (
                 "conditional-anchor-transport",
                 "conditional-adapter-offset-transport",
+                "conditional-adapter-offset-attribute-transport",
             ):
                 target_positions = [position for position, _ in non_probe_items]
                 conditional_means = (
                     adapter_offset_conditional_means[probe_offset]
-                    if merge_semantics == "conditional-adapter-offset-transport"
+                    if merge_semantics in (
+                        "conditional-adapter-offset-transport",
+                        "conditional-adapter-offset-attribute-transport",
+                    )
                     else self._anchor_conditioned_transport_means(
                         source_means[probe_offset],
                         probe_depth_tensor[probe_offset],
@@ -1568,12 +1602,16 @@ class ProgressiveSAES:
                 conditional_covariances = source_covs[probe_offset].unsqueeze(0).expand(
                     len(non_probe_items), -1, -1
                 )
-                conditional_harmonics = flat_harmonics[probe_offset].unsqueeze(0).expand(
-                    len(non_probe_items), -1
-                )
-                conditional_opacities = flat_opacities[probe_offset].unsqueeze(0).expand(
-                    len(non_probe_items), -1
-                )
+                if merge_semantics == "conditional-adapter-offset-attribute-transport":
+                    conditional_harmonics = pseudo_harmonics
+                    conditional_opacities = pseudo_opacities
+                else:
+                    conditional_harmonics = flat_harmonics[probe_offset].unsqueeze(0).expand(
+                        len(non_probe_items), -1
+                    )
+                    conditional_opacities = flat_opacities[probe_offset].unsqueeze(0).expand(
+                        len(non_probe_items), -1
+                    )
                 contributor_means = torch.cat(
                     (source_means[probe_offset].unsqueeze(0), conditional_means), dim=0
                 )
@@ -1650,7 +1688,10 @@ class ProgressiveSAES:
                 # only from selected anchor opacities, to its soft-assigned
                 # retained anchor. This restores the assignment-surrogate
                 # mass without consulting the skipped Stage-3 outputs.
-                if assignments and merge_semantics == "conditional-anchor-transport":
+                if assignments and merge_semantics in (
+                    "conditional-anchor-transport",
+                    "conditional-adapter-offset-transport",
+                ):
                     absorbed_optical_depth = (
                         absorbed.sum() * source_optical_depth[probe_offset]
                     )
@@ -1676,9 +1717,15 @@ class ProgressiveSAES:
                 merged_opacity = torch.einsum(
                     "n,nk->k", normalized, contributor_opacities
                 )
+                if merge_semantics == "conditional-adapter-offset-attribute-transport":
+                    opacity_upper = flat_opacities.amax(dim=0)
+                    opacity_lower = flat_opacities.amin(dim=0)
+                else:
+                    opacity_upper = contributor_opacities.amax(dim=0)
+                    opacity_lower = contributor_opacities.amin(dim=0)
                 merged_opacity = torch.maximum(
-                    torch.minimum(merged_opacity, contributor_opacities.amax(dim=0)),
-                    contributor_opacities.amin(dim=0),
+                    torch.minimum(merged_opacity, opacity_upper),
+                    opacity_lower,
                 ).clamp(0.0, 1.0 - 1e-6).reshape(opacity_shape)
 
             eigenvalues, eigenvectors = torch.linalg.eigh(merged_covariance)
@@ -1698,7 +1745,10 @@ class ProgressiveSAES:
                 -output_opacities.clamp(0.0, 1.0 - 1e-6)
             ).sum()
             expected_optical_depth = source_optical_depth.sum()
-            if assignments and merge_semantics == "assignment-mixture":
+            if assignments and merge_semantics in (
+                "assignment-mixture",
+                "conditional-adapter-offset-attribute-transport",
+            ):
                 expected_optical_depth = expected_optical_depth + pseudo_optical_depth.sum()
             aggregation_error = float(
                 (observed_optical_depth - expected_optical_depth).abs().item()
@@ -2295,6 +2345,7 @@ class ProgressiveSAES:
                                 "virtual-reconstruction-diagnostic",
                                 "conditional-anchor-transport-diagnostic",
                                 "conditional-adapter-offset-transport-diagnostic",
+                                "conditional-adapter-offset-attribute-transport-diagnostic",
                                 "conditional-optical-mass-diagnostic",
                                 "conditional-projected-optical-mass-diagnostic",
                             ):
@@ -2364,9 +2415,9 @@ class ProgressiveSAES:
                                 "conditional-projected-optical-mass",
                             ):
                                 self.stats['conditional_mass_fallback_tiles'] += 1
-                            elif (
-                                self.merge_semantics
-                                == "conditional-adapter-offset-transport"
+                            elif self.merge_semantics in (
+                                "conditional-adapter-offset-transport",
+                                "conditional-adapter-offset-attribute-transport",
                             ):
                                 self.stats['adapter_offset_transport_fallback_tiles'] += 1
                             self.stats['full_tiles'] += 1

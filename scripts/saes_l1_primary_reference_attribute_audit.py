@@ -44,6 +44,19 @@ DEPTH_THRESHOLD = 0.10
 DECISION_SEMANTICS = "probe-normalized-std-first-hit"
 DEPTH_ROUTING_SEMANTICS = "metric-depth-standard-deviation"
 MATERIALIZATION = "conditional-adapter-offset-transport-diagnostic"
+ATTRIBUTE_TRANSPORT_MATERIALIZATION = (
+    "conditional-adapter-offset-attribute-transport-diagnostic"
+)
+AUDIT_KIND = "saes_l1_primary_reference_target_free_attribute_audit"
+ATTRIBUTE_TRANSPORT_AUDIT_KIND = (
+    "saes_l1_primary_reference_attribute_transport_target_free_attribute_audit"
+)
+FIXED_AUDIT_MATERIALIZATIONS = frozenset(
+    (
+        MATERIALIZATION,
+        ATTRIBUTE_TRANSPORT_MATERIALIZATION,
+    )
+)
 INPUT_KIND = "dl3dv_target_free_l1_primary_reference_audit_input"
 
 
@@ -91,12 +104,22 @@ def _load_audit_input(input_root: Path) -> tuple[dict[str, Any], dict[str, Any],
     return record, sidecar, tree
 
 
-def collect_attribute_audit(*, input_root: Path, device: torch.device) -> dict[str, Any]:
+def collect_attribute_audit(
+    *,
+    input_root: Path,
+    device: torch.device,
+    materialization: str = MATERIALIZATION,
+    audit_kind: str = AUDIT_KIND,
+) -> dict[str, Any]:
     """Run the fixed, context-only L1 correction oracle on sample zero."""
     from scripts.ae_config import resolve_experiment
     from scripts.demo import load_model_and_data
     from scripts.result_record import cached_sha256_file, source_identity
 
+    if materialization not in FIXED_AUDIT_MATERIALIZATIONS:
+        raise ValueError("target-free attribute audit has an unsupported materialization")
+    if not isinstance(audit_kind, str) or not audit_kind:
+        raise ValueError("target-free attribute audit has an invalid kind")
     input_root = input_root.resolve()
     input_record, sidecar_identity, input_tree = _load_audit_input(input_root)
     experiment = resolve_experiment(MODEL, DATASET, ROOT)
@@ -145,7 +168,7 @@ def collect_attribute_audit(*, input_root: Path, device: torch.device) -> dict[s
         features=features,
         depths=depths,
         view_count=views,
-        materialization=MATERIALIZATION,
+        materialization=materialization,
         decision_semantics=DECISION_SEMANTICS,
         context_extrinsics=audit_extrinsics,
         context_intrinsics=audit_intrinsics,
@@ -169,7 +192,7 @@ def collect_attribute_audit(*, input_root: Path, device: torch.device) -> dict[s
         features=features,
         depths=depths,
         view_count=views,
-        materialization=MATERIALIZATION,
+        materialization=materialization,
         decision_semantics=DECISION_SEMANTICS,
         context_extrinsics=audit_extrinsics,
         context_intrinsics=audit_intrinsics,
@@ -204,14 +227,14 @@ def collect_attribute_audit(*, input_root: Path, device: torch.device) -> dict[s
         depth_threshold=DEPTH_THRESHOLD,
         view_count=views,
         decision_semantics=DECISION_SEMANTICS,
-        materialization=MATERIALIZATION,
+        materialization=materialization,
         effective_mask=mask,
     )
     if oracle["route_source"] != "committed_sparse_output_mask":
         raise RuntimeError("posthoc attribute oracle did not use the committed sparse mask")
     return {
         "schema_version": "1.0",
-        "kind": "saes_l1_primary_reference_target_free_attribute_audit",
+        "kind": audit_kind,
         "status": "COMPLETED",
         "paper_result_eligible": False,
         "expected_results_accessed": False,
@@ -242,7 +265,7 @@ def collect_attribute_audit(*, input_root: Path, device: torch.device) -> dict[s
             "depth_threshold": DEPTH_THRESHOLD,
             "feature_decision_semantics": DECISION_SEMANTICS,
             "depth_routing_semantics": DEPTH_ROUTING_SEMANTICS,
-            "materialization": MATERIALIZATION,
+            "materialization": materialization,
             "l1_depth_reference": "primary-probes",
             "l1_anchor_layout": "2K-native-selected-anchors",
         },
@@ -272,6 +295,14 @@ def collect_attribute_audit(*, input_root: Path, device: torch.device) -> dict[s
             "event_statistics_identical": True,
             "retained_maximum_absolute_delta": retained_delta,
             "skipped_stage3_attributes_read": False,
+        },
+        "retained_attribute_transport": {
+            "enabled": (
+                materialization == ATTRIBUTE_TRANSPORT_MATERIALIZATION
+            ),
+            "maximum_absolute_update": _max_attribute_delta(
+                source_gaussians, materialized, retained
+            ),
         },
         "posthoc_full_stage3_oracle": {
             **oracle,

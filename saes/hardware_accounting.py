@@ -184,6 +184,21 @@ def build_saes_event_ledger(
     l1_nonanchors = l1_tiles * (tile_positions - l1_anchor_count) * primitives_per_pixel
     total_nonanchors = l0_nonanchors + l1_nonanchors
     retained_anchors = l0_anchors + l1_anchors
+    attribute_transport_pairs = _count(
+        saes_stats, "adapter_offset_attribute_transport_uses"
+    )
+    expected_attribute_transport_pairs = (
+        l0_nonanchors * primary_probe_count
+        + l1_nonanchors * l1_anchor_count
+    )
+    if (
+        attribute_transport_pairs
+        and attribute_transport_pairs != expected_attribute_transport_pairs
+    ):
+        raise ValueError(
+            "adapter_offset_attribute_transport_uses is inconsistent with "
+            "the declared SAES tile path"
+        )
 
     guard_enabled = saes_stats.get("materialization_guard_enabled", False)
     if not isinstance(guard_enabled, bool):
@@ -242,6 +257,10 @@ def build_saes_event_ledger(
     descriptor_bytes = descriptor_storage["descriptor_bytes"]
     descriptor_elements = 3 + 6 + 3 * (sh_degree + 1) ** 2 + 1
     descriptor_chunks = _ceil_div(descriptor_elements, vector_width)
+    attribute_transport_elements = 3 * (sh_degree + 1) ** 2 + 1
+    attribute_transport_chunks = _ceil_div(
+        attribute_transport_elements, vector_width
+    )
     guard_anchor_descriptors = primitives_per_pixel * (
         l0_guard_checks * primary_probe_count + l1_guard_checks * l1_anchor_count
     )
@@ -272,6 +291,13 @@ def build_saes_event_ledger(
     l1_moment_cycles = _moment_cycles(l1_nonanchors, l1_anchor_count, l1_anchors)
     assignment_cycles = l0_assignment_cycles + l1_assignment_cycles
     moment_cycles = l0_moment_cycles + l1_moment_cycles
+    # The standard moment charge includes the receiving-anchor update. The
+    # adapter-offset attribute diagnostic first reconstructs the skipped SH and
+    # opacity convex estimate from selected anchors, so charge that additional
+    # fixed-function reduction rather than treating it as free.
+    attribute_transport_cycles = (
+        attribute_transport_pairs * attribute_transport_chunks
+    )
 
     # Traffic is reported even where data can reuse an already-resident S1/S2
     # tile buffer.  Only the retained-descriptor read/rewrite and route record
@@ -283,11 +309,15 @@ def build_saes_event_ledger(
     retained_descriptor_read_bytes = retained_anchors * descriptor_bytes
     retained_descriptor_write_bytes = retained_anchors * descriptor_bytes
     guard_descriptor_read_bytes = guard_anchor_descriptors * descriptor_bytes
+    attribute_transport_read_bytes = attribute_transport_pairs * (
+        descriptor_parts["harmonics_fp16"] + descriptor_parts["opacity_fp16"]
+    )
     route_record_write_bytes = total_tiles
     charged_storage_bytes = (
         retained_descriptor_read_bytes
         + retained_descriptor_write_bytes
         + guard_descriptor_read_bytes
+        + attribute_transport_read_bytes
         + route_record_write_bytes
     )
     storage_transfer_cycles = _ceil_div(charged_storage_bytes, storage_beat_bytes)
@@ -296,7 +326,11 @@ def build_saes_event_ledger(
         feature_stat_cycles + depth_stat_cycles + controller_cycles + guard_control_cycles
     )
     serialized_accounting_cycles = (
-        decision_cycles + assignment_cycles + moment_cycles + storage_transfer_cycles
+        decision_cycles
+        + assignment_cycles
+        + moment_cycles
+        + attribute_transport_cycles
+        + storage_transfer_cycles
     )
 
     return {
@@ -325,6 +359,15 @@ def build_saes_event_ledger(
             "l0_retained_anchors": l0_anchors,
             "l1_retained_anchors": l1_anchors,
             "full_stage3_gaussians": full_stage3,
+            **(
+                {
+                    "adapter_offset_attribute_transport_pairs": (
+                        attribute_transport_pairs
+                    ),
+                }
+                if attribute_transport_pairs
+                else {}
+            ),
             **(
                 {
                     "l0_guard_checks": l0_guard_checks,
@@ -359,6 +402,7 @@ def build_saes_event_ledger(
             "l0_moment_matching": l0_moment_cycles,
             "l1_moment_matching": l1_moment_cycles,
             "moment_matching_total": moment_cycles,
+            "adapter_offset_attribute_reconstruction": attribute_transport_cycles,
             "storage_transfer": storage_transfer_cycles,
             "serialized_accounting_cycles": serialized_accounting_cycles,
         },
@@ -369,6 +413,7 @@ def build_saes_event_ledger(
             "retained_descriptor_read": retained_descriptor_read_bytes,
             "retained_descriptor_write": retained_descriptor_write_bytes,
             "materialization_guard_descriptor_read": guard_descriptor_read_bytes,
+            "adapter_offset_attribute_transport_read": attribute_transport_read_bytes,
             "route_record_write": route_record_write_bytes,
             "charged_storage_total": charged_storage_bytes,
             "observed_total": (
@@ -384,6 +429,11 @@ def build_saes_event_ledger(
             "storage_cycle_model": "one logical 128-bit accounting beat per cycle without overlap",
             "controller_cycles": "matches submitted SAESController.decisionCycles traces",
             "materialization_guard": "probe-only Control comparison and descriptor reads are charged without adding an S2/S3 saving claim",
+            "adapter_offset_attribute_transport": (
+                "selected-anchor SH/opacity reconstruction is charged as "
+                "conservative FP16 descriptor reads plus VectorALU reduction; "
+                "it does not create an S2/S3 saving claim"
+            ),
             "rtl_cycle_equivalent": False,
         },
     }

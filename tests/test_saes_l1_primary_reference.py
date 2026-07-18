@@ -65,6 +65,7 @@ def _run_l1(depths: torch.Tensor):
         "transmittance-diagnostic",
         "conditional-anchor-transport-diagnostic",
         "conditional-adapter-offset-transport-diagnostic",
+        "conditional-adapter-offset-attribute-transport-diagnostic",
     ),
 )
 def test_all_normal_saes_materializations_use_primary_l1_reference(materialization):

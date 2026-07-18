@@ -50,6 +50,35 @@ def test_event_ledger_charges_every_executed_l0_l1_operation():
     assert ledger["assumptions"]["rtl_cycle_equivalent"] is False
 
 
+def test_event_ledger_charges_adapter_offset_attribute_reconstruction():
+    from saes.hardware_accounting import build_saes_event_ledger
+
+    baseline = build_saes_event_ledger(
+        _mixed_stats(), feature_dim=128, tile_size=4, sh_degree=2
+    )
+    stats = _mixed_stats()
+    stats["adapter_offset_attribute_transport_uses"] = 12 * 4 + 8 * 8
+    transport = build_saes_event_ledger(
+        stats, feature_dim=128, tile_size=4, sh_degree=2
+    )
+
+    assert transport["events"]["adapter_offset_attribute_transport_pairs"] == 112
+    assert transport["cycles"]["adapter_offset_attribute_reconstruction"] == 112
+    assert transport["traffic_bytes"]["adapter_offset_attribute_transport_read"] == (
+        112 * (54 + 2)
+    )
+    assert (
+        transport["traffic_bytes"]["charged_storage_total"]
+        - baseline["traffic_bytes"]["charged_storage_total"]
+        == 112 * (54 + 2)
+    )
+    assert (
+        transport["cycles"]["serialized_accounting_cycles"]
+        - baseline["cycles"]["serialized_accounting_cycles"]
+        == 112 + (112 * (54 + 2)) // 16
+    )
+
+
 def test_event_ledger_rejects_anchor_counts_that_do_not_match_the_route():
     from saes.hardware_accounting import build_saes_event_ledger
 
