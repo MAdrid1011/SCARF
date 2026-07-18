@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Mapping
 
 import torch
 import torch.nn.functional as F
@@ -544,6 +544,492 @@ def _audit_summary(values: list[float]) -> dict[str, float | int]:
         "p50": float(torch.quantile(tensor, 0.50).item()),
         "p95": float(torch.quantile(tensor, 0.95).item()),
         "maximum": float(tensor.max().item()),
+    }
+
+
+def guard_partition_full_s3_attribute_audit(
+    original: Any,
+    sparse: Any,
+    *,
+    features: torch.Tensor,
+    depths: torch.Tensor,
+    height: int,
+    width: int,
+    tile_size: int,
+    feature_threshold: float,
+    depth_threshold: float,
+    view_count: int,
+    decision_semantics: str,
+    materialization: str,
+    effective_mask: torch.Tensor,
+    partition_by_tile: Mapping[tuple[int, int, int], str],
+) -> dict[str, Any]:
+    """Summarize fixed guard partitions with posthoc full-S3 attributes only.
+
+    The partition labels and sparse mask are committed by the target-free
+    execution before this helper runs. S1 features and selected-anchor S2
+    depths recreate only the existing assignment weights. Full S3 attributes
+    are then read solely to measure the frozen output; no non-probe S2 value is
+    opened by this oracle.
+    """
+    required = ("means", "covariances", "harmonics", "opacities")
+    if any(not hasattr(value, name) for value in (original, sparse) for name in required):
+        raise ValueError("guard partition audit requires complete Gaussian attributes")
+    if features.dim() != 5 or depths.dim() not in (4, 5):
+        raise ValueError("guard partition audit requires S1 features and S2 depths")
+    if min(height, width, tile_size, view_count) <= 0:
+        raise ValueError("guard partition audit dimensions must be positive")
+    if height % tile_size or width % tile_size:
+        raise ValueError("guard partition audit requires an integral tile grid")
+    if materialization not in (
+        "representative",
+        "transmittance-diagnostic",
+        "virtual-reconstruction-diagnostic",
+        "l1-primary-depth-reference-diagnostic",
+        "conditional-anchor-transport-diagnostic",
+        "conditional-adapter-offset-transport-diagnostic",
+        "conditional-adapter-offset-attribute-transport-diagnostic",
+    ):
+        raise ValueError(f"unsupported audited SAES materialization: {materialization}")
+    if not torch.is_tensor(effective_mask):
+        raise ValueError("guard partition audit requires a committed sparse mask")
+
+    position_count = view_count * height * width
+    gaussian_count = int(original.means.shape[1])
+    if (
+        sparse.means.shape != original.means.shape
+        or gaussian_count % position_count
+        or original.covariances.shape[1] != gaussian_count
+        or original.harmonics.shape[1] != gaussian_count
+        or original.opacities.shape[1] != gaussian_count
+    ):
+        raise ValueError("guard partition audit received incompatible Gaussian layout")
+    primitives_per_pixel = gaussian_count // position_count
+    effective_mask = effective_mask.detach().to(
+        device=original.means.device, dtype=torch.bool
+    ).reshape(-1)
+    if effective_mask.numel() != gaussian_count:
+        raise ValueError("guard partition audit mask has an incompatible Gaussian layout")
+
+    statistic = {
+        "probe-vector-first-hit": "raw-probe-vector-variance",
+        "probe-channel-variance-first-hit": "raw-probe-mean-channel-variance",
+        "probe-normalized-std-first-hit": "normalized-probe-vector-standard-deviation",
+        "current": "normalized-probe-total-variance",
+    }.get(decision_semantics)
+    if statistic is None:
+        raise ValueError(f"unsupported SAES decision semantics: {decision_semantics}")
+    variances, normalized_features = ProgressiveSAES.classify_tiles_by_features(
+        features,
+        height,
+        width,
+        tile_size,
+        per_view=True,
+        statistic=statistic,
+    )
+    scorer = ProgressiveSAES(
+        height,
+        width,
+        initial_tile_size=tile_size,
+        feature_var_threshold=feature_threshold,
+        depth_std_threshold=depth_threshold,
+        view_count=view_count,
+        primitives_per_pixel=primitives_per_pixel,
+        decision_semantics=decision_semantics,
+    )
+
+    expected_tiles = {
+        (view, tile_row, tile_column)
+        for view in range(view_count)
+        for tile_row in range(height // tile_size)
+        for tile_column in range(width // tile_size)
+    }
+    if set(partition_by_tile) != expected_tiles:
+        raise ValueError("guard partition labels must cover exactly the tile grid")
+    if any(not isinstance(label, str) or not label for label in partition_by_tile.values()):
+        raise ValueError("guard partition labels must be nonempty strings")
+
+    def flat_index(view: int, row: int, column: int, slot: int) -> int:
+        return ((view * height * width + row * width + column) * primitives_per_pixel) + slot
+
+    def tile_indices(view: int, tile_y: int, tile_x: int, slot: int) -> torch.Tensor:
+        return torch.tensor(
+            [
+                flat_index(view, tile_y + local_y, tile_x + local_x, slot)
+                for local_y in range(tile_size)
+                for local_x in range(tile_size)
+            ],
+            device=original.means.device,
+            dtype=torch.long,
+        )
+
+    def selected_anchor_depth(
+        view: int, row: int, column: int, slot: int
+    ) -> torch.Tensor:
+        """Read only an already-selected S2 anchor depth."""
+        if depths.dim() == 5:
+            values = depths[0, view, row * width + column].reshape(-1)
+            return values[min(slot, values.numel() - 1)].to(
+                device=original.means.device, dtype=original.means.dtype
+            )
+        return depths[0, view, row, column].reshape(()).to(
+            device=original.means.device, dtype=original.means.dtype
+        )
+
+    def level_from_mask(view: int, tile_y: int, tile_x: int) -> str:
+        skipped_per_slot = [
+            int(effective_mask[tile_indices(view, tile_y, tile_x, slot)].sum().item())
+            for slot in range(primitives_per_pixel)
+        ]
+        if len(set(skipped_per_slot)) != 1:
+            raise ValueError("guard partition mask has inconsistent primitive slots")
+        skipped = skipped_per_slot[0]
+        if skipped == 0:
+            return "Full"
+        if skipped == tile_size * tile_size - len(scorer.probe_positions):
+            return "L0"
+        if skipped == tile_size * tile_size - len(scorer.lightweight_positions):
+            return "L1"
+        raise ValueError("guard partition mask has an unsupported tile pattern")
+
+    metric_keys = (
+        "native_covariance_scale_ratio",
+        "native_transported_mean_update_l2",
+        "native_harmonic_relative_update",
+        "native_opacity_absolute_update",
+        "full_s3_oracle_covariance_scale_ratio",
+        "full_s3_oracle_covariance_relative_error",
+        "full_s3_oracle_mean_relative_error",
+        "full_s3_oracle_harmonic_relative_error",
+        "full_s3_oracle_opacity_absolute_error",
+        "full_s3_optical_depth_relative_error",
+    )
+
+    def route_accumulator() -> dict[str, Any]:
+        return {
+            "tiles": 0,
+            "retained_descriptor_count": 0,
+            **{key: [] for key in metric_keys},
+        }
+
+    accumulators: dict[str, dict[str, dict[str, Any]]] = {
+        label: {route: route_accumulator() for route in ("L0", "L1", "Full")}
+        for label in sorted(set(partition_by_tile.values()))
+    }
+
+    def append_metric(values: list[float], value: torch.Tensor | float) -> None:
+        scalar = float(value.detach().item()) if torch.is_tensor(value) else float(value)
+        if not math.isfinite(scalar):
+            raise ValueError("guard partition audit produced a non-finite metric")
+        values.append(scalar)
+
+    coordinate_scale = max(tile_size - 1, 1)
+    for view, tile_row, tile_column in sorted(expected_tiles):
+        label = partition_by_tile[(view, tile_row, tile_column)]
+        tile_y = tile_row * tile_size
+        tile_x = tile_column * tile_size
+        level = level_from_mask(view, tile_y, tile_x)
+        record = accumulators[label][level]
+        record["tiles"] += 1
+        feature_variance = variances[(view, tile_row, tile_column)]
+        assignment_feature_variance = scorer._assignment_feature_variance(feature_variance)
+
+        if level == "L0":
+            if feature_variance >= feature_threshold:
+                raise ValueError("committed L0 mask contradicts the fixed feature route")
+            retained_positions = scorer.probe_positions
+        elif level == "L1":
+            if not scorer.check_depth_uniformity(
+                depths,
+                tile_row,
+                tile_column,
+                tile_size,
+                height,
+                width,
+                depth_threshold,
+                probe_positions=scorer.probe_positions,
+                view_index=view,
+                relative=False,
+            ):
+                raise ValueError("committed L1 mask contradicts the fixed depth route")
+            retained_positions = scorer.lightweight_positions
+        else:
+            retained_positions = [
+                (local_y, local_x)
+                for local_y in range(tile_size)
+                for local_x in range(tile_size)
+            ]
+
+        retained = set(retained_positions)
+        non_probe_positions = [
+            (local_y, local_x)
+            for local_y in range(tile_size)
+            for local_x in range(tile_size)
+            if (local_y, local_x) not in retained
+        ]
+        view_features = normalized_features[view]
+        for slot in range(primitives_per_pixel):
+            output_indices = torch.tensor(
+                [
+                    flat_index(view, tile_y + local_y, tile_x + local_x, slot)
+                    for local_y, local_x in retained_positions
+                ],
+                device=original.means.device,
+                dtype=torch.long,
+            )
+            record["retained_descriptor_count"] += int(output_indices.numel())
+
+            # A Full tile is an unmodified Stage-3 passthrough, not a
+            # zero-error sparse materialization sample. Keep its tile/count
+            # provenance, but do not manufacture oracle metric observations.
+            if level == "Full":
+                continue
+
+            assignments = None
+            if level != "Full":
+                anchor_depths = torch.stack(
+                    [
+                        selected_anchor_depth(
+                            view, tile_y + local_y, tile_x + local_x, slot
+                        )
+                        for local_y, local_x in retained_positions
+                    ]
+                )
+                depth_reference_depths = (
+                    anchor_depths[: len(scorer.probe_positions)]
+                    if level == "L1"
+                    else None
+                )
+                assignment_rows = []
+                for local_y, local_x in non_probe_positions:
+                    feature_i = view_features[:, tile_y + local_y, tile_x + local_x]
+                    spatial_distances = []
+                    feature_distances = []
+                    for anchor_y, anchor_x in retained_positions:
+                        anchor_feature = view_features[
+                            :, tile_y + anchor_y, tile_x + anchor_x
+                        ]
+                        spatial_distances.append(
+                            ((local_y - anchor_y) / coordinate_scale) ** 2
+                            + ((local_x - anchor_x) / coordinate_scale) ** 2
+                        )
+                        feature_distances.append(
+                            float((feature_i - anchor_feature).square().sum().item())
+                        )
+                    assignment_rows.append(
+                        paper_assignment_weights(
+                            torch.tensor(
+                                spatial_distances,
+                                device=original.means.device,
+                                dtype=original.means.dtype,
+                            ),
+                            torch.tensor(
+                                feature_distances,
+                                device=original.means.device,
+                                dtype=original.means.dtype,
+                            ),
+                            feature_variance=assignment_feature_variance,
+                            beta_x=scorer.beta_x,
+                            beta_f=scorer.beta_f,
+                            level=level,
+                            probe_depths=anchor_depths if level == "L1" else None,
+                            depth_reference_depths=depth_reference_depths,
+                            beta_d=scorer.beta_d if level == "L1" else None,
+                        )
+                    )
+                assignments = torch.stack(assignment_rows, dim=0)
+                if not torch.allclose(
+                    assignments.sum(dim=1), torch.ones(
+                        assignments.shape[0],
+                        device=assignments.device,
+                        dtype=assignments.dtype,
+                    ),
+                    atol=1.0e-5,
+                    rtol=0.0,
+                ):
+                    raise ValueError("guard partition audit assignment weights do not normalize")
+
+            # Route and assignment state are now fixed. Full S3 values below
+            # are posthoc comparisons only and never flow back to SAES.
+            full_indices = tile_indices(view, tile_y, tile_x, slot)
+            source_means = original.means[0, output_indices].float()
+            output_means = sparse.means[0, output_indices].float()
+            source_covariances = original.covariances[0, output_indices].float()
+            output_covariances = sparse.covariances[0, output_indices].float()
+            source_harmonics = original.harmonics[0, output_indices].float()
+            output_harmonics = sparse.harmonics[0, output_indices].float()
+            source_opacities = original.opacities[0, output_indices].float().reshape(-1)
+            output_opacities = sparse.opacities[0, output_indices].float().reshape(-1)
+            for index in range(output_indices.numel()):
+                append_metric(
+                    record["native_covariance_scale_ratio"],
+                    output_covariances[index].norm()
+                    / source_covariances[index].norm().clamp_min(1.0e-8),
+                )
+                append_metric(
+                    record["native_transported_mean_update_l2"],
+                    (output_means[index] - source_means[index]).norm(),
+                )
+                append_metric(
+                    record["native_harmonic_relative_update"],
+                    (output_harmonics[index] - source_harmonics[index]).norm()
+                    / source_harmonics[index].norm().clamp_min(1.0e-8),
+                )
+                append_metric(
+                    record["native_opacity_absolute_update"],
+                    (output_opacities[index] - source_opacities[index]).abs(),
+                )
+
+            full_opacities = original.opacities[0, full_indices].float().reshape(-1)
+            full_optical_depth = -torch.log1p(
+                -full_opacities.clamp(0.0, 1.0 - 1.0e-6)
+            ).sum()
+            output_optical_depth = -torch.log1p(
+                -output_opacities.clamp(0.0, 1.0 - 1.0e-6)
+            ).sum()
+            append_metric(
+                record["full_s3_optical_depth_relative_error"],
+                (output_optical_depth - full_optical_depth).abs()
+                / full_optical_depth.abs().clamp_min(1.0e-8),
+            )
+
+            non_probe_indices = torch.tensor(
+                [
+                    flat_index(view, tile_y + local_y, tile_x + local_x, slot)
+                    for local_y, local_x in non_probe_positions
+                ],
+                device=original.means.device,
+                dtype=torch.long,
+            )
+            for anchor_index, representative_index in enumerate(output_indices):
+                weights = torch.cat(
+                    (
+                        torch.ones(
+                            1,
+                            device=original.means.device,
+                            dtype=original.means.dtype,
+                        ),
+                        assignments[:, anchor_index],
+                    )
+                )
+                weights = weights / weights.sum().clamp_min(1.0e-8)
+                contributors = torch.cat((representative_index.reshape(1), non_probe_indices))
+                oracle_means = original.means[0, contributors].float()
+                oracle_covariances = original.covariances[0, contributors].float()
+                oracle_harmonics = original.harmonics[0, contributors].float()
+                oracle_opacities = original.opacities[0, contributors].float().reshape(-1)
+                oracle_weights = weights.to(oracle_means)
+                oracle_mean = torch.einsum("n,ni->i", oracle_weights, oracle_means)
+                centered = oracle_means - oracle_mean
+                oracle_covariance = torch.einsum(
+                    "n,nij->ij",
+                    oracle_weights,
+                    oracle_covariances
+                    + torch.einsum("ni,nj->nij", centered, centered),
+                )
+                oracle_harmonic = torch.einsum(
+                    "n,n...->...", oracle_weights, oracle_harmonics
+                )
+                oracle_opacity = torch.einsum("n,n->", oracle_weights, oracle_opacities)
+                output_index = int(anchor_index)
+                append_metric(
+                    record["full_s3_oracle_covariance_scale_ratio"],
+                    output_covariances[output_index].norm()
+                    / oracle_covariance.norm().clamp_min(1.0e-8),
+                )
+                append_metric(
+                    record["full_s3_oracle_covariance_relative_error"],
+                    (output_covariances[output_index] - oracle_covariance).norm()
+                    / oracle_covariance.norm().clamp_min(1.0e-8),
+                )
+                append_metric(
+                    record["full_s3_oracle_mean_relative_error"],
+                    (output_means[output_index] - oracle_mean).norm()
+                    / oracle_mean.norm().clamp_min(1.0e-8),
+                )
+                append_metric(
+                    record["full_s3_oracle_harmonic_relative_error"],
+                    (output_harmonics[output_index] - oracle_harmonic).norm()
+                    / oracle_harmonic.norm().clamp_min(1.0e-8),
+                )
+                append_metric(
+                    record["full_s3_oracle_opacity_absolute_error"],
+                    (output_opacities[output_index] - oracle_opacity).abs(),
+                )
+
+    return {
+        "schema_version": "1.0",
+        "kind": "saes_guard_partition_full_s3_attribute_audit",
+        "paper_result_eligible": False,
+        "routing_signal_used": False,
+        "parameter_selection_used": False,
+        "full_stage3_reference_use": "posthoc-diagnostic-only",
+        "full_stage3_reference_timing": "after-committed-routing",
+        "nonprobe_stage2_depth_accessed": False,
+        "assignment_depths": "selected-anchor-S2-only",
+        "materialization": materialization,
+        "partitions": {
+            label: {
+                route: {
+                    "tiles": int(record["tiles"]),
+                    "retained_descriptor_count": int(record["retained_descriptor_count"]),
+                    "oracle_applicable": route != "Full",
+                    "full_stage3_passthrough": route == "Full",
+                    "covariance_scale_relative_error": _audit_summary(
+                        record["full_s3_oracle_covariance_relative_error"]
+                    ),
+                    "transported_mean_update_relative_error": _audit_summary(
+                        record["full_s3_oracle_mean_relative_error"]
+                    ),
+                    "sh_relative_error": _audit_summary(
+                        record["full_s3_oracle_harmonic_relative_error"]
+                    ),
+                    "opacity_absolute_error": _audit_summary(
+                        record["full_s3_oracle_opacity_absolute_error"]
+                    ),
+                    "covariance": {
+                        "native_scale_ratio": _audit_summary(
+                            record["native_covariance_scale_ratio"]
+                        ),
+                        "full_s3_oracle_scale_ratio": _audit_summary(
+                            record["full_s3_oracle_covariance_scale_ratio"]
+                        ),
+                        "full_s3_oracle_relative_error": _audit_summary(
+                            record["full_s3_oracle_covariance_relative_error"]
+                        ),
+                    },
+                    "transported_mean": {
+                        "native_update_l2": _audit_summary(
+                            record["native_transported_mean_update_l2"]
+                        ),
+                        "full_s3_oracle_relative_error": _audit_summary(
+                            record["full_s3_oracle_mean_relative_error"]
+                        ),
+                    },
+                    "harmonics": {
+                        "native_relative_update": _audit_summary(
+                            record["native_harmonic_relative_update"]
+                        ),
+                        "full_s3_oracle_relative_error": _audit_summary(
+                            record["full_s3_oracle_harmonic_relative_error"]
+                        ),
+                    },
+                    "opacity": {
+                        "native_absolute_update": _audit_summary(
+                            record["native_opacity_absolute_update"]
+                        ),
+                        "full_s3_oracle_absolute_error": _audit_summary(
+                            record["full_s3_oracle_opacity_absolute_error"]
+                        ),
+                        "full_s3_optical_depth_relative_error": _audit_summary(
+                            record["full_s3_optical_depth_relative_error"]
+                        ),
+                    },
+                }
+                for route, record in routes.items()
+            }
+            for label, routes in accumulators.items()
+        },
     }
 
 

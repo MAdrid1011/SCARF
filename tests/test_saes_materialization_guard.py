@@ -70,6 +70,71 @@ def test_l0_guard_rejection_still_attempts_l1_before_full_fallback():
     assert stats["materialization_guard_enabled"] is True
 
 
+def test_tile_trace_matches_guard_counters_for_rejected_to_full_route():
+    from saes.progressive_saes import apply_progressive_saes
+
+    gaussians = _gaussians()
+    # A failed primary-anchor SH comparison rejects L0. Those same primary
+    # anchors are part of the declared L1 set, so the fail-closed route ends
+    # at Full after both guard checks.
+    gaussians.harmonics[0, 0] *= -1.0
+    features, depths = _uniform_inputs()
+    tile_trace = []
+
+    _, stats, _ = apply_progressive_saes(
+        gaussians,
+        4,
+        4,
+        feature_var_threshold=0.2,
+        depth_std_threshold=0.1,
+        features=features,
+        depths=depths,
+        tile_trace=tile_trace,
+    )
+
+    assert len(tile_trace) == stats["total_tiles_processed"] == 1
+    record = tile_trace[0]
+    assert set(record) == {
+        "view_index",
+        "tile_row",
+        "tile_column",
+        "feature_variance",
+        "feature_candidate",
+        "depth_candidate",
+        "guard_enabled",
+        "guard_checks",
+        "routing_level_before_materialization",
+    }
+    assert record["feature_candidate"] is True
+    assert record["depth_candidate"] is True
+    assert record["guard_enabled"] is True
+    assert record["routing_level_before_materialization"] == "Full"
+
+    checks = record["guard_checks"]
+    assert [check["level"] for check in checks] == ["L0", "L1"]
+    assert [check["anchor_count"] for check in checks] == [4, 8]
+    assert all(check["passed"] is False for check in checks)
+    assert sum(check["level"] == "L0" for check in checks) == stats[
+        "l0_guard_checks"
+    ]
+    assert sum(check["level"] == "L1" for check in checks) == stats[
+        "l1_guard_checks"
+    ]
+
+    allowed_guard_scalars = {
+        "level",
+        "anchor_count",
+        "passed",
+        "covariance_cosine_minimum",
+        "harmonic_cosine_minimum",
+        "opacity_distance_maximum",
+        "nonprobe_s3_attribute_reads",
+    }
+    for check in checks:
+        assert set(check) == allowed_guard_scalars
+        assert check["nonprobe_s3_attribute_reads"] == 0
+
+
 def test_disabled_materialization_guard_preserves_boolean_provenance():
     from saes.progressive_saes import apply_progressive_saes
 

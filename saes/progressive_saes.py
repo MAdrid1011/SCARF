@@ -2130,6 +2130,7 @@ class ProgressiveSAES:
         depths=None,
         routing_depths=None,
         feat_norm=None,
+        tile_trace: List[Dict] | None = None,
     ) -> Tuple['torch.Tensor', Dict]:
         """
         Multi-level SAES v4 tile processing (Dataflow-aligned, L0+L1 only).
@@ -2149,6 +2150,8 @@ class ProgressiveSAES:
         """
         gaussian_count = gaussians_full.means.shape[1]
         device = gaussians_full.means.device
+        if tile_trace is not None and not isinstance(tile_trace, list):
+            raise ValueError("tile_trace must be a list when provided")
         if (
             self._camera_directions is not None
             and self._camera_directions.device != device
@@ -2240,19 +2243,27 @@ class ProgressiveSAES:
                         feature_variance
                     )
 
+                    depth_candidate = None
+
                     def depth_route_passes() -> bool:
-                        return routing_depths is not None and self.check_depth_uniformity(
-                            routing_depths,
-                            th,
-                            tw,
-                            tile_size,
-                            self.H,
-                            self.W,
-                            self.depth_std_threshold,
-                            probe_positions=self.probe_positions,
-                            view_index=view,
-                            relative=False,
-                        )
+                        nonlocal depth_candidate
+                        if depth_candidate is None:
+                            depth_candidate = bool(
+                                routing_depths is not None
+                                and self.check_depth_uniformity(
+                                    routing_depths,
+                                    th,
+                                    tw,
+                                    tile_size,
+                                    self.H,
+                                    self.W,
+                                    self.depth_std_threshold,
+                                    probe_positions=self.probe_positions,
+                                    view_index=view,
+                                    relative=False,
+                                )
+                            )
+                        return depth_candidate
 
                     def materialization_guard_passes(
                         positions: List[Tuple[int, int]], level: str
@@ -2272,9 +2283,35 @@ class ProgressiveSAES:
                             self.stats['guard_nonprobe_s3_attribute_reads'] += record[
                                 'nonprobe_s3_attribute_reads'
                             ]
-                        return all(record['passed'] for record in records)
+                        passed = all(record['passed'] for record in records)
+                        if tile_trace is not None:
+                            tile_guard_checks.append(
+                                {
+                                    'level': level,
+                                    'anchor_count': len(positions) * self.primitives_per_pixel,
+                                    'passed': passed,
+                                    'covariance_cosine_minimum': min(
+                                        record['covariance_cosine_minimum']
+                                        for record in records
+                                    ),
+                                    'harmonic_cosine_minimum': min(
+                                        record['harmonic_cosine_minimum']
+                                        for record in records
+                                    ),
+                                    'opacity_distance_maximum': max(
+                                        record['opacity_distance_maximum']
+                                        for record in records
+                                    ),
+                                    'nonprobe_s3_attribute_reads': sum(
+                                        record['nonprobe_s3_attribute_reads']
+                                        for record in records
+                                    ),
+                                }
+                            )
+                        return passed
 
                     selected_level = None
+                    tile_guard_checks: List[Dict] = []
                     if feature_variance < self.feature_var_threshold:
                         if not self.materialization_guard:
                             selected_level = 'L0'
@@ -2307,6 +2344,24 @@ class ProgressiveSAES:
                                 selected_level = 'L1'
                             else:
                                 self.stats['l1_guard_rejections'] += 1
+                    if tile_trace is not None:
+                        tile_trace.append(
+                            {
+                                'view_index': view,
+                                'tile_row': th,
+                                'tile_column': tw,
+                                'feature_variance': float(feature_variance),
+                                'feature_candidate': bool(
+                                    feature_variance < self.feature_var_threshold
+                                ),
+                                'depth_candidate': depth_candidate,
+                                'guard_enabled': self.materialization_guard,
+                                'guard_checks': tile_guard_checks,
+                                'routing_level_before_materialization': (
+                                    selected_level if selected_level is not None else 'Full'
+                                ),
+                            }
+                        )
 
                     if selected_level is not None:
                         if (
@@ -2521,6 +2576,7 @@ def apply_progressive_saes(
     depth_near: torch.Tensor | None = None,
     depth_far: torch.Tensor | None = None,
     materialization_guard: bool = True,
+    tile_trace: List[Dict] | None = None,
 ) -> Tuple['torch.Tensor', Dict, List]:
     """
     Apply progressive SAES v4 (Dataflow-aligned, L0+L1) to Gaussians.
@@ -2630,6 +2686,7 @@ def apply_progressive_saes(
         depths=depths,
         routing_depths=routing_depths,
         feat_norm=_feat_norm,
+        tile_trace=tile_trace,
     )
 
     continue_pixels = []

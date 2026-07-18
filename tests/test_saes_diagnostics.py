@@ -347,6 +347,143 @@ def test_materialization_attribute_audit_is_target_free_and_tracks_l0_errors():
     assert optical_depth["relative_error"]["p50"] == pytest.approx(0.75)
 
 
+def test_guard_partition_full_s3_oracle_uses_only_selected_l1_s2_anchors():
+    """The guard oracle may compare full S3 posthoc, but never full nonprobe S2."""
+    from saes.probe_layout import compute_lightweight_positions
+    from scripts.saes_diagnostics import guard_partition_full_s3_attribute_audit
+
+    height = width = tile_size = 4
+    selected = {
+        row * width + column
+        for row, column in compute_lightweight_positions(tile_size)
+    }
+
+    class SelectedAnchorDepths(torch.Tensor):
+        @staticmethod
+        def __new__(cls, values):
+            return torch.Tensor._make_subclass(cls, values, values.requires_grad)
+
+        def __getitem__(self, index):
+            if isinstance(index, tuple) and len(index) >= 3:
+                flat_index = index[2]
+                if isinstance(flat_index, int) and flat_index not in selected:
+                    raise AssertionError(
+                        f"guard oracle accessed nonprobe S2 index {flat_index}"
+                    )
+                if isinstance(flat_index, slice):
+                    raise AssertionError("guard oracle sliced full S2 depths")
+                if torch.is_tensor(flat_index):
+                    requested = {int(value) for value in flat_index.reshape(-1).tolist()}
+                    if not requested <= selected:
+                        raise AssertionError("guard oracle gathered nonprobe S2 depths")
+            return super().__getitem__(index)
+
+    original = SimpleNamespace(
+        means=torch.ones(1, 16, 3),
+        covariances=torch.eye(3).reshape(1, 1, 3, 3).repeat(1, 16, 1, 1),
+        harmonics=torch.full((1, 16, 3, 1), 0.5),
+        opacities=torch.full((1, 16), 0.25),
+    )
+    sparse = SimpleNamespace(
+        means=original.means.clone(),
+        covariances=original.covariances.clone(),
+        harmonics=original.harmonics.clone(),
+        opacities=original.opacities.clone(),
+    )
+    # Ensure the resulting summaries contain a measured, nontrivial sparse update.
+    sparse.means[0, 0, 0] += 0.25
+    sparse.covariances[0, 0] *= 1.25
+    sparse.harmonics[0, 0] += 0.25
+    sparse.opacities[0, 0] += 0.10
+
+    features = torch.zeros(1, 1, 2, height, width)
+    for (row, column), value in {
+        (0, 0): (0.0, 0.0),
+        (0, 3): (2.0, 0.0),
+        (3, 0): (0.0, 2.0),
+        (3, 3): (2.0, 2.0),
+    }.items():
+        features[0, 0, :, row, column] = torch.tensor(value)
+    depth_values = torch.ones(1, 1, 16, 1, 1)
+    nonselected = sorted(set(range(16)) - selected)
+    depth_values[0, 0, nonselected, 0, 0] = float("nan")
+    depths = SelectedAnchorDepths(depth_values)
+    effective_mask = torch.ones(16, dtype=torch.bool)
+    effective_mask[torch.tensor(sorted(selected))] = False
+
+    record = guard_partition_full_s3_attribute_audit(
+        original,
+        sparse,
+        features=features,
+        depths=depths,
+        height=height,
+        width=width,
+        tile_size=tile_size,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+        view_count=1,
+        decision_semantics="probe-vector-first-hit",
+        materialization="conditional-adapter-offset-attribute-transport-diagnostic",
+        effective_mask=effective_mask,
+        partition_by_tile={(0, 0, 0): "guard_accepted"},
+    )
+
+    assert record["full_stage3_reference_use"] == "posthoc-diagnostic-only"
+    assert record["routing_signal_used"] is False
+    assert "posthoc_nonprobe_s2_depth_reconstruction" not in record
+    level = record["partitions"]["guard_accepted"]["L1"]
+    assert level["tiles"] == 1
+    for metric in (
+        "covariance_scale_relative_error",
+        "transported_mean_update_relative_error",
+        "sh_relative_error",
+        "opacity_absolute_error",
+    ):
+        summary = level[metric]
+        assert summary["count"] > 0
+        assert summary["maximum"] >= summary["p95"] >= summary["p50"] >= 0.0
+
+
+def test_guard_partition_full_passthrough_has_no_sparse_oracle_samples():
+    from scripts.saes_diagnostics import guard_partition_full_s3_attribute_audit
+
+    original = SimpleNamespace(
+        means=torch.ones(1, 16, 3),
+        covariances=torch.eye(3).reshape(1, 1, 3, 3).repeat(1, 16, 1, 1),
+        harmonics=torch.full((1, 16, 3, 1), 0.5),
+        opacities=torch.full((1, 16), 0.25),
+    )
+    sparse = SimpleNamespace(
+        means=original.means.clone(),
+        covariances=original.covariances.clone(),
+        harmonics=original.harmonics.clone(),
+        opacities=original.opacities.clone(),
+    )
+    record = guard_partition_full_s3_attribute_audit(
+        original,
+        sparse,
+        features=torch.ones(1, 1, 2, 4, 4),
+        depths=torch.ones(1, 1, 16, 1, 1),
+        height=4,
+        width=4,
+        tile_size=4,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+        view_count=1,
+        decision_semantics="probe-normalized-std-first-hit",
+        materialization="conditional-adapter-offset-attribute-transport-diagnostic",
+        effective_mask=torch.zeros(16, dtype=torch.bool),
+        partition_by_tile={(0, 0, 0): "rejected_to_full"},
+    )
+
+    full = record["partitions"]["rejected_to_full"]["Full"]
+    assert full["tiles"] == 1
+    assert full["full_stage3_passthrough"] is True
+    assert full["oracle_applicable"] is False
+    assert full["covariance_scale_relative_error"]["count"] == 0
+    assert full["transported_mean_update_relative_error"]["count"] == 0
+
+
 def test_materialization_audit_compares_corner_depth_reconstruction_posthoc():
     from scripts.saes_diagnostics import materialization_attribute_audit
 

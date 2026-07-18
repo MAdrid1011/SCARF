@@ -776,6 +776,10 @@ Verified on 2026-07-16 and 2026-07-17:
 - [ ] Diagnose the remaining materialization failure target-free before
   registering any new quality gate. The diagnosis must not read target RGB,
   select a new sample, change thresholds, or infer a quality tolerance.
+- [ ] Run the fixed guard-partition oracle audit with canonical guarded and
+  unguarded shadow clones. It must report only posthoc full-S3 attribute
+  distributions, preserve all target-free and poison invariants, and cannot
+  authorize a guard threshold change or quality retry.
 - [x] Add a fail-closed DL3DV training-calibration archive path: enumerate the
   authenticated official tree, freeze an evaluation-disjoint 24+8 plan before
   download, verify selected ZIP byte counts and upstream object ids, record

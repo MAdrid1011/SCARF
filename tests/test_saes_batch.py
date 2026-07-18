@@ -2182,3 +2182,37 @@ def test_adapter_offset_attribute_transport_preserves_l1_route_and_charges_recon
         attribute_ledger["cycles"]["serialized_accounting_cycles"]
         > adapter_ledger["cycles"]["serialized_accounting_cycles"]
     )
+
+
+def test_optional_tile_trace_records_only_guard_scalars_and_matches_route():
+    from saes.progressive_saes import apply_progressive_saes
+
+    gaussians = _gaussians()
+    trace = []
+    _, stats, _ = apply_progressive_saes(
+        gaussians,
+        4,
+        4,
+        feature_var_threshold=1.0,
+        depth_std_threshold=1.0,
+        features=torch.ones(1, 1, 2, 4, 4),
+        depths=torch.ones(1, 1, 16, 1, 1),
+        tile_trace=trace,
+    )
+
+    assert stats["level0_tiles"] == 1
+    assert len(trace) == 1
+    record = trace[0]
+    assert record["feature_candidate"] is True
+    assert record["depth_candidate"] is None
+    assert record["routing_level_before_materialization"] == "L0"
+    assert record["guard_enabled"] is True
+    assert len(record["guard_checks"]) == 1
+    check = record["guard_checks"][0]
+    assert check["level"] == "L0"
+    assert check["anchor_count"] == 4
+    assert check["passed"] is True
+    assert check["nonprobe_s3_attribute_reads"] == 0
+    assert "anchor_indices" not in check
+    assert "harmonics" not in check
+    assert "opacities" not in check

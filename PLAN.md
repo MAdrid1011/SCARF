@@ -1522,6 +1522,38 @@
   retry it, change its fixed contract, or launch 8/32/140-scene work; the next
   route must begin with a new target-free implementation diagnosis.
 
+### 33.3 Guard-Partition Oracle Audit
+
+- Research question: does the existing diagnostic-only probe-attribute guard
+  identify tiles whose selected-anchor materialization is locally faithful, or
+  does the same retained-attribute error persist in both accepted and rejected
+  partitions? The quality result cannot answer this because it must not be used
+  to tune a guard or route.
+- Fixed design: a new target-free entrypoint reuses only the v2 sidecar,
+  TranSplat/DL3DV sample 0, seed 0, tile size 4, tau_f=0.20, tau_d=0.10,
+  normalized-probe feature statistic, metric depth standard deviation, primary-K
+  L1 reference, 2K native anchors, and adapter-offset attribute transport. It
+  runs a guarded canonical clone and an unguarded shadow clone, records only
+  per-tile route/guard scalars, and compares their already-committed retained
+  descriptors against full encoder attributes post hoc. It may not render,
+  decode, read target RGB, compute quality metrics, expose a threshold or
+  sample override, or select a subsequent parameter.
+- Acceptance: trace counts must agree with runtime guard counters; each trace
+  carries no raw non-probe attributes; poisoning skipped descriptors must leave
+  route, trace, stats, and retained output unchanged; covariance PSD,
+  transmittance bounds, and assignment normalization must hold. The report
+  separates guard-accepted, L0-rejected/L1-accepted, and rejected-to-Full
+  outcomes, charging no new result or saving claim. With the current nested
+  L1 anchors and identical guard predicate, an L0 rejection necessarily also
+  rejects L1; retain the L0-rejected/L1-accepted partition with an explicit
+  zero-by-construction count rather than inferring a measured absence.
+- Decision rule: if the unguarded shadow has comparable posthoc covariance
+  scale, transported-mean, SH, or opacity error in guard-accepted and
+  guard-rejected partitions, no additional guard threshold is a valid repair.
+  The next candidate must instead repair pseudo-descriptor geometry. If the
+  partitions clearly separate, retain the finding as diagnostic-only and wait
+  for disjoint calibration before any guard policy is considered.
+
 ## 34. DL3DV Training-Calibration Preparation
 
 - The author-side training calibration path now has an executable, fail-closed
