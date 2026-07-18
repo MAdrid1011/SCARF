@@ -25,10 +25,12 @@ def _optimized(gaussians, representative_local):
 
 def test_fixed_parameter_variant_registry_has_exactly_requested_twelve_variants():
     from scripts.saes_same_budget_render_teacher_parameter_attribution import (
+        ATTRIBUTION_ID,
         _expected_variant_names,
         _variant_specs,
     )
 
+    assert ATTRIBUTION_ID == "same-budget-render-teacher-parameter-attribution-v2"
     assert _expected_variant_names() == (
         "initial_compact",
         "teacher_means",
@@ -104,3 +106,47 @@ def test_sanity_match_is_metric_direction_agnostic_and_fail_closed():
     assert _sanity_match(expected, expected)["passed"] is True
     changed = {**expected, "psnr_db": 52.0}
     assert _sanity_match(changed, expected)["passed"] is False
+
+
+def test_selected_only_preflight_rejects_the_posthoc_dense_oracle(monkeypatch):
+    import scripts.saes_same_budget_render_teacher_parameter_attribution as attribution
+
+    monkeypatch.setattr(
+        attribution,
+        "SELECTED_ONLY_PREFLIGHT_MATERIALIZATION",
+        attribution.MATERIALIZATION,
+    )
+    with pytest.raises(RuntimeError, match="post-hoc full-S3 oracle"):
+        attribution._run_two_sentinel_selected_only_preflight(
+            model=object(), context={}, device=torch.device("cpu")
+        )
+
+
+def test_selected_only_preflight_runs_before_frozen_oracle_reconstruction(monkeypatch):
+    import scripts.saes_same_budget_render_teacher_parameter_attribution as attribution
+
+    class Model:
+        def eval(self):
+            return self
+
+    def blocked_preflight(**_kwargs):
+        raise RuntimeError("preflight-blocked")
+
+    monkeypatch.setattr(
+        attribution,
+        "_load_model_and_inputs",
+        lambda _device: (Model(), {}, {}, {}),
+    )
+    monkeypatch.setattr(
+        attribution,
+        "_run_two_sentinel_selected_only_preflight",
+        blocked_preflight,
+    )
+    monkeypatch.setattr(
+        attribution,
+        "_load_frozen_oracle",
+        lambda: pytest.fail("oracle reconstruction ran before selected-only preflight"),
+    )
+
+    with pytest.raises(RuntimeError, match="preflight-blocked"):
+        attribution.collect_parameter_attribution(device=torch.device("cpu"))

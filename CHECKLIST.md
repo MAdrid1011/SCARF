@@ -903,15 +903,23 @@ Verified on 2026-07-16 and 2026-07-17:
   It did not render or compute quality. Its fixed-input and selected-only-S3
   enforcement was insufficient for a clean gate, so it is retained honestly
   as a diagnostic and the tangent candidate is retired rather than rerun.
-- [ ] Before any distinct future descriptor candidate is audited, harden the
-  audit harness to pre-enforce the exact context-only input/source/checkpoint
-  binding and to prove selected-only S3 access with an allowlisted payload,
-  two finite sentinels, trace/counter equality, and committed-output equality.
-  This item cannot authorize a quality retry, a threshold sweep, or revival of
-  the retired tangent candidate.
+- [x] Wire the common runner-invoked S3-access preflight. Selected-only audit
+  paths use an allowlisted payload and two finite S2/S3 sentinels, requiring
+  equal route trace, counters, committed outputs, and Full outputs. The v2
+  runner invokes that preflight on the fixed attribute-transport path before
+  reconstructing the oracle. Its separately declared full-S3 oracle read is
+  recorded as a non-runtime `not-applicable` exception with an observed full
+  read count, never as selected-only execution. This cannot authorize a
+  quality retry, a threshold sweep, or revival of the retired tangent
+  candidate.
+- [ ] Run the zero-output strict-FP32 initial-compact smoke in a fresh CUDA
+  process. It must pass fixed input/checkpoint hashes, the two-sentinel access
+  preflight, exact partition, finite/immutable Full slots, and one target
+  view shape/finite check without target RGB, teacher metrics, optimizer, or
+  an output artifact.
 - [ ] Run exactly one frozen render-teacher representative-parameter
   attribution at
-  `transplat_sample0_same_budget_render_teacher_parameter_attribution_v1/`.
+  `transplat_sample0_same_budget_render_teacher_parameter_attribution_v2/`.
   Use only the v3 `optimized_representatives.pt` and saved dense-render teacher
   under the fixed partition. Measure the twelve pre-registered descriptor
   family substitutions and leave-one-family-out controls against the teacher,
@@ -919,3 +927,8 @@ Verified on 2026-07-16 and 2026-07-17:
   camera, Full-slot, teacher-fidelity, target-RGB, or optimizer-boundary
   violation. This is a capacity diagnostic only and cannot launch a new
   materialization candidate or any DL3DV quality gate.
+- [x] Preserve the aborted `...parameter_attribution_v1/` record rather than
+  overwriting it. It ended before any direct-teacher metric with a CUDA
+  device-side assert; its retained record does not determine the cause. The
+  designated v2 replay is hash-bound to the target-free source sidecar and
+  must pass strict-FP32 exact-partition verification before rendering.

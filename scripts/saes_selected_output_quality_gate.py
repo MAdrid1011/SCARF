@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Run one fixed DL3DV quality pilot through the real selected-output head path."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
@@ -242,6 +244,7 @@ def _apply_fixed_saes(
     width: int,
     views: int,
     materialization: str,
+    tile_trace: list[dict[str, Any]] | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     modified, stats, _ = apply_progressive_saes(
         gaussians,
@@ -258,6 +261,7 @@ def _apply_fixed_saes(
         depth_routing_semantics=DEPTH_ROUTING_SEMANTICS,
         context_extrinsics=context["extrinsics"],
         context_intrinsics=context["intrinsics"],
+        tile_trace=tile_trace,
     )
     return modified, stats
 

@@ -1923,7 +1923,7 @@
 
 ## 38. Frozen Render-Teacher Parameter Attribution
 
-- Campaign id: `same-budget-render-teacher-parameter-attribution-v1`. This is
+- Campaign id: `same-budget-render-teacher-parameter-attribution-v2`. This is
   one post-hoc capacity diagnostic answering which representative descriptor
   families the already-computed teacher needed. It is not a materialization
   candidate, a quality gate, a calibration run, or a runtime claim.
@@ -1939,6 +1939,42 @@
   teacher. The checkpoint, evaluation index, context sidecar, target-camera
   metadata hash, route mask, K/2K budget, removed slots, and Full slots must
   all be verified before rendering.
+- Technical abort: preserve
+  `transplat_sample0_same_budget_render_teacher_parameter_attribution_v1/`
+  `results.json` SHA256
+  `94a9db61cb8346e0a70124638d034a3c73fc85b6e1adaf7b0e3aa6774d75f97c`.
+  It terminated with a CUDA device-side assert before any renderer output or
+  direct-teacher metric. The preserved record does not establish a root cause.
+  A later non-result reconstruction observed `9424/4784/116864` rather than
+  `9432/4792/116848`; a separate strict-FP32 reconstruction recovered the
+  expected partition. Neither diagnostic proves that the mismatch caused the
+  v1 CUDA failure or turns v1 into an attribution observation. The failed
+  record is immutable.
+- Corrected replay boundary: the sole planned v2 execution uses the hash-bound
+  target-free calibration sidecar, its two context-image payloads, and camera
+  metadata. It synthesizes a zero-only target shape carrier only while
+  applying the native crop/data shims, then removes it before decoder
+  execution. It must fail closed unless strict-FP32 replay verifies the fixed
+  partition before rendering. The sidecar schema contains no target-image
+  payload or target-image path; target-camera metadata is permitted only for
+  rendering against the saved teacher.
+- Common S3-access preflight: before the oracle reconstruction or renderer,
+  v2 verifies the fixed input/checkpoint path and runs the shared two-finite-
+  sentinel selected-only descriptor-access proof against the unchanged
+  attribute-transport materialization. Both replays must preserve the route
+  trace, counters, committed descriptors, and Full outputs while the wrapper
+  rejects skipped S3 reads. This proves descriptor-access isolation after a
+  dense encoder capture only; it does not prove S3 compute savings or that the
+  dense oracle is selected-only. The v2 oracle therefore records a separate
+  `same-budget-dense-oracle-diagnostic` full-S3 exception, observed full-read
+  count, `runtime_execution=false`, `paper_result_eligible=false`, and
+  `quality_gate_authorized=false`; any attempt to attach runtime or quality
+  eligibility fails closed.
+- Smoke before attribution: run one fresh-process strict-FP32 initial-compact
+  target-view-0 render with no output artifact or teacher metric. It must pass
+  the common preflight, exact frozen partition, finite descriptors, Full-slot
+  passthrough, and `[3,H,W]` finite render shape before the unique twelve-
+  variant run is permitted.
 - Isolation boundary: target RGB must not be loaded, decoded, transferred, or
   passed to any model component. The only target-side input is the frozen
   target-camera metadata needed to render against the saved dense-render

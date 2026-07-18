@@ -11,7 +11,6 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable
-from types import SimpleNamespace
 
 import torch
 
@@ -26,6 +25,14 @@ from data.frozen_audit_contract import (  # noqa: E402
     require_frozen_identity,
 )
 from integration import create_model_loader, load_context_only_audit_data  # noqa: E402
+from saes.frozen_audit_preflight import (  # noqa: E402
+    SENTINEL_SPECS,
+    SelectedOnlyS3Tensor as _SelectedReadTensor,
+    poison_skipped_depths as _poison_skipped_depths,
+    poison_skipped_s3 as _poison_skipped_descriptors,
+    selected_s3_read_evidence,
+    wrap_selected_s3_reads,
+)
 from saes.progressive_saes import apply_progressive_saes  # noqa: E402
 from saes.projected_optical_moment_audit import (  # noqa: E402
     DirectionalTileComparison,
@@ -71,64 +78,6 @@ FIXED_INPUT_IDENTITY = {
         "source_sidecar_tree_sha256": "ae043f7584dec864af7a29d5f0c74a871974e627e36b0e23de955c7141b82fd9",
     },
 }
-SENTINEL_SPECS = (
-    (
-        "finite-sentinel-a",
-        {
-            "means": 1.0e4,
-            "covariances": -1.0e4,
-            "harmonics": 1.0e4,
-            "opacities": 0.99,
-            "depth": 1.0e4,
-        },
-    ),
-    (
-        "finite-sentinel-b",
-        {
-            "means": -2.0e4,
-            "covariances": 2.0e4,
-            "harmonics": -2.0e4,
-            "opacities": 0.01,
-            "depth": -2.0e4,
-        },
-    ),
-)
-
-
-class _SelectedReadTensor:
-    """Allow selected S3 reads and any output write during a sentinel replay."""
-
-    def __init__(self, tensor: torch.Tensor, allowed_indices: torch.Tensor):
-        self._tensor = tensor
-        self._allowed_indices = {
-            int(index) for index in allowed_indices.detach().cpu().reshape(-1).tolist()
-        }
-        self.read_indices: list[int] = []
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._tensor, name)
-
-    def __getitem__(self, index: Any) -> Any:
-        if not isinstance(index, tuple) or len(index) != 2 or index[0] != 0:
-            raise AssertionError(f"unexpected S3 tensor read index: {index!r}")
-        requested = index[1]
-        if isinstance(requested, int):
-            indices = [requested]
-        elif torch.is_tensor(requested):
-            indices = [
-                int(value) for value in requested.detach().cpu().reshape(-1).tolist()
-            ]
-        else:
-            indices = [int(value) for value in requested]
-        if not set(indices) <= self._allowed_indices:
-            raise AssertionError(f"skipped S3 descriptor read: {indices!r}")
-        self.read_indices.extend(indices)
-        return self._tensor[index]
-
-    def __setitem__(self, index: Any, value: Any) -> None:
-        self._tensor[index] = value
-
-
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
@@ -443,36 +392,6 @@ def _phase_a_invariants(
     }
 
 
-def _poison_skipped_descriptors(
-    gaussians: Any, mask: torch.Tensor, *, sentinel: dict[str, float]
-) -> None:
-    skipped = torch.nonzero(mask, as_tuple=False).flatten()
-    for name in ("means", "covariances", "harmonics", "opacities"):
-        getattr(gaussians, name)[0, skipped] = sentinel[name]
-
-
-def _poison_skipped_depths(
-    depths: torch.Tensor,
-    mask: torch.Tensor,
-    *,
-    height: int,
-    width: int,
-    gpp: int,
-    value: float,
-) -> None:
-    positions = torch.unique(torch.nonzero(mask, as_tuple=False).flatten() // gpp)
-    per_view = height * width
-    for position in positions.tolist():
-        view, pixel = divmod(position, per_view)
-        if depths.ndim == 5:
-            depths[0, view, pixel] = value
-        elif depths.ndim == 4:
-            row, column = divmod(pixel, width)
-            depths[0, view, row, column] = value
-        else:
-            raise RuntimeError("audit cannot poison an unsupported S2 depth layout")
-
-
 def _assert_payload_identical(
     reference: dict[str, Any], candidate: dict[str, Any], *, label: str
 ) -> dict[str, float]:
@@ -508,11 +427,7 @@ def _assert_payload_identical(
 def _wrap_selected_s3_reads(
     gaussians: Any, selected_indices: torch.Tensor
 ) -> tuple[Any, dict[str, _SelectedReadTensor]]:
-    fields = {
-        name: _SelectedReadTensor(getattr(gaussians, name), selected_indices)
-        for name in ("means", "covariances", "harmonics", "opacities")
-    }
-    return SimpleNamespace(**fields), fields
+    return wrap_selected_s3_reads(gaussians, selected_indices)
 
 
 def _run_sentinel_replay(
@@ -534,7 +449,7 @@ def _run_sentinel_replay(
         mask,
         height=height,
         width=width,
-        gpp=int(reference["primitives_per_pixel"]),
+        primitives_per_pixel=int(reference["primitives_per_pixel"]),
         value=sentinel["depth"],
     )
     guarded, fields = _wrap_selected_s3_reads(gaussians, selected)
@@ -569,14 +484,7 @@ def _run_sentinel_replay(
         view_count=views,
     )
     deltas = _assert_payload_identical(reference, payload, label=sentinel_name)
-    reads = {}
-    for name, field in fields.items():
-        if not field.read_indices:
-            raise RuntimeError(f"{sentinel_name} did not read selected {name}")
-        reads[name] = {
-            "read_count": len(field.read_indices),
-            "selected_only": True,
-        }
+    reads = selected_s3_read_evidence(fields, label=sentinel_name)
     return payload, {
         "sentinel": sentinel_name,
         "route_trace_identical": True,
