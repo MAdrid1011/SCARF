@@ -19,9 +19,18 @@ FIXED = {
     "fsdr_guidance_policy": "paper-hamming-local-validity",
     "saes_depth_threshold": 0.1,
     "saes_feature_threshold": 0.2,
+    "saes_l1_depth_reference": "primary-routing-probes-v1",
     "saes_moment_geometry": "c2w-probe-depth-ray-v1",
     "saes_tile_size": 4,
 }
+CALIBRATED_SPLIT_PROTOCOL = "dl3dv_train_holdout_v1"
+CALIBRATED_SPLIT_HASHES = (
+    "selection_sha256",
+    "scene_set_sha256",
+    "pair_bindings_sha256",
+    "trace_set_sha256",
+    "candidate_set_sha256",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -38,6 +47,49 @@ def _digest(value: Any, label: str) -> str:
     if not isinstance(value, str) or SHA256.fullmatch(value) is None:
         raise ValueError(f"{label} must be a SHA256 digest")
     return value
+
+
+def _validated_split_provenance(
+    calibration: dict[str, Any], selected: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate the train/holdout evidence bound into a frozen config."""
+    if calibration.get("protocol") != CALIBRATED_SPLIT_PROTOCOL:
+        raise ValueError("calibrated mechanism config has no DL3DV train/holdout protocol")
+    if calibration.get("train_holdout_scene_disjoint") is not True:
+        raise ValueError("calibrated mechanism config train/holdout split is not disjoint")
+    split_records: dict[str, dict[str, Any]] = {}
+    for split in ("train", "holdout"):
+        record = calibration.get(split)
+        if not isinstance(record, dict):
+            raise ValueError(f"calibrated mechanism config has no {split} evidence")
+        normalized = {
+            field: _digest(record.get(field), f"calibration.{split}.{field}")
+            for field in CALIBRATED_SPLIT_HASHES
+        }
+        if split == "train":
+            normalized["selected_candidate_sha256"] = _digest(
+                record.get("selected_candidate_sha256"),
+                "calibration.train.selected_candidate_sha256",
+            )
+        else:
+            normalized["validated_parameters_sha256"] = _digest(
+                record.get("validated_parameters_sha256"),
+                "calibration.holdout.validated_parameters_sha256",
+            )
+            normalized["validated_candidate_sha256"] = _digest(
+                record.get("validated_candidate_sha256"),
+                "calibration.holdout.validated_candidate_sha256",
+            )
+        split_records[split] = normalized
+    if split_records["train"]["selection_sha256"] == split_records["holdout"]["selection_sha256"]:
+        raise ValueError("calibrated mechanism config reuses one train/holdout selection")
+    from scripts.calibration_contract import parameters_sha256
+
+    if split_records["holdout"]["validated_parameters_sha256"] != parameters_sha256(
+        selected
+    ):
+        raise ValueError("calibrated mechanism config holdout tuple does not match selected parameters")
+    return split_records
 
 
 def load_mechanism_config(
@@ -112,6 +164,7 @@ def load_mechanism_config(
             raise ValueError("calibrated mechanism config has invalid calibration hashes")
         if calibration.get("evaluation_disjoint") is not True:
             raise ValueError("calibrated mechanism config is not evaluation-disjoint")
+        split_provenance = _validated_split_provenance(calibration, selected)
         provenance = {
             "status": status,
             "manifest_sha256": manifest_sha256,
@@ -119,6 +172,10 @@ def load_mechanism_config(
             "evaluation_disjoint": True,
             "expected_results_accessed": False,
             "global_configuration": True,
+            "protocol": CALIBRATED_SPLIT_PROTOCOL,
+            "train_holdout_scene_disjoint": True,
+            "train": split_provenance["train"],
+            "holdout": split_provenance["holdout"],
         }
     else:
         raise ValueError("mechanism config status must be preregistered or calibrated")

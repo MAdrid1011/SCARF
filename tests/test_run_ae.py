@@ -149,14 +149,13 @@ def test_calibrate_mode_is_bound_to_the_public_contract(tmp_path):
     commands = plan["commands"]
 
     assert plan["evidence_profile"] == "calibration"
-    assert len(commands) == 3
-    assert commands[0][1].endswith("scripts/compile_calibration.py")
-    assert "--calibration-root" in commands[0]
-    assert commands[0][commands[0].index("--calibration-root") + 1].endswith(
-        "downloads/calibration/prepared"
+    assert len(commands) == 2
+    assert commands[0][1].endswith("scripts/calibration_sweep.py")
+    assert "--manifest" in commands[0]
+    assert commands[0][commands[0].index("--manifest") + 1].endswith(
+        "outputs/calibration/dl3dv-protocol/manifest.json"
     )
-    assert commands[1][1].endswith("scripts/calibration_sweep.py")
-    assert commands[2][1].endswith("scripts/calibrate_mechanisms.py")
+    assert commands[1][1].endswith("scripts/calibrate_mechanisms.py")
     assert "artifact/CALIBRATION.md" in plan["calibration_contract"]
     assert "expected_results" not in " ".join(
         argument for command in commands for argument in command
@@ -405,12 +404,14 @@ def test_full_mode_uses_recovered_executable_sample_counts(tmp_path, monkeypatch
     assert counts == {"re10k": 6474, "acid": 1595, "dl3dv": 140}
 
 
-def test_unavailable_orin_is_not_planned_but_sensitivity_remains_executable(tmp_path):
+def test_awaiting_independent_orin_is_not_locally_planned_but_sensitivity_remains_executable(tmp_path):
     orin = dry_run(tmp_path / "orin", "orin", "--num-samples", "1")
     sensitivity = dry_run(tmp_path / "sensitivity", "sensitivity", "--num-samples", "1")
 
     assert not orin["experiments"]
-    assert orin["claim_status"]["figure8"].startswith("NOT_CLAIMED")
+    assert orin["claim_status"]["figure8"] == (
+        "CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION"
+    )
     assert len(sensitivity["commands"]) == 1
     assert sensitivity["commands"][0][1].endswith("scripts/sensitivity_sweep.py")
     command = sensitivity["commands"][0]

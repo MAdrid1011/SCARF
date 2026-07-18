@@ -1,4 +1,5 @@
 import json
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +9,57 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "hardware" / "scaling" / "deepscale.py"
+
+
+def standard_provenance() -> dict:
+    return {
+        "git_commit": "a" * 40,
+        "git_dirty": False,
+        "source_identity": "git",
+        "source_tree_sha256": "b" * 64,
+        "submodules": {
+            "transplat": "c" * 40,
+            "mvsplat": "d" * 40,
+            "depthsplat": "e" * 40,
+        },
+        "mechanism_config_sha256": "f" * 64,
+        "calibration_provenance": {
+            "status": "preregistered",
+            "manifest_sha256": "1" * 64,
+            "candidate_records_sha256": None,
+            "evaluation_disjoint": False,
+            "expected_results_accessed": False,
+            "global_configuration": True,
+        },
+    }
+
+
+def raw_ppa() -> dict:
+    return {
+        "schema_version": "1.0",
+        "evidence_type": "asap7_predictive_postroute",
+        "physical_valid": True,
+        "metrics": {
+            "logic_area_mm2": 1.0,
+            "critical_path_ns": 0.5,
+            "total_power_w": 2.0,
+            "hierarchy": {
+                "mmcu": {
+                    "area_mm2": 0.4,
+                    "dynamic_power_w": 0.8,
+                    "static_power_w": 0.1,
+                    "total_power_w": 0.9,
+                },
+                "sram_proxy": {
+                    "area_mm2": 0.2,
+                    "dynamic_power_w": None,
+                    "static_power_w": None,
+                    "total_power_w": None,
+                },
+            },
+        },
+        "provenance": standard_provenance(),
+    }
 
 
 def run_scale(tmp_path: Path, payload: dict, *args: str):
@@ -65,30 +117,7 @@ def test_round_trip(metric, value):
 
 
 def test_cli_preserves_raw_record_and_writes_provenance(tmp_path):
-    raw = {
-        "schema_version": "1.0",
-        "evidence_type": "asap7_predictive_postroute",
-        "physical_valid": True,
-        "metrics": {
-            "logic_area_mm2": 1.0,
-            "critical_path_ns": 0.5,
-            "total_power_w": 2.0,
-            "hierarchy": {
-                "mmcu": {
-                    "area_mm2": 0.4,
-                    "dynamic_power_w": 0.8,
-                    "static_power_w": 0.1,
-                    "total_power_w": 0.9,
-                },
-                "sram_proxy": {
-                    "area_mm2": 0.2,
-                    "dynamic_power_w": None,
-                    "static_power_w": None,
-                    "total_power_w": None,
-                },
-            },
-        },
-    }
+    raw = raw_ppa()
     result, output = run_scale(tmp_path, raw)
     assert result.returncode == 0, result.stderr
     scaled = json.loads(output.read_text(encoding="utf-8"))
@@ -105,6 +134,39 @@ def test_cli_preserves_raw_record_and_writes_provenance(tmp_path):
         0.9 / 0.375
     )
     assert scaled["scaled_hierarchy"]["sram_proxy"]["total_power_w"] is None
+    assert scaled["provenance"] == raw["provenance"]
+    assert scaled["raw_asap7_input"]["sha256"] == hashlib.sha256(
+        (tmp_path / "ppa.json").read_bytes()
+    ).hexdigest()
+    assert (
+        scaled["raw_asap7_input"]["source_tree_sha256"]
+        == raw["provenance"]["source_tree_sha256"]
+    )
+    assert (
+        scaled["raw_asap7_input"]["mechanism_config_sha256"]
+        == raw["provenance"]["mechanism_config_sha256"]
+    )
+
+
+def test_scaled_record_validator_rejects_a_tampered_raw_input_binding():
+    from hardware.scaling.deepscale import scale_record, validate_scaled_record
+
+    raw = raw_ppa()
+    raw_sha256 = hashlib.sha256(json.dumps(raw).encode("utf-8")).hexdigest()
+    scaled = scale_record(
+        raw,
+        7,
+        28,
+        raw_input_sha256=raw_sha256,
+    )
+    scaled["raw_asap7_input"]["sha256"] = "0" * 64
+
+    with pytest.raises(ValueError, match="raw ASAP7 input binding"):
+        validate_scaled_record(
+            scaled,
+            raw,
+            raw_input_sha256=raw_sha256,
+        )
 
 
 def test_cli_rejects_invalid_or_incomplete_physical_record(tmp_path):
@@ -115,6 +177,17 @@ def test_cli_rejects_invalid_or_incomplete_physical_record(tmp_path):
     assert result.returncode != 0
     assert not output.exists()
     assert "physical_valid" in result.stderr
+
+
+def test_cli_rejects_a_raw_ppa_without_standard_execution_provenance(tmp_path):
+    raw = raw_ppa()
+    raw.pop("provenance")
+
+    result, output = run_scale(tmp_path, raw)
+
+    assert result.returncode != 0
+    assert not output.exists()
+    assert "provenance" in result.stderr
 
 
 def test_unsupported_node_is_rejected():

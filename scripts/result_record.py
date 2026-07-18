@@ -786,6 +786,15 @@ def build_result_record(
     _, mechanism = load_mechanism_config()
     if mechanism["status"] != "calibrated":
         paper_result_eligible = False
+    elif (
+        mechanism.get("protocol") != "dl3dv_train_holdout_v1"
+        or mechanism.get("train_holdout_scene_disjoint") is not True
+        or not isinstance(mechanism.get("train"), dict)
+        or not isinstance(mechanism.get("holdout"), dict)
+    ):
+        raise RuntimeError(
+            "calibrated mechanism provenance has no verified DL3DV holdout evidence"
+        )
     calibration_provenance = {
         key: value
         for key, value in mechanism.items()

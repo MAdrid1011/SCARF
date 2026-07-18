@@ -156,11 +156,25 @@ def load_target_free_calibration_data(
             dataset_root, dataset_name
         )
         scene_order = calibration_scene_order(dataset_root)
-        rows, _ = canonicalize_index(
+        index_sha256 = sha256_file(evaluation_index)
+        rows, index_summary = canonicalize_index(
             evaluation_index,
-            sha256_file(evaluation_index),
+            index_sha256,
             execution_scene_order=scene_order,
         )
+        if (
+            calibration_identity["selection_sha256"]
+            != index_summary["sample_selection_sha256"]
+        ):
+            raise ValueError("calibration input selection does not match its index")
+        # The caller may resume a run-pair worker.  Bind the sidecar identity to
+        # the exact index bytes it actually opened so a same-scene stale trace
+        # cannot be mistaken for evidence from a changed sidecar/protocol.
+        calibration_identity = {
+            **calibration_identity,
+            "index_sha256": index_sha256,
+            "index_selection_sha256": index_summary["sample_selection_sha256"],
+        }
         if sample_index < 0 or sample_index >= len(rows):
             raise IndexError(f"sample_index={sample_index} is out of range")
         selection = rows[sample_index]

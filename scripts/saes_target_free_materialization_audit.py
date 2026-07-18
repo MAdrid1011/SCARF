@@ -30,6 +30,13 @@ from saes.progressive_saes import ProgressiveSAES, apply_progressive_saes
 from scripts.saes_dependency_audit import _context_on_device, remove_target_rgb
 
 
+MATERIALIZATION_CHOICES = (
+    "conditional-anchor-transport-diagnostic",
+    "conditional-adapter-offset-transport-diagnostic",
+    "conditional-optical-mass-diagnostic",
+    "conditional-projected-optical-mass-diagnostic",
+)
+
 def _clone_gaussians(gaussians: Any) -> Any:
     """Clone the four source attributes without reading model internals."""
     return type(gaussians)(
@@ -130,6 +137,180 @@ def _routing_statistic_summary(
     return summary
 
 
+def _pre_fallback_routing_summary(
+    features: torch.Tensor,
+    depths: torch.Tensor,
+    *,
+    near: torch.Tensor,
+    far: torch.Tensor,
+    height: int,
+    width: int,
+) -> dict[str, Any]:
+    """Compare fixed-unit L1 interpretations before materialization fallback.
+
+    This is an observational routing ledger, not a calibration sweep. Every
+    entry uses the paper's fixed 0.20/0.10 thresholds and the same normalized
+    probe-vector L0 statistic. It does not inspect raw skipped descriptors or
+    run a renderer.
+    """
+    feature_scores, _ = ProgressiveSAES.classify_tiles_by_features(
+        features,
+        height,
+        width,
+        4,
+        per_view=True,
+        statistic="normalized-probe-vector-standard-deviation",
+    )
+    candidate_depths = ProgressiveSAES.inverse_depth_candidate_coordinate(
+        depths, near=near, far=far
+    )
+    coordinates = {
+        "metric-depth-standard-deviation": (depths, False),
+        "relative-metric-depth-standard-deviation": (depths, True),
+        "inverse-depth-candidate-coordinate-standard-deviation": (
+            candidate_depths,
+            False,
+        ),
+    }
+    result: dict[str, Any] = {}
+    views = int(features.shape[1])
+    for name, (routing_depths, relative) in coordinates.items():
+        scorer = ProgressiveSAES(
+            height,
+            width,
+            initial_tile_size=4,
+            feature_var_threshold=0.2,
+            depth_std_threshold=0.1,
+            view_count=views,
+            decision_semantics="probe-normalized-std-first-hit",
+        )
+        counts = {"L0": 0, "L1": 0, "Full": 0}
+        for view in range(views):
+            for tile_y in range(height // 4):
+                for tile_x in range(width // 4):
+                    if feature_scores[(view, tile_y, tile_x)] < 0.2:
+                        counts["L0"] += 1
+                    elif scorer.check_depth_uniformity(
+                        routing_depths,
+                        tile_y,
+                        tile_x,
+                        4,
+                        height,
+                        width,
+                        0.1,
+                        probe_positions=scorer.probe_positions,
+                        view_index=view,
+                        relative=relative,
+                    ):
+                        counts["L1"] += 1
+                    else:
+                        counts["Full"] += 1
+        total = sum(counts.values())
+        result[name] = {
+            "diagnostic_only": True,
+            "tile_count": total,
+            "l0_count": counts["L0"],
+            "l1_count": counts["L1"],
+            "full_count": counts["Full"],
+            "l0_rate": counts["L0"] / total,
+            "l1_rate": counts["L1"] / total,
+            "full_rate": counts["Full"] / total,
+        }
+    return result
+
+
+def _finite_summary(values: torch.Tensor) -> dict[str, float | int]:
+    """Summarize a nonempty finite tensor without exposing individual values."""
+    flattened = values.detach().reshape(-1).double()
+    if flattened.numel() == 0 or not bool(torch.isfinite(flattened).all()):
+        raise ValueError("attribute diagnostic requires nonempty finite values")
+    return {
+        "count": int(flattened.numel()),
+        "minimum": float(flattened.min().item()),
+        "p50": float(torch.quantile(flattened, 0.50).item()),
+        "p95": float(torch.quantile(flattened, 0.95).item()),
+        "maximum": float(flattened.max().item()),
+        "mean": float(flattened.mean().item()),
+    }
+
+
+def _retained_anchor_attribute_diagnostic(
+    source: Any, materialized: Any, retained: torch.Tensor
+) -> dict[str, Any]:
+    """Profile only changed retained anchors after target-free materialization."""
+    attributes = ("means", "covariances", "harmonics", "opacities")
+    retained = retained.to(source.means.device)
+    changed = torch.zeros(retained.numel(), dtype=torch.bool, device=retained.device)
+    for name in attributes:
+        delta = (
+            getattr(materialized, name)[0, retained]
+            - getattr(source, name)[0, retained]
+        )
+        changed |= delta.reshape(delta.shape[0], -1).abs().amax(dim=1) > 0.0
+    changed_indices = retained[changed]
+    if changed_indices.numel() == 0:
+        return {
+            "changed_retained_anchor_count": 0,
+            "source_or_skipped_descriptor_access": False,
+        }
+
+    source_means = source.means[0, changed_indices]
+    output_means = materialized.means[0, changed_indices]
+    source_covariances = source.covariances[0, changed_indices]
+    output_covariances = materialized.covariances[0, changed_indices]
+    source_alpha = source.opacities[0, changed_indices].reshape(-1)
+    output_alpha = materialized.opacities[0, changed_indices].reshape(-1)
+    source_harmonics = source.harmonics[0, changed_indices]
+    output_harmonics = materialized.harmonics[0, changed_indices]
+    eps = torch.finfo(source_means.dtype).eps
+    determinant_floor = torch.finfo(source_means.dtype).tiny
+    source_covariances_symmetric = (
+        source_covariances + source_covariances.mT
+    ) * 0.5
+    output_covariances_symmetric = (
+        output_covariances + output_covariances.mT
+    ) * 0.5
+    source_det = torch.linalg.det(source_covariances_symmetric)
+    output_det = torch.linalg.det(output_covariances_symmetric)
+    return {
+        "changed_retained_anchor_count": int(changed_indices.numel()),
+        "source_or_skipped_descriptor_access": False,
+        "mean_displacement_l2": _finite_summary(
+            (output_means - source_means).norm(dim=1)
+        ),
+        "covariance_determinant_ratio": _finite_summary(
+            output_det / source_det.clamp_min(determinant_floor)
+        ),
+        "source_covariance_min_eigenvalue": _finite_summary(
+            torch.linalg.eigvalsh(source_covariances_symmetric)[:, 0]
+        ),
+        "output_covariance_min_eigenvalue": _finite_summary(
+            torch.linalg.eigvalsh(output_covariances_symmetric)[:, 0]
+        ),
+        "covariance_increment_min_eigenvalue": _finite_summary(
+            torch.linalg.eigvalsh(
+                output_covariances_symmetric - source_covariances_symmetric
+            )[:, 0]
+        ),
+        "source_covariance_asymmetry_frobenius": _finite_summary(
+            (source_covariances - source_covariances.mT)
+            .reshape(changed_indices.numel(), -1)
+            .norm(dim=1)
+        ),
+        "source_opacity": _finite_summary(source_alpha),
+        "output_opacity": _finite_summary(output_alpha),
+        "opacity_ratio": _finite_summary(output_alpha / source_alpha.clamp_min(eps)),
+        "harmonic_relative_change": _finite_summary(
+            (output_harmonics - source_harmonics)
+            .reshape(changed_indices.numel(), -1)
+            .norm(dim=1)
+            / source_harmonics.reshape(changed_indices.numel(), -1)
+            .norm(dim=1)
+            .clamp_min(eps)
+        ),
+    }
+
+
 def _l0_range_envelope_summary(
     source: Any,
     materialized: Any,
@@ -182,7 +363,13 @@ def _l0_range_envelope_summary(
 
 
 def collect_materialization_audit(
-    *, model_name: str, sample_index: int, device: torch.device
+    *,
+    model_name: str,
+    sample_index: int,
+    device: torch.device,
+    decision_semantics: str = "current",
+    depth_routing_semantics: str = "metric-depth-standard-deviation",
+    materialization: str = "conditional-optical-mass-diagnostic",
 ) -> dict[str, Any]:
     """Run the predeclared target-free DL3DV sample-0 materialization gate."""
     if model_name not in {"transplat", "mvsplat"}:
@@ -220,6 +407,8 @@ def collect_materialization_audit(
     depths = depths.detach().cpu()
     audit_extrinsics = context["extrinsics"].detach().cpu()
     audit_intrinsics = context["intrinsics"].detach().cpu()
+    audit_near = context["near"].detach().cpu()
+    audit_far = context["far"].detach().cpu()
     del model, context
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -235,12 +424,24 @@ def collect_materialization_audit(
         features=features,
         depths=depths,
         view_count=views,
-        materialization="conditional-optical-mass-diagnostic",
+        materialization=materialization,
+        decision_semantics=decision_semantics,
         context_extrinsics=audit_extrinsics,
         context_intrinsics=audit_intrinsics,
+        depth_routing_semantics=depth_routing_semantics,
+        depth_near=audit_near,
+        depth_far=audit_far,
     )
     routing_statistics = _routing_statistic_summary(
         features, height=height, width=width
+    )
+    pre_fallback_routing = _pre_fallback_routing_summary(
+        features,
+        depths,
+        near=audit_near,
+        far=audit_far,
+        height=height,
+        width=width,
     )
     range_envelope = _l0_range_envelope_summary(
         source_gaussians,
@@ -253,6 +454,9 @@ def collect_materialization_audit(
     )
     skipped = mask.nonzero(as_tuple=False).flatten()
     retained = (~mask).nonzero(as_tuple=False).flatten()
+    retained_anchor_attributes = _retained_anchor_attribute_diagnostic(
+        source_gaussians, materialized, retained
+    )
     poisoned = _clone_gaussians(source_gaussians)
     _poison_skipped_descriptors(poisoned, skipped)
     poisoned_mask, poisoned_stats, _ = apply_progressive_saes(
@@ -265,9 +469,13 @@ def collect_materialization_audit(
         features=features,
         depths=depths,
         view_count=views,
-        materialization="conditional-optical-mass-diagnostic",
+        materialization=materialization,
+        decision_semantics=decision_semantics,
         context_extrinsics=audit_extrinsics,
         context_intrinsics=audit_intrinsics,
+        depth_routing_semantics=depth_routing_semantics,
+        depth_near=audit_near,
+        depth_far=audit_far,
     )
     if not torch.equal(mask, poisoned_mask):
         raise RuntimeError("poisoned descriptor audit changed the target-free route")
@@ -279,7 +487,7 @@ def collect_materialization_audit(
 
     return {
         "schema_version": "1.0",
-        "kind": "saes_conditional_optical_mass_target_free_audit",
+        "kind": "saes_target_free_materialization_audit",
         "paper_result_eligible": False,
         "target_rgb_accessed": False,
         "native_dataloader_loaded_target_rgb": native_target_rgb_loaded,
@@ -313,9 +521,20 @@ def collect_materialization_audit(
             "retained_descriptor_count": int(retained.numel()),
             "skipped_mask_sha256": _mask_sha256(mask),
         },
+        "routing_contract": {
+            "materialization": materialization,
+            "feature_decision_semantics": decision_semantics,
+            "depth_routing_semantics": depth_routing_semantics,
+            "feature_threshold": 0.2,
+            "depth_threshold": 0.1,
+            "global_thresholds_unchanged": True,
+            "nonzero_sparse_work": bool(stats["zeroed_gaussians"] > 0),
+        },
         "saes_stats": stats,
         "routing_statistic_diagnostics": routing_statistics,
+        "pre_fallback_routing_diagnostic": pre_fallback_routing,
         "l0_range_envelope_diagnostic": range_envelope,
+        "retained_anchor_attribute_diagnostic": retained_anchor_attributes,
         "skipped_descriptor_poison_audit": {
             "poison_value": 1.0e4,
             "route_identical": True,
@@ -328,14 +547,37 @@ def collect_materialization_audit(
     }
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=("transplat", "mvsplat"), default="transplat")
     parser.add_argument("--sample-index", type=int, default=0)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--decision-semantics",
+        choices=("current", "probe-normalized-std-first-hit"),
+        default="current",
+    )
+    parser.add_argument(
+        "--depth-routing-semantics",
+        choices=(
+            "metric-depth-standard-deviation",
+            "inverse-depth-candidate-coordinate-standard-deviation",
+        ),
+        default="metric-depth-standard-deviation",
+    )
+    parser.add_argument(
+        "--materialization",
+        choices=MATERIALIZATION_CHOICES,
+        default="conditional-optical-mass-diagnostic",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
     if args.sample_index != 0:
         parser.error("the materialization audit is predeclared for DL3DV sample index 0")
     if args.output_dir.exists():
@@ -350,7 +592,12 @@ def main() -> None:
         torch.cuda.manual_seed_all(args.seed)
 
     record = collect_materialization_audit(
-        model_name=args.model, sample_index=args.sample_index, device=device
+        model_name=args.model,
+        sample_index=args.sample_index,
+        device=device,
+        decision_semantics=args.decision_semantics,
+        depth_routing_semantics=args.depth_routing_semantics,
+        materialization=args.materialization,
     )
     from scripts.result_record import portable_command, write_result
 

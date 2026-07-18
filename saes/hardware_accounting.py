@@ -185,6 +185,29 @@ def build_saes_event_ledger(
     total_nonanchors = l0_nonanchors + l1_nonanchors
     retained_anchors = l0_anchors + l1_anchors
 
+    guard_enabled = saes_stats.get("materialization_guard_enabled", False)
+    if not isinstance(guard_enabled, bool):
+        raise ValueError("materialization_guard_enabled must be boolean")
+    l0_guard_checks = _count(saes_stats, "l0_guard_checks")
+    l1_guard_checks = _count(saes_stats, "l1_guard_checks")
+    l0_guard_rejections = _count(saes_stats, "l0_guard_rejections")
+    l1_guard_rejections = _count(saes_stats, "l1_guard_rejections")
+    guard_attribute_reads = _count(saes_stats, "guard_anchor_attribute_reads")
+    guard_nonprobe_reads = _count(saes_stats, "guard_nonprobe_s3_attribute_reads")
+    if guard_nonprobe_reads != 0:
+        raise ValueError("SAES materialization guard read a non-probe S3 attribute")
+    if l0_guard_rejections > l0_guard_checks or l1_guard_rejections > l1_guard_checks:
+        raise ValueError("SAES materialization guard rejections exceed checks")
+    expected_guard_attribute_reads = 3 * primitives_per_pixel * (
+        l0_guard_checks * primary_probe_count + l1_guard_checks * l1_anchor_count
+    )
+    if guard_enabled and guard_attribute_reads != expected_guard_attribute_reads:
+        raise ValueError("SAES materialization guard anchor-read accounting is inconsistent")
+    if not guard_enabled and any(
+        (l0_guard_checks, l1_guard_checks, l0_guard_rejections, l1_guard_rejections, guard_attribute_reads)
+    ):
+        raise ValueError("disabled SAES materialization guard has event activity")
+
     # S3 path selection: two sufficient-statistic reductions (sum and square)
     # over K probe feature vectors.  A reduction tree contributes one cycle per
     # level for every 64-channel vector chunk.  L1's depth standard deviation
@@ -219,6 +242,13 @@ def build_saes_event_ledger(
     descriptor_bytes = descriptor_storage["descriptor_bytes"]
     descriptor_elements = 3 + 6 + 3 * (sh_degree + 1) ** 2 + 1
     descriptor_chunks = _ceil_div(descriptor_elements, vector_width)
+    guard_anchor_descriptors = primitives_per_pixel * (
+        l0_guard_checks * primary_probe_count + l1_guard_checks * l1_anchor_count
+    )
+    # Covariance, SH, and opacity checks are a Control operation over already
+    # selected native descriptors. Charge the descriptor fetch and one vector
+    # comparison chunk per anchor rather than treating the check as free.
+    guard_control_cycles = guard_anchor_descriptors * descriptor_chunks
 
     def _assignment_cycles(nonanchors: int, anchors_per_tile: int) -> int:
         # Feature distance: subtract/square plus reduce for every anchor.
@@ -252,15 +282,19 @@ def build_saes_event_ledger(
     probe_depth_read_bytes = (l1_tiles + full_tiles) * primary_probe_count * 2
     retained_descriptor_read_bytes = retained_anchors * descriptor_bytes
     retained_descriptor_write_bytes = retained_anchors * descriptor_bytes
+    guard_descriptor_read_bytes = guard_anchor_descriptors * descriptor_bytes
     route_record_write_bytes = total_tiles
     charged_storage_bytes = (
         retained_descriptor_read_bytes
         + retained_descriptor_write_bytes
+        + guard_descriptor_read_bytes
         + route_record_write_bytes
     )
     storage_transfer_cycles = _ceil_div(charged_storage_bytes, storage_beat_bytes)
 
-    decision_cycles = feature_stat_cycles + depth_stat_cycles + controller_cycles
+    decision_cycles = (
+        feature_stat_cycles + depth_stat_cycles + controller_cycles + guard_control_cycles
+    )
     serialized_accounting_cycles = (
         decision_cycles + assignment_cycles + moment_cycles + storage_transfer_cycles
     )
@@ -291,6 +325,18 @@ def build_saes_event_ledger(
             "l0_retained_anchors": l0_anchors,
             "l1_retained_anchors": l1_anchors,
             "full_stage3_gaussians": full_stage3,
+            **(
+                {
+                    "l0_guard_checks": l0_guard_checks,
+                    "l1_guard_checks": l1_guard_checks,
+                    "l0_guard_rejections": l0_guard_rejections,
+                    "l1_guard_rejections": l1_guard_rejections,
+                    "guard_anchor_descriptors": guard_anchor_descriptors,
+                    "guard_nonprobe_s3_attribute_reads": guard_nonprobe_reads,
+                }
+                if guard_enabled
+                else {}
+            ),
             "l0_nonanchors": l0_nonanchors,
             "l1_nonanchors": l1_nonanchors,
             "total_nonanchors": total_nonanchors,
@@ -305,6 +351,7 @@ def build_saes_event_ledger(
             "controller_l0": controller_l0_cycles,
             "controller_l1_full": controller_l1_full_cycles,
             "controller_total": controller_cycles,
+            "materialization_guard": guard_control_cycles,
             "decision_total": decision_cycles,
             "l0_assignment": l0_assignment_cycles,
             "l1_assignment": l1_assignment_cycles,
@@ -321,6 +368,7 @@ def build_saes_event_ledger(
             "probe_depth_read": probe_depth_read_bytes,
             "retained_descriptor_read": retained_descriptor_read_bytes,
             "retained_descriptor_write": retained_descriptor_write_bytes,
+            "materialization_guard_descriptor_read": guard_descriptor_read_bytes,
             "route_record_write": route_record_write_bytes,
             "charged_storage_total": charged_storage_bytes,
             "observed_total": (
@@ -335,6 +383,7 @@ def build_saes_event_ledger(
             "retained_descriptor_buffer": "one conservative read plus one merged rewrite per retained anchor",
             "storage_cycle_model": "one logical 128-bit accounting beat per cycle without overlap",
             "controller_cycles": "matches submitted SAESController.decisionCycles traces",
+            "materialization_guard": "probe-only Control comparison and descriptor reads are charged without adding an S2/S3 saving claim",
             "rtl_cycle_equivalent": False,
         },
     }

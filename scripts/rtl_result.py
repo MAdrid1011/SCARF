@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.result_record import source_identity
+from scripts.mechanism_config import load_mechanism_config
 
 
 def sha256_file(path: Path) -> str:
@@ -52,6 +53,12 @@ def build_result(output_dir: Path) -> dict:
         raise ValueError(f"Verilator reported {errors} errors")
     warnings = len(re.findall(r"^%Warning", lint_text, flags=re.MULTILINE))
     source = source_identity(ROOT)
+    _, mechanism = load_mechanism_config()
+    calibration_provenance = {
+        key: value
+        for key, value in mechanism.items()
+        if key != "mechanism_config_sha256"
+    }
     return {
         "schema_version": "1.0",
         "kind": "rtl_validation",
@@ -60,7 +67,10 @@ def build_result(output_dir: Path) -> dict:
             "git_commit": source["git_commit"],
             "git_dirty": source["git_dirty"],
             "source_identity": source["source"],
+            "source_tree_sha256": source["source_tree_sha256"],
             "submodules": source["submodules"],
+            "mechanism_config_sha256": mechanism["mechanism_config_sha256"],
+            "calibration_provenance": calibration_provenance,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "commands": [
                 "sbt test",

@@ -45,6 +45,10 @@ def test_catalog_separates_claimable_results_from_public_proxies():
         assert record["acceptance"]
 
     assert records["figure8"]["claim_role"] == "mandatory_key_result"
+    assert records["figure8"]["claim_intent"] == "CLAIMED"
+    assert records["figure8"]["current_state"] == (
+        "CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION"
+    )
     assert records["figure8"]["required_evidence_class"] == (
         "independent_measurement"
     )
@@ -58,6 +62,15 @@ def test_catalog_separates_claimable_results_from_public_proxies():
         in {"independent_measurement", "deterministic_execution"}
         for record in records.values()
         if record["claim_role"] == "mandatory_key_result"
+    )
+    assert {
+        result_id
+        for result_id, record in records.items()
+        if record["claim_role"] == "mandatory_key_result"
+    } == {"figure8", "table1", "figure11", "table2", "table3"}
+    assert all(
+        records[result_id]["claim_role"] == "supporting_result"
+        for result_id in ("figure10", "figure12", "figure13", "figure14", "figure15", "figure16")
     )
 
 

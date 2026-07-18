@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -43,6 +45,8 @@ def test_sensitivity_dry_run_covers_every_grid_point_and_pair(tmp_path):
     assert len(plan["runs"]) == plan["expected_runs"]
     assert not (tmp_path / "sensitivity").exists()
     assert len(plan["pair_traces"]) == 9
+    assert len(plan["execution_provenance"]["source_tree_sha256"]) == 64
+    assert len(plan["execution_provenance"]["mechanism_config_sha256"]) == 64
     for pair in plan["pair_traces"]:
         command = pair["command"]
         assert command[1].endswith("scripts/run_pair.py")
@@ -68,6 +72,26 @@ def test_trace_aggregation_replays_grid_without_rerunning_models(tmp_path: Path)
     from scripts.sensitivity_sweep import STUDIES, aggregate_pair_traces
 
     trace_dir = tmp_path / "traces" / "mvsplat_re10k"
+    provenance = {
+        "git_commit": "a" * 40,
+        "git_dirty": False,
+        "source_identity": "git",
+        "source_tree_sha256": "b" * 64,
+        "submodules": {
+            "transplat": "c" * 40,
+            "mvsplat": "d" * 40,
+            "depthsplat": "e" * 40,
+        },
+        "mechanism_config_sha256": "f" * 64,
+        "calibration_provenance": {
+            "status": "calibrated",
+            "manifest_sha256": "0" * 64,
+            "candidate_records_sha256": "1" * 64,
+            "evaluation_disjoint": True,
+            "expected_results_accessed": False,
+            "global_configuration": True,
+        },
+    }
     for execution_index, source_index in enumerate((0, 3)):
         replays = []
         for study, config in STUDIES.items():
@@ -99,6 +123,7 @@ def test_trace_aggregation_replays_grid_without_rerunning_models(tmp_path: Path)
             "target_indices": [1],
             "model": "mvsplat",
             "dataset": "re10k",
+            "execution_provenance": provenance,
             "trace": {"neural_forward_passes": 1, "replay_count": 25},
             "replays": replays,
         }
@@ -114,10 +139,29 @@ def test_trace_aggregation_replays_grid_without_rerunning_models(tmp_path: Path)
             "declared_sample_count": 6474,
             "declared_sample_selection_sha256": "0" * 64,
             "trace_dir": str(trace_dir),
+            "execution_provenance": provenance,
         }
     )
 
     assert len(aggregates) == 25
     assert audit["neural_forward_passes"] == 2
     assert audit["parameter_replays"] == 50
+    assert audit["execution_provenance"] == provenance
     assert aggregates[("fsdr_cache_size", 32)]["performance"]["speedup"] == 2.0
+
+    stale_path = trace_dir / "samples/sample_00000/results.json"
+    stale = json.loads(stale_path.read_text(encoding="utf-8"))
+    stale["execution_provenance"]["source_tree_sha256"] = "0" * 64
+    stale_path.write_text(json.dumps(stale), encoding="utf-8")
+    with pytest.raises(ValueError, match="trace provenance"):
+        aggregate_pair_traces(
+            {
+                "model": "mvsplat",
+                "dataset": "re10k",
+                "sample_count": 2,
+                "declared_sample_count": 6474,
+                "declared_sample_selection_sha256": "0" * 64,
+                "trace_dir": str(trace_dir),
+                "execution_provenance": provenance,
+            }
+        )

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
+
+from scripts.calibration_contract import canonical_parameters
 
 
 MODELS = ("transplat", "mvsplat", "depthsplat")
@@ -22,6 +25,24 @@ def nonnegative_int(value: str) -> int:
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be nonnegative")
     return parsed
+
+
+def calibration_parameters(value: str) -> dict[str, float]:
+    """Parse the one train-selected tuple allowed for a holdout trace."""
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(
+            "must be a JSON object containing the complete registered tuple"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError(
+            "must be a JSON object containing the complete registered tuple"
+        )
+    try:
+        return canonical_parameters(parsed)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +88,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline-only", action="store_true")
     parser.add_argument("--sensitivity-trace", action="store_true")
     parser.add_argument("--calibration-trace", action="store_true")
+    parser.add_argument(
+        "--calibration-parameters",
+        type=calibration_parameters,
+        help=(
+            "One committed registered tuple for holdout validation; "
+            "valid only with --calibration-trace"
+        ),
+    )
     parser.add_argument(
         "--fsdr-only",
         action="store_true",
@@ -131,9 +160,9 @@ def build_parser() -> argparse.ArgumentParser:
             "probe-spread-diagnostic",
             "transmittance-diagnostic",
             "virtual-reconstruction-diagnostic",
-            "l1-primary-depth-reference-diagnostic",
             "conditional-anchor-transport-diagnostic",
             "conditional-optical-mass-diagnostic",
+            "conditional-projected-optical-mass-diagnostic",
         ),
         default="representative",
         help="Use the paper-faithful sparse path or a non-claim materialization diagnostic",
@@ -426,6 +455,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.calibration_trace and args.sensitivity_trace:
         build_parser().error(
             "--calibration-trace cannot be combined with --sensitivity-trace"
+        )
+    if args.calibration_parameters is not None and not args.calibration_trace:
+        build_parser().error(
+            "--calibration-parameters requires --calibration-trace"
         )
     if args.calibration_trace:
         overrides = [

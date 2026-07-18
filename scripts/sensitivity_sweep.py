@@ -23,7 +23,8 @@ from scripts.ae_config import (
     resolve_experiment,
 )
 from scripts.aggregate_results import _mean_tree
-from scripts.result_record import build_quality_record, sha256_file
+from scripts.mechanism_config import load_mechanism_config
+from scripts.result_record import build_quality_record, sha256_file, source_identity
 from scripts.run_ae import _python_for
 from scripts.evidence_profiles import resolve_evidence_selection
 
@@ -57,6 +58,26 @@ STUDIES: dict[str, dict[str, Any]] = {
 }
 
 
+def execution_provenance() -> dict[str, Any]:
+    """Bind trace replay and its aggregate to one source/mechanism state."""
+    source = source_identity()
+    _, mechanism = load_mechanism_config()
+    calibration = {
+        key: value
+        for key, value in mechanism.items()
+        if key != "mechanism_config_sha256"
+    }
+    return {
+        "git_commit": source["git_commit"],
+        "git_dirty": source["git_dirty"],
+        "source_identity": source["source"],
+        "source_tree_sha256": source["source_tree_sha256"],
+        "submodules": source["submodules"],
+        "mechanism_config_sha256": mechanism["mechanism_config_sha256"],
+        "calibration_provenance": calibration,
+    }
+
+
 def build_plan(
     output_dir: Path,
     *,
@@ -65,6 +86,7 @@ def build_plan(
     seed: int = 0,
     evidence_profile: str = "full",
 ) -> dict[str, Any]:
+    provenance = execution_provenance()
     pair_traces = []
     for model, dataset in CLAIMED_MATRIX:
         sample_count = (
@@ -130,6 +152,7 @@ def build_plan(
                 "evaluation_index": str(selection.index_path),
                 "trace_dir": str(trace_dir),
                 "command": command,
+                "execution_provenance": provenance,
             }
         )
 
@@ -157,6 +180,7 @@ def build_plan(
         "expected_runs": len(runs),
         "pair_traces": pair_traces,
         "runs": runs,
+        "execution_provenance": provenance,
     }
 
 
@@ -181,6 +205,14 @@ def aggregate_pair_traces(pair: dict[str, Any]) -> tuple[dict[tuple[str, Any], A
     traces = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
     if any(record.get("kind") != "sensitivity_sample_trace" for record in traces):
         raise ValueError("sensitivity input contains a non-trace result")
+    expected_provenance = pair.get("execution_provenance")
+    if not isinstance(expected_provenance, dict):
+        raise ValueError("sensitivity trace execution provenance is missing")
+    if any(
+        record.get("execution_provenance") != expected_provenance
+        for record in traces
+    ):
+        raise ValueError("sensitivity trace provenance does not match the execution plan")
     execution_indices = sorted(record.get("execution_index") for record in traces)
     if execution_indices != list(range(pair["sample_count"])):
         raise ValueError("sensitivity trace execution indices are incomplete")
@@ -258,6 +290,7 @@ def aggregate_pair_traces(pair: dict[str, Any]) -> tuple[dict[tuple[str, Any], A
         "selection_hash": selection_hash,
         "neural_forward_passes": len(traces),
         "parameter_replays": sum(record["trace"]["replay_count"] for record in traces),
+        "execution_provenance": expected_provenance,
     }
     return aggregates, audit
 
@@ -268,7 +301,12 @@ def execute(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     pair_aggregates = {}
     audits = {}
+    provenance = plan.get("execution_provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("sensitivity execution provenance is missing")
     for index, pair in enumerate(plan["pair_traces"], start=1):
+        if pair.get("execution_provenance") != provenance:
+            raise ValueError("sensitivity pair provenance does not match the execution plan")
         print(
             f"[{index}/{len(plan['pair_traces'])}]",
             " ".join(pair["command"]),
@@ -299,6 +337,7 @@ def execute(plan: dict[str, Any], output_dir: Path) -> dict[str, Any]:
         "schema_version": "1.0",
         "kind": "sensitivity_results",
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "provenance": provenance,
         "grids": plan["grids"],
         "runs": completed,
         "validation": {

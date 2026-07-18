@@ -26,7 +26,30 @@ def test_source_bundle_includes_only_synthetic_quick_dataset():
     assert all(include_in_source_release(Path(relative)) for relative in fixture_files)
     assert not include_in_source_release(Path("datasets/re10k/test/000000.torch"))
     assert not include_in_source_release(Path("outputs/ae/validation.json"))
+    assert not include_in_source_release(Path("outputs/ae_failures/diagnostic.json"))
     assert not include_in_source_release(Path("mvsplat/checkpoints/re10k.ckpt"))
+
+
+def test_source_release_excludes_internal_plans_and_failure_logs():
+    from scripts.build_archive import include_in_source_release
+
+    assert not include_in_source_release(Path("PLAN.md"))
+    assert not include_in_source_release(Path("CHECKLIST.md"))
+    assert not include_in_source_release(Path("outputs/ae_failures/saes/results.json"))
+    assert include_in_source_release(Path("artifact/CLAIMS.md"))
+
+
+def test_source_release_allowlist_excludes_unreviewed_artifact_content():
+    from scripts.build_archive import include_in_source_release
+
+    assert include_in_source_release(Path("scripts/run_ae.py"))
+    assert include_in_source_release(Path("artifact/mechanism_config.json"))
+    assert not include_in_source_release(
+        Path("artifact/reference_results/evidence/raw.json")
+    )
+    assert not include_in_source_release(Path("artifact/unreviewed.json"))
+    assert not include_in_source_release(Path("micro59-submit/Sections/paper.tex"))
+    assert not include_in_source_release(Path("status.md"))
 
 
 def test_build_archive_cli_resolves_repository_modules():
@@ -76,6 +99,66 @@ def test_single_source_archive_identifies_itself_as_a_release_source(
     assert result["bundle_kind"] == "source"
 
 
+def test_build_mapping_rejects_unsafe_duplicate_and_symlink_inputs(tmp_path):
+    import scripts.build_archive as archive
+
+    source = tmp_path / "README.md"
+    source.write_text("portable\n", encoding="utf-8")
+    manifest = {"bundle_kind": "source"}
+
+    with pytest.raises(ValueError, match="unsafe archive path"):
+        archive._build_from_mapping(
+            tmp_path / "unsafe.tar.gz",
+            "SCARF-AE",
+            manifest,
+            {"../README.md": source},
+            "tar.gz",
+        )
+    with pytest.raises(ValueError, match="duplicate normalized archive path"):
+        archive._build_from_mapping(
+            tmp_path / "duplicate.tar.gz",
+            "SCARF-AE",
+            manifest,
+            {"README.md": source, "./README.md": source},
+            "tar.gz",
+        )
+    with pytest.raises(ValueError, match="not allowed in source bundle"):
+        archive._build_from_mapping(
+            tmp_path / "unreviewed.tar.gz",
+            "SCARF-AE",
+            manifest,
+            {"PLAN.md": source},
+            "tar.gz",
+        )
+    with pytest.raises(ValueError, match="not allowed in evidence bundle"):
+        archive._build_from_mapping(
+            tmp_path / "unreviewed-evidence.tar.gz",
+            "SCARF-AE",
+            {"bundle_kind": "evidence"},
+            {"contracts/unreviewed.txt": source},
+            "tar.gz",
+        )
+    with pytest.raises(ValueError, match="archive prefix"):
+        archive._build_from_mapping(
+            tmp_path / "bad-prefix.tar.gz",
+            "../SCARF-AE",
+            manifest,
+            {"README.md": source},
+            "tar.gz",
+        )
+
+    symlink = tmp_path / "README-link.md"
+    symlink.symlink_to(source)
+    with pytest.raises(ValueError, match="regular non-symlink"):
+        archive._build_from_mapping(
+            tmp_path / "symlink.tar.gz",
+            "SCARF-AE",
+            manifest,
+            {"README.md": symlink},
+            "tar.gz",
+        )
+
+
 def make_archive(path, *, extra=False, unsafe=False):
     payload = b"artifact\n"
     manifest = {
@@ -101,6 +184,23 @@ def make_archive(path, *, extra=False, unsafe=False):
             info = tarfile.TarInfo("../unsafe.txt")
             info.size = len(data)
             archive.addfile(info, io.BytesIO(data))
+
+
+def add_regular_member(archive, name, data):
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    archive.addfile(info, io.BytesIO(data))
+
+
+def make_release_archive(path, manifest, members):
+    with tarfile.open(path, "w:gz") as archive:
+        for name, data in members:
+            add_regular_member(archive, name, data)
+        add_regular_member(
+            archive,
+            "SCARF-AE/release-manifest.json",
+            json.dumps(manifest).encode(),
+        )
 
 
 def test_verify_release_archive_rehashes_every_manifested_file(tmp_path):
@@ -146,6 +246,7 @@ def test_evidence_file_set_is_curated_and_hash_checked(tmp_path):
             {
                 "status": "complete",
                 "validation_status": "PASS",
+                "validation_require_key_results": True,
                 "files": {
                     "evidence/result.json": {
                         "size": evidence.stat().st_size,
@@ -190,6 +291,65 @@ def test_verify_release_archive_rejects_unmanifested_and_unsafe_files(tmp_path):
     make_archive(unsafe, unsafe=True)
     with pytest.raises(ValueError, match="root directory|unsafe archive"):
         verify(unsafe)
+
+
+def test_verify_rejects_duplicate_normalized_and_nonregular_members(tmp_path):
+    from scripts.build_archive import verify
+
+    payload = b"portable\n"
+    manifest = {"files": {"README.md": hashlib.sha256(payload).hexdigest()}}
+
+    duplicate = tmp_path / "duplicate.tar.gz"
+    make_release_archive(
+        duplicate,
+        manifest,
+        [
+            ("SCARF-AE/README.md", payload),
+            ("./SCARF-AE/README.md", payload),
+        ],
+    )
+    with pytest.raises(ValueError, match="duplicate normalized archive member"):
+        verify(duplicate)
+
+    symlink = tmp_path / "symlink.tar.gz"
+    with tarfile.open(symlink, "w:gz") as archive:
+        add_regular_member(archive, "SCARF-AE/README.md", payload)
+        link = tarfile.TarInfo("SCARF-AE/README-link.md")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "README.md"
+        archive.addfile(link)
+        add_regular_member(
+            archive,
+            "SCARF-AE/release-manifest.json",
+            json.dumps(manifest).encode(),
+        )
+    with pytest.raises(ValueError, match="non-regular archive member"):
+        verify(symlink)
+
+
+def test_verify_enforces_source_and_evidence_allowlists(tmp_path):
+    from scripts.build_archive import verify
+
+    payload = b"portable\n"
+    digest = hashlib.sha256(payload).hexdigest()
+    for bundle_kind, relative in (("source", "PLAN.md"), ("evidence", "README.md")):
+        path = tmp_path / f"{bundle_kind}.tar.gz"
+        make_release_archive(
+            path,
+            {"bundle_kind": bundle_kind, "files": {relative: digest}},
+            [(f"SCARF-AE/{relative}", payload)],
+        )
+        with pytest.raises(ValueError, match=f"not allowed in {bundle_kind} bundle"):
+            verify(path)
+
+    legacy = tmp_path / "legacy.tar.gz"
+    make_release_archive(
+        legacy,
+        {"files": {"PLAN.md": digest}},
+        [("SCARF-AE/PLAN.md", payload)],
+    )
+    with pytest.raises(ValueError, match="not allowed in source bundle"):
+        verify(legacy)
 
 
 def test_source_and_evidence_bundles_require_identical_release_identity():

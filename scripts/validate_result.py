@@ -251,6 +251,48 @@ def _validate_v21_evidence(record: dict[str, Any]) -> None:
             )
         if calibration.get("evaluation_disjoint") is not True:
             raise ValueError("calibration provenance is not evaluation-disjoint")
+        if calibration.get("protocol") != "dl3dv_train_holdout_v1":
+            raise ValueError("calibrated result has no DL3DV train/holdout protocol")
+        if calibration.get("train_holdout_scene_disjoint") is not True:
+            raise ValueError("calibrated result train/holdout split is not disjoint")
+        split_hashes = (
+            "selection_sha256",
+            "scene_set_sha256",
+            "pair_bindings_sha256",
+            "trace_set_sha256",
+            "candidate_set_sha256",
+        )
+        split_records: dict[str, dict[str, Any]] = {}
+        for split in ("train", "holdout"):
+            split_record = calibration.get(split)
+            if not isinstance(split_record, dict):
+                raise ValueError(f"calibrated result has no {split} calibration evidence")
+            for field in split_hashes:
+                if not _sha256_digest(split_record.get(field)):
+                    raise ValueError(
+                        f"calibration_provenance.{split}.{field} must be a SHA256 digest"
+                    )
+            if split == "train":
+                if not _sha256_digest(split_record.get("selected_candidate_sha256")):
+                    raise ValueError(
+                        "calibration_provenance.train.selected_candidate_sha256 "
+                        "must be a SHA256 digest"
+                    )
+            else:
+                for field in (
+                    "validated_parameters_sha256",
+                    "validated_candidate_sha256",
+                ):
+                    if not _sha256_digest(split_record.get(field)):
+                        raise ValueError(
+                            f"calibration_provenance.holdout.{field} must be a SHA256 digest"
+                        )
+            split_records[split] = split_record
+        if (
+            split_records["train"].get("selection_sha256")
+            == split_records["holdout"].get("selection_sha256")
+        ):
+            raise ValueError("calibrated result reuses one train/holdout selection")
     else:
         if calibration.get("candidate_records_sha256") is not None:
             raise ValueError("preregistered calibration has candidate evidence")

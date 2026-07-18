@@ -7,14 +7,15 @@ paper's reported results as an optimization target.
 
 ## Isolation Boundary
 
-Calibration scenes come only from the official Re10K and ACID training splits.
-The author-side recovery command is `bash data/download_calibration_splits.sh`;
-it verifies the published archive byte counts before hashing. The current
-official SimpleHTTP mirror does not support byte-range requests, so an
-interrupted full-archive download is deliberately preserved rather than falsely
-resumed; `SCARF_CALIBRATION_RESTART_PARTIAL=1` is required to discard it and
-restart. Full training archives and prepared images are not redistributed in
-the release artifact.
+The primary calibration source is the official gated DL3DV corpus. Its plan
+selects 24 calibration scenes and eight holdout scenes from the pinned
+`DL3DV/DL3DV-ALL-480P` revision using only archive paths and hashes, and rejects
+every scene in the 140-scene DL3DV evaluation index. The plan records the terms
+URL, revision, complete listed-tree SHA256, evaluation-index SHA256, and the
+exact selected archive hashes before any image is downloaded. The current
+account must have upstream access to that gated source; the downloader fails
+closed instead of reusing evaluation scenes or bypassing terms. Full training
+archives and prepared images are not redistributed in the release artifact.
 
 This is an author-side, pre-submission operation. It is deliberately separate
 from `quick`, `pilot`, and both `all-eval` profiles: a reviewer never downloads
@@ -23,34 +24,84 @@ single frozen, SHA256-bound `artifact/mechanism_config.json`; the evidence
 archive carries the calibration manifest and candidate-record digests needed to
 audit that configuration without distributing upstream training images.
 
-After the archives complete, prepare and execute calibration with:
+Before any gated image download, produce the source-bound selection plan. The
+downloader obtains the official archive tree through the authenticated Hugging
+Face API, requires every selected object to expose a stable upstream object id,
+and writes the plan before it requests any archive bytes. It uses the LFS
+SHA256 when the gated API exposes it; otherwise it binds the revision-pinned
+Git blob id and records the archive's actual SHA256 after download:
 
 ```bash
-bash data/download_calibration_splits.sh
-"${SCARF_PYTHON_CLASSIC:-python3}" data/prepare_calibration_splits.py
-SCARF_PYTHON_CLASSIC=/path/to/classic/bin/python \
-  bash scripts/run_ae.sh calibrate --output-root outputs/calibration
+python data/download_dl3dv_calibration.py \
+  --write-plan outputs/calibration/dl3dv-download-plan.json \
+  --evaluation-index depthsplat/assets/dl3dv_start_0_distance_10_ctx_2v_tgt_4v.json \
+  --revision 5902ed6d707cc13a7779907c1e096676f7707971
 ```
 
-`calibrate` runs its compiler, trace replay, and configuration writer with the
-same locked classic profile that loads the Re10K/ACID chunks; it never relies
-on whichever Python happens to launch the shell wrapper.
+The plan remains `PLANNED_AWAITING_UPSTREAM_ACCESS` until the selected archives
+can be legally downloaded and their internal camera/image layout is verified.
+The existing Re10K/ACID `calibrate` command is retained for Functional
+regression only and must not be substituted for this DL3DV calibration contract.
 
-The preparation step extracts only the selected chunks into
-`downloads/calibration/prepared/<dataset>/`. The compiler then writes a
-separate target-free sidecar under the calibration output: it contains only
-the selected context-image bytes, all camera metadata, and the fixed view
-indices. Target RGB bytes are not copied into that tree and calibration replay
-rejects a record that carries them. The source subset retains the full official
-training index, the selected 32-scene index, archive hash, prepared-tree
-manifest, and provenance record. The compiler rejects a subset unless it is
-exactly the SHA256-ranked selection from that full index.
+After reviewing that immutable plan, download and safely extract all 32
+selected archives. The tool verifies every archive's advertised byte count and
+bound upstream object id, records the actual SHA256 of each downloaded ZIP,
+and preserves the plan-bound 24-scene training and eight-scene holdout sets in
+the prepared-tree provenance.
 
-The compiler selects 32 scenes from each dataset by sorting
-`SHA256("SCARF-AE-calibration-v1\0" + dataset + "\0" + scene)` and taking the
-first 32 valid scenes. The compiled manifest records every scene/view and the
-source-tree hash. A scene or view present in the finalized evaluation protocol
-is rejected. DL3DV is evaluation-only and never participates in calibration.
+```bash
+python data/download_dl3dv_calibration.py \
+  --plan outputs/calibration/dl3dv-download-plan.json \
+  --evaluation-index depthsplat/assets/dl3dv_start_0_distance_10_ctx_2v_tgt_4v.json \
+  --revision 5902ed6d707cc13a7779907c1e096676f7707971 \
+  --output-root downloads/calibration/dl3dv
+
+python data/prepare_dl3dv_calibration_inputs.py \
+  --raw-root downloads/calibration/dl3dv/prepared \
+  --plan outputs/calibration/dl3dv-download-plan.json \
+  --preparation-record downloads/calibration/dl3dv/.scarf-dl3dv-calibration-source.json \
+  --output-dir outputs/calibration/dl3dv-protocol
+```
+
+The compiler writes separate native and Re10K-compatible target-free sidecars
+for `calibration_train` and `calibration_holdout`. Each contains only selected
+context-image bytes, all camera metadata, and fixed view indices; target RGB
+bytes are never copied into either sidecar and replay rejects a record that
+carries them. The source subset retains the official archive-tree hash,
+selected archive hashes, prepared-tree manifest, and split provenance. The
+compiler rejects missing, overlapping, extra, or evaluation-scene sidecars.
+
+The global grid consumes only the training sidecars: TranSplat and MVSplat use
+the Re10K-compatible representation, while DepthSplat uses native DL3DV. The
+holdout pass receives exactly the training-selected tuple and may not enumerate
+or rerank the grid. The existing Re10K/ACID `run_ae.sh calibrate` command
+remains Functional regression only and cannot freeze a Results Reproduced
+configuration.
+
+```bash
+python scripts/calibration_sweep.py \
+  --manifest outputs/calibration/dl3dv-protocol/manifest.json \
+  --output-dir outputs/calibration/dl3dv-sweep
+
+python scripts/calibrate_mechanisms.py \
+  --candidate-records outputs/calibration/dl3dv-sweep/candidates.json \
+  --output-dir outputs/calibration/dl3dv-sweep \
+  --config-output artifact/mechanism_config.json
+```
+
+The sweep runs the full registered grid only on `calibration_train`, writes the
+selected tuple and holdout request, then invokes every holdout trace with that
+exact tuple. `calibrate_mechanisms.py` reopens and rehashes the trace files,
+sidecar provenance, train decision, and holdout result before it writes a
+calibrated configuration. A stale or same-selection trace from a different
+sidecar is rejected even when a resumable pair directory already exists.
+
+The DL3DV planner domain-separates a 24-scene calibration rank and an eight-scene
+holdout rank. The compiled manifest records every scene/view and source-tree
+hash. A scene present in the finalized 140-scene evaluation protocol is
+rejected. Re10K/ACID training calibration remains a separately documented
+fallback only if a legal public scene-disjoint multiview source is pinned; it
+is not a substitute for DL3DV evaluation scenes.
 
 The calibration process may read context images, model inputs, pretrained-model
 outputs, hardware event traces, and baseline-versus-approximated renders. It
@@ -80,18 +131,21 @@ parameter overrides are forbidden in a claim run.
 
 ## Selection Rule
 
-Each candidate is replayed over the same compiled calibration traces. A
+Each registered candidate is replayed over the same compiled training traces. A
 candidate is feasible only when baseline-render versus approximated-render
 degradation is at most 0.05 dB PSNR, 0.003 SSIM, and 0.003 LPIPS on every
-calibration pair. Among feasible candidates, the compiler selects the tuple
-with the largest event-derived S2+S3 work reduction. Ties select less
-compression, then the lexicographically smallest tuple. The decision does not
-compare Guided Rate, L0/L1 rate, speedup, or quality with manuscript values.
+training pair. Among feasible candidates, the compiler selects the tuple with
+the largest event-derived S2+S3 work reduction. Ties select less compression,
+then the lexicographically smallest tuple. The selected tuple alone is replayed
+on every holdout pair under the same quality constraints; the holdout never
+reranks candidates. The decision does not compare Guided Rate, L0/L1 rate,
+speedup, or quality with manuscript values.
 
-The selected record is written to `artifact/mechanism_config.json` together
-with calibration manifest hashes and raw candidate records. It is frozen before
-the first evaluation run; changing it changes source identity and invalidates
-resume/evidence reuse.
+The selected record is written to `artifact/mechanism_config.json` only after
+the exact tuple passes holdout. It binds both split manifests, target-free
+sidecar/provenance hashes, trace sets, and candidate records. It is frozen
+before the first evaluation run; changing it changes source identity and
+invalidates resume/evidence reuse.
 
 ## Faithfulness Boundary
 
@@ -103,7 +157,10 @@ the cached anchor; it does not introduce another reuse method.
 SAES routing remains the published probe feature-variance then probe
 depth-standard-deviation first-hit hierarchy. L0 uses probe-anchored bilateral
 aggregation. L1 uses a less-compressive `2K(T)` lightweight probe-constrained
-path. Neither path may inspect target images or full non-probe Stage-3 outputs.
+path. Its depth-reliability mean and standard deviation are computed from the
+primary `K(T)` routing probes; the extra L1 anchors are an execution and
+aggregation expansion, not a new depth reference. Neither path may inspect
+target images or full non-probe Stage-3 outputs.
 For moment matching, the released implementation uses the already available
 C2W camera transform, normalized intrinsics, assignment-weighted probe depth,
 and the non-probe pixel coordinate to lift a pseudo 3D mean on that pixel's

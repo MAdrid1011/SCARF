@@ -3110,6 +3110,7 @@ def main(argv=None):
             context_extrinsics=context['extrinsics'],
             context_intrinsics=context['intrinsics'],
             ray_depth_mode=('z' if args.model == 'depthsplat' else 'euclidean'),
+            committed_parameters=args.calibration_parameters,
         )
         trace['calibration_input'] = batch['calibration']
         protocol_sample_index = (
@@ -3133,6 +3134,12 @@ def main(argv=None):
             'dataset': args.dataset,
             'seed': args.seed,
             'trace': trace,
+            'calibration_scope': (
+                'exact_committed_train_tuple'
+                if args.calibration_parameters is not None
+                else 'registered_global_grid'
+            ),
+            'committed_parameters': args.calibration_parameters,
             'candidates': candidates,
         }
         output_dir = (
@@ -3203,7 +3210,14 @@ def main(argv=None):
                 for value in batch['target']['index'][0, :V_tgt].tolist()
             ],
         }
-        from scripts.result_record import cached_sha256_file
+        from scripts.result_record import cached_sha256_file, source_identity
+
+        source = source_identity()
+        calibration_provenance = {
+            key: value
+            for key, value in mechanism_provenance.items()
+            if key != 'mechanism_config_sha256'
+        }
 
         trace_record = {
             'schema_version': '1.0',
@@ -3217,6 +3231,17 @@ def main(argv=None):
             'dataset_tree_sha256': dataset_identity['tree_sha256'],
             'checkpoint_sha256': cached_sha256_file(checkpoint_path),
             'seed': args.seed,
+            'execution_provenance': {
+                'git_commit': source['git_commit'],
+                'git_dirty': source['git_dirty'],
+                'source_identity': source['source'],
+                'source_tree_sha256': source['source_tree_sha256'],
+                'submodules': source['submodules'],
+                'mechanism_config_sha256': mechanism_provenance[
+                    'mechanism_config_sha256'
+                ],
+                'calibration_provenance': calibration_provenance,
+            },
             'trace': trace,
             'replays': replays,
         }

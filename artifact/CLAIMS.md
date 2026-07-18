@@ -9,11 +9,14 @@ non-author evaluator runs the documented workflow and `scripts/validate_ae.py
 ## Submission Intent Versus Evidence State
 
 Claim intent and completed evidence are separate. Figure 8 is a mandatory key
-result, but it remains blocked until a real Jetson Orin NX evaluator run exists.
-Table 1, Figure 10, Figure 11, Tables 2-3, Figure 12, and Figures 13-16 are
-mandatory deterministic results whose current simulator and data gaps must be
-closed before release. The machine-readable state must never be promoted merely
-because a result is listed here.
+result with submission state `CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION`:
+SCARF requests reproduction of the result, but it is neither scheduled on this
+host nor marked `PASS` until a non-author runs the documented real Jetson Orin
+NX workflow. Table 1, Figure 11, and Tables 2-3 are the remaining mandatory
+deterministic results. Figure 10 and Figures 12-16 remain required supporting
+outputs and must be generated from the same raw evidence, but they are not
+substitutes for a missing key result. The machine-readable state must never be
+promoted merely because a result is listed here.
 
 Figure 9 and Table 4 have two explicitly separate layers: the paper's
 commercial TSMC28 values are comparison targets, while the released workflow
@@ -42,15 +45,27 @@ requires.
 |---|---|---|---|
 | Figure 8 | `run_ae.sh performance --device orin` | Real Orin CUDA events, Nsight stage records, and positive ASIC cycles | Nine pairs and geometric mean within 5% of 2.94x |
 | Table 1 | `run_ae.sh quality` | All selected target views for nine pairs | PSNR 0.15 dB; SSIM/LPIPS 0.005 |
-| Figure 10 | `run_ae.sh worstcase` | Full per-view ranking, source images, and stage cycles | Displayed views are the deterministic global FSDR/SAES worst cases |
 | Figure 11 | `run_ae.sh mechanisms` | No-opt, FSDR, SAES, and combined event cycles | Three geometric means within 5% |
 | Tables 2-3 | `run_ae.sh mechanisms` | Discrete mechanism and work counters | Rates within 0.02 absolute; counts within 5% relative |
-| Figure 12 | `run_ae.sh utilization` | Useful and scheduled MMCU slots | S1-S3 bars within two percentage points |
-| Figures 13-16 | `run_ae.sh sensitivity` | Five-point grids for all nine pairs | Fixed peaks, ratios, monotonicity, and quality gates |
 
 The quick synthetic fixture, bounded pilots, dense diagnostics, partial
 matrices, workstation timing, and manuscript CSV files cannot satisfy these
 rows.
+
+## Supporting Results
+
+Figure 10 is regenerated from every completed target view. Figure 12 is
+regenerated from the same event records as Tables 2-3. Figures 13-16 replay the
+fixed per-sample traces used by the passed execution. These supporting results
+must be present and internally valid in a final evidence bundle; they cannot
+turn an absent key-result execution into `PASS`.
+
+## Aggregate Rule
+
+A single-scene pilot is a diagnostic only. Its L0/L1/Full route mix, quality,
+or speed cannot be compared with a paper dataset aggregate or used to select
+configuration. Only the frozen protocol aggregate over every required scene
+and target view can be compared with Table 1, Figure 11, or Tables 2-3.
 
 ## Hardware Assignment
 
@@ -103,6 +118,11 @@ to the paper TSMC28 numbers is never a pass/fail criterion.
 - `BLOCKED`: an external legal, account, or physical-hardware dependency is
   unavailable and no valid evidence exists.
 - `NOT_CLAIMED`: context or proxy evidence outside the Results Reproduced set.
+
+`CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION` is a submission-intent state,
+not an execution outcome. It requires the same independent Orin evidence as
+`PASS` and must never cause a workstation run, release staging, or validator to
+treat Figure 8 as complete.
 
 The public LPDDR5 Ramulator/DRAMPower smoke trace remains Functional evidence
 until full workload traces reproduce the paper's stated memory configuration.

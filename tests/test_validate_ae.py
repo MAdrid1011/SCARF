@@ -35,6 +35,17 @@ def test_key_result_catalog_gate_rejects_not_run_and_accepts_complete_pass(tmp_p
         validate_result_catalog(catalog, require_key_results=True)
 
 
+def test_figure8_pending_state_is_valid_intent_but_not_completed_evidence():
+    from scripts.validate_ae import figure8_pending_state_check
+
+    pending = figure8_pending_state_check(
+        "CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION"
+    )
+    assert pending["pass"] is True
+    assert "awaiting" in pending["claim"]
+    assert figure8_pending_state_check("NOT_CLAIMED_NO_ORIN_EVIDENCE")["pass"] is False
+
+
 def test_expected_table_has_all_nine_pairs():
     root = Path(__file__).resolve().parents[1]
     expected = json.loads((root / "artifact/expected_results.json").read_text())

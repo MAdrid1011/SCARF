@@ -9,6 +9,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +23,199 @@ BASE_CATEGORIES = {
     "environments",
     "validation",
 }
+SOURCE_PROVENANCE_FIELDS = (
+    "git_commit",
+    "git_dirty",
+    "source_identity",
+    "source_tree_sha256",
+    "submodules",
+)
+RAW_ASAP7_PPA_PATH = "physical/asap7/ppa.json"
+DEEPSCALE_PPA_PATH = "physical/asap7/ppa_28nm_estimated.json"
+PHYSICAL_RESULT_PATHS = {RAW_ASAP7_PPA_PATH, DEEPSCALE_PPA_PATH}
+
+
+def canonical_sha256(value: Any) -> str:
+    """Hash a JSON value using the stable form used by provenance records."""
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def release_evidence_binding(root: Path = ROOT) -> dict[str, Any]:
+    """Return the source and mechanism identity required for staged evidence."""
+    from scripts.mechanism_config import load_mechanism_config
+    from scripts.result_record import source_identity
+
+    root = Path(root).resolve()
+    source = source_identity(root)
+    _, mechanism = load_mechanism_config(root / "artifact/mechanism_config.json")
+    calibration = {
+        key: value
+        for key, value in mechanism.items()
+        if key != "mechanism_config_sha256"
+    }
+    return {
+        "source": {
+            "git_commit": source["git_commit"],
+            "git_dirty": source["git_dirty"],
+            "source_identity": source["source"],
+            "source_tree_sha256": source["source_tree_sha256"],
+            "submodules": source["submodules"],
+        },
+        "mechanism": {
+            "mechanism_config_sha256": mechanism["mechanism_config_sha256"],
+            "calibration_status": calibration["status"],
+            "calibration_provenance_sha256": canonical_sha256(calibration),
+            "calibration_provenance": calibration,
+        },
+    }
+
+
+def _record_binding(
+    provenance: Mapping[str, Any], *, calibration: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
+        "source": {
+            field: provenance.get(field) for field in SOURCE_PROVENANCE_FIELDS
+        },
+        "mechanism": {
+            "mechanism_config_sha256": provenance.get("mechanism_config_sha256"),
+            "calibration_status": calibration.get("status"),
+            "calibration_provenance_sha256": canonical_sha256(calibration),
+        },
+    }
+
+
+def is_generated_execution_record(relative: Path) -> bool:
+    """Return whether a staged file carries direct execution provenance."""
+    return relative.name == "results.json" or relative.as_posix() in PHYSICAL_RESULT_PATHS
+
+
+def validate_deepscale_derivations(
+    files: Mapping[Path, Path], parsed_records: Mapping[str, Mapping[str, Any]]
+) -> list[str]:
+    """Bind a staged 28 nm estimate to its exact staged raw ASAP7 input."""
+    by_relative = {
+        relative.as_posix(): path for path, relative in files.items()
+    }
+    estimate_path = by_relative.get(DEEPSCALE_PPA_PATH)
+    if estimate_path is None:
+        return []
+    label = str(Path("evidence") / DEEPSCALE_PPA_PATH)
+    raw_path = by_relative.get(RAW_ASAP7_PPA_PATH)
+    if raw_path is None:
+        return [f"DeepScale estimate is missing staged raw ASAP7 PPA: {label}"]
+    raw = parsed_records.get(RAW_ASAP7_PPA_PATH)
+    estimate = parsed_records.get(DEEPSCALE_PPA_PATH)
+    if raw is None or estimate is None:
+        # The caller already reports malformed JSON for either record.
+        return []
+    try:
+        from hardware.scaling.deepscale import validate_scaled_record
+
+        validate_scaled_record(
+            estimate,
+            raw,
+            raw_input_sha256=sha256_file(raw_path),
+        )
+    except (OSError, ValueError) as exc:
+        return [f"DeepScale estimate input binding is invalid: {label} ({exc})"]
+    return []
+
+
+def validate_generated_records(
+    files: Mapping[Path, Path], *, expected_binding: Mapping[str, Any]
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Check every staged execution result against one source/config identity.
+
+    Non-result artifacts such as images, traces, and reports are hash-bound by the
+    enclosing manifest.  Every ``results.json`` is independently provenance-bound
+    here so an old Functional tree cannot be restaged as current claim evidence.
+    """
+    expected_source = expected_binding.get("source")
+    expected_mechanism = expected_binding.get("mechanism")
+    if not isinstance(expected_source, Mapping) or not isinstance(
+        expected_mechanism, Mapping
+    ):
+        raise ValueError("release evidence binding has an invalid schema")
+
+    records: dict[str, dict[str, Any]] = {}
+    parsed_records: dict[str, Mapping[str, Any]] = {}
+    failures: list[str] = []
+    for path, relative in sorted(files.items(), key=lambda item: str(item[1])):
+        if not is_generated_execution_record(relative):
+            continue
+        label = str(Path("evidence") / relative)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            failures.append(f"generated evidence is not valid JSON: {label} ({exc})")
+            continue
+        if isinstance(record, Mapping):
+            parsed_records[relative.as_posix()] = record
+        provenance = record.get("provenance") if isinstance(record, dict) else None
+        if not isinstance(provenance, Mapping):
+            failures.append(f"generated evidence provenance is missing: {label}")
+            continue
+
+        source_valid = True
+        for field in SOURCE_PROVENANCE_FIELDS:
+            if field not in provenance:
+                failures.append(
+                    f"generated evidence source provenance missing {field}: {label}"
+                )
+                source_valid = False
+            elif provenance[field] != expected_source.get(field):
+                failures.append(
+                    f"generated evidence source provenance mismatch {field}: {label}"
+                )
+                source_valid = False
+
+        mechanism_valid = True
+        if "mechanism_config_sha256" not in provenance:
+            failures.append(
+                f"generated evidence mechanism provenance missing mechanism_config_sha256: {label}"
+            )
+            mechanism_valid = False
+        elif provenance["mechanism_config_sha256"] != expected_mechanism.get(
+            "mechanism_config_sha256"
+        ):
+            failures.append(
+                f"generated evidence mechanism provenance mismatch mechanism_config_sha256: {label}"
+            )
+            mechanism_valid = False
+
+        calibration = provenance.get("calibration_provenance")
+        if not isinstance(calibration, Mapping):
+            failures.append(
+                f"generated evidence mechanism provenance missing calibration_provenance: {label}"
+            )
+            mechanism_valid = False
+        else:
+            if calibration.get("status") != expected_mechanism.get(
+                "calibration_status"
+            ):
+                failures.append(
+                    f"generated evidence calibration status mismatch: {label}"
+                )
+                mechanism_valid = False
+            if canonical_sha256(calibration) != expected_mechanism.get(
+                "calibration_provenance_sha256"
+            ):
+                failures.append(
+                    f"generated evidence calibration provenance digest mismatch: {label}"
+                )
+                mechanism_valid = False
+
+        if source_valid and mechanism_valid:
+            records[label] = _record_binding(provenance, calibration=calibration)
+
+    failures.extend(validate_deepscale_derivations(files, parsed_records))
+    if not records and not failures:
+        failures.append("validated output has no generated execution result records")
+    return records, failures
 
 
 def required_categories() -> set[str]:
@@ -155,6 +349,8 @@ def selected_files(source: Path) -> dict[Path, Path]:
         "speedup/*/samples/*/results.json",
         "speedup/*/samples/*/orin-evidence/measurement.json",
         "speedup/*/samples/*/orin-evidence/cuda-events.json",
+        "speedup/*/samples/*/orin-evidence/tegrastats.log",
+        "speedup/*/samples/*/orin-evidence/nsight*.nsys-rep",
         "speedup/*/orin-profile/*",
         "ablation/*/results.json",
         "ablation/*/pair-execution.json",
@@ -212,6 +408,10 @@ def stage(source: Path, destination: Path = DESTINATION) -> dict:
     validation = json.loads(validation_path.read_text(encoding="utf-8"))
     if validation.get("status") != "PASS":
         raise ValueError("reference evidence requires validation status PASS")
+    if validation.get("require_key_results") is not True:
+        raise ValueError(
+            "reference evidence requires validation with --require-key-results"
+        )
     evidence = destination / "evidence"
     if evidence.exists():
         raise FileExistsError(f"reference evidence already exists: {evidence}")
@@ -234,6 +434,15 @@ def stage(source: Path, destination: Path = DESTINATION) -> dict:
             "validated output is missing environment profiles: "
             + ", ".join(missing_profiles)
         )
+    provenance = release_evidence_binding(ROOT)
+    generated_records, provenance_failures = validate_generated_records(
+        files, expected_binding=provenance
+    )
+    if provenance_failures:
+        raise ValueError(
+            "generated evidence does not match the current release provenance: "
+            + "; ".join(provenance_failures)
+        )
     records = {}
     for path, relative in sorted(files.items(), key=lambda item: str(item[1])):
         target = evidence / relative
@@ -247,11 +456,16 @@ def stage(source: Path, destination: Path = DESTINATION) -> dict:
             "sha256": sha256_file(target),
         }
     manifest = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "status": "complete",
         "validation_status": "PASS",
+        "validation_require_key_results": True,
         "categories": sorted(categories),
         "files": records,
+        "provenance": {
+            **provenance,
+            "generated_records": generated_records,
+        },
     }
     (destination / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"

@@ -15,7 +15,7 @@ sparse.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import torch
 import torch.nn as nn
@@ -36,6 +36,15 @@ class SelectedOutputReplay:
 
     coordinates: torch.Tensor
     values: torch.Tensor
+    events: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SelectedOutputReplayMap:
+    """A full-shape raw head map with only selected positions executed."""
+
+    values: torch.Tensor
+    selection_mask: torch.Tensor
     events: dict[str, Any]
 
 
@@ -278,3 +287,104 @@ def compare_selected_outputs(
         "mean_absolute_delta": float(delta.mean().item()),
         "equivalent": bool(allclose),
     }
+
+
+def replay_two_conv_selected_output_maps(
+    head: nn.Module,
+    head_input: torch.Tensor,
+    selection_mask: torch.Tensor,
+    *,
+    dense_forward: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> SelectedOutputReplayMap:
+    """Execute a possibly different retained mask for every head batch item.
+
+    Classic encoders flatten context views into the head batch. A two-dimensional
+    mask would incorrectly impose one view's route on every other view, so this
+    wrapper consumes ``[N,H,W]`` masks. Unselected output slots are zero-filled;
+    a correct later materialization path must never read those descriptors.
+    """
+    if head_input.ndim != 4:
+        raise ValueError("head_input must have shape [N,C,H,W]")
+    first, activation, second = unpack_two_conv_head(head)
+    batch, channels, height, width = head_input.shape
+    if channels != first.in_channels:
+        raise ValueError("head_input channel count does not match head[0]")
+    if selection_mask.ndim == 2:
+        selection_mask = selection_mask.unsqueeze(0).expand(batch, -1, -1)
+    if (
+        selection_mask.ndim != 3
+        or selection_mask.shape != (batch, height, width)
+        or selection_mask.dtype != torch.bool
+    ):
+        raise ValueError("selection_mask must have shape [N,H,W] and bool dtype")
+    selection_mask = selection_mask.to(head_input.device)
+    output = torch.zeros(
+        (batch, second.out_channels, height, width),
+        dtype=head_input.dtype,
+        device=head_input.device,
+    )
+    per_item_events = []
+    for item in range(batch):
+        item_mask = selection_mask[item]
+        selected = int(item_mask.sum().item())
+        if selected == height * width:
+            # Full tiles use the native dense head and are charged as such.
+            dense = (
+                dense_forward(head_input[item : item + 1])
+                if dense_forward is not None
+                else head(head_input[item : item + 1])
+            )
+            if dense.shape != (1, second.out_channels, height, width):
+                raise ValueError("dense head execution returned an incompatible shape")
+            output[item : item + 1] = dense
+            first_macs = _conv_macs_per_position(first)
+            second_macs = _conv_macs_per_position(second)
+            event = {
+                "dense_spatial_positions": height * width,
+                "selected_final_output_positions": selected,
+                "first_conv_required_output_positions": height * width,
+                "first_conv_required_input_halo_positions": height * width,
+                "first_conv_dense_closure": True,
+                "second_conv_selected_only": False,
+                "dense_head_macs": (height * width) * (first_macs + second_macs),
+                "replayed_head_macs": (height * width) * (first_macs + second_macs),
+                "head_mac_saving": 0.0,
+            }
+        else:
+            replay = replay_two_conv_selected_outputs(
+                head, head_input[item : item + 1], item_mask
+            )
+            coordinates = replay.coordinates
+            output[item, :, coordinates[:, 0], coordinates[:, 1]] = replay.values[0]
+            event = dict(replay.events)
+        event["batch_item"] = item
+        per_item_events.append(event)
+
+    dense_head_macs = sum(int(event["dense_head_macs"]) for event in per_item_events)
+    actual_head_macs = sum(int(event["replayed_head_macs"]) for event in per_item_events)
+    selected_positions = sum(
+        int(event["selected_final_output_positions"]) for event in per_item_events
+    )
+    return SelectedOutputReplayMap(
+        values=output,
+        selection_mask=selection_mask,
+        events={
+            "contract_version": REPLAY_CONTRACT_VERSION,
+            "batch_size": batch,
+            "head_structure": "Conv3x3->GELU->Conv3x3",
+            "dense_head_macs": dense_head_macs,
+            "actual_head_macs": actual_head_macs,
+            "head_mac_delta": dense_head_macs - actual_head_macs,
+            "head_mac_saving": 1.0 - actual_head_macs / dense_head_macs,
+            "selected_final_output_positions": selected_positions,
+            "omitted_final_output_positions": batch * height * width - selected_positions,
+            "dense_batch_items": sum(
+                not event["second_conv_selected_only"] for event in per_item_events
+            ),
+            "selected_output_batch_items": sum(
+                event["second_conv_selected_only"] for event in per_item_events
+            ),
+            "upstream_s2_saving": 0.0,
+            "per_item": per_item_events,
+        },
+    )

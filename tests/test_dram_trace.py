@@ -231,6 +231,7 @@ def test_dram_collector_binds_evidence_to_source_identity(tmp_path, monkeypatch)
         "git_commit": "a" * 40,
         "git_dirty": False,
         "source": "git",
+        "source_tree_sha256": "e" * 64,
         "submodules": {
             "transplat": "b" * 40,
             "mvsplat": "c" * 40,
@@ -238,6 +239,16 @@ def test_dram_collector_binds_evidence_to_source_identity(tmp_path, monkeypatch)
         },
     }
     monkeypatch.setattr(collector, "source_identity", lambda: identity)
+    mechanism = {
+        "status": "preregistered",
+        "manifest_sha256": "f" * 64,
+        "candidate_records_sha256": None,
+        "evaluation_disjoint": False,
+        "expected_results_accessed": False,
+        "global_configuration": True,
+        "mechanism_config_sha256": "1" * 64,
+    }
+    monkeypatch.setattr(collector, "load_mechanism_config", lambda: ({}, mechanism))
 
     record = collector.collect(tmp_path)
 
@@ -245,7 +256,14 @@ def test_dram_collector_binds_evidence_to_source_identity(tmp_path, monkeypatch)
         "git_commit": identity["git_commit"],
         "git_dirty": False,
         "source_identity": "git",
+        "source_tree_sha256": identity["source_tree_sha256"],
         "submodules": identity["submodules"],
+        "mechanism_config_sha256": mechanism["mechanism_config_sha256"],
+        "calibration_provenance": {
+            key: value
+            for key, value in mechanism.items()
+            if key != "mechanism_config_sha256"
+        },
     }
 
 
@@ -285,8 +303,25 @@ def test_dram_collector_labels_only_bound_workload_energy_per_inference(
             "git_commit": "a" * 40,
             "git_dirty": False,
             "source": "git",
+            "source_tree_sha256": "e" * 64,
             "submodules": {},
         },
+    )
+    monkeypatch.setattr(
+        collector,
+        "load_mechanism_config",
+        lambda: (
+            {},
+            {
+                "status": "preregistered",
+                "manifest_sha256": "f" * 64,
+                "candidate_records_sha256": None,
+                "evaluation_disjoint": False,
+                "expected_results_accessed": False,
+                "global_configuration": True,
+                "mechanism_config_sha256": "1" * 64,
+            },
+        ),
     )
 
     record = collector.collect(tmp_path)

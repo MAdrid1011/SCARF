@@ -157,6 +157,7 @@
 | 2026-07-16 | Add C2W-ray-aware SAES moment construction | Non-probe Stage-3 attributes remain unread; pseudo 3D means now use only static camera geometry, assignment weights, and probe depths, and the path is bound into calibration/sensitivity provenance. |
 | 2026-07-16 | Materialize target-free calibration sidecars | Calibration replay now reads only selected context-image bytes plus target camera geometry; compiler and runner reject target-RGB-bearing inputs before a trace starts. |
 | 2026-07-17 | Stop the hardware-honest probe-spread SAES branch | The strict canonical TranSplat/Re10K diagnostic pruned 75.0% of Gaussians but lost 7.9188 dB SAES-only PSNR, so this non-claiming historical coverage variant cannot justify another six-pair run. |
+| 2026-07-18 | Make primary routing probes the default L1 reliability reference | Section 3 defines the L1 depth mean and standard deviation over the routing probe set; the declared 2K anchor expansion remains an execution and aggregation detail. A fresh target-free audit passed structural and poison-invariance checks, but it does not override the historical all-attribute failure or authorize a quality retry. |
 
 ## 9. Paper-Formula SAES Audit
 
@@ -887,20 +888,24 @@
   unless a separately specified, paper-compatible L1-only hypothesis clears its
   own property and event-accounting gates.
 
-- L1 primary-depth-reference diagnostic (rejected): the paper defines the L1
-  reliability normalizer over the primary routing probes, while the 2K native
-  L1 anchor expansion is an engineering detail. The non-claim
-  `l1-primary-depth-reference-diagnostic` therefore retained and charged all
-  2K anchors but computed their depth reliability relative to the original K
-  probe mean and standard deviation. It preserves routing, thresholds,
-  selected anchor positions, and target isolation. The fixed target-free
+- L1 primary-depth-reference correction: the paper defines the L1 reliability
+  normalizer over the primary routing probes, while the 2K native L1 anchor
+  expansion is an engineering detail. The former non-claim
+  `l1-primary-depth-reference-diagnostic` therefore represented the required
+  semantics and is now a legacy alias of the normal implementation: all normal
+  paths retain and charge 2K anchors but normalize their depth reliability with
+  the original K probe mean and standard deviation. The historical target-free
   result at
   `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_l1_primary_depth_reference_audit_v1/`
   improves L1 tile-mixture covariance p50 (0.129935 -> 0.121641) and mean p50
   (0.000404 -> 0.000351), but worsens harmonic p50 (0.008279 -> 0.008306) and
   opacity-average p50 (0.003373 -> 0.003485). It fails the all-attribute gate;
-  no quality retry is allowed. The diagnostic code and synthetic properties
-  remain as a transparent failed implementation record, not a claim path.
+  no quality retry is allowed. The fresh target-free structural audit at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_l1_primary_reference_corrected_audit_v1/`
+  (SHA256 `c93a6bc94e7e20098333a438f0256574c5946745d74fc0c4cf9a0fae26aefea1`)
+  confirms no target-RGB transfer, no skipped-S3 read, PSD-safe output, stable
+  events under poisoned skipped descriptors, and nonzero sparse work. It is
+  not an attribute-quality pass and cannot reopen the historical quality gate.
 
 ## 23. DL3DV SAES Routing and Hardware-Cost Closure
 
@@ -1263,3 +1268,331 @@
   SAES benefit, so it cannot support Results Reproduced. Any future reopen
   needs a paper-compatible sparse producer or a distinct target-free mechanism
   correction that preserves nonzero sparse work before another quality run.
+- Follow-up correction: the determinant-envelope fallback was an additional
+  condition not stated in the paper. The paper constrains averaged SH and
+  opacity, while its first/second-moment match necessarily permits covariance
+  expansion from transported mean dispersion. Keep the historical all-Full
+  audit as negative evidence, but remove that envelope condition from the
+  candidate implementation. PSD, finite-value, opacity-domain, single-
+  assignment, and optical-mass-conservation failures still return Full.
+
+## 33. DL3DV Coordinate-Explicit SAES Gate
+
+- Hypothesis: the paper's fixed `tau_f=0.20` and `tau_d=0.10` compare probe
+  statistics in the encoder's normalized feature and S2 inverse-depth candidate
+  coordinates, respectively. This preserves the published L0->L1->Full
+  hierarchy and thresholds; it only makes their previously implicit units
+  explicit. On DL3DV/TranSplat sample 0, the normalized probe-vector standard
+  deviation independently yields a 12.915% L0 rate, close to the paper's 12.0%
+  DL3DV row, unlike the current statistic's 100% L0 route.
+- Pre-quality gate: run exactly one fresh target-free sample-0 audit with
+  `probe-normalized-std-first-hit` and
+  `inverse-depth-candidate-coordinate-standard-deviation`. It must retain the
+  existing single-assignment, skipped-descriptor poison, PSD, opacity/SH-range,
+  and finite-value checks and report nonzero sparse work. It must not render,
+  load target RGB into the model, compute metrics, or read expected results.
+- Stop condition: if that audit still reaches Full fallback for every selected
+  tile or otherwise has zero sparse work, record the failure and repair the
+  representative materialization before any new quality run. If it passes,
+  pre-register one fresh sample-0 quality gate with unchanged global
+  thresholds and tolerance.
+- Result: the fixed target-free audit at source commit `8fbcb73` is preserved
+  as `transplat_sample0_coordinate_explicit_optical_mass_audit_v1/results.json`
+  (SHA256 `fca6d6237ef1839358c2ba11475caa50fe530b5c39de8eb9b734588ea1860936`).
+  It proves target RGB was removed before device transfer and does not render
+  or compute quality metrics. The normalized feature statistic remains 12.915%
+  L0, but the inverse-depth candidate coordinate makes every remaining tile
+  pass L1 and the covariance-envelope safeguard returns all 8,192 tiles to
+  Full. Zero descriptors are skipped. This candidate fails its nonzero-sparse
+  pre-quality gate; no quality run is authorized.
+- Next candidate: retain the feature interpretation but use the paper-literal
+  metric probe-depth standard deviation for L1. The target-free routing ledger
+  records 12.915% L0, 34.314% L1, and 52.771% Full on sample 0 before any
+  materialization fallback. Its next audit tests only the removal of the
+  unsupported covariance envelope; it does not change `tau_f`, `tau_d`,
+  datasets, checkpoints, assignment bandwidths, or tolerances.
+- Target-free result: `transplat_sample0_metric_depth_optical_mass_audit_v1/
+  results.json` (SHA256
+  `27ece34902cada6d20a745295dcf6f8c82bcdeff60b8e3265b7cff68fb417183`)
+  passes the pre-quality gate. It is target-free, has 1,058 L0, 2,811 L1, and
+  4,323 Full tiles, skips 35,184 descriptors (26.8433%), has zero PSD and
+  mass-fallback failures, and is invariant to poisoned skipped descriptors.
+- Pre-registered quality gate: run exactly once in
+  `outputs/ae_dl3dv_repair_diagnostics/
+  transplat_sample0_metric_depth_optical_mass_quality_v1/` with the official
+  DL3DV index, TranSplat `re10k.ckpt` SHA256
+  `89e43c205a04962e427801385d7d18e74cba063d05a76bf8b28e5fa746a4b69a`,
+  seed 0, sample/protocol index 0, all four selected target views, diagnostic
+  materialization `conditional-optical-mass-diagnostic`, and feature semantics
+  `probe-normalized-std-first-hit`. The default metric-depth L1 statistic and
+  global thresholds remain fixed. Accept only PSNR loss <= 0.15 dB, SSIM loss
+  <= 0.005, and LPIPS increase <= 0.005. Failure stops this line before any
+  8/32/140-scene run.
+- Quality result: the pre-registered run completed at the same dirty source
+  identity and is preserved as
+  `transplat_sample0_metric_depth_optical_mass_quality_v1/results.json`
+  (SHA256 `88a78ec60326b008cbd8a8f8ccd1ae71babca78ebf2ca2193fe5660e3e8559c2`).
+  Its schema/provenance validation passes, but quality fails decisively:
+  baseline/SAES PSNR is `34.8381/10.0265` dB, SSIM is
+  `0.97360/0.44955`, and LPIPS is `0.03276/0.51326`. This is an improvement
+  over the all-L0 optical-mass failure but exceeds every unchanged tolerance.
+  Do not run 8/32/140 scenes. The next permitted action is a target-free
+  retained-anchor attribute diagnosis, not another quality retry.
+- Attribute diagnosis: `transplat_sample0_metric_depth_optical_mass_attribute_
+  profile_v1/results.json` (SHA256
+  `5f06fc833de6b5d9c786a48626d7f1510bf26a828e958439d65a07d222a65d04`)
+  identifies opacity, not SH, as the failure source. Across 26,720 changed
+  retained anchors, output/source opacity ratio has p50 `0.01291` and output
+  opacity p50 `0.00403` versus source p50 `0.29721`; covariance determinant
+  ratio has p95 `1600.92`. The 3D determinant counts transported depth-axis
+  spread as rendering footprint and over-attenuates opacity.
+- Next candidate: preserve the one-assignment, C2W transport, first/second
+  moment, and optical-density construction, but evaluate the optical footprint
+  in the context camera's renderer coordinate system as
+  `sqrt(det(J * Sigma * J^T))`. The camera Jacobian uses only the producing
+  context view's C2W/intrinsics and retained anchor mean, never target camera
+  geometry or target RGB. It adds no route input or tunable parameter. Its
+  synthetic projected-footprint properties and a fresh target-free attribute
+  profile must pass before another pre-registered quality run.
+- First projected-footprint audit: preserve
+  `transplat_sample0_metric_depth_projected_optical_mass_audit_v1/results.json`
+  (SHA256 `4f23429a8b3917a73aa71a5c85934be89ac295d40be0df2e1bf2198ccc9aa1b4`).
+  It is target-free and keeps poison/PSD/mass checks, but only 9 L0 tiles pass
+  while 3,860 early tiles return Full. The cause is a `1e-8` determinant floor
+  incorrectly reused from 3D covariance checks for valid tiny 2D raster-space
+  footprints. Correct that numerical validity bound before judging the
+  projected-mass mechanism; do not render quality from this result.
+- Corrected projected-footprint audit: preserve
+  `transplat_sample0_metric_depth_projected_optical_mass_audit_v2/results.json`
+  (SHA256 `b6c6d4949ee5ff6d735caed7ffe153dd4bc76070449868bef7e7ec96bfdeb988`).
+  It restores the expected 35,184 skipped descriptors and passes all
+  target-free numerical/poison checks, but does not repair the result: changed
+  anchor opacity ratio remains p50 `0.01236`. Do not run a quality gate for
+  projected optical mass.
+- Next candidate: use the paper's explicit range-constrained SH/opacity
+  averaging with conditional one-assignment C2W transport and first/second
+  moments. This is the existing `conditional-anchor-transport-diagnostic`
+  equation, not a new router or parameter. Run a target-free attribute audit
+  first; its opacity must remain in the selected-anchor range before a single
+  new quality gate may be pre-registered.
+- Target-free result: preserve
+  `transplat_sample0_metric_depth_conditional_anchor_attribute_profile_v1/
+  results.json` (SHA256
+  `900c8e968076dee17f16ed2d6ef0540e454a98da1c1266b474670c0020e910f0`).
+  It passes all target-free checks with the same 35,184 skipped descriptors.
+  Across 26,720 changed anchors its opacity ratio is exactly 1.0, SH change is
+  only floating-point roundoff, and mean-displacement p95 is `0.06587`; the
+  remaining risk is covariance contraction (determinant-ratio p50 `2.25e-4`).
+- Pre-registered quality gate: run exactly once in
+  `outputs/ae_dl3dv_repair_diagnostics/
+  transplat_sample0_metric_depth_conditional_anchor_quality_v1/` using the
+  same official sample/checkpoint/seed/target-view contract as the preceding
+  quality gate, but materialization
+  `conditional-anchor-transport-diagnostic`. Thresholds and quality tolerances
+  remain `0.20/0.10` and `0.15/0.005/0.005`. A failure forbids all DL3DV
+  expansion and requires a target-free covariance diagnosis.
+- Quality result: preserve
+  `transplat_sample0_metric_depth_conditional_anchor_quality_v1/results.json`
+  (SHA256 `bde1768c7edd077ee000cab60f632c121928182564237d8788ea0acb7abfd9b1`).
+  It passes schema/provenance validation but fails the unchanged quality gate:
+  PSNR `34.8381 -> 24.2559`, SSIM `0.97360 -> 0.83307`, LPIPS
+  `0.03276 -> 0.24604`. This confirms that opacity preservation improves the
+  all-L0/optical-mass failures but does not recover sparse quality. Do not
+  expand DL3DV. Diagnose the conditional covariance moment equation before any
+  future quality run.
+- Covariance diagnosis: preserve
+  `transplat_sample0_metric_depth_conditional_anchor_covariance_audit_v3/
+  results.json` (SHA256
+  `8545e6479c7cd496ceaa8ba4aa395b27e16ea055ef32cd02e52dcad7ab818ed1`).
+  The corrected determinant ratio is never below `1.00021` (p50 `3.6828`),
+  the covariance increment minimum eigenvalue is positive at p50, and source
+  covariances are already symmetric/PSD. The former contraction conclusion was
+  a diagnostic denominator-floor error, not a mechanism error.
+- Current stop condition: the remaining mismatch is routing prevalence. At
+  fixed paper thresholds this sample has L0/L1/Full
+  `12.915%/34.314%/52.771%`, whereas the paper's DL3DV aggregate is
+  `12.0%/10.1%/77.9%` with 17.0% Gaussian saving. Changing the L1 statistic or
+  calibrating a new threshold from this evaluation sample would violate the
+  global, target-free contract. Retain Results Reproduced as unclaimed; do not
+  run another DL3DV quality/full evaluation unless disjoint training
+  calibration or author-compatible sparse-adaptor evidence supplies a new
+  predeclared route.
+
+### 33.1 Adapter-Offset Transport Diagnostic
+
+- Rationale: TranSplat's Gaussian adapter applies its predicted subpixel image
+  offset to the normalized image-plane coordinate before unprojecting and
+  normalizing the ray. The prior conditional-anchor diagnostic carried a
+  world-space residual, which is not equivalent for nonzero offsets or real
+  intrinsics. `conditional-adapter-offset-transport-diagnostic` recovers the
+  bounded offset from each retained anchor's native mean/depth and the producing
+  context C2W/intrinsics, then applies it before each assigned target-pixel ray
+  normalization. It preserves the existing router, `tau_f=0.20`, `tau_d=0.10`,
+  assignments, and moment matching, and fail-closes an entire tile to Full when
+  any selected anchor cannot satisfy the adapter geometry contract.
+- Pre-flight: synthetic direct-adapter equivalence, skipped-descriptor poison,
+  PSD/SH/opacity, event-ledger, and fail-closed tests pass. The next fixed run
+  is exactly one target-free TranSplat/DL3DV sample-0 attribute audit in
+  `outputs/ae_dl3dv_repair_diagnostics/
+  transplat_sample0_adapter_offset_transport_audit_v1/`, with seed 0,
+  `probe-normalized-std-first-hit`, metric-depth routing, and no target RGB,
+  renderer, quality metric, GGU, or hardware simulator. It is non-claim
+  diagnostic evidence. A failure preserves the output and forbids a quality
+  gate; a pass only authorizes a separately pre-registered single quality gate.
+- Target-free result: preserve
+  `transplat_sample0_adapter_offset_transport_audit_v1/results.json` (SHA256
+  `9fd33bf2a0e1ab4abeacd347d0f5478eac296a8a25d3a0cce7e8d53e9352fa17`).
+  It reports `target_rgb_accessed=false`; the native loader's target field was
+  removed before context-device transfer and never passed to routing or a
+  metric. The route has 26,496 skipped descriptors, zero adapter-geometry
+  fallback tiles, zero skipped-S3 reads, identical poisoned-pass events, PSD
+  output covariances, unchanged opacity (ratio exactly 1.0), and nonzero sparse
+  selected-head work. This passes the target-free attribute gate only.
+- Pre-registered quality gate: run exactly once in
+  `outputs/ae_dl3dv_repair_diagnostics/
+  transplat_sample0_adapter_offset_transport_quality_v1/` using the fixed
+  `scripts/saes_selected_output_quality_gate.py` entrypoint bound to
+  `conditional-adapter-offset-transport-diagnostic`, seed 0, the same official
+  sample/checkpoint/target views, and unchanged `0.15/0.005/0.005` quality
+  limits. The output remains non-claiming and does not authorize 8/32/140-scene
+  expansion unless all limits and sparse-execution prerequisites pass.
+- Quality result: preserve
+  `transplat_sample0_adapter_offset_transport_quality_v1/results.json` (SHA256
+  `e1e21de6f3d5f5509e676415ecf7314743af1b3aae453d0f17036cc973c858b1`).
+  The selected-output trace is internally consistent (same route and retained
+  attributes, no adapter fallback, and no target RGB before the mask commits),
+  but the fixed quality gate fails: PSNR `34.8391 -> 25.6927` (loss `9.1464`
+  dB), SSIM `0.97360 -> 0.85157` (loss `0.12203`), and LPIPS
+  `0.03276 -> 0.21826` (increase `0.18550`). The strict decoder comparison is
+  also non-bit-identical at max absolute delta `0.001052`, so this remains
+  non-claim diagnostic evidence. Do not retry this candidate, change its
+  thresholds, or expand DL3DV; a future branch requires an independently
+  justified implementation hypothesis and then resumes from target-free tests.
+
+## 34. DL3DV Training-Calibration Preparation
+
+- The author-side training calibration path now has an executable, fail-closed
+  archive contract. `data/download_dl3dv_calibration.py --write-plan` lists the
+  pinned gated `DL3DV/DL3DV-ALL-480P` tree and commits a 24+8
+  evaluation-disjoint selection before data download. Its execution phase
+  rereads that tree, verifies the plan byte-for-byte, downloads only the 32
+  selected ZIPs, checks size plus the bound upstream object id, records each
+  actual archive SHA256, and safely extracts all 32 scenes while binding the
+  24 training and eight holdout scene sets to the prepared tree.
+- `data/prepare_dl3dv_calibration_inputs.py` converts both fixed splits into
+  native and Re10K-compatible target-free sidecars. It permits only selected
+  context image bytes and camera geometry, binds source/prepared-tree hashes,
+  rejects missing, overlapping, extra, or evaluation scenes, and routes the
+  three models to their required representation in `scripts/calibration_sweep.py`.
+- Current external blocker: the configured account has a valid Hugging Face
+  token but has not been granted data access to `DL3DV-ALL-480P`. On 2026-07-18
+  the revision-pinned archive resolve request returned the upstream explicit
+  `403 ... not in the authorized list`; no archive was downloaded and no
+  permission boundary was bypassed. This is not a GPU or Vivado constraint;
+  the RTX 3060 is idle after Vivado was stopped.
+- Current technical blocker: all three fixed-model direct-S2/S3 sparse paths
+  are fail-closed with zero verified SAES savings. Therefore calibration and
+  any 140-scene DL3DV evaluation remain prohibited until a paper-compatible
+  sparse implementation passes the existing synthetic and one-sample quality
+  gates. The new data path is preparation work, not a Results Reproduced claim.
+- Probe-only guard checkpoint: the first fresh target-free TranSplat/DL3DV
+  sample-0 run at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_materialization_guard_v1/`
+  executed 1,058 L0 and 2,878 L1 guard checks without reading a non-probe S3
+  attribute, but an initialization bug serialized
+  `materialization_guard_enabled` as `0`. Preserve it as invalid diagnostic
+  evidence. The fixed v2 rerun preserves all routing counters exactly, records
+  `materialization_guard_enabled=true`, and builds the charged ledger with
+  27,256 guard descriptor events and 2,507,552 bytes of guard traffic. It is
+  target-free and stops before GGU, rendering, quality metrics, and hardware
+  simulation. The ledger remains analytic, not RTL-cycle-equivalent; this does
+  not change the zero verified S2/S3 saving or authorize quality expansion.
+
+## 35. Selected-Output Quality-Pilot Contract
+
+- Run ID: `saes-selected-output-quality-pilot-v1`.
+- Research question: can the exact same-weight TranSplat Gaussian-head replay
+  execute the real L0/L1/Full retained-output mask through the native Gaussian
+  adapter and decoder without changing the fixed target-view quality contract?
+- Fixed setup: canonical DL3DV sample 0, its committed two context and four
+  target views, TranSplat `re10k.ckpt`, seed 0, `tau_f=0.20`, `tau_d=0.10`,
+  metric probe-depth standard deviation, the existing probe-only guard, and
+  conditional-anchor moment materialization. No target RGB may enter routing,
+  mask selection, or head execution; it is read only after the sparse output
+  is fixed to render the four already selected target views and evaluate them.
+- Execution design: the dense reference/control pass records actual S1/S2
+  tensors but contributes no SAES saving. A first selected-head pass produces
+  only the conservative L0/L1 anchor closure needed for the guard. A second
+  selected-head pass uses the guard-resolved retained mask; every Full-tile
+  output and every retained L0/L1 anchor is executed with original weights,
+  while omitted second-convolution outputs are not executed. Both replay event
+  ledgers are charged. Dense S1/S2/refinement and first-convolution closure
+  remain explicitly charged, and global `s2_s3_sparse_execution_verified`
+  remains false unless a later complete stage proof is obtained.
+- Minimal gate: synthetic batched-mask replay equivalence and a new DL3DV
+  sample-0 output directory. Acceptance requires identical guard-resolved
+  masks across the two sparse passes, a complete replay event record, and
+  PSNR loss <= 0.15 dB, SSIM loss <= 0.005, LPIPS increase <= 0.005 over the
+  same dense reference. Any failure is preserved as non-claim evidence; it
+  does not authorize an 8/32/140-scene run or a change to thresholds, seed,
+  scene, or tolerances.
+- `v1` result: preserve
+  `outputs/ae_dl3dv_repair_diagnostics/saes_selected_output_quality_pilot_v1/`
+  as non-claim failure evidence. Its fixed quality verdict fails (PSNR loss
+  `9.1452 dB`, SSIM loss `0.12201`, LPIPS increase `0.18548`), and source
+  inspection also found that it transferred target RGB before the sparse mask
+  was committed. The result must not be promoted or overwritten.
+- `v2` repair contract: repeat the same one-sample command in a new output
+  directory with no change to scene, seed, checkpoint, thresholds, routing,
+  materialization, or quality limits. Target RGB remains in the native batch
+  until after the final sparse mask, selected-head event ledgers, retained
+  descriptor equivalence, and target-free decoder equivalence are all fixed.
+  The run must prove that the selected-head output and a dense-head SAES
+  control have equal routing masks and FP32-equivalent retained attributes and
+  decoder colors before target RGB is read. A quality failure after those
+  execution checks is a mechanism-fidelity failure, not an execution-boundary
+  failure, and still prohibits expansion.
+- `v2` target-free decoder finding: the repaired execution reached the
+  semantic control before RGB access, but its native rasterizer output was not
+  FP32-equivalent while it retained SAES-removed, zero-opacity descriptors
+  whose raw head entries were intentionally absent. Retained attributes and
+  the route mask were already equivalent. This is an S4 input-contract issue,
+  not a quality verdict; preserve
+  `saes_selected_output_quality_pilot_v2.run.log` as the failed audit trace.
+- `v3` repair contract: pass only the post-SAes retained descriptor set to the
+  native decoder on both the dense-SAes control and selected-head path. This
+  removes descriptors SAES has already assigned zero opacity and changes no
+  retained descriptor, router decision, materialization equation, checkpoint,
+  sample, seed, or threshold. Require the same target-free attribute and
+  decoder equivalence checks before the one fixed quality evaluation.
+- `v3` target-free decoder finding: compaction removed the deleted descriptors
+  but the strict decoder equivalence still failed before RGB access and before
+  metrics. Preserve `saes_selected_output_quality_pilot_v3.run.log`; it is not
+  a quality result. The follow-up remains target-free: record the selected-vs-
+  dense render delta together with a repeat render of the same dense descriptor
+  set, so CUDA rasterizer repeatability is distinguished from selected-head
+  numerical drift before selecting an execution contract.
+- `v4` target-free result: the dense control is bit-stable on immediate repeat;
+  selected-vs-dense has mean absolute color delta `1.028e-7` and maximum
+  `0.001052`, induced by the already audited FP32 selected-head accumulation
+  delta (maximum `2.670e-5`). Therefore the next fixed quality measurement
+  records this nonzero numerical boundary explicitly instead of falsely
+  calling it bit-equivalent. It remains non-claiming unless both strict
+  decoder equivalence and all original quality gates pass; no threshold,
+  scene, seed, or routing change is authorized by this diagnostic.
+- `v5` clean quality result: preserve
+  `outputs/ae_dl3dv_repair_diagnostics/saes_selected_output_quality_pilot_v5/`
+  (results SHA256
+  `d2c51c3e1f93bad4d488f4366f1640f93045683a5e47b5695348561e1fcc4269`).
+  Target RGB provenance is valid: it stayed in the native batch until sparse
+  output commitment, then was removed for the fixed four-view metrics. The
+  dense and selected-head paths have equal masks and FP32-equivalent retained
+  attributes, but their strict decoder images differ by max `0.001052` from
+  selected-head accumulation. More importantly, the unchanged quality gate
+  fails: PSNR loss `9.1452 dB`, SSIM loss `0.12201`, and LPIPS increase
+  `0.18548`. It is non-claim evidence and forbids any 8/32/140-scene DL3DV
+  expansion. The only valid next routes are an evaluation-disjoint training
+  calibration after official access is granted, or a new target-free,
+  paper-compatible materialization hypothesis that first passes synthetic and
+  descriptor-property gates; neither route may use evaluation RGB, metrics,
+  sample choice, or threshold fitting.

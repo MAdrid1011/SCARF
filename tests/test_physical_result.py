@@ -108,9 +108,36 @@ def test_route_drc_parser_is_strict_about_unknown_nonempty_reports():
     assert parse_drc("route finished but report format is unknown\n") is None
 
 
-def test_complete_routed_fixture_sets_physical_valid(tmp_path):
-    from hardware.iflow.physical_result import build_record
+def test_complete_routed_fixture_sets_physical_valid(tmp_path, monkeypatch):
+    import hardware.iflow.physical_result as physical_result
+
+    build_record = physical_result.build_record
     from hardware.iflow.paper_table4 import REQUIRED_REPORT_COMPONENTS
+
+    identity = {
+        "git_commit": "a" * 40,
+        "git_dirty": False,
+        "source": "git",
+        "source_tree_sha256": "b" * 64,
+        "submodules": {
+            "transplat": "c" * 40,
+            "mvsplat": "d" * 40,
+            "depthsplat": "e" * 40,
+        },
+    }
+    mechanism = {
+        "status": "preregistered",
+        "manifest_sha256": "f" * 64,
+        "candidate_records_sha256": None,
+        "evaluation_disjoint": False,
+        "expected_results_accessed": False,
+        "global_configuration": True,
+        "mechanism_config_sha256": "1" * 64,
+    }
+    monkeypatch.setattr(physical_result, "source_identity", lambda *_: identity)
+    monkeypatch.setattr(
+        physical_result, "load_mechanism_config", lambda: ({}, mechanism)
+    )
 
     output = tmp_path / "physical"
     runtime = output / "runtime/iflow"
@@ -205,3 +232,9 @@ def test_complete_routed_fixture_sets_physical_valid(tmp_path):
     assert record["artifacts"]["routed_def"]["path"].startswith("runtime/iflow/")
     assert record["artifacts"]["routed_def"]["path_base"] == "output_dir"
     assert record["provenance"]["host_resources"]["mode"] == "low_memory_attempt"
+    assert record["provenance"]["source_tree_sha256"] == identity["source_tree_sha256"]
+    assert (
+        record["provenance"]["mechanism_config_sha256"]
+        == mechanism["mechanism_config_sha256"]
+    )
+    assert record["provenance"]["calibration_provenance"]["status"] == "preregistered"

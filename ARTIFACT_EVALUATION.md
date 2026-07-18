@@ -7,7 +7,9 @@ Accelerator with Semantic Reuse and Fused Dataflow
 Results Reproduced. Figure 8 is a mandatory key result and requires an
 independent run on a real Jetson Orin NX. Listing a result in the submission
 contract does not mark it complete: every key result remains `NOT_RUN` or
-`BLOCKED` until its raw evidence passes strict validation.
+`FAIL` until its raw evidence passes strict validation. Figure 8 is currently
+`CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION`: it is included in the requested
+badge scope but still has no independent measurement and is not `PASS`.
 
 The exact claim scope, commands, and tolerances are defined in
 [`artifact/CLAIMS.md`](artifact/CLAIMS.md). The final archival DOI must be added
@@ -177,22 +179,21 @@ evaluation protocol document.
 ### Calibration and Reviewer Profiles
 
 The unresolved engineering constants are selected once under the isolated
-contract in [`artifact/CALIBRATION.md`](artifact/CALIBRATION.md). Calibration
-uses 32 official training scenes from Re10K and 32 from ACID, selected by a
-domain-separated SHA256 ordering. It is disjoint from every evaluation
-scene/view and cannot read target RGB, ground truth, manuscript tables,
+contract in [`artifact/CALIBRATION.md`](artifact/CALIBRATION.md). The primary
+source is 24 official gated DL3DV calibration scenes plus eight DL3DV holdout
+scenes, selected by separate domain-separated SHA256 orderings from a pinned
+DL3DV archive tree and disjoint from the 140-scene evaluation index. Calibration
+cannot read target RGB, ground truth, manuscript tables,
 `artifact/expected_results.json`, or completed evaluation outputs. One global
 configuration is frozen for all nine pairs before evaluation begins.
 
 Calibration is a pre-submission, author-side provenance operation, not a
-reviewer setup step. The official full training archives are large (currently
-about 554 GB for Re10K and 174 GB for ACID) because they contain the complete
-upstream training releases. They are neither redistributed nor required by
-`quick`, `pilot`, `all-eval --profile reviewer`, or `all-eval --profile full`.
-Those workflows consume only the SHA256-bound frozen
+reviewer setup step. The selected gated scene archives are neither redistributed
+nor required by `quick`, `pilot`, `all-eval --profile reviewer`, or `all-eval
+--profile full`. Those workflows consume only the SHA256-bound frozen
 `artifact/mechanism_config.json`; the evidence package records the calibration
 manifest and candidate-record digests so the selected configuration remains
-auditable without redistributing training data.
+auditable without redistributing upstream images.
 
 The `full` evidence profile consumes every executable upstream index entry. The
 `reviewer` profile uses 512 hash-selected Re10K entries, 512 ACID entries, and
@@ -201,12 +202,31 @@ selection is compiled before mechanism evaluation and cannot be changed in
 response to results. Both profiles emit the same schema and figure/table
 catalog; only `full` is used for the complete author-side evidence set.
 
-Author-side calibration, run once before evidence collection:
+Author-side planning, before any gated image download:
 
 ```bash
-SCARF_PYTHON_CLASSIC=/path/to/classic/bin/python \
-  bash scripts/run_ae.sh calibrate --output-root outputs/calibration
+python data/download_dl3dv_calibration.py \
+  --write-plan outputs/calibration/dl3dv-download-plan.json \
+  --evaluation-index depthsplat/assets/dl3dv_start_0_distance_10_ctx_2v_tgt_4v.json \
+  --revision 5902ed6d707cc13a7779907c1e096676f7707971
 ```
+
+The plan is intentionally `PLANNED_AWAITING_UPSTREAM_ACCESS` until the account
+has accepted the official source terms and the selected archives are downloaded
+and prepared. The plan downloader re-reads the official tree before it fetches
+the 32 selected archives, validates every byte count and bound upstream object
+id, records the actual archive SHA256, extracts all 32 selected scenes with
+their train/holdout split provenance, and emits target-free native and
+Re10K-compatible sidecars. The legacy Re10K/ACID `run_ae.sh calibrate` command
+is not a substitute for this DL3DV plan and cannot produce Results Reproduced
+evidence.
+
+Once the author-side protocol exists, `python scripts/run_ae.py calibrate
+--calibration-manifest outputs/calibration/dl3dv-protocol/manifest.json
+--output-root outputs/calibration/dl3dv-run` executes the fixed train-grid,
+exact-tuple holdout, and configuration-freeze sequence. It rejects a missing
+holdout, reranking attempt, changed sidecar provenance, or failed holdout
+quality gate.
 
 Reviewer and evaluation evidence paths, which never invoke calibration:
 
@@ -249,8 +269,10 @@ not accepted as evidence for sparse Gaussian pruning.
 ### Figure 8: End-to-End Speedup
 
 Target state: mandatory key result. Current state:
-`BLOCKED_UNTIL_REAL_ORIN_REVIEWER_RUN`. The command must run on a real Jetson
-Orin NX; an RTX run, calculated baseline, or manuscript constant is rejected.
+`CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION`. This records the requested
+result without claiming a completed measurement. The command must run on a real
+Jetson Orin NX; an RTX run, calculated baseline, or manuscript constant is
+rejected.
 
 ```bash
 bash scripts/run_ae.sh performance --device orin --output-root outputs/ae
@@ -272,7 +294,7 @@ the public ASAP7 flow reports achieved timing independently. A routed ASAP7
 result that misses 1 GHz remains a visible timing failure and does not validate
 the unavailable commercial TSMC28 implementation.
 
-### Figure 10: Worst-Case Error Analysis
+### Figure 10: Worst-Case Error Analysis (Supporting)
 
 ```bash
 bash scripts/run_ae.sh worstcase --output-root outputs/ae
@@ -310,7 +332,7 @@ paths, low-variance agreement, Gaussian savings, and S2 evaluations from the
 same event stream. Historical failing pilots remain visible until new complete
 aggregates pass the unchanged gates.
 
-### Figure 12: MMCU Utilization
+### Figure 12: MMCU Utilization (Supporting)
 
 ```bash
 bash scripts/run_ae.sh utilization --output-root outputs/ae
@@ -319,7 +341,7 @@ bash scripts/run_ae.sh utilization --output-root outputs/ae
 Utilization is `useful_mmcu_slots / scheduled_mmcu_slots` for S1-S3. It cannot
 be supplied as a percentage constant or inferred from the manuscript CSV.
 
-### Figures 13-16: Sensitivity
+### Figures 13-16: Sensitivity (Supporting)
 
 Target state: mandatory full nine-pair trace-and-replay evidence. A model runs
 once per sample trace; the five parameter values replay deterministic feature,
@@ -332,6 +354,9 @@ bash scripts/run_ae.sh sensitivity --output-root outputs/ae
 The configured grids include cache sizes 8-128, Hamming thresholds 1-5, the
 feature and depth thresholds from the paper, and tile sizes 2-32. Every grid point runs
 all protocol samples and produces a strict dataset aggregate before plotting.
+These figures are mandatory supporting outputs, not standalone key results.
+One-scene route mixes are diagnostics only and are never compared with the
+dataset-level Table 3 or Figure 11 aggregate.
 
 ### Complete Declared Workflow
 

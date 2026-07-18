@@ -11,19 +11,181 @@ import hashlib
 import io
 import json
 import os
+import re
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
-from pathlib import Path, PurePosixPath
-from typing import Any
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 MANIFEST_NAME = "release-manifest.json"
-VERSION_RE = __import__("re").compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
+VERSION_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+# Source archives are intentionally a closed set.  New top-level material must
+# be reviewed before it can be published, rather than being included merely
+# because it happened to be tracked in the working tree.
+SOURCE_RELEASE_ROOT_FILES = frozenset(
+    {
+        ".gitignore",
+        ".gitmodules",
+        "ARTIFACT_EVALUATION.md",
+        "LICENSE",
+        "README.md",
+        "SUMMARY.md",
+        "THIRD_PARTY.md",
+        "install.sh",
+        "pytest.ini",
+        "requirements.txt",
+    }
+)
+SOURCE_RELEASE_DIRECTORIES = frozenset(
+    {
+        "adapters",
+        "chisel",
+        "data",
+        "depth_predictor",
+        "depthsplat",
+        "docs",
+        "encoder",
+        "environments",
+        "feature_extractor",
+        "fsdr",
+        "ggu",
+        "hardware",
+        "integration",
+        "mvsplat",
+        "saes",
+        "scripts",
+        "tests",
+        "transplat",
+    }
+)
+SOURCE_RELEASE_ARTIFACT_FILES = frozenset(
+    {
+        "artifact/CALIBRATION.md",
+        "artifact/CHECKLIST.md",
+        "artifact/CLAIMS.md",
+        "artifact/EVALUATION_PROTOCOL.md",
+        "artifact/HARDWARE_SCOPE.md",
+        "artifact/HOTCRP_SUBMISSION.md",
+        "artifact/appendix.tex",
+        "artifact/claim_status.json",
+        "artifact/evaluation_catalog.json",
+        "artifact/evaluation_protocol.json",
+        "artifact/expected_results.json",
+        "artifact/lsh_projection.json",
+        "artifact/manifests/checkpoints.json",
+        "artifact/manifests/datasets.json",
+        "artifact/manifests/runtime_assets.json",
+        "artifact/mechanism_config.json",
+        "artifact/plot_style.mplstyle",
+        "artifact/protocol/compiled.json",
+        "artifact/protocol/reviewer/acid.json",
+        "artifact/protocol/reviewer/dl3dv.json",
+        "artifact/protocol/reviewer/manifest.json",
+        "artifact/protocol/reviewer/re10k.json",
+        "artifact/quick/evaluation_index.json",
+        "artifact/reference_results/README.md",
+        "artifact/reference_results/manifest.json",
+        "artifact/release.json",
+    }
+)
+SOURCE_RELEASE_QUICK_DATASET_PREFIX = "datasets/quick-re10k/"
+EVIDENCE_RELEASE_ROOT_FILES = frozenset({"reference-manifest.json"})
+EVIDENCE_RELEASE_CONTRACT_FILES = frozenset(
+    {
+        "contracts/THIRD_PARTY.md",
+        "contracts/checkpoints.json",
+        "contracts/claim_status.json",
+        "contracts/compiled_protocol.json",
+        "contracts/datasets.json",
+        "contracts/evaluation_protocol.json",
+        "contracts/expected_results.json",
+        "contracts/release.json",
+        "contracts/runtime_assets.json",
+    }
+)
+
+
+def normalize_archive_relative(value: str) -> str:
+    """Normalize one safe, relative POSIX archive path without resolving ``..``."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"unsafe archive path: {value!r}")
+    if "\x00" in value or "\\" in value:
+        raise ValueError(f"unsafe archive path: {value}")
+    windows = PureWindowsPath(value)
+    pure = PurePosixPath(value)
+    raw_parts = value.split("/")
+    if pure.is_absolute() or windows.is_absolute() or windows.drive or ".." in raw_parts:
+        raise ValueError(f"unsafe archive path: {value}")
+    parts = tuple(part for part in pure.parts if part not in {".", ""})
+    if not parts or any(part in {".", ".."} for part in parts):
+        raise ValueError(f"unsafe archive path: {value}")
+    return PurePosixPath(*parts).as_posix()
+
+
+def _is_normalized_archive_relative(value: str, normalized: str) -> bool:
+    return value == normalized
+
+
+def _require_regular_file(path: Path, *, label: str) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except OSError as exc:
+        raise FileNotFoundError(path) from exc
+    if path.is_symlink() or not stat.S_ISREG(mode):
+        raise ValueError(f"{label} must be a regular non-symlink file: {path}")
+
+
+def _is_source_release_path(normalized: str) -> bool:
+    parts = PurePosixPath(normalized).parts
+    if "checkpoints" in parts:
+        return False
+    if len(parts) == 1:
+        return normalized in SOURCE_RELEASE_ROOT_FILES
+    if normalized in SOURCE_RELEASE_ARTIFACT_FILES:
+        return True
+    if normalized.startswith(SOURCE_RELEASE_QUICK_DATASET_PREFIX):
+        return True
+    return parts[0] in SOURCE_RELEASE_DIRECTORIES
+
+
+def _is_evidence_release_path(normalized: str) -> bool:
+    parts = PurePosixPath(normalized).parts
+    return (
+        normalized in EVIDENCE_RELEASE_ROOT_FILES
+        or normalized in EVIDENCE_RELEASE_CONTRACT_FILES
+        or (len(parts) > 1 and parts[0] == "evidence")
+    )
+
+
+def _bundle_path_is_allowed(bundle_kind: str | None, normalized: str) -> bool:
+    if bundle_kind == "source":
+        return _is_source_release_path(normalized)
+    if bundle_kind == "evidence":
+        return _is_evidence_release_path(normalized)
+    return False
+
+
+def _validate_prefix(prefix: str) -> str:
+    try:
+        normalized = normalize_archive_relative(prefix)
+    except ValueError as exc:
+        raise ValueError("archive prefix must be one safe path component") from exc
+    if (
+        normalized != prefix
+        or len(PurePosixPath(normalized).parts) != 1
+        or normalized in {".", ".."}
+    ):
+        raise ValueError("archive prefix must be one safe path component")
+    return normalized
 
 
 def git(*args: str) -> str:
@@ -61,23 +223,29 @@ def write_sha256sums(paths: list[Path], output: Path) -> None:
 
 def release_files() -> list[Path]:
     names = git("ls-files", "--recurse-submodules", "-z").split("\0")
-    return sorted(ROOT / name for name in names if name and (ROOT / name).is_file())
+    files = []
+    for name in names:
+        if not name:
+            continue
+        normalized = normalize_archive_relative(name)
+        if normalized != name:
+            raise ValueError(f"tracked path is not normalized: {name}")
+        path = ROOT / normalized
+        _require_regular_file(path, label="tracked release input")
+        files.append(path)
+    return sorted(files)
 
 
 def include_in_source_release(relative: Path) -> bool:
     """Return whether one tracked path belongs in the public source bundle."""
-    if relative.parts[:1] == ("outputs",):
+    raw = relative.as_posix()
+    try:
+        normalized = normalize_archive_relative(raw)
+    except ValueError:
         return False
-    if (
-        relative.parts[:1] == ("datasets",)
-        and relative.parts[:2] != ("datasets", "quick-re10k")
-    ):
+    if not _is_normalized_archive_relative(raw, normalized):
         return False
-    if "checkpoints" in relative.parts:
-        return False
-    if relative.parts[:3] == ("artifact", "reference_results", "evidence"):
-        return False
-    return True
+    return _is_source_release_path(normalized)
 
 
 def source_release_files() -> list[Path]:
@@ -98,17 +266,33 @@ def evidence_release_files(
         else root / "artifact/reference_results"
     )
     manifest_path = reference_root / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _require_regular_file(manifest_path, label="reference evidence manifest")
+    manifest = json.loads(
+        manifest_path.read_text(encoding="utf-8"),
+        object_pairs_hook=_reject_duplicate_json_keys,
+    )
+    if not isinstance(manifest, dict):
+        raise ValueError("reference evidence manifest must be a JSON object")
     if manifest.get("status") != "complete" or manifest.get("validation_status") != "PASS":
         raise ValueError("reference evidence is not staged from a passing run")
+    if manifest.get("validation_require_key_results") is not True:
+        raise ValueError(
+            "reference evidence was not validated with --require-key-results"
+        )
     files = {"reference-manifest.json": manifest_path}
-    for relative, declared in manifest.get("files", {}).items():
-        pure = PurePosixPath(relative)
-        if pure.is_absolute() or ".." in pure.parts or pure.parts[:1] != ("evidence",):
+    declared_files = manifest.get("files")
+    if not isinstance(declared_files, dict):
+        raise ValueError("reference evidence manifest has no valid file mapping")
+    for relative, declared in declared_files.items():
+        normalized = normalize_archive_relative(relative)
+        if (
+            normalized != relative
+            or not _is_evidence_release_path(normalized)
+            or not normalized.startswith("evidence/")
+        ):
             raise ValueError(f"unsafe reference evidence path: {relative}")
-        source = reference_root / pure
-        if not source.is_file():
-            raise FileNotFoundError(source)
+        source = reference_root / normalized
+        _require_regular_file(source, label="reference evidence input")
         if (
             not isinstance(declared, dict)
             or declared.get("size") != source.stat().st_size
@@ -127,13 +311,43 @@ def evidence_release_files(
         "contracts/THIRD_PARTY.md": root / "THIRD_PARTY.md",
     }
     for relative, source in contracts.items():
-        if not source.is_file():
-            raise FileNotFoundError(source)
+        _require_regular_file(source, label="evidence contract input")
         files[relative] = source
     release_path = root / "artifact/release.json"
     if release_path.is_file():
+        _require_regular_file(release_path, label="evidence release metadata")
         files["contracts/release.json"] = release_path
     return files
+
+
+def _validated_archive_file_mapping(
+    files: Mapping[str, Path], *, bundle_kind: str | None
+) -> dict[str, Path]:
+    if bundle_kind not in {"source", "evidence"}:
+        raise ValueError(f"unsupported release bundle kind: {bundle_kind!r}")
+    normalized_files: dict[str, Path] = {}
+    non_normalized: list[str] = []
+    for relative, source in files.items():
+        normalized = normalize_archive_relative(relative)
+        if normalized == MANIFEST_NAME:
+            raise ValueError(f"archive file mapping reserves {MANIFEST_NAME}")
+        if normalized in normalized_files:
+            raise ValueError(f"duplicate normalized archive path: {normalized}")
+        if not _is_normalized_archive_relative(relative, normalized):
+            non_normalized.append(relative)
+        if not _bundle_path_is_allowed(bundle_kind, normalized):
+            raise ValueError(
+                f"archive path is not allowed in {bundle_kind} bundle: {relative}"
+            )
+        path = Path(source)
+        _require_regular_file(path, label="release archive input")
+        normalized_files[normalized] = path
+    if non_normalized:
+        raise ValueError(
+            "archive file mapping contains non-normalized paths: "
+            + ", ".join(sorted(non_normalized)[:10])
+        )
+    return normalized_files
 
 
 def _write_tar(
@@ -142,6 +356,10 @@ def _write_tar(
     files: dict[str, Path],
     manifest: dict[str, Any],
 ) -> None:
+    prefix = _validate_prefix(prefix)
+    files = _validated_archive_file_mapping(
+        files, bundle_kind=manifest.get("bundle_kind")
+    )
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
     with tarfile.open(tar_path, "w", format=tarfile.PAX_FORMAT) as archive:
         for relative, path in sorted(files.items()):
@@ -189,6 +407,10 @@ def _build_from_mapping(
     archive_format: str,
 ) -> dict[str, Any]:
     manifest = copy.deepcopy(manifest)
+    prefix = _validate_prefix(prefix)
+    files = _validated_archive_file_mapping(
+        files, bundle_kind=manifest.get("bundle_kind")
+    )
     manifest["files"] = {
         relative: hashlib.sha256(path.read_bytes()).hexdigest()
         for relative, path in sorted(files.items())
@@ -221,8 +443,7 @@ def build(
 ) -> dict[str, Any]:
     if git("status", "--porcelain"):
         raise ValueError("release archive requires a clean worktree")
-    if not prefix or PurePosixPath(prefix).name != prefix or prefix in {".", ".."}:
-        raise ValueError("archive prefix must be one safe path component")
+    _validate_prefix(prefix)
     from scripts.check_release import build_manifest
 
     identity = build_manifest(require_doi, reference_results=reference_results)
@@ -311,27 +532,96 @@ def _readable_tar_path(archive_path: Path):
         tar_path.unlink(missing_ok=True)
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    record: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in record:
+            raise ValueError(f"duplicate JSON object key in archive manifest: {key}")
+        record[key] = value
+    return record
+
+
+def _manifest_files(
+    manifest: dict[str, Any], *, bundle_kind: str
+) -> dict[str, str]:
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        raise ValueError("archive manifest has no valid file mapping")
+    if bundle_kind not in {"source", "evidence"}:
+        raise ValueError(f"unsupported release bundle kind: {bundle_kind!r}")
+    normalized_files: dict[str, str] = {}
+    non_normalized: list[str] = []
+    for relative, expected_hash in files.items():
+        normalized = normalize_archive_relative(relative)
+        if normalized == MANIFEST_NAME:
+            raise ValueError(f"archive manifest reserves {MANIFEST_NAME}")
+        if normalized in normalized_files:
+            raise ValueError(f"duplicate normalized manifest path: {normalized}")
+        if not _is_normalized_archive_relative(relative, normalized):
+            non_normalized.append(relative)
+        if not _bundle_path_is_allowed(bundle_kind, normalized):
+            raise ValueError(
+                f"archive manifest path is not allowed in {bundle_kind} bundle: {relative}"
+            )
+        if not isinstance(expected_hash, str) or not SHA256_RE.fullmatch(expected_hash):
+            raise ValueError(f"archive manifest has an invalid SHA256: {relative}")
+        normalized_files[normalized] = expected_hash
+    if non_normalized:
+        raise ValueError(
+            "archive manifest contains non-normalized paths: "
+            + ", ".join(sorted(non_normalized)[:10])
+        )
+    return normalized_files
+
+
 def verify(archive_path: Path) -> dict[str, Any]:
     with _readable_tar_path(archive_path) as readable, tarfile.open(readable, "r:*") as archive:
-        members = [member for member in archive.getmembers() if member.isfile()]
+        members = archive.getmembers()
         if not members:
             raise ValueError("archive is empty")
-        roots = {PurePosixPath(member.name).parts[0] for member in members}
+        archived: dict[str, tarfile.TarInfo] = {}
+        non_normalized: list[str] = []
+        for member in members:
+            if not member.isreg() or member.issparse():
+                raise ValueError(f"non-regular archive member: {member.name}")
+            normalized = normalize_archive_relative(member.name)
+            if normalized in archived:
+                raise ValueError(f"duplicate normalized archive member: {normalized}")
+            if not _is_normalized_archive_relative(member.name, normalized):
+                non_normalized.append(member.name)
+            if len(PurePosixPath(normalized).parts) < 2:
+                raise ValueError(f"archive member is outside the archive root: {member.name}")
+            archived[normalized] = member
+        if non_normalized:
+            raise ValueError(
+                "archive contains non-normalized paths: "
+                + ", ".join(sorted(non_normalized)[:10])
+            )
+        roots = {PurePosixPath(name).parts[0] for name in archived}
         if len(roots) != 1:
             raise ValueError("archive must have exactly one root directory")
         root = next(iter(roots))
-        for member in members:
-            path = PurePosixPath(member.name)
-            if path.is_absolute() or ".." in path.parts or path.parts[0] != root:
-                raise ValueError(f"unsafe archive path: {member.name}")
-        manifest_member = archive.getmember(f"{root}/{MANIFEST_NAME}")
+        manifest_name = f"{root}/{MANIFEST_NAME}"
+        manifest_member = archived.get(manifest_name)
+        if manifest_member is None:
+            raise ValueError("archive is missing release-manifest.json")
         manifest_stream = archive.extractfile(manifest_member)
         if manifest_stream is None:
             raise ValueError("release manifest cannot be read")
-        manifest = json.loads(manifest_stream.read())
-        archived = {member.name: member for member in members}
+        manifest = json.loads(
+            manifest_stream.read(), object_pairs_hook=_reject_duplicate_json_keys
+        )
+        if not isinstance(manifest, dict):
+            raise ValueError("archive manifest must be a JSON object")
+        archive_record = manifest.get("archive")
+        if archive_record is not None and (
+            not isinstance(archive_record, dict) or archive_record.get("prefix") != root
+        ):
+            raise ValueError("archive manifest prefix does not match archive root")
+        bundle_kind = manifest.get("bundle_kind", "source")
+        manifest_files = _manifest_files(manifest, bundle_kind=bundle_kind)
         failures = []
-        for relative, expected_hash in manifest.get("files", {}).items():
+        for relative, expected_hash in manifest_files.items():
             name = f"{root}/{relative}"
             member = archived.get(name)
             if member is None:
@@ -341,8 +631,8 @@ def verify(archive_path: Path) -> dict[str, Any]:
             actual = sha256_bytes(stream.read()) if stream is not None else "unreadable"
             if actual != expected_hash:
                 failures.append(f"hash mismatch {relative}")
-        expected_names = {f"{root}/{name}" for name in manifest.get("files", {})}
-        extra = sorted(set(archived) - expected_names - {f"{root}/{MANIFEST_NAME}"})
+        expected_names = {f"{root}/{name}" for name in manifest_files}
+        extra = sorted(set(archived) - expected_names - {manifest_name})
         failures.extend(f"unmanifested {name}" for name in extra)
     if failures:
         raise ValueError("archive verification failed: " + "; ".join(failures[:10]))
@@ -350,11 +640,11 @@ def verify(archive_path: Path) -> dict[str, Any]:
         "schema_version": "1.0",
         "status": "PASS",
         "prefix": root,
-        "verified_files": len(manifest["files"]),
+        "verified_files": len(manifest_files),
         "git_commit": manifest.get("git_commit"),
         "submodules": manifest.get("submodules"),
         "zenodo_doi": manifest.get("zenodo_doi"),
-        "bundle_kind": manifest.get("bundle_kind"),
+        "bundle_kind": bundle_kind,
     }
 
 

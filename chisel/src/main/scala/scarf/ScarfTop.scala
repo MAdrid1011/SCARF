@@ -178,6 +178,12 @@ class ScarfTop extends Module {
   saesCtrl.io.probeFeatureVar := featureBuf.io.doutA
   saesCtrl.io.probeDepthStd   := tileBuf.io.rdData
   saesCtrl.io.crossCheckError := featureBuf.io.doutB
+  // The published top-level trace currently has no serialized descriptor
+  // comparator producer. Keep the new Control interface fail-open only at
+  // this integration boundary; no RTL timing or S2/S3 saving is claimed until
+  // the producer and retained-output schedule are co-simulated.
+  saesCtrl.io.l0MaterializationValid := true.B
+  saesCtrl.io.l1MaterializationValid := true.B
 
   // ═══════════════════════════════════════════════
   // FSDR Controller + LSH Hash + Cache wiring

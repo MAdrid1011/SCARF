@@ -269,6 +269,7 @@ def test_target_free_calibration_sidecar_excludes_target_rgb(
     )
 
     assert record["target_rgb_included"] is False
+    assert all("target" not in item["path"] for item in record["opened_file_manifest"])
     assert calibration_scene_order(root) == [scene]
     sidecar = load_target_free_record(root, scene)
     assert sidecar["context_images"] == [b"context-0", b"context-4"]
@@ -277,6 +278,38 @@ def test_target_free_calibration_sidecar_excludes_target_rgb(
     assert validate_target_free_input_root(root, "re10k")[
         "target_rgb_accessed"
     ] is False
+
+
+def test_target_free_calibration_sidecar_has_a_hashed_opened_file_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setitem(sys.modules, "torch", _ArchiveTorch)
+
+    from scripts.calibration_inputs import materialize_target_free_inputs, validate_target_free_input_root
+
+    root = tmp_path / "inputs" / "dl3dv"
+    materialize_target_free_inputs(
+        root,
+        dataset="dl3dv",
+        examples={
+            "train-scene": {
+                "key": "train-scene",
+                "cameras": [[0.0] * 18 for _ in range(5)],
+                "images": [b"context-0", b"target-1", b"target-2", b"target-3", b"context-4"],
+            }
+        },
+        index={"train-scene": {"context": [0, 4], "target": [1, 2, 3]}},
+        source={},
+        selection_sha256="d" * 64,
+    )
+
+    identity = validate_target_free_input_root(root, "dl3dv")
+    assert identity["opened_file_manifest_sha256"]
+    assert {item["path"] for item in identity["opened_file_manifest"]} == {
+        "test/000000.torch",
+        "test/index.json",
+    }
+    assert all("target" not in item["path"] for item in identity["opened_file_manifest"])
 
 
 def test_target_free_calibration_sidecar_rejects_target_payload(
@@ -437,3 +470,7 @@ def test_target_free_loader_never_decodes_target_rgb(
     assert "image" not in batch["target"]
     assert batch["target"]["extrinsics"].shape == (1, 3, 4, 4)
     assert batch["calibration"]["target_rgb_accessed"] is False
+    assert batch["calibration"]["index_sha256"] == sha256_file(index_path)
+    assert batch["calibration"]["index_selection_sha256"] == selection[
+        "sample_selection_sha256"
+    ]

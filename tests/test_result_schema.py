@@ -147,6 +147,25 @@ def valid_v21_result() -> dict:
                 "evaluation_disjoint": True,
                 "expected_results_accessed": False,
                 "global_configuration": True,
+                "protocol": "dl3dv_train_holdout_v1",
+                "train_holdout_scene_disjoint": True,
+                "train": {
+                    "selection_sha256": "6" * 64,
+                    "scene_set_sha256": "7" * 64,
+                    "pair_bindings_sha256": "8" * 64,
+                    "trace_set_sha256": "9" * 64,
+                    "candidate_set_sha256": "a" * 64,
+                    "selected_candidate_sha256": "b" * 64,
+                },
+                "holdout": {
+                    "selection_sha256": "c" * 64,
+                    "scene_set_sha256": "d" * 64,
+                    "pair_bindings_sha256": "e" * 64,
+                    "trace_set_sha256": "f" * 64,
+                    "candidate_set_sha256": "0" * 64,
+                    "validated_parameters_sha256": "1" * 64,
+                    "validated_candidate_sha256": "2" * 64,
+                },
             },
         }
     )
@@ -182,6 +201,7 @@ def test_v21_result_requires_calibration_and_faithful_event_evidence(tmp_path):
         lambda r: r["provenance"]["calibration_provenance"].update(
             evaluation_disjoint=False
         ),
+        lambda r: r["provenance"]["calibration_provenance"].pop("holdout"),
         lambda r: r["events"]["fsdr"].update(local_valid_hits=81),
         lambda r: r["events"]["saes"].update(covariance_psd_violations=1),
         lambda r: r["events"]["saes"].pop("execution_dependency"),

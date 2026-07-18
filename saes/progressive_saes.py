@@ -42,6 +42,11 @@ from saes.probe_layout import (
 from saes.probe_layout import compute_probe_positions as _compute_probe_positions
 
 
+LEGACY_L1_PRIMARY_DEPTH_REFERENCE_MATERIALIZATION = (
+    "l1-primary-depth-reference-diagnostic"
+)
+
+
 def paper_assignment_weights(
     spatial_distances: torch.Tensor,
     feature_distances: torch.Tensor,
@@ -236,6 +241,7 @@ class ProgressiveSAES:
         context_extrinsics: torch.Tensor | None = None,
         context_intrinsics: torch.Tensor | None = None,
         ray_depth_mode: str = "euclidean",
+        materialization_guard: bool = True,
     ):
         self.H = H
         self.W = W
@@ -259,12 +265,23 @@ class ProgressiveSAES:
             "probe-spread-diagnostic",
             "transmittance-diagnostic",
             "virtual-reconstruction-diagnostic",
-            "l1-primary-depth-reference-diagnostic",
+            LEGACY_L1_PRIMARY_DEPTH_REFERENCE_MATERIALIZATION,
             "conditional-anchor-transport-diagnostic",
+            "conditional-adapter-offset-transport-diagnostic",
             "conditional-optical-mass-diagnostic",
+            "conditional-projected-optical-mass-diagnostic",
         ):
             raise ValueError(f"unsupported SAES materialization: {materialization}")
+        # The former diagnostic name represented the paper's actual L1
+        # semantics. Keep it parseable for historical invocation records, but
+        # normalize it to the ordinary representative implementation so it
+        # cannot remain a divergent execution mode.
+        if materialization == LEGACY_L1_PRIMARY_DEPTH_REFERENCE_MATERIALIZATION:
+            materialization = "representative"
         self.materialization = materialization
+        if not isinstance(materialization_guard, bool):
+            raise ValueError("materialization_guard must be boolean")
+        self.materialization_guard = materialization_guard
         # The paper's soft assignment associates a skipped position with its
         # receiving probe.  The historical implementation first formed an
         # unconditional mixture over *all* probes and then applied the same
@@ -272,6 +289,12 @@ class ProgressiveSAES:
         # transports each selected anchor conditionally to its assigned target
         # position, avoiding an undocumented r_i,p * r_i,q cross-anchor term.
         self.merge_semantics = (
+            "conditional-adapter-offset-transport"
+            if materialization == "conditional-adapter-offset-transport-diagnostic"
+            else
+            "conditional-projected-optical-mass"
+            if materialization == "conditional-projected-optical-mass-diagnostic"
+            else
             "conditional-optical-mass"
             if materialization == "conditional-optical-mass-diagnostic"
             else
@@ -279,16 +302,10 @@ class ProgressiveSAES:
             if materialization == "conditional-anchor-transport-diagnostic"
             else "assignment-mixture"
         )
-        # The paper defines the L1 depth reliability statistic over its primary
-        # probe set.  The 2K native-anchor expansion is an explicitly declared
-        # engineering detail, so this diagnostic keeps those extra anchors for
-        # aggregation but anchors their reliability normalization to the K
-        # routing probes instead of letting them redefine the L1 evidence.
-        self.l1_depth_reference = (
-            "primary-probes"
-            if materialization == "l1-primary-depth-reference-diagnostic"
-            else "retained-anchors"
-        )
+        # The paper defines L1 depth reliability over the K primary routing
+        # probes. The declared 2K native-anchor expansion may supply extra
+        # descriptors after routing, but it must not redefine that reference.
+        self.l1_depth_reference = "primary-probes"
         if decision_semantics not in (
             "current",
             "probe-vector-first-hit",
@@ -395,6 +412,24 @@ class ProgressiveSAES:
             'conditional_assignment_uses': 0,
             'conditional_mass_fallback_tiles': 0,
             'conditional_range_fallback_tiles': 0,
+            # This diagnostic reconstructs the producer's bounded image-plane
+            # offset from a selected anchor and applies it before normalizing
+            # the target C2W ray.  It is fail-closed when that reconstruction
+            # cannot be justified from selected-anchor/context inputs alone.
+            'adapter_offset_transport_uses': 0,
+            'adapter_offset_transport_fallback_tiles': 0,
+            # This is Control logic for the paper's existing probe-only
+            # materialization path. It inspects only the selected native
+            # anchors before their moments are merged; it is not a fourth
+            # routing level or a Table 4 module.
+            'l0_guard_checks': 0,
+            'l0_guard_rejections': 0,
+            'l1_guard_checks': 0,
+            'l1_guard_rejections': 0,
+            'l1_guard_attempts_after_l0_rejection': 0,
+            'guard_anchor_attribute_reads': 0,
+            'guard_nonprobe_s3_attribute_reads': 0,
+            'materialization_guard_enabled': self.materialization_guard,
         }
 
     def _build_camera_rays(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -541,6 +576,226 @@ class ProgressiveSAES:
             device=source_mean.device, dtype=source_mean.dtype
         ) + residual.unsqueeze(0)
 
+    def _adapter_offset_transport_means(
+        self,
+        source_mean: torch.Tensor,
+        source_depth: torch.Tensor,
+        source_position: Tuple[int, int],
+        target_positions: List[Tuple[int, int]],
+        *,
+        view_index: int,
+    ) -> torch.Tensor | None:
+        """Transport one anchor with TranSplat's image-plane-offset convention.
+
+        The Gaussian adapter first shifts a pixel centre by its predicted
+        sub-pixel image-plane offset, then unprojects and normalizes that ray.
+        Stage 3 exposes the resulting mean rather than the raw offset, so this
+        diagnostic recovers the offset from one *selected* anchor mean/depth
+        and the producer context camera.  It applies that same bounded offset
+        to each assigned pixel centre before normalizing the target ray.
+
+        This deliberately accepts no target-view data and no skipped S3
+        descriptor.  ``None`` is a fail-closed signal: a caller must keep the
+        tile Full rather than approximate the adapter with a world-space
+        residual when camera geometry, depth convention, or offset bounds do
+        not match the upstream adapter contract.
+        """
+        if source_mean.shape != (3,) or source_depth.numel() != 1:
+            raise ValueError("adapter-offset transport requires one 3D source")
+        if not target_positions:
+            return source_mean.new_empty((0, 3))
+        if (
+            self.context_extrinsics is None
+            or self.context_intrinsics is None
+            or self._camera_origins is None
+            or self.ray_depth_mode != "euclidean"
+            or not 0 <= view_index < self.view_count
+        ):
+            return None
+
+        source_row, source_column = source_position
+        if (
+            not 0 <= source_row < self.H
+            or not 0 <= source_column < self.W
+            or any(
+                not 0 <= row < self.H or not 0 <= column < self.W
+                for row, column in target_positions
+            )
+        ):
+            return None
+
+        device = source_mean.device
+        dtype = source_mean.dtype
+        if not torch.is_floating_point(source_mean):
+            return None
+        depth = source_depth.reshape(()).to(device=device, dtype=dtype)
+        if not bool(torch.isfinite(source_mean).all()) or not bool(torch.isfinite(depth)):
+            return None
+        tiny = torch.as_tensor(torch.finfo(dtype).eps, device=device, dtype=dtype)
+        if bool(depth <= tiny):
+            return None
+
+        extrinsic = self.context_extrinsics[0, view_index].to(device=device, dtype=dtype)
+        intrinsic = self.context_intrinsics[0, view_index].to(device=device, dtype=dtype)
+        if not bool(torch.isfinite(extrinsic).all()) or not bool(torch.isfinite(intrinsic).all()):
+            return None
+        try:
+            intrinsic_determinant = torch.linalg.det(intrinsic)
+        except RuntimeError:
+            return None
+        if not bool(torch.isfinite(intrinsic_determinant)) or bool(
+            intrinsic_determinant.abs() <= tiny
+        ):
+            return None
+
+        rotation_c2w = extrinsic[:3, :3]
+        origin = extrinsic[:3, 3]
+        camera_displacement = rotation_c2w.mT @ (source_mean - origin)
+        source_distance = camera_displacement.norm()
+        if not bool(torch.isfinite(source_distance)) or bool(source_distance <= tiny):
+            return None
+        # The upstream adapter applies Euclidean depth after unit-ray
+        # normalization.  Reject an incompatible retained descriptor instead
+        # of silently treating a z-depth or arbitrary world residual as an
+        # adapter offset.
+        depth_tolerance = torch.maximum(
+            depth.abs() * 1e-4,
+            torch.as_tensor(1e-6, device=device, dtype=dtype),
+        )
+        if bool((source_distance - depth).abs() > depth_tolerance):
+            return None
+        camera_direction = camera_displacement / source_distance
+        source_homogeneous = intrinsic @ camera_direction
+        if (
+            not bool(torch.isfinite(source_homogeneous).all())
+            or bool(source_homogeneous[2].abs() <= tiny)
+        ):
+            return None
+        source_coordinate = source_homogeneous[:2] / source_homogeneous[2]
+        source_centre = torch.tensor(
+            ((source_column + 0.5) / self.W, (source_row + 0.5) / self.H),
+            device=device,
+            dtype=dtype,
+        )
+        offset = source_coordinate - source_centre
+        # EncoderTrans produces ``(sigmoid(raw_offset) - 0.5) * pixel_size``.
+        # Keep this diagnostic tied to that bounded contract rather than
+        # accepting a free world-space displacement.
+        offset_limit = torch.tensor(
+            (0.5 / self.W, 0.5 / self.H), device=device, dtype=dtype
+        )
+        offset_tolerance = torch.as_tensor(1e-6, device=device, dtype=dtype)
+        if not bool(torch.isfinite(offset).all()) or bool(
+            (offset.abs() > offset_limit + offset_tolerance).any()
+        ):
+            return None
+
+        rows = torch.tensor(
+            [row for row, _ in target_positions], device=device, dtype=dtype
+        )
+        columns = torch.tensor(
+            [column for _, column in target_positions], device=device, dtype=dtype
+        )
+        target_centres = torch.stack(
+            ((columns + 0.5) / self.W, (rows + 0.5) / self.H), dim=-1
+        )
+        target_coordinates = target_centres + offset.unsqueeze(0)
+        target_homogeneous = torch.cat(
+            (
+                target_coordinates,
+                torch.ones(
+                    (len(target_positions), 1), device=device, dtype=dtype
+                ),
+            ),
+            dim=-1,
+        )
+        try:
+            camera_directions = torch.linalg.solve(
+                intrinsic, target_homogeneous.mT
+            ).mT
+        except RuntimeError:
+            return None
+        direction_norms = camera_directions.norm(dim=-1, keepdim=True)
+        if (
+            not bool(torch.isfinite(camera_directions).all())
+            or not bool(torch.isfinite(direction_norms).all())
+            or bool((direction_norms <= tiny).any())
+        ):
+            return None
+        camera_directions = camera_directions / direction_norms
+        world_directions = torch.einsum("ij,nj->ni", rotation_c2w, camera_directions)
+        transported = origin.unsqueeze(0) + world_directions * depth.reshape(1, 1)
+        return transported if bool(torch.isfinite(transported).all()) else None
+
+    def _context_projected_footprint_scales(
+        self,
+        means: torch.Tensor,
+        covariances: torch.Tensor,
+        *,
+        view_index: int,
+    ) -> torch.Tensor | None:
+        """Return context-camera 2D Gaussian footprint scales.
+
+        Alpha compositing consumes projected 2D Gaussian support, not 3D
+        covariance volume. The producer's own context C2W/intrinsics provide
+        the local projection Jacobian, so no target-view geometry is needed.
+        ``None`` means the tile must remain Full rather than inventing a
+        footprint without a valid camera projection.
+        """
+        if (
+            self.context_extrinsics is None
+            or self.context_intrinsics is None
+            or means.ndim != 2
+            or means.shape[1] != 3
+            or covariances.shape != (means.shape[0], 3, 3)
+            or not 0 <= view_index < self.view_count
+        ):
+            return None
+        dtype = means.dtype
+        device = means.device
+        extrinsic = self.context_extrinsics[0, view_index].to(device=device, dtype=dtype)
+        intrinsic = self.context_intrinsics[0, view_index].to(device=device, dtype=dtype)
+        rotation_c2w = extrinsic[:3, :3]
+        camera_points = torch.einsum(
+            "ij,nj->ni", rotation_c2w.mT, means - extrinsic[:3, 3]
+        )
+        depth = camera_points[:, 2]
+        tiny = torch.as_tensor(torch.finfo(dtype).tiny, device=device, dtype=dtype)
+        if not bool(torch.isfinite(camera_points).all()) or bool((depth <= tiny).any()):
+            return None
+        normalized_jacobian = torch.zeros(
+            (means.shape[0], 2, 3), device=device, dtype=dtype
+        )
+        normalized_jacobian[:, 0, 0] = depth.reciprocal()
+        normalized_jacobian[:, 1, 1] = depth.reciprocal()
+        normalized_jacobian[:, 0, 2] = -camera_points[:, 0] / depth.square()
+        normalized_jacobian[:, 1, 2] = -camera_points[:, 1] / depth.square()
+        image_jacobian = torch.einsum(
+            "ij,njk->nik", intrinsic[:2, :2], normalized_jacobian
+        )
+        camera_covariances = torch.einsum(
+            "ij,njk,kl->nil", rotation_c2w.mT, covariances, rotation_c2w
+        )
+        projected_covariances = torch.einsum(
+            "nij,njk,nlk->nil",
+            image_jacobian,
+            camera_covariances,
+            image_jacobian,
+        )
+        projected_covariances = (
+            projected_covariances + projected_covariances.mT
+        ) * 0.5
+        eigenvalues, eigenvectors = torch.linalg.eigh(projected_covariances)
+        if not bool(torch.isfinite(eigenvalues).all()) or bool((eigenvalues < -1e-7).any()):
+            return None
+        projected_covariances = eigenvectors @ torch.diag_embed(
+            eigenvalues.clamp_min(tiny)
+        ) @ eigenvectors.mT
+        determinants = torch.linalg.det(projected_covariances)
+        if not bool(torch.isfinite(determinants).all()) or bool((determinants <= 0.0).any()):
+            return None
+        return torch.sqrt(determinants)
+
     @staticmethod
     def _interpolate_intrinsic_covariance(
         source_covariances: torch.Tensor, weights: torch.Tensor
@@ -575,6 +830,32 @@ class ProgressiveSAES:
         if self.decision_semantics == "probe-normalized-std-first-hit":
             return float(decision_statistic) ** 2
         return float(decision_statistic)
+
+    @staticmethod
+    def inverse_depth_candidate_coordinate(
+        depths: torch.Tensor,
+        *,
+        near: torch.Tensor,
+        far: torch.Tensor,
+    ) -> torch.Tensor:
+        """Map metric depths to the S2 inverse-depth candidate coordinate.
+
+        This uses only the per-context-view near/far bounds already consumed
+        by S2. It makes the unit of the paper's L1 probe-depth statistic
+        explicit without adding a routing signal or changing its threshold.
+        """
+        if depths.dim() not in (4, 5) or depths.shape[:2] != near.shape:
+            raise ValueError("depths and near bounds must share [batch, view] dimensions")
+        if far.shape != near.shape:
+            raise ValueError("near and far bounds must have identical shapes")
+        if not torch.isfinite(depths).all() or not torch.isfinite(near).all() or not torch.isfinite(far).all():
+            raise ValueError("depth values and bounds must be finite")
+        if (depths <= 0).any() or (near <= 0).any() or (far <= near).any():
+            raise ValueError("inverse-depth normalization requires 0 < near < far")
+        trailing = (1,) * (depths.dim() - 2)
+        near_inverse = near.to(depths).reciprocal().reshape(*near.shape, *trailing)
+        far_inverse = far.to(depths).reciprocal().reshape(*far.shape, *trailing)
+        return (depths.reciprocal() - far_inverse) / (near_inverse - far_inverse)
 
     # ------------------------------------------------------------------ #
     # Feature / depth classification helpers                               #
@@ -867,6 +1148,100 @@ class ProgressiveSAES:
             <= self.cross_check_threshold
         )
 
+    def probe_materialization_validity(
+        self,
+        gaussians_full,
+        anchor_indices: List[int],
+        *,
+        level: str,
+    ) -> Dict:
+        """Validate a retained-anchor materialization without reading S3 skips.
+
+        The existing paper-local consistency checks are applied only to the
+        native attributes that the selected L0/L1 anchors would execute:
+        covariance cosine and SH cosine must both be at least 0.7, and the
+        greatest pairwise opacity distance may not exceed 0.2.  The result is
+        a fail-closed Control decision.  It neither changes feature/depth
+        routing nor accesses a non-anchor Gaussian descriptor.
+        """
+        if level not in {'L0', 'L1'}:
+            raise ValueError('materialization guard level must be L0 or L1')
+        if (
+            not isinstance(anchor_indices, list)
+            or len(anchor_indices) < 2
+            or any(isinstance(index, bool) or not isinstance(index, int) for index in anchor_indices)
+            or len(anchor_indices) != len(set(anchor_indices))
+        ):
+            raise ValueError('materialization guard requires unique anchor indices')
+        count = gaussians_full.means.shape[1]
+        if any(index < 0 or index >= count for index in anchor_indices):
+            raise ValueError('materialization guard anchor index is out of range')
+
+        # Index every source tensor once with the declared anchor list. No
+        # non-probe index is formed here, which makes poisoning skipped S3
+        # descriptors observationally irrelevant to this Control decision.
+        covariances = gaussians_full.covariances[0, anchor_indices].reshape(
+            len(anchor_indices), -1
+        )
+        harmonics = gaussians_full.harmonics[0, anchor_indices].reshape(
+            len(anchor_indices), -1
+        )
+        opacities = gaussians_full.opacities[0, anchor_indices].reshape(
+            len(anchor_indices), -1
+        )
+        finite = bool(
+            torch.isfinite(covariances).all()
+            and torch.isfinite(harmonics).all()
+            and torch.isfinite(opacities).all()
+        )
+        covariance_cosines = []
+        harmonic_cosines = []
+        opacity_distances = []
+        for first in range(len(anchor_indices)):
+            for second in range(first + 1, len(anchor_indices)):
+                covariance_cosines.append(
+                    float(
+                        F.cosine_similarity(
+                            covariances[first].unsqueeze(0),
+                            covariances[second].unsqueeze(0),
+                            eps=1e-8,
+                        ).item()
+                    )
+                )
+                harmonic_cosines.append(
+                    float(
+                        F.cosine_similarity(
+                            harmonics[first].unsqueeze(0),
+                            harmonics[second].unsqueeze(0),
+                            eps=1e-8,
+                        ).item()
+                    )
+                )
+                opacity_distances.append(
+                    float((opacities[first] - opacities[second]).abs().max().item())
+                )
+        covariance_minimum = min(covariance_cosines, default=float('-inf'))
+        harmonic_minimum = min(harmonic_cosines, default=float('-inf'))
+        opacity_maximum = max(opacity_distances, default=float('inf'))
+        return {
+            'level': level,
+            'anchor_indices': list(anchor_indices),
+            'anchor_count': len(anchor_indices),
+            'covariance_cosine_minimum': covariance_minimum,
+            'harmonic_cosine_minimum': harmonic_minimum,
+            'opacity_distance_maximum': opacity_maximum,
+            'covariance_cosine_threshold': 0.7,
+            'harmonic_cosine_threshold': 0.7,
+            'opacity_distance_threshold': 0.2,
+            'passed': bool(
+                finite
+                and covariance_minimum >= 0.7
+                and harmonic_minimum >= 0.7
+                and opacity_maximum <= 0.2
+            ),
+            'nonprobe_s3_attribute_reads': 0,
+        }
+
     # ------------------------------------------------------------------ #
     # Core interpolation / update methods                                  #
     # ------------------------------------------------------------------ #
@@ -915,7 +1290,9 @@ class ProgressiveSAES:
         if merge_semantics not in (
             "assignment-mixture",
             "conditional-anchor-transport",
+            "conditional-adapter-offset-transport",
             "conditional-optical-mass",
+            "conditional-projected-optical-mass",
         ):
             raise ValueError(f"unsupported SAES merge semantics: {merge_semantics}")
         if (
@@ -970,7 +1347,7 @@ class ProgressiveSAES:
             probe_depths, device=device, dtype=means.dtype
         )
         depth_reference_tensor = probe_depth_tensor
-        if level == "L1" and self.l1_depth_reference == "primary-probes":
+        if level == "L1":
             primary_count = len(self.probe_positions)
             if (
                 retained_positions[:primary_count] != self.probe_positions
@@ -1041,7 +1418,10 @@ class ProgressiveSAES:
                 self.stats['assignment_weight_sum_error_max'], error
             )
 
-        if merge_semantics == "conditional-optical-mass":
+        if merge_semantics in (
+            "conditional-optical-mass",
+            "conditional-projected-optical-mass",
+        ):
             return self._conditional_optical_mass_merge(
                 means=means,
                 covariances=covs,
@@ -1057,6 +1437,9 @@ class ProgressiveSAES:
                 non_probe_items=non_probe_items,
                 assignment_matrix=assignment_matrix,
                 view_index=view_index,
+                projected_footprint=(
+                    merge_semantics == "conditional-projected-optical-mass"
+                ),
             )
 
         flat_harmonics = source_harmonics.reshape(K, -1)
@@ -1129,6 +1512,32 @@ class ProgressiveSAES:
             self.stats['virtual_reconstructed_gaussians'] += len(non_probe_items)
             return
 
+        adapter_offset_conditional_means = None
+        if (
+            assignments
+            and merge_semantics == "conditional-adapter-offset-transport"
+        ):
+            target_positions = [
+                (tile_y + local_y, tile_x + local_x)
+                for (local_y, local_x), _ in non_probe_items
+            ]
+            # Validate every selected anchor before writing any output.  A
+            # failed geometry recovery must leave the whole tile on Full, not
+            # partially update anchors that happened to be visited first.
+            adapter_offset_conditional_means = []
+            for probe_offset in range(K):
+                transported = self._adapter_offset_transport_means(
+                    source_means[probe_offset],
+                    probe_depth_tensor[probe_offset],
+                    (probe_gy[probe_offset], probe_gx[probe_offset]),
+                    target_positions,
+                    view_index=view_index,
+                )
+                if transported is None:
+                    return True
+                adapter_offset_conditional_means.append(transported)
+            self.stats['adapter_offset_transport_uses'] += K * len(non_probe_items)
+
         for probe_offset, probe_index in enumerate(probe_indices):
             absorbed = (
                 assignment_matrix[:, probe_offset]
@@ -1137,17 +1546,24 @@ class ProgressiveSAES:
             )
             weights = torch.cat((torch.ones(1, device=device, dtype=means.dtype), absorbed))
             normalized = weights / weights.sum().clamp_min(1e-8)
-            if assignments and merge_semantics == "conditional-anchor-transport":
+            if assignments and merge_semantics in (
+                "conditional-anchor-transport",
+                "conditional-adapter-offset-transport",
+            ):
                 target_positions = [position for position, _ in non_probe_items]
-                conditional_means = self._anchor_conditioned_transport_means(
-                    source_means[probe_offset],
-                    probe_depth_tensor[probe_offset],
-                    (probe_gy[probe_offset], probe_gx[probe_offset]),
-                    [
-                        (tile_y + local_y, tile_x + local_x)
-                        for local_y, local_x in target_positions
-                    ],
-                    view_index=view_index,
+                conditional_means = (
+                    adapter_offset_conditional_means[probe_offset]
+                    if merge_semantics == "conditional-adapter-offset-transport"
+                    else self._anchor_conditioned_transport_means(
+                        source_means[probe_offset],
+                        probe_depth_tensor[probe_offset],
+                        (probe_gy[probe_offset], probe_gx[probe_offset]),
+                        [
+                            (tile_y + local_y, tile_x + local_x)
+                            for local_y, local_x in target_positions
+                        ],
+                        view_index=view_index,
+                    )
                 )
                 conditional_covariances = source_covs[probe_offset].unsqueeze(0).expand(
                     len(non_probe_items), -1, -1
@@ -1318,16 +1734,19 @@ class ProgressiveSAES:
         non_probe_items: List[Tuple[Tuple[int, int], int]],
         assignment_matrix: torch.Tensor,
         view_index: int,
+        projected_footprint: bool = False,
     ) -> bool:
         """Merge each pseudo descriptor into only its assigned anchor.
 
         A skipped position ``i`` is represented once for each receiving anchor
         ``p`` with its one existing paper assignment ``r_i,p``.  Its descriptor
         is transported from ``p`` alone, rather than first mixing all anchors
-        and then multiplying by ``r_i,p`` a second time.  Optical-density mass
-        is ``tau * sqrt(det(Sigma + eps I))``.  All candidate updates are held
-        locally; a non-finite, non-PSD, out-of-range, or non-conserving result
-        returns ``True`` so the caller keeps the tile on the Full path.
+        and then multiplying by ``r_i,p`` a second time. Optical-density mass
+        is evaluated either in native 3D volume coordinates or, for the
+        projected diagnostic, in the producer context camera's raster-space
+        footprint. All candidate updates are held locally; a non-finite,
+        non-PSD, out-of-range, or non-conserving result returns ``True`` so the
+        caller keeps the tile on the Full path.
         """
         if source_opacities[0].numel() != 1:
             # The submitted models use one opacity per primitive.  Do not
@@ -1353,8 +1772,15 @@ class ProgressiveSAES:
             (source_determinants <= 0.0).any()
         ):
             return True
-        source_scales = torch.sqrt(source_determinants)
-        source_determinant_max = source_determinants.max()
+        source_scales = (
+            self._context_projected_footprint_scales(
+                source_means, source_covariances, view_index=view_index
+            )
+            if projected_footprint
+            else torch.sqrt(source_determinants)
+        )
+        if source_scales is None:
+            return True
         source_alpha = source_opacities.reshape(count, 1)
         if not bool(torch.isfinite(source_alpha).all()) or bool(
             ((source_alpha < 0.0) | (source_alpha >= 1.0)).any()
@@ -1414,17 +1840,18 @@ class ProgressiveSAES:
             merged_determinant = torch.linalg.det(merged_covariance + eps * eye)
             if not bool(torch.isfinite(merged_determinant)) or bool(merged_determinant <= 0.0):
                 return True
-            # The range constraint is a fail-closed tile safeguard, not a
-            # fourth routing decision.  A moment merge may expand covariance
-            # through transported mean dispersion, but it may not create a
-            # support determinant larger than every native selected anchor.
-            # Returning Full preserves the exact dense descriptor instead of
-            # introducing a tunable covariance cap or target-side quality gate.
-            range_tolerance = source_determinant_max * 1e-6 + eps
-            if bool(merged_determinant > source_determinant_max + range_tolerance):
-                self.stats['conditional_range_fallback_tiles'] += 1
+            merged_scale = (
+                self._context_projected_footprint_scales(
+                    merged_mean.unsqueeze(0),
+                    merged_covariance.unsqueeze(0),
+                    view_index=view_index,
+                )
+                if projected_footprint
+                else torch.sqrt(merged_determinant).reshape(1)
+            )
+            if merged_scale is None:
                 return True
-            merged_scale = torch.sqrt(merged_determinant)
+            merged_scale = merged_scale.reshape(())
             merged_tau = total_mass / merged_scale
             merged_alpha = -torch.expm1(-merged_tau)
             if not bool(torch.isfinite(merged_alpha)) or bool(
@@ -1651,6 +2078,7 @@ class ProgressiveSAES:
         gpp: int = 1,
         tile_variances: Dict = None,
         depths=None,
+        routing_depths=None,
         feat_norm=None,
     ) -> Tuple['torch.Tensor', Dict]:
         """
@@ -1689,6 +2117,7 @@ class ProgressiveSAES:
                 f"got {gaussian_count}, expected {expected_gaussians}"
             )
 
+        routing_depths = depths if routing_depths is None else routing_depths
         modified_mask = torch.zeros(
             gaussian_count, dtype=torch.bool, device=device
         )
@@ -1696,9 +2125,11 @@ class ProgressiveSAES:
             if key not in {
                 'decision_semantics',
                 'feature_statistic',
+                'depth_statistic',
                 'camera_aware_moment_matching',
                 'l1_depth_reference',
                 'merge_semantics',
+                'materialization_guard_enabled',
             }:
                 self.stats[key] = 0
 
@@ -1747,7 +2178,6 @@ class ProgressiveSAES:
                             if (local_y, local_x) not in retained
                         }
 
-                    first_probes = indices_for_positions(0, self.probe_positions)
                     feature_key = (view, th, tw)
                     feature_variance = (
                         tile_variances.get(
@@ -1760,43 +2190,80 @@ class ProgressiveSAES:
                         feature_variance
                     )
 
+                    def depth_route_passes() -> bool:
+                        return routing_depths is not None and self.check_depth_uniformity(
+                            routing_depths,
+                            th,
+                            tw,
+                            tile_size,
+                            self.H,
+                            self.W,
+                            self.depth_std_threshold,
+                            probe_positions=self.probe_positions,
+                            view_index=view,
+                            relative=False,
+                        )
+
+                    def materialization_guard_passes(
+                        positions: List[Tuple[int, int]], level: str
+                    ) -> bool:
+                        if not self.materialization_guard:
+                            return True
+                        records = []
+                        for slot in range(self.primitives_per_pixel):
+                            anchor_indices = indices_for_positions(slot, positions)
+                            record = self.probe_materialization_validity(
+                                gaussians_full, anchor_indices, level=level
+                            )
+                            records.append(record)
+                            self.stats['guard_anchor_attribute_reads'] += 3 * len(
+                                anchor_indices
+                            )
+                            self.stats['guard_nonprobe_s3_attribute_reads'] += record[
+                                'nonprobe_s3_attribute_reads'
+                            ]
+                        return all(record['passed'] for record in records)
+
                     selected_level = None
-                    if self.decision_semantics == "probe-vector-first-hit":
-                        if feature_variance < self.feature_var_threshold:
+                    if feature_variance < self.feature_var_threshold:
+                        if not self.materialization_guard:
                             selected_level = 'L0'
-                        elif depths is not None and self.check_depth_uniformity(
-                            depths,
-                            th,
-                            tw,
-                            tile_size,
-                            self.H,
-                            self.W,
-                            self.depth_std_threshold,
-                            probe_positions=self.probe_positions,
-                            view_index=view,
-                            relative=False,
-                        ):
+                        else:
+                            self.stats['l0_guard_checks'] += 1
+                            if materialization_guard_passes(self.probe_positions, 'L0'):
+                                selected_level = 'L0'
+                            else:
+                                self.stats['l0_guard_rejections'] += 1
+                                # A rejected L0 materialization still follows the
+                                # paper's second probe test. It is not silently
+                                # conflated with Full until the L1 guard rejects.
+                                self.stats['l1_guard_attempts_after_l0_rejection'] += 1
+                                if depth_route_passes():
+                                    self.stats['l1_guard_checks'] += 1
+                                    if materialization_guard_passes(
+                                        self.lightweight_positions, 'L1'
+                                    ):
+                                        selected_level = 'L1'
+                                    else:
+                                        self.stats['l1_guard_rejections'] += 1
+                    elif depth_route_passes():
+                        if not self.materialization_guard:
                             selected_level = 'L1'
-                    else:
-                        if feature_variance < self.feature_var_threshold:
-                            selected_level = 'L0'
-                        elif depths is not None and self.check_depth_uniformity(
-                            depths,
-                            th,
-                            tw,
-                            tile_size,
-                            self.H,
-                            self.W,
-                            self.depth_std_threshold,
-                            probe_positions=self.probe_positions,
-                            view_index=view,
-                            relative=False,
-                        ):
-                            selected_level = 'L1'
+                        else:
+                            self.stats['l1_guard_checks'] += 1
+                            if materialization_guard_passes(
+                                self.lightweight_positions, 'L1'
+                            ):
+                                selected_level = 'L1'
+                            else:
+                                self.stats['l1_guard_rejections'] += 1
 
                     if selected_level is not None:
                         if (
-                            self.materialization == "conditional-optical-mass-diagnostic"
+                            self.materialization in (
+                                "conditional-optical-mass-diagnostic",
+                                "conditional-projected-optical-mass-diagnostic",
+                            )
                             and self.primitives_per_pixel != 1
                         ):
                             # The mass rule is defined only for the submitted
@@ -1826,9 +2293,10 @@ class ProgressiveSAES:
                                 "representative",
                                 "transmittance-diagnostic",
                                 "virtual-reconstruction-diagnostic",
-                                "l1-primary-depth-reference-diagnostic",
                                 "conditional-anchor-transport-diagnostic",
+                                "conditional-adapter-offset-transport-diagnostic",
                                 "conditional-optical-mass-diagnostic",
+                                "conditional-projected-optical-mass-diagnostic",
                             ):
                                 # L1 routing uses only primary probes. After it
                                 # succeeds, its deterministic 2K positions are
@@ -1891,7 +2359,16 @@ class ProgressiveSAES:
                             if not preserves_virtual_outputs:
                                 total_zeroed += len(non_probes)
                         if fallback_to_full:
-                            self.stats['conditional_mass_fallback_tiles'] += 1
+                            if self.merge_semantics in (
+                                "conditional-optical-mass",
+                                "conditional-projected-optical-mass",
+                            ):
+                                self.stats['conditional_mass_fallback_tiles'] += 1
+                            elif (
+                                self.merge_semantics
+                                == "conditional-adapter-offset-transport"
+                            ):
+                                self.stats['adapter_offset_transport_fallback_tiles'] += 1
                             self.stats['full_tiles'] += 1
                             self.stats['full_stage3_gaussians'] += (
                                 tile_size * tile_size * self.primitives_per_pixel
@@ -1989,6 +2466,10 @@ def apply_progressive_saes(
     context_extrinsics: torch.Tensor | None = None,
     context_intrinsics: torch.Tensor | None = None,
     ray_depth_mode: str = "euclidean",
+    depth_routing_semantics: str = "metric-depth-standard-deviation",
+    depth_near: torch.Tensor | None = None,
+    depth_far: torch.Tensor | None = None,
+    materialization_guard: bool = True,
 ) -> Tuple['torch.Tensor', Dict, List]:
     """
     Apply progressive SAES v4 (Dataflow-aligned, L0+L1) to Gaussians.
@@ -2011,6 +2492,20 @@ def apply_progressive_saes(
         stats:           per-level statistics (incl. effective_gaussians)
         continue_pixels: list of (y, x, pixel_idx) for unmodified pixels
     """
+    if depth_routing_semantics not in (
+        "metric-depth-standard-deviation",
+        "inverse-depth-candidate-coordinate-standard-deviation",
+    ):
+        raise ValueError(f"unsupported depth routing semantics: {depth_routing_semantics}")
+    if (depth_near is None) != (depth_far is None):
+        raise ValueError("depth_near and depth_far must be provided together")
+    if (
+        depth_routing_semantics
+        == "inverse-depth-candidate-coordinate-standard-deviation"
+        and (depth_near is None or depth_far is None)
+    ):
+        raise ValueError("inverse-depth candidate routing requires depth_near and depth_far")
+
     gaussian_count = gaussians_full.means.shape[1]
     if view_count is None:
         if features is not None and hasattr(features, 'dim') and features.dim() == 5:
@@ -2066,11 +2561,23 @@ def apply_progressive_saes(
         context_extrinsics=context_extrinsics,
         context_intrinsics=context_intrinsics,
         ray_depth_mode=ray_depth_mode,
+        materialization_guard=materialization_guard,
     )
+    routing_depths = (
+        ProgressiveSAES.inverse_depth_candidate_coordinate(
+            depths, near=depth_near, far=depth_far
+        )
+        if depths is not None
+        and depth_routing_semantics
+        == "inverse-depth-candidate-coordinate-standard-deviation"
+        else depths
+    )
+    saes.stats['depth_statistic'] = depth_routing_semantics
     modified_mask, stats = saes.process_all_tiles(
         gaussians_full, gpp,
         tile_variances=tile_variances,
         depths=depths,
+        routing_depths=routing_depths,
         feat_norm=_feat_norm,
     )
 

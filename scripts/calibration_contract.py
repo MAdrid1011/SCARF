@@ -112,6 +112,38 @@ def validate_candidate(candidate: Mapping[str, Any]) -> None:
             raise ValueError(f"calibration parameter is outside registered grid: {name}")
 
 
+def canonical_parameters(parameters: Mapping[str, Any]) -> dict[str, float]:
+    """Return one complete registered tuple in a stable representation.
+
+    The calibration runner passes this object between the train grid and the
+    holdout replay.  Keeping the normalization here prevents a caller from
+    treating a partial tuple, a pair override, or an out-of-grid value as a
+    committed holdout configuration.
+    """
+    validate_candidate({"parameters": parameters})
+    if set(parameters) != set(PARAMETER_GRID):
+        raise ValueError("calibration candidate must contain the complete global tuple")
+    return {name: float(parameters[name]) for name in PARAMETER_GRID}
+
+
+def parameters_sha256(parameters: Mapping[str, Any]) -> str:
+    """Hash the normalized global tuple used to scope a holdout replay."""
+    return canonical_sha256(canonical_parameters(parameters))
+
+
+def candidate_sha256(candidate: Mapping[str, Any]) -> str:
+    """Hash a candidate record without trusting a self-reported digest."""
+    if not isinstance(candidate, Mapping):
+        raise ValueError("calibration candidate must be an object")
+    payload = {
+        key: value
+        for key, value in candidate.items()
+        if key != "candidate_sha256"
+    }
+    validate_candidate(payload)
+    return canonical_sha256(payload)
+
+
 def _finite_nonnegative(value: Any, label: str) -> float:
     if (
         isinstance(value, bool)
@@ -134,6 +166,12 @@ def _candidate_feasible(candidate: Mapping[str, Any]) -> bool:
             if _finite_nonnegative(metrics.get(metric), f"{pair}.{metric}") > limit:
                 return False
     return True
+
+
+def candidate_is_feasible(candidate: Mapping[str, Any]) -> bool:
+    """Check quality feasibility without selecting or reranking a tuple."""
+    validate_candidate(candidate)
+    return _candidate_feasible(candidate)
 
 
 def select_global_candidate(

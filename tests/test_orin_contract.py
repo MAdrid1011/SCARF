@@ -11,7 +11,9 @@ def test_orin_mode_is_empty_without_real_device_evidence(tmp_path: Path):
         Namespace(mode="orin", output_root=tmp_path, python=None, num_samples=1)
     )
     assert not plan["experiments"]
-    assert plan["claim_status"]["figure8"] == "NOT_CLAIMED_NO_ORIN_EVIDENCE"
+    assert plan["claim_status"]["figure8"] == (
+        "CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION"
+    )
 
 
 def test_tegrastats_temperature_summary_is_strict():

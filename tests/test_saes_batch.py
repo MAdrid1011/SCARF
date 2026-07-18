@@ -26,6 +26,28 @@ def _gaussians(view_count: int = 1):
     )
 
 
+def _adapter_compatible_gaussians():
+    """Return a 4x4 fixture whose means follow the adapter ray contract."""
+    gaussians = _gaussians()
+    depth = 2.0
+    for row in range(4):
+        for column in range(4):
+            offset = torch.tensor(
+                (
+                    0.04 if (row + column) % 2 else -0.03,
+                    -0.02 if row % 2 else 0.03,
+                )
+            )
+            coordinate = torch.tensor(
+                ((column + 0.5) / 4, (row + 0.5) / 4, 1.0)
+            )
+            coordinate[:2] += offset
+            gaussians.means[0, row * 4 + column] = (
+                coordinate / coordinate.norm() * depth
+            )
+    return gaussians
+
+
 def test_batched_tile_variance_matches_direct_formula():
     from saes.progressive_saes import ProgressiveSAES
 
@@ -292,7 +314,6 @@ def test_default_first_hit_routing_uses_no_gaussian_similarity_gate():
     from saes.progressive_saes import apply_progressive_saes
 
     gaussians = _gaussians()
-    gaussians.harmonics[0, 0] *= -100.0
     features = torch.ones(1, 1, 2, 4, 4)
     depths = torch.ones(1, 1, 16, 1, 1)
 
@@ -316,7 +337,6 @@ def test_probe_vector_first_hit_routes_l1_without_unpublished_gaussian_gate():
     from saes.progressive_saes import apply_progressive_saes
 
     gaussians = _gaussians()
-    gaussians.harmonics[0, 0] *= -10.0
     features = torch.zeros(1, 1, 2, 4, 4)
     for (y, x), value in {
         (0, 0): (0.0, 0.0),
@@ -393,6 +413,137 @@ def test_standard_deviation_decision_squares_back_to_kernel_variance():
     assert standard_deviation._assignment_feature_variance(float("inf")) == float("inf")
 
 
+def test_inverse_depth_candidate_routing_uses_s2_coordinate_without_changing_merge_depths():
+    from saes.progressive_saes import ProgressiveSAES, apply_progressive_saes
+
+    features = torch.zeros(1, 1, 2, 4, 4)
+    for (row, column), value in {
+        (0, 0): (1.0, 0.0),
+        (0, 3): (0.0, 1.0),
+        (3, 0): (1.0, 0.0),
+        (3, 3): (0.0, 1.0),
+    }.items():
+        features[0, 0, :, row, column] = torch.tensor(value)
+    depths = torch.full((1, 1, 16, 1, 1), 100.0)
+    depths[0, 0, 3, 0, 0] = 120.0
+    depths[0, 0, 12, 0, 0] = 120.0
+    near = torch.tensor([[0.1]])
+    far = torch.tensor([[1000.0]])
+
+    metric_mask, metric_stats, _ = apply_progressive_saes(
+        _gaussians(),
+        4,
+        4,
+        feature_var_threshold=0.2,
+        depth_std_threshold=0.1,
+        features=features,
+        depths=depths,
+        decision_semantics="probe-normalized-std-first-hit",
+    )
+    candidate_mask, candidate_stats, _ = apply_progressive_saes(
+        _gaussians(),
+        4,
+        4,
+        feature_var_threshold=0.2,
+        depth_std_threshold=0.1,
+        features=features,
+        depths=depths,
+        decision_semantics="probe-normalized-std-first-hit",
+        depth_routing_semantics="inverse-depth-candidate-coordinate-standard-deviation",
+        depth_near=near,
+        depth_far=far,
+    )
+
+    assert metric_stats["full_tiles"] == 1
+    assert candidate_stats["level1_tiles"] == 1
+    assert candidate_stats["depth_statistic"] == (
+        "inverse-depth-candidate-coordinate-standard-deviation"
+    )
+    assert not bool(metric_mask.any())
+    assert bool(candidate_mask.any())
+    normalized = ProgressiveSAES.inverse_depth_candidate_coordinate(
+        depths, near=near, far=far
+    )
+    assert normalized[0, 0, 0, 0, 0] != normalized[0, 0, 3, 0, 0]
+
+
+def test_inverse_depth_candidate_routing_requires_context_bounds():
+    from saes.progressive_saes import apply_progressive_saes
+
+    with pytest.raises(ValueError, match="requires depth_near and depth_far"):
+        apply_progressive_saes(
+            _gaussians(),
+            4,
+            4,
+            features=torch.ones(1, 1, 2, 4, 4),
+            depths=torch.ones(1, 1, 16, 1, 1),
+            depth_routing_semantics="inverse-depth-candidate-coordinate-standard-deviation",
+        )
+
+
+def test_pre_fallback_routing_ledger_keeps_thresholds_fixed_and_separates_units():
+    from scripts.saes_target_free_materialization_audit import (
+        _pre_fallback_routing_summary,
+    )
+
+    features = torch.zeros(1, 1, 2, 4, 4)
+    for (row, column), value in {
+        (0, 0): (1.0, 0.0),
+        (0, 3): (0.0, 1.0),
+        (3, 0): (1.0, 0.0),
+        (3, 3): (0.0, 1.0),
+    }.items():
+        features[0, 0, :, row, column] = torch.tensor(value)
+    depths = torch.full((1, 1, 16, 1, 1), 100.0)
+    depths[0, 0, 3, 0, 0] = 120.0
+    depths[0, 0, 12, 0, 0] = 120.0
+
+    report = _pre_fallback_routing_summary(
+        features,
+        depths,
+        near=torch.tensor([[0.1]]),
+        far=torch.tensor([[1000.0]]),
+        height=4,
+        width=4,
+    )
+
+    assert report["metric-depth-standard-deviation"] == {
+        "diagnostic_only": True,
+        "tile_count": 1,
+        "l0_count": 0,
+        "l1_count": 0,
+        "full_count": 1,
+        "l0_rate": 0.0,
+        "l1_rate": 0.0,
+        "full_rate": 1.0,
+    }
+    assert report["inverse-depth-candidate-coordinate-standard-deviation"]["l1_count"] == 1
+
+
+def test_retained_anchor_attribute_diagnostic_excludes_skipped_descriptors():
+    from scripts.saes_target_free_materialization_audit import (
+        _retained_anchor_attribute_diagnostic,
+    )
+
+    source = _gaussians()
+    materialized = _gaussians()
+    retained = torch.tensor([0, 3, 12, 15])
+    materialized.means[0, 0, 0] += 2.0
+    materialized.covariances[0, 0] *= 4.0
+    materialized.opacities[0, 0] *= 0.5
+
+    report = _retained_anchor_attribute_diagnostic(source, materialized, retained)
+
+    assert report["changed_retained_anchor_count"] == 1
+    assert report["source_or_skipped_descriptor_access"] is False
+    assert report["mean_displacement_l2"]["p50"] == pytest.approx(2.0)
+    assert report["covariance_determinant_ratio"]["p50"] == pytest.approx(64.0)
+    assert report["source_covariance_min_eigenvalue"]["p50"] == pytest.approx(0.01)
+    assert report["source_covariance_asymmetry_frobenius"]["p50"] == pytest.approx(0.0)
+    assert report["covariance_increment_min_eigenvalue"]["p50"] == pytest.approx(0.03)
+    assert report["opacity_ratio"]["p50"] == pytest.approx(0.5)
+
+
 def test_l1_lightweight_positions_double_the_representative_anchors():
     from saes.progressive_saes import ProgressiveSAES
 
@@ -441,6 +592,7 @@ def test_representative_path_performs_full_gaussian_moment_matching():
         depth_std_threshold=1.0,
         features=features,
         depths=depths,
+        materialization_guard=False,
         cross_check_threshold=2.0,
     )
 
@@ -483,6 +635,7 @@ def test_representative_path_preserves_constant_sh_and_range_bounded_opacity():
         depth_std_threshold=1.0,
         features=features,
         depths=depths,
+        materialization_guard=False,
     )
 
     # With identical probe features the bilateral assignment is uniform. Each
@@ -722,7 +875,7 @@ def test_conditional_optical_mass_falls_back_to_full_on_non_psd_anchor_input():
     torch.testing.assert_close(gaussians.opacities, before)
 
 
-def test_conditional_optical_mass_falls_back_on_source_covariance_range_escape(monkeypatch):
+def test_conditional_optical_mass_allows_second_moment_covariance_expansion(monkeypatch):
     from saes.progressive_saes import ProgressiveSAES
 
     gaussians = _gaussians()
@@ -759,8 +912,76 @@ def test_conditional_optical_mass_falls_back_on_source_covariance_range_escape(m
         view_index=0,
     )
 
-    assert fallback is True
-    assert saes.stats["conditional_range_fallback_tiles"] == 1
+    assert fallback is False
+    assert saes.stats["conditional_range_fallback_tiles"] == 0
+    assert torch.linalg.det(gaussians.covariances[0, probes[0]]) > torch.det(
+        torch.eye(3) * 0.25
+    )
+    assert torch.all(torch.linalg.eigvalsh(gaussians.covariances[0, probes]) >= -1e-7)
+
+
+def test_context_projected_footprint_ignores_pure_depth_axis_expansion():
+    from saes.progressive_saes import ProgressiveSAES
+
+    saes = ProgressiveSAES(
+        4,
+        4,
+        context_extrinsics=torch.eye(4).reshape(1, 1, 4, 4),
+        context_intrinsics=torch.eye(3).reshape(1, 1, 3, 3),
+    )
+    means = torch.tensor([[0.0, 0.0, 2.0]])
+    planar = torch.diag(torch.tensor((0.25, 0.25, 0.25))).unsqueeze(0)
+    depth_stretched = torch.diag(torch.tensor((0.25, 0.25, 25.0))).unsqueeze(0)
+
+    planar_scale = saes._context_projected_footprint_scales(
+        means, planar, view_index=0
+    )
+    stretched_scale = saes._context_projected_footprint_scales(
+        means, depth_stretched, view_index=0
+    )
+
+    torch.testing.assert_close(planar_scale, torch.tensor((0.0625,)))
+    torch.testing.assert_close(stretched_scale, planar_scale)
+
+
+def test_context_projected_footprint_accepts_valid_sub_3d_epsilon_area():
+    from saes.progressive_saes import ProgressiveSAES
+
+    saes = ProgressiveSAES(
+        4,
+        4,
+        context_extrinsics=torch.eye(4).reshape(1, 1, 4, 4),
+        context_intrinsics=torch.eye(3).reshape(1, 1, 3, 3),
+    )
+    scale = saes._context_projected_footprint_scales(
+        torch.tensor([[0.0, 0.0, 2.0]]),
+        (torch.eye(3) * 1.0e-10).unsqueeze(0),
+        view_index=0,
+    )
+
+    assert scale is not None
+    assert scale.item() == pytest.approx(2.5e-11, rel=1e-5)
+
+
+def test_conditional_projected_optical_mass_requires_context_camera_geometry():
+    from saes.progressive_saes import apply_progressive_saes
+
+    gaussians = _gaussians()
+    before = gaussians.opacities.clone()
+    _mask, stats, _ = apply_progressive_saes(
+        gaussians,
+        4,
+        4,
+        feature_var_threshold=1.0,
+        depth_std_threshold=1.0,
+        features=torch.ones(1, 1, 2, 4, 4),
+        depths=torch.ones(1, 1, 16, 1, 1),
+        materialization="conditional-projected-optical-mass-diagnostic",
+    )
+
+    assert stats["conditional_mass_fallback_tiles"] == 1
+    assert stats["full_tiles"] == 1
+    torch.testing.assert_close(gaussians.opacities, before)
 
 
 def test_target_free_materialization_helpers_clone_and_poison_only_skipped_rows():
@@ -840,6 +1061,225 @@ def test_anchor_conditioned_transport_preserves_one_anchor_camera_residual():
     expected = saes._camera_world_point(0, 2, 1, source_depth) + residual
 
     torch.testing.assert_close(actual[0], expected)
+
+
+def test_adapter_offset_transport_matches_transplat_adapter_subpixel_ray():
+    """The diagnostic must reproduce offset-before-normalization geometry."""
+    from saes.progressive_saes import ProgressiveSAES
+    from transplat.src.model.encoder.common.gaussian_adapter import (
+        GaussianAdapter,
+        GaussianAdapterCfg,
+    )
+
+    height = width = 4
+    angle = torch.tensor(0.31)
+    rotation = torch.tensor(
+        (
+            (torch.cos(angle), -torch.sin(angle), 0.0),
+            (torch.sin(angle), torch.cos(angle), 0.0),
+            (0.0, 0.0, 1.0),
+        )
+    )
+    extrinsic = torch.eye(4)
+    extrinsic[:3, :3] = rotation
+    extrinsic[:3, 3] = torch.tensor((0.2, -0.3, 0.4))
+    intrinsic = torch.tensor(
+        ((2.3, 0.1, 0.05), (0.0, 1.7, -0.03), (0.0, 0.0, 1.0))
+    )
+    adapter = GaussianAdapter(GaussianAdapterCfg(0.01, 0.10, 0))
+    depth = torch.tensor((2.4,))
+    opacity = torch.tensor((0.30,))
+    raw_gaussian = torch.zeros(1, adapter.d_in)
+    source_position = (0, 1)
+    target_position = (2, 2)
+    offset_xy = torch.tensor((0.73, 0.31))
+    pixel_size = torch.tensor((1 / width, 1 / height))
+
+    def adapter_coordinate(position):
+        row, column = position
+        centre = torch.tensor(((column + 0.5) / width, (row + 0.5) / height))
+        return centre + (offset_xy - 0.5) * pixel_size
+
+    source = adapter.forward(
+        extrinsic.unsqueeze(0),
+        intrinsic.unsqueeze(0),
+        adapter_coordinate(source_position).unsqueeze(0),
+        depth,
+        opacity,
+        raw_gaussian,
+        (height, width),
+    )
+    expected = adapter.forward(
+        extrinsic.unsqueeze(0),
+        intrinsic.unsqueeze(0),
+        adapter_coordinate(target_position).unsqueeze(0),
+        depth,
+        opacity,
+        raw_gaussian,
+        (height, width),
+    ).means[0]
+    saes = ProgressiveSAES(
+        height,
+        width,
+        context_extrinsics=extrinsic.reshape(1, 1, 4, 4),
+        context_intrinsics=intrinsic.reshape(1, 1, 3, 3),
+    )
+
+    actual = saes._adapter_offset_transport_means(
+        source.means[0],
+        depth[0],
+        source_position,
+        [target_position],
+        view_index=0,
+    )
+    residual_transport = saes._anchor_conditioned_transport_means(
+        source.means[0],
+        depth[0],
+        source_position,
+        [target_position],
+        view_index=0,
+    )
+
+    assert actual is not None
+    torch.testing.assert_close(actual[0], expected, rtol=1e-5, atol=1e-6)
+    # A constant world-space residual is the old diagnostic, not the adapter.
+    assert not torch.allclose(actual, residual_transport)
+
+
+def test_adapter_offset_transport_is_target_free_psd_and_attribute_preserving():
+    from saes.progressive_saes import apply_progressive_saes
+
+    baseline = _adapter_compatible_gaussians()
+    poisoned = _adapter_compatible_gaussians()
+    probes = torch.tensor((0, 3, 12, 15))
+    non_probes = torch.tensor(
+        [index for index in range(16) if index not in probes.tolist()]
+    )
+    original = {
+        name: getattr(baseline, name)[0, probes].clone()
+        for name in ("means", "covariances", "harmonics", "opacities")
+    }
+    poisoned.means[0, non_probes] = 1e4
+    poisoned.covariances[0, non_probes] = -1e4
+    poisoned.harmonics[0, non_probes] = 1e4
+    poisoned.opacities[0, non_probes] = 0.99
+    options = {
+        "feature_var_threshold": 1.0,
+        "depth_std_threshold": 1.0,
+        "features": torch.ones(1, 1, 2, 4, 4),
+        "depths": torch.full((1, 1, 16, 1, 1), 2.0),
+        "context_extrinsics": torch.eye(4).reshape(1, 1, 4, 4),
+        "context_intrinsics": torch.eye(3).reshape(1, 1, 3, 3),
+        "materialization": "conditional-adapter-offset-transport-diagnostic",
+        "materialization_guard": False,
+    }
+
+    for gaussians in (baseline, poisoned):
+        mask, stats, _ = apply_progressive_saes(gaussians, 4, 4, **options)
+        assert stats["merge_semantics"] == "conditional-adapter-offset-transport"
+        assert stats["adapter_offset_transport_uses"] == 12 * 4
+        assert stats["adapter_offset_transport_fallback_tiles"] == 0
+        assert stats["level0_tiles"] == 1
+        assert stats["covariance_psd_violations"] == 0
+        assert mask[non_probes].all()
+        assert torch.count_nonzero(gaussians.opacities[0, non_probes]) == 0
+        assert torch.all(torch.linalg.eigvalsh(gaussians.covariances[0, probes]) >= -1e-7)
+        # Each conditional descriptor originates from the receiving anchor,
+        # so no other anchor (or skipped S3 descriptor) can alter SH/opacity.
+        torch.testing.assert_close(gaussians.harmonics[0, probes], original["harmonics"])
+        torch.testing.assert_close(gaussians.opacities[0, probes], original["opacities"])
+
+    for name in ("means", "covariances", "harmonics", "opacities"):
+        torch.testing.assert_close(
+            getattr(baseline, name)[0, probes],
+            getattr(poisoned, name)[0, probes],
+        )
+
+
+def test_adapter_offset_transport_preserves_router_and_execution_events():
+    from saes.progressive_saes import apply_progressive_saes
+    from saes.hardware_accounting import build_saes_event_ledger
+
+    adapter_path = _adapter_compatible_gaussians()
+    residual_path = _adapter_compatible_gaussians()
+    options = {
+        "feature_var_threshold": 1.0,
+        "depth_std_threshold": 1.0,
+        "features": torch.ones(1, 1, 2, 4, 4),
+        "depths": torch.full((1, 1, 16, 1, 1), 2.0),
+        "context_extrinsics": torch.eye(4).reshape(1, 1, 4, 4),
+        "context_intrinsics": torch.eye(3).reshape(1, 1, 3, 3),
+        "materialization_guard": False,
+    }
+    _, adapter_stats, _ = apply_progressive_saes(
+        adapter_path,
+        4,
+        4,
+        materialization="conditional-adapter-offset-transport-diagnostic",
+        **options,
+    )
+    _, residual_stats, _ = apply_progressive_saes(
+        residual_path,
+        4,
+        4,
+        materialization="conditional-anchor-transport-diagnostic",
+        **options,
+    )
+
+    # The adapter repair may only change pseudo-mean geometry.  It must not
+    # change the L0/L1/Full router, selected-anchor count, or S2/S3 ledger.
+    event_keys = (
+        "total_tiles_processed",
+        "level0_tiles",
+        "level1_tiles",
+        "full_tiles",
+        "level0_pixels",
+        "level1_pixels",
+        "l0_representatives",
+        "l1_lightweight_anchors",
+        "full_stage3_gaussians",
+        "zeroed_gaussians",
+        "effective_gaussians",
+        "full_s2_evaluations",
+        "executed_s2_evaluations",
+    )
+    for key in event_keys:
+        assert adapter_stats[key] == residual_stats[key]
+    assert adapter_stats["executed_s2_evaluations"] == 4
+    assert adapter_stats["full_s2_evaluations"] == 16
+    assert build_saes_event_ledger(
+        adapter_stats, feature_dim=2, tile_size=4, sh_degree=0
+    ) == build_saes_event_ledger(
+        residual_stats, feature_dim=2, tile_size=4, sh_degree=0
+    )
+
+
+def test_adapter_offset_transport_fails_closed_without_context_geometry():
+    from saes.progressive_saes import apply_progressive_saes
+
+    gaussians = _adapter_compatible_gaussians()
+    before = {
+        name: getattr(gaussians, name).clone()
+        for name in ("means", "covariances", "harmonics", "opacities")
+    }
+    mask, stats, _ = apply_progressive_saes(
+        gaussians,
+        4,
+        4,
+        feature_var_threshold=1.0,
+        depth_std_threshold=1.0,
+        features=torch.ones(1, 1, 2, 4, 4),
+        depths=torch.full((1, 1, 16, 1, 1), 2.0),
+        materialization="conditional-adapter-offset-transport-diagnostic",
+        materialization_guard=False,
+    )
+
+    assert stats["adapter_offset_transport_fallback_tiles"] == 1
+    assert stats["level0_tiles"] == 0
+    assert stats["full_tiles"] == 1
+    assert not bool(mask.any())
+    for name, value in before.items():
+        torch.testing.assert_close(getattr(gaussians, name), value)
 
 
 def test_transmittance_diagnostic_conserves_constant_l0_optical_depth_without_nonprobe_reads():
@@ -926,6 +1366,7 @@ def test_virtual_reconstruction_l0_is_constant_preserving_and_uses_no_nonprobe_s
             features=features,
             depths=depths,
             materialization=materialization,
+            materialization_guard=False,
         )
         assert stats["level0_tiles"] == 1
         assert stats["virtual_reconstructed_gaussians"] == 12
@@ -1014,6 +1455,7 @@ def test_l1_selected_native_anchors_do_not_read_unselected_stage3_attributes():
             depth_std_threshold=0.1,
             features=features,
             depths=depths,
+            materialization_guard=False,
         )
         assert stats["level0_tiles"] == 0
         assert stats["level1_tiles"] == 1
@@ -1190,6 +1632,7 @@ def test_virtual_reconstruction_l1_consumes_the_extra_native_anchor_outputs(
             features=features,
             depths=depths,
             materialization=materialization,
+            materialization_guard=False,
         )
         assert stats["level0_tiles"] == 0
         assert stats["level1_tiles"] == 1
@@ -1240,6 +1683,7 @@ def test_l1_selected_lightweight_anchors_are_native_stage3_outputs():
             depth_std_threshold=0.1,
             features=features,
             depths=depths,
+            materialization_guard=False,
         )
         assert stats["level0_tiles"] == 0
         assert stats["level1_tiles"] == 1
@@ -1488,7 +1932,7 @@ def test_l1_reliability_can_use_primary_probe_depth_reference():
     assert weights[-1] < weights[-2] < weights[0]
 
 
-def test_l1_primary_depth_reference_is_explicitly_diagnostic():
+def test_legacy_l1_primary_depth_reference_alias_matches_default():
     from saes.progressive_saes import apply_progressive_saes
 
     gaussians = _gaussians()

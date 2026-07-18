@@ -947,14 +947,13 @@ def materialization_attribute_audit(
                             ]
                         )
                     )
+                    # The L1 reliability reference is always the K routing
+                    # probes. Extra 2K anchors are an execution expansion and
+                    # do not enter the paper's mean/std normalization.
                     depth_reference_depths = (
                         l1_anchor_depths[: len(scorer.probe_positions)]
-                        if (
-                            level == "L1"
-                            and materialization
-                            == "l1-primary-depth-reference-diagnostic"
-                        )
-                        else l1_anchor_depths
+                        if level == "L1"
+                        else None
                     )
                     assignment_rows = []
                     for local_y, local_x in non_probe_positions:

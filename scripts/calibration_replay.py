@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import math
+from collections.abc import Mapping
 from typing import Any, Callable
 
 import torch
@@ -12,7 +13,7 @@ import torch.nn.functional as F
 
 from fsdr import FSDRSimulator
 from saes import apply_progressive_saes
-from scripts.calibration_contract import PARAMETER_GRID
+from scripts.calibration_contract import PARAMETER_GRID, canonical_parameters, parameters_sha256
 
 
 FIDELITY_PSNR_FLOOR_DB = 40.0
@@ -27,7 +28,17 @@ def _tensor_record(tensor: torch.Tensor) -> dict[str, Any]:
     }
 
 
-def registered_candidates() -> list[dict[str, float]]:
+def registered_candidates(
+    committed_parameters: Mapping[str, Any] | None = None,
+) -> list[dict[str, float]]:
+    """Return the registered grid, or exactly one already-committed tuple.
+
+    Training calibration deliberately uses the full preregistered grid.  A
+    holdout must never get that freedom: it receives the one tuple selected
+    from the training traces and validates it without a second ranking pass.
+    """
+    if committed_parameters is not None:
+        return [canonical_parameters(committed_parameters)]
     names = tuple(PARAMETER_GRID)
     return [
         {name: float(value) for name, value in zip(names, values)}
@@ -48,6 +59,7 @@ def replay_calibration_sample(
     context_extrinsics: torch.Tensor | None = None,
     context_intrinsics: torch.Tensor | None = None,
     ray_depth_mode: str = "euclidean",
+    committed_parameters: Mapping[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not torch.is_tensor(features) or not torch.is_tensor(depths):
         raise ValueError("calibration replay requires feature and depth tensors")
@@ -84,7 +96,8 @@ def replay_calibration_sample(
     ):
         raise ValueError("calibration Gaussian layout does not match the context views")
     candidates = []
-    for parameters in registered_candidates():
+    candidate_parameters = registered_candidates(committed_parameters)
+    for parameters in candidate_parameters:
         trial = gaussian_type(
             means=means.clone(),
             covariances=covariances.clone(),
@@ -205,5 +218,15 @@ def replay_calibration_sample(
             else None
         ),
         "candidate_count": len(candidates),
+        "candidate_scope": (
+            "exact_committed_train_tuple"
+            if committed_parameters is not None
+            else "registered_global_grid"
+        ),
+        "candidate_parameters_sha256": parameters_sha256(
+            committed_parameters
+        )
+        if committed_parameters is not None
+        else None,
     }
     return candidates, trace

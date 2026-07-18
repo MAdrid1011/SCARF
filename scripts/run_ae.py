@@ -17,6 +17,9 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
 DEFAULT_CALIBRATION_ROOT = ROOT / "downloads" / "calibration" / "prepared"
+DEFAULT_DL3DV_CALIBRATION_MANIFEST = (
+    ROOT / "outputs" / "calibration" / "dl3dv-protocol" / "manifest.json"
+)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -432,6 +435,14 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         getattr(args, "allow_low_memory_attempt", False)
     )
     calibration_root = getattr(args, "calibration_root", DEFAULT_CALIBRATION_ROOT)
+    calibration_manifest = getattr(
+        args, "calibration_manifest", DEFAULT_DL3DV_CALIBRATION_MANIFEST
+    )
+    if args.mode == "calibrate" and calibration_root != DEFAULT_CALIBRATION_ROOT:
+        raise ValueError(
+            "--calibration-root is legacy Functional-only input and cannot freeze "
+            "a DL3DV Results Reproduced configuration; use --calibration-manifest"
+        )
     plan: dict[str, Any] = {
         "schema_version": "1.0",
         "mode": args.mode,
@@ -451,6 +462,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "require_key_results": bool(getattr(args, "require_key_results", False)),
         "allow_low_memory_attempt": allow_low_memory_attempt,
         "calibration_root": str(calibration_root),
+        "calibration_manifest": str(calibration_manifest),
     }
     plan["software_claim_scope"] = {
         "status": (
@@ -477,24 +489,15 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         sensitivity_command.extend(("--num-samples", str(num_samples)))
     sensitivity_claimed = plan["claim_status"].get("sensitivity") == "CLAIMED"
     if args.mode == "calibrate":
-        protocol_dir = args.output_root / "protocol"
         sweep_dir = args.output_root / "sweep"
         calibration_python = _python_for("classic", args.python)
         plan["calibration_python"] = calibration_python
         plan["commands"] = [
             [
                 calibration_python,
-                str(SCRIPT_DIR / "compile_calibration.py"),
-                "--output-dir",
-                str(protocol_dir),
-                "--calibration-root",
-                str(calibration_root),
-            ],
-            [
-                calibration_python,
                 str(SCRIPT_DIR / "calibration_sweep.py"),
                 "--manifest",
-                str(protocol_dir / "manifest.json"),
+                str(calibration_manifest),
                 "--output-dir",
                 str(sweep_dir),
             ],
@@ -730,7 +733,13 @@ def parse_args() -> argparse.Namespace:
         "--calibration-root",
         type=Path,
         default=DEFAULT_CALIBRATION_ROOT,
-        help="Prepared official training subsets used only by calibrate mode",
+        help="Legacy Functional-only training root; cannot freeze a DL3DV claim config",
+    )
+    parser.add_argument(
+        "--calibration-manifest",
+        type=Path,
+        default=DEFAULT_DL3DV_CALIBRATION_MANIFEST,
+        help="Prepared 24-train/8-holdout DL3DV calibration protocol manifest",
     )
     args = parser.parse_args()
     if args.num_samples is not None and args.num_samples <= 0:
@@ -739,6 +748,11 @@ def parse_args() -> argparse.Namespace:
         parser.error("--allow-low-memory-attempt is only valid with physical")
     if args.calibration_root != DEFAULT_CALIBRATION_ROOT and args.mode != "calibrate":
         parser.error("--calibration-root is only valid with calibrate")
+    if (
+        args.calibration_manifest != DEFAULT_DL3DV_CALIBRATION_MANIFEST
+        and args.mode != "calibrate"
+    ):
+        parser.error("--calibration-manifest is only valid with calibrate")
     return args
 
 

@@ -226,7 +226,7 @@ def test_report_generator_emits_tables_vector_and_preview_figures(tmp_path):
     assert by_id["figure8"]["evidence_class"] == "independent_measurement"
     assert by_id["table1"]["evidence_class"] == "deterministic_execution"
     markdown = (report / "reproduction_report.md").read_text(encoding="utf-8")
-    assert "NOT_CLAIMED_NO_ORIN_EVIDENCE" in markdown
+    assert "CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION" in markdown
 
 
 def test_table2_never_substitutes_continuous_in_window_rate_for_discrete_top1(tmp_path):

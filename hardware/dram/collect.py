@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.result_record import source_identity
+from scripts.mechanism_config import load_mechanism_config
 
 
 def sha256_file(path: Path) -> str:
@@ -54,6 +55,12 @@ def collect(output_dir: Path) -> dict:
     ):
         raise ValueError("DRAM evidence contains missing, zero, or non-finite metrics")
     source = source_identity()
+    _, mechanism = load_mechanism_config()
+    calibration_provenance = {
+        key: value
+        for key, value in mechanism.items()
+        if key != "mechanism_config_sha256"
+    }
     workload = records["trace_manifest"].get("workload")
     if workload is not None:
         if not isinstance(workload, dict):
@@ -98,7 +105,10 @@ def collect(output_dir: Path) -> dict:
             "git_commit": source["git_commit"],
             "git_dirty": source["git_dirty"],
             "source_identity": source["source"],
+            "source_tree_sha256": source["source_tree_sha256"],
             "submodules": source["submodules"],
+            "mechanism_config_sha256": mechanism["mechanism_config_sha256"],
+            "calibration_provenance": calibration_provenance,
         },
         "evidence_type": "public_memory_system_proxy",
         "paper_lpddr4x_reproduced": False,

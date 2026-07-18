@@ -524,6 +524,14 @@ Verified on 2026-07-16 and 2026-07-17:
   improve, but harmonic and opacity aggregate errors worsen; the all-attribute
   gate fails, so preserve the non-claim implementation/evidence and do not
   run a quality retry.
+- [x] Make that paper-required K-probe reference the default L1 semantics while
+  retaining the declared 2K anchors for execution and aggregation. The fresh
+  target-free audit at
+  `transplat_sample0_l1_primary_reference_corrected_audit_v1/` (SHA256
+  `c93a6bc94e7e20098333a438f0256574c5946745d74fc0c4cf9a0fae26aefea1`)
+  passes target isolation, PSD, event, and skipped-descriptor poison checks
+  with nonzero sparse work. It does not satisfy the earlier all-attribute gate
+  and therefore does not authorize an RGB quality rerun.
 - [x] Preserve the target-free routing-coordinate audit: metric-depth remains
   the literal default; relative and candidate-coordinate variants are rejected
   because they route 92.8% and 99.98% of this fixed sample to L1 and would fit
@@ -652,3 +660,147 @@ Verified on 2026-07-16 and 2026-07-17:
   sparse SAES reproduction result.
 - [ ] Do not launch 8/32/140 DL3DV SAES quality runs until a target-free,
   nonzero sparse candidate passes the same sample-0 gate.
+- [x] Run the coordinate-explicit target-free TranSplat/DL3DV sample-0 gate:
+  normalized probe-vector standard deviation for L0 and inverse-depth candidate
+  coordinate standard deviation for L1, with the paper's unchanged 0.20/0.10
+  thresholds. It failed closed: all 8,192 attempted tiles returned to Full and
+  skipped zero descriptors. Preserve `transplat_sample0_coordinate_explicit_
+  optical_mass_audit_v1/` (SHA256 `fca6d6237ef1839358c2ba11475caa50fe530b5c39de8eb9b734588ea1860936`);
+  do not run quality.
+- [ ] Re-run one target-free TranSplat/DL3DV sample-0 audit after removing the
+  unsupported covariance-determinant envelope. Use the fixed normalized probe
+  feature statistic and paper-literal metric probe-depth standard deviation;
+  require nonzero sparse work and all retained existing numerical safeguards
+  before pre-registering any quality run.
+- [x] Pass that target-free gate in
+  `transplat_sample0_metric_depth_optical_mass_audit_v1/` (SHA256
+  `27ece34902cada6d20a745295dcf6f8c82bcdeff60b8e3265b7cff68fb417183`):
+  35,184 descriptors are skipped with no PSD, mass, or poison-invariance
+  failure.
+- [x] Run exactly one pre-registered TranSplat/DL3DV sample-0 quality gate in
+  `transplat_sample0_metric_depth_optical_mass_quality_v1/` (SHA256
+  `88a78ec60326b008cbd8a8f8ccd1ae71babca78ebf2ca2193fe5660e3e8559c2`).
+  It fails: PSNR `34.8381 -> 10.0265`, SSIM `0.97360 -> 0.44955`, and LPIPS
+  `0.03276 -> 0.51326`; no 8/32/140-scene expansion is authorized.
+- [ ] Diagnose retained-anchor attribute distortion on the same sample with a
+  target-free audit before considering one new materialization correction.
+- [x] Diagnose retained anchors in
+  `transplat_sample0_metric_depth_optical_mass_attribute_profile_v1/` (SHA256
+  `5f06fc833de6b5d9c786a48626d7f1510bf26a828e958439d65a07d222a65d04`):
+  3D covariance-volume mass drives output opacity p50 to `0.00403` from source
+  p50 `0.29721`, while SH is unchanged.
+- [ ] Implement and test context-camera projected optical-footprint mass before
+  any further quality run. It must use no target camera/RGB, add no route gate,
+  and pass PSD, finite, single-assignment, opacity-domain, and poison checks.
+- [x] Run the first projected-footprint target-free audit. Preserve
+  `transplat_sample0_metric_depth_projected_optical_mass_audit_v1/` (SHA256
+  `4f23429a8b3917a73aa71a5c85934be89ac295d40be0df2e1bf2198ccc9aa1b4`);
+  it exposes an overly large numerical 2D determinant floor, so quality is not
+  authorized.
+- [ ] Lower the projected-footprint validity floor to dtype-minimum positive
+  scale, rerun the target-free profile, and require a nontrivial sparse route
+  before another quality gate.
+- [x] Correct the projected-footprint floor and run v2 (SHA256
+  `b6c6d4949ee5ff6d735caed7ffe153dd4bc76070449868bef7e7ec96bfdeb988`).
+  It passes numerical checks but retains opacity collapse, so no quality gate
+  is authorized for projected optical mass.
+- [ ] Run a target-free conditional-anchor-transport attribute audit with the
+  fixed normalized feature and metric-depth route; verify range-constrained
+  opacity before considering one fresh quality gate.
+- [x] Pass that target-free conditional-anchor audit (SHA256
+  `900c8e968076dee17f16ed2d6ef0540e454a98da1c1266b474670c0020e910f0`):
+  opacity remains exactly range-constrained, while covariance contraction is
+  recorded as the remaining quality risk.
+- [ ] Run exactly one pre-registered conditional-anchor sample-0 quality gate
+  in `transplat_sample0_metric_depth_conditional_anchor_quality_v1/`; do not
+  expand DL3DV unless unchanged PSNR/SSIM/LPIPS tolerances all pass.
+- [x] Run that pre-registered gate (SHA256
+  `bde1768c7edd077ee000cab60f632c121928182564237d8788ea0acb7abfd9b1`):
+  PSNR `34.8381 -> 24.2559`, SSIM `0.97360 -> 0.83307`, LPIPS
+  `0.03276 -> 0.24604`; no DL3DV expansion is authorized.
+- [ ] Run a local target-free conditional covariance-moment diagnosis before
+  considering another materialization correction or quality gate.
+- [x] Run the covariance diagnosis v3 (SHA256
+  `8545e6479c7cd496ceaa8ba4aa395b27e16ea055ef32cd02e52dcad7ab818ed1`):
+  covariance moments expand as required; no local arithmetic repair remains.
+- [x] Stop DL3DV quality expansion: the fixed route's 34.314% L1 prevalence
+  conflicts with the paper's 10.1% DL3DV aggregate and cannot be changed from
+  evaluation data. Preserve Results Reproduced as unclaimed.
+- [x] Implement the diagnostic-only adapter-faithful subpixel-offset transport:
+  retain only anchor mean/depth/context C2W/intrinsics, apply the recovered
+  bounded offset before target-ray normalization, and fail-close incompatible
+  tiles to Full. Synthetic adapter-equivalence, poison, PSD/SH/opacity, and
+  event-ledger tests pass.
+- [x] Run exactly one target-free TranSplat/DL3DV sample-0 adapter-offset
+  attribute audit in
+  `transplat_sample0_adapter_offset_transport_audit_v1/`; do not render or
+  compare quality until that new output passes every target-free check.
+- [x] Pass the fixed adapter-offset attribute audit (SHA256
+  `9fd33bf2a0e1ab4abeacd347d0f5478eac296a8a25d3a0cce7e8d53e9352fa17`):
+  26,496 descriptors are skipped with no adapter fallback, no skipped-S3
+  reads, and identical poison-pass events. This is target-free provenance, not
+  a quality claim.
+- [x] Run exactly one fixed adapter-offset selected-output quality pilot in
+  `transplat_sample0_adapter_offset_transport_quality_v1/` with the unchanged
+  `0.15/0.005/0.005` limits; no further DL3DV expansion is authorized on any
+  failure. Preserve SHA256
+  `e1e21de6f3d5f5509e676415ecf7314743af1b3aae453d0f17036cc973c858b1`:
+  PSNR loss `9.1464` dB, SSIM loss `0.12203`, and LPIPS increase `0.18550`.
+  This candidate fails and must not be retried.
+- [x] Add a fail-closed DL3DV training-calibration archive path: enumerate the
+  authenticated official tree, freeze an evaluation-disjoint 24+8 plan before
+  download, verify selected ZIP byte counts and upstream object ids, record
+  actual SHA256 values, and reject unsafe archive members or a changed source
+  tree.
+- [x] Add a DL3DV target-free calibration compiler: build native and
+  Re10K-compatible sidecars for disjoint 24-scene training and eight-scene
+  holdout sets, retain all camera geometry, omit target RGB, and bind
+  plan/preparation/tree hashes.
+- [x] Teach the calibration grid to route TranSplat/MVSplat to the Re10K
+  sidecar and DepthSplat to the native sidecar; legacy Re10K/ACID calibration
+  remains Functional-only.
+- [x] Re-run the target-free TranSplat/DL3DV materialization guard gate after
+  fixing its stats reset. Preserve v1 as invalid because it serialized an
+  active guard as disabled; v2 records `true`, 1,058 L0 plus 2,878 L1 checks,
+  zero non-probe S3 reads, and a ledger-consistent charged guard path. This is
+  diagnostic provenance only and does not grant S2/S3 savings.
+- [ ] Obtain official access to `DL3DV/DL3DV-ALL-480P`, write the source-bound
+  archive plan, then download and verify its 24 calibration plus 8 holdout ZIPs.
+  The 2026-07-18 tree request succeeds but its first revision-pinned archive
+  resolve returns upstream `403 not in the authorized list`; this remains an
+  external authorization task, not a downloader or network failure.
+- [ ] Do not run DL3DV calibration or the 140-scene evaluation until a real
+  paper-compatible SAES sparse path passes the existing synthetic and
+  single-sample quality gates with nonzero verified savings.
+- [x] `saes-selected-output-quality-pilot-v1`: add batched per-view
+  selected-output replay, execute guard-resolved L0/L1/Full masks through the
+  native adapter and decoder, charge both replay passes, and run only the fixed
+  TranSplat/DL3DV sample-0 quality gate. Preserve the output as a non-claim
+  failure: it violates all three fixed quality limits and transferred target
+  RGB before mask commitment, so its provenance cannot support a claim.
+- [x] `saes-selected-output-quality-pilot-v2`: rerun the fixed v1
+  scene/seed/checkpoint/threshold contract with RGB delayed until final-mask
+  commitment. Target RGB remained unread, and the selected head matched
+  dense-SAes routing and retained attributes, but the native decoder still
+  consumed zero-opacity removed descriptors with absent raw-head attributes.
+  Preserve the log as a target-free S4 contract failure; it produced no
+  quality verdict.
+- [x] `saes-selected-output-quality-pilot-v3`: render only SAES-retained
+  descriptors from both dense and selected-head controls. It still failed the
+  strict target-free decoder-equivalence gate before RGB access; preserve its
+  log and do not treat it as a quality result.
+- [x] `saes-selected-output-quality-pilot-v4`: record selected-vs-dense
+  decoder deltas alongside a repeat dense-control render. Dense repeat is
+  bit-stable; selected-vs-dense has mean absolute delta `1.028e-7` and max
+  `0.001052`, so the source is selected-head FP32 accumulation rather than
+  rasterizer noise. This run did not read RGB or emit quality metrics.
+- [x] `saes-selected-output-quality-pilot-v5`: run the unchanged fixed
+  four-view quality measurement after output commitment. Preserve results
+  SHA256 `d2c51c3e1f93bad4d488f4366f1640f93045683a5e47b5695348561e1fcc4269`:
+  clean RGB provenance, equal masks and retained attributes, but nonzero
+  selected-head decoder delta plus PSNR loss `9.1452 dB`, SSIM loss `0.12201`,
+  and LPIPS increase `0.18548`. It is non-claim failure evidence.
+- [x] Block all 8/32/140-scene DL3DV expansion for this mechanism. A next
+  candidate must be target-free until it passes synthetic/descriptor gates,
+  or use only the official evaluation-disjoint training calibration once
+  upstream `DL3DV-ALL-480P` authorization is granted.

@@ -20,6 +20,12 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _safe_chunk_path(test_root: Path, value: Any) -> Path:
     if not isinstance(value, str):
         raise ValueError("calibration input index has a non-string chunk path")
@@ -123,6 +129,21 @@ def materialize_target_free_inputs(
     (test_root / "index.json").write_text(
         json.dumps(input_index, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    opened_file_manifest = [
+        {
+            "path": "test/index.json",
+            "role": "target_free_sidecar_index",
+            "sha256": sha256_file(test_root / "index.json"),
+        },
+        *[
+            {
+                "path": f"test/{input_index[scene]}",
+                "role": "target_free_sidecar_record",
+                "sha256": sha256_file(test_root / input_index[scene]),
+            }
+            for scene in selected
+        ],
+    ]
     source_record = {
         "schema_version": "1.0",
         "kind": INPUT_KIND,
@@ -130,6 +151,11 @@ def materialize_target_free_inputs(
         "target_rgb_included": False,
         "selection_sha256": selection_sha256,
         "selected_scene_count": len(selected),
+        # This is the exact allowlist of serialized files from which the
+        # calibration loader may decode model inputs. It names only target-free
+        # sidecars, never upstream source images or target RGB payloads.
+        "opened_file_manifest": opened_file_manifest,
+        "opened_file_manifest_sha256": _canonical_sha256(opened_file_manifest),
         "source_dataset_tree_sha256": source.get("dataset_tree_sha256"),
         "source_dataset_manifest_sha256": source.get("dataset_manifest_sha256"),
         "source_prepared_provenance_sha256": source.get("prepared_source_sha256"),
@@ -156,6 +182,8 @@ def materialize_target_free_inputs(
         "calibration_input_manifest_sha256": sha256_file(manifest_path),
         "calibration_input_tree_sha256": manifest["tree_sha256"],
         "calibration_input_provenance_sha256": sha256_file(source_path),
+        "opened_file_manifest": opened_file_manifest,
+        "opened_file_manifest_sha256": _canonical_sha256(opened_file_manifest),
         "target_rgb_included": False,
     }
 
@@ -183,6 +211,42 @@ def validate_target_free_input_root(root: Path, dataset: str) -> dict[str, Any]:
     count = source.get("selected_scene_count")
     if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
         raise ValueError("calibration input scene count is invalid")
+    opened_file_manifest = source.get("opened_file_manifest")
+    opened_file_manifest_sha256 = source.get("opened_file_manifest_sha256")
+    if (
+        not isinstance(opened_file_manifest, list)
+        or len(opened_file_manifest) != count + 1
+        or opened_file_manifest_sha256 != _canonical_sha256(opened_file_manifest)
+    ):
+        raise ValueError("calibration input opened-file manifest is invalid")
+    expected_paths = {"test/index.json"}
+    index = json.loads((root / "test" / "index.json").read_text(encoding="utf-8"))
+    if not isinstance(index, dict) or len(index) != count:
+        raise ValueError("calibration input index is invalid")
+    expected_paths.update(f"test/{value}" for value in index.values())
+    manifest_paths = set()
+    for item in opened_file_manifest:
+        if not isinstance(item, dict):
+            raise ValueError("calibration input opened-file record is invalid")
+        relative = item.get("path")
+        if (
+            not isinstance(relative, str)
+            or relative not in expected_paths
+            or "target" in relative.lower()
+            or item.get("role") not in {
+                "target_free_sidecar_index",
+                "target_free_sidecar_record",
+            }
+            or not isinstance(item.get("sha256"), str)
+            or len(item["sha256"]) != 64
+        ):
+            raise ValueError("calibration input opened-file record is unsafe")
+        path = root / relative
+        if not path.is_file() or sha256_file(path) != item["sha256"]:
+            raise ValueError("calibration input opened-file manifest hash mismatch")
+        manifest_paths.add(relative)
+    if manifest_paths != expected_paths:
+        raise ValueError("calibration input opened-file manifest is incomplete")
     tree = verify_tree_manifest(root, root / ".scarf-manifest.json")
     return {
         "representation": f"{dataset}-target-free-calibration-v1",
@@ -193,6 +257,8 @@ def validate_target_free_input_root(root: Path, dataset: str) -> dict[str, Any]:
         "selected_scene_count": count,
         "selection_sha256": selection_sha256,
         "input_provenance_sha256": sha256_file(source_path),
+        "opened_file_manifest": opened_file_manifest,
+        "opened_file_manifest_sha256": opened_file_manifest_sha256,
     }
 
 

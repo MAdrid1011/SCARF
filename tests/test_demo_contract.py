@@ -26,6 +26,7 @@ def test_demo_help_exposes_public_ae_arguments():
         "--functional-run",
         "--diagnostic-run",
         "--image-output-policy",
+        "--calibration-parameters",
         "--fsdr-only",
         "--fsdr-feature-source",
         "--saes-feature-source",
@@ -191,6 +192,39 @@ def test_calibration_trace_rejects_unregistered_overrides(extra):
         parse_args([*base, *extra])
 
 
+def test_calibration_holdout_accepts_only_one_complete_registered_tuple():
+    from scripts.demo_cli import parse_args
+
+    args = parse_args(
+        [
+            "--diagnostic-run",
+            "--evaluation-index",
+            "index.json",
+            "--calibration-trace",
+            "--image-output-policy",
+            "none",
+            "--calibration-parameters",
+            '{"gamma_depth":0.05,"beta_x":0.25,"beta_f":0.05,"beta_d":0.5}',
+        ]
+    )
+    assert args.calibration_parameters == {
+        "gamma_depth": 0.05,
+        "beta_x": 0.25,
+        "beta_f": 0.05,
+        "beta_d": 0.5,
+    }
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--diagnostic-run",
+                "--evaluation-index",
+                "index.json",
+                "--calibration-parameters",
+                '{"gamma_depth":0.05}',
+            ]
+        )
+
+
 def test_claim_run_rejects_dense_saes_diagnostic():
     from scripts.demo_cli import parse_args
 
@@ -261,6 +295,25 @@ def test_conditional_optical_mass_is_diagnostic_only():
     from scripts.demo_cli import parse_args
 
     materialization = "conditional-optical-mass-diagnostic"
+    args = parse_args(["--saes-materialization", materialization])
+    assert args.saes_materialization == materialization
+    for strict_mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    strict_mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--saes-materialization",
+                    materialization,
+                ]
+            )
+
+
+def test_conditional_projected_optical_mass_is_diagnostic_only():
+    from scripts.demo_cli import parse_args
+
+    materialization = "conditional-projected-optical-mass-diagnostic"
     args = parse_args(["--saes-materialization", materialization])
     assert args.saes_materialization == materialization
     for strict_mode in ("--claim-run", "--functional-run"):
@@ -350,35 +403,12 @@ def test_transmittance_materialization_is_non_claiming_only():
     assert diagnostic.saes_materialization == "transmittance-diagnostic"
 
 
-def test_l1_primary_depth_reference_materialization_is_non_claiming_only():
+def test_l1_primary_depth_reference_is_not_an_exposed_diagnostic_mode():
     from scripts.demo_cli import parse_args
 
     materialization = "l1-primary-depth-reference-diagnostic"
-    args = parse_args(["--saes-materialization", materialization])
-    assert args.saes_materialization == materialization
-
-    for strict_mode in ("--claim-run", "--functional-run"):
-        with pytest.raises(SystemExit):
-            parse_args(
-                [
-                    strict_mode,
-                    "--evaluation-index",
-                    "index.json",
-                    "--saes-materialization",
-                    materialization,
-                ]
-            )
-
-    diagnostic = parse_args(
-        [
-            "--diagnostic-run",
-            "--evaluation-index",
-            "index.json",
-            "--saes-materialization",
-            materialization,
-        ]
-    )
-    assert diagnostic.diagnostic_run is True
+    with pytest.raises(SystemExit):
+        parse_args(["--saes-materialization", materialization])
 
 
 def test_virtual_reconstruction_materialization_is_non_claiming_only():

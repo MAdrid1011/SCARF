@@ -12,6 +12,7 @@
     "fsdr_guidance_policy": "paper-hamming-local-validity",
     "saes_depth_threshold": 0.1,
     "saes_feature_threshold": 0.2,
+    "saes_l1_depth_reference": "primary-routing-probes-v1",
     "saes_moment_geometry": "c2w-probe-depth-ray-v1",
     "saes_tile_size": 4
   },

@@ -18,6 +18,11 @@ class SAESController extends Module {
     val probeFeatureVar = Input(UInt(ScarfConfig.DataWidth.W))
     val probeDepthStd   = Input(UInt(ScarfConfig.DataWidth.W))
     val crossCheckError = Input(UInt(ScarfConfig.DataWidth.W))
+    // Probe-only materialization checks are Control inputs. Their producer
+    // reads only selected native descriptors; an L0 rejection still permits
+    // the existing L1 depth decision, while an L1 rejection is fail-closed.
+    val l0MaterializationValid = Input(Bool())
+    val l1MaterializationValid = Input(Bool())
 
     val level          = Output(SAESLevel())
     // Valid only with ``done``.  This traces the accepted-start-to-result
@@ -45,7 +50,10 @@ class SAESController extends Module {
     }
     is(sCheckL0) {
       decisionCycles := decisionCycles + 1.U
-      when(io.probeFeatureVar < io.config.saesFeatureVarThresh) {
+      when(
+        io.probeFeatureVar < io.config.saesFeatureVarThresh &&
+          io.l0MaterializationValid
+      ) {
         resultLevel := SAESLevel.sL0
         state := sResult
       }.otherwise {
@@ -54,7 +62,10 @@ class SAESController extends Module {
     }
     is(sCheckL1) {
       decisionCycles := decisionCycles + 1.U
-      when(io.probeDepthStd < io.config.saesDepthStdThresh) {
+      when(
+        io.probeDepthStd < io.config.saesDepthStdThresh &&
+          io.l1MaterializationValid
+      ) {
         resultLevel := SAESLevel.sL1
       }.otherwise {
         resultLevel := SAESLevel.sFull

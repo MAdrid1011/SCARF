@@ -25,6 +25,7 @@ def test_rtl_result_preserves_lint_warning_count_and_hashes(tmp_path, monkeypatc
         "git_commit": "a" * 40,
         "git_dirty": False,
         "source": "git",
+        "source_tree_sha256": "e" * 64,
         "submodules": {
             "transplat": "b" * 40,
             "mvsplat": "c" * 40,
@@ -32,6 +33,16 @@ def test_rtl_result_preserves_lint_warning_count_and_hashes(tmp_path, monkeypatc
         },
     }
     monkeypatch.setattr(rtl_result, "source_identity", lambda *_: identity)
+    mechanism = {
+        "status": "preregistered",
+        "manifest_sha256": "f" * 64,
+        "candidate_records_sha256": None,
+        "evaluation_disjoint": False,
+        "expected_results_accessed": False,
+        "global_configuration": True,
+        "mechanism_config_sha256": "1" * 64,
+    }
+    monkeypatch.setattr(rtl_result, "load_mechanism_config", lambda: ({}, mechanism))
 
     record = rtl_result.build_result(tmp_path)
     assert record["status"] == "PASS"
@@ -42,7 +53,14 @@ def test_rtl_result_preserves_lint_warning_count_and_hashes(tmp_path, monkeypatc
         "git_commit": identity["git_commit"],
         "git_dirty": False,
         "source_identity": "git",
+        "source_tree_sha256": identity["source_tree_sha256"],
         "submodules": identity["submodules"],
+        "mechanism_config_sha256": mechanism["mechanism_config_sha256"],
+        "calibration_provenance": {
+            key: value
+            for key, value in mechanism.items()
+            if key != "mechanism_config_sha256"
+        },
         "generated_at": record["provenance"]["generated_at"],
         "commands": record["provenance"]["commands"],
     }

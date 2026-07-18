@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +60,8 @@ def sha256_file(path: Path) -> str:
 
 
 def archive_files() -> list[Path]:
+    from scripts.build_archive import include_in_source_release, normalize_archive_relative
+
     release_manifest = ROOT / "release-manifest.json"
     if release_manifest.is_file():
         record = json.loads(release_manifest.read_text(encoding="utf-8"))
@@ -72,24 +74,48 @@ def archive_files() -> list[Path]:
         ):
             raise RuntimeError("release manifest has an invalid source file set")
         selected = []
+        normalized_paths = set()
+        non_normalized = []
         for relative in files:
-            pure = PurePosixPath(relative)
+            normalized = normalize_archive_relative(relative)
+            if normalized in normalized_paths:
+                raise RuntimeError(
+                    f"release manifest has a duplicate normalized file: {normalized}"
+                )
+            normalized_paths.add(normalized)
+            if normalized != relative:
+                non_normalized.append(relative)
+                continue
+            pure = PurePosixPath(normalized)
             path = ROOT / pure
             if (
-                not isinstance(relative, str)
-                or pure.is_absolute()
-                or ".." in pure.parts
+                not include_in_source_release(pure)
+                or path.is_symlink()
                 or not path.is_file()
             ):
                 raise RuntimeError(f"release manifest has an invalid file: {relative}")
             selected.append(path)
+        if non_normalized:
+            raise RuntimeError(
+                "release manifest has non-normalized files: "
+                + ", ".join(sorted(non_normalized)[:10])
+            )
         return sorted(selected)
     output = git("ls-files", "--recurse-submodules", "-z")
-    return sorted(
-        ROOT / name
-        for name in output.split("\0")
-        if name and (ROOT / name).is_file()
-    )
+    selected = []
+    for name in output.split("\0"):
+        if not name:
+            continue
+        normalized = normalize_archive_relative(name)
+        if normalized != name:
+            raise RuntimeError(f"tracked release path is not normalized: {name}")
+        path = ROOT / normalized
+        if not include_in_source_release(PurePosixPath(normalized)):
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"tracked release path is not a regular file: {name}")
+        selected.append(path)
+    return sorted(selected)
 
 
 def check_local_paths(files: list[Path]) -> list[str]:
@@ -437,7 +463,11 @@ def check_claim_status(path: Path | None = None) -> list[str]:
         if invalid:
             failures.append(f"claim status {field} has invalid states: {invalid}")
     aggregate_states = {
-        "figure8": {"CLAIMED", "NOT_CLAIMED_NO_ORIN_EVIDENCE"},
+        "figure8": {
+            "CLAIMED",
+            "CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION",
+            "NOT_CLAIMED_NO_ORIN_EVIDENCE",
+        },
         "figure11": {"CLAIMED", "NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX"},
         "sensitivity": {"CLAIMED", "NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX"},
         "rtl": {"CLAIMED"},
@@ -456,10 +486,67 @@ def check_claim_status(path: Path | None = None) -> list[str]:
     return failures
 
 
-def check_reference_results(
-    root: Path = ROOT, *, reference_results: Path | None = None
+def _binding_failures(
+    actual: Mapping[str, Any], expected: Mapping[str, Any], *, subject: str
 ) -> list[str]:
-    from scripts.stage_reference_results import required_categories
+    """Return field-level failures for one staged source/config binding."""
+    from scripts.stage_reference_results import (
+        SOURCE_PROVENANCE_FIELDS,
+        canonical_sha256,
+    )
+
+    failures: list[str] = []
+    actual_source = actual.get("source")
+    expected_source = expected.get("source")
+    if not isinstance(actual_source, Mapping):
+        failures.append(f"{subject} is missing source provenance binding")
+    elif not isinstance(expected_source, Mapping):
+        failures.append(f"cannot determine current source provenance for {subject}")
+    else:
+        for field in SOURCE_PROVENANCE_FIELDS:
+            if field not in actual_source:
+                failures.append(f"{subject} source provenance missing {field}")
+            elif actual_source[field] != expected_source.get(field):
+                failures.append(f"{subject} source provenance mismatch {field}")
+
+    actual_mechanism = actual.get("mechanism")
+    expected_mechanism = expected.get("mechanism")
+    if not isinstance(actual_mechanism, Mapping):
+        failures.append(f"{subject} is missing mechanism provenance binding")
+    elif not isinstance(expected_mechanism, Mapping):
+        failures.append(f"cannot determine current mechanism provenance for {subject}")
+    else:
+        for field in (
+            "mechanism_config_sha256",
+            "calibration_status",
+            "calibration_provenance_sha256",
+        ):
+            if field not in actual_mechanism:
+                failures.append(f"{subject} mechanism provenance missing {field}")
+            elif actual_mechanism[field] != expected_mechanism.get(field):
+                failures.append(f"{subject} mechanism provenance mismatch {field}")
+        calibration = actual_mechanism.get("calibration_provenance")
+        digest = actual_mechanism.get("calibration_provenance_sha256")
+        if not isinstance(calibration, Mapping):
+            failures.append(f"{subject} mechanism provenance missing calibration_provenance")
+        elif canonical_sha256(calibration) != digest:
+            failures.append(
+                f"{subject} mechanism calibration provenance digest is inconsistent"
+            )
+    return failures
+
+
+def check_reference_results(
+    root: Path = ROOT,
+    *,
+    reference_results: Path | None = None,
+    expected_binding: Mapping[str, Any] | None = None,
+) -> list[str]:
+    from scripts.stage_reference_results import (
+        release_evidence_binding,
+        required_categories,
+        validate_generated_records,
+    )
 
     reference_root = (
         Path(reference_results).resolve()
@@ -470,15 +557,18 @@ def check_reference_results(
     if not manifest_path.is_file():
         return ["reference evidence manifest is missing"]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    failures = []
     if manifest.get("status") != "complete" or manifest.get("validation_status") != "PASS":
-        return ["reference evidence has not been staged from a passing validation run"]
+        failures.append("reference evidence has not been staged from a passing validation run")
+    if manifest.get("validation_require_key_results") is not True:
+        failures.append("reference evidence was not validated with --require-key-results")
     required = required_categories()
     if not required <= set(manifest.get("categories", [])):
-        return ["reference evidence categories are incomplete"]
-    failures = []
+        failures.append("reference evidence categories are incomplete")
     files = manifest.get("files")
     if not isinstance(files, dict) or not files:
-        return ["reference evidence file manifest is empty"]
+        failures.append("reference evidence file manifest is empty")
+        return failures
     for relative, record in files.items():
         pure = PurePosixPath(relative)
         if pure.is_absolute() or ".." in pure.parts or pure.parts[:1] != ("evidence",):
@@ -500,6 +590,56 @@ def check_reference_results(
             continue
         if any(pattern.search(text) for pattern in LOCAL_PATH_PATTERNS):
             failures.append(f"author-local path in reference evidence: {relative}")
+
+    provenance = manifest.get("provenance")
+    if not isinstance(provenance, Mapping):
+        failures.append(
+            "reference evidence manifest has no provenance binding (legacy Functional-era evidence)"
+        )
+        return failures
+    try:
+        current_binding = (
+            dict(expected_binding)
+            if expected_binding is not None
+            else release_evidence_binding(root)
+        )
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        failures.append(f"cannot determine current release provenance: {exc}")
+        return failures
+    failures.extend(
+        _binding_failures(
+            provenance,
+            current_binding,
+            subject="reference evidence manifest",
+        )
+    )
+
+    generated_records, generated_failures = validate_generated_records(
+        {
+            reference_root / PurePosixPath(relative): PurePosixPath(relative).relative_to(
+                "evidence"
+            )
+            for relative in files
+            if PurePosixPath(relative).parts[:1] == ("evidence",)
+            and (reference_root / PurePosixPath(relative)).is_file()
+        },
+        expected_binding=current_binding,
+    )
+    failures.extend(f"reference {failure}" for failure in generated_failures)
+    declared_records = provenance.get("generated_records")
+    if not isinstance(declared_records, Mapping):
+        failures.append("reference evidence manifest is missing generated-record bindings")
+    elif not generated_failures:
+        if set(declared_records) != set(generated_records):
+            failures.append(
+                "reference evidence manifest generated-record bindings do not cover the staged results"
+            )
+        else:
+            for relative, binding in generated_records.items():
+                if declared_records.get(relative) != binding:
+                    failures.append(
+                        f"reference evidence manifest generated-record binding mismatch: {relative}"
+                    )
     return failures
 
 
@@ -528,7 +668,7 @@ def build_manifest(
     failures.extend(check_orin_contract())
     failures.extend(check_claim_status())
     failures.extend(check_evaluation_protocol())
-    failures.extend(check_reference_results(reference_results=reference_results))
+    failures.extend(check_reference_results(ROOT, reference_results=reference_results))
     doi = None
     if require_doi:
         doi, doi_failures = check_doi()

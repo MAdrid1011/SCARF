@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.calibration_contract import PARAMETER_GRID, select_global_candidate
+from scripts.calibration_contract import PARAMETER_GRID, canonical_parameters
+from scripts.calibration_sweep import validate_split_candidate_records
 from scripts.mechanism_config import sha256_file as mechanism_sha256_file
 
 
@@ -23,16 +24,19 @@ def sha256_file(path: Path) -> str:
 
 
 def build_config(candidate_records: Path) -> dict:
+    candidate_records = candidate_records.resolve()
     source = json.loads(candidate_records.read_text(encoding="utf-8"))
-    candidates = source.get("candidates")
-    if source.get("evaluation_disjoint") is not True:
-        raise ValueError("calibration manifest is not evaluation-disjoint")
-    if not isinstance(candidates, list) or not candidates:
-        raise ValueError("calibration candidate record is empty")
-    selected = select_global_candidate(candidates)
+    evidence = validate_split_candidate_records(source, candidate_records.parent)
+    selected = evidence["selected_train_candidate"]
+    holdout = evidence["validated_holdout_candidate"]
     manifest_sha256 = source.get("calibration_manifest_sha256")
     if not isinstance(manifest_sha256, str) or len(manifest_sha256) != 64:
         raise ValueError("calibration manifest SHA256 is missing")
+    selected_parameters = canonical_parameters(selected["parameters"])
+    if canonical_parameters(holdout["parameters"]) != selected_parameters:
+        raise ValueError("holdout candidate does not match the selected train tuple")
+    train = evidence["train"]
+    holdout_split = evidence["holdout"]
     return {
         "schema_version": "1.0",
         "status": "calibrated",
@@ -50,15 +54,37 @@ def build_config(candidate_records: Path) -> dict:
             "fsdr_contraction_ratio": 4,
             "saes_feature_threshold": 0.2,
             "saes_depth_threshold": 0.1,
+            "saes_l1_depth_reference": "primary-routing-probes-v1",
             "saes_moment_geometry": "c2w-probe-depth-ray-v1",
             "saes_tile_size": 4,
         },
         "search_space": {key: list(values) for key, values in PARAMETER_GRID.items()},
-        "selected": selected["parameters"],
+        "selected": selected_parameters,
         "calibration": {
             "manifest_sha256": manifest_sha256,
             "candidate_records_sha256": sha256_file(candidate_records),
             "evaluation_disjoint": True,
+            "protocol": "dl3dv_train_holdout_v1",
+            "train_holdout_scene_disjoint": True,
+            "train": {
+                "selection_sha256": train["selection_sha256"],
+                "scene_set_sha256": train["scene_set_sha256"],
+                "pair_bindings_sha256": train["pair_bindings_sha256"],
+                "trace_set_sha256": train["trace_set_sha256"],
+                "candidate_set_sha256": train["candidate_set_sha256"],
+                "selected_candidate_sha256": selected["candidate_sha256"],
+            },
+            "holdout": {
+                "selection_sha256": holdout_split["selection_sha256"],
+                "scene_set_sha256": holdout_split["scene_set_sha256"],
+                "pair_bindings_sha256": holdout_split["pair_bindings_sha256"],
+                "trace_set_sha256": holdout_split["trace_set_sha256"],
+                "candidate_set_sha256": holdout_split["candidate_set_sha256"],
+                "validated_parameters_sha256": holdout_split[
+                    "validated_parameters_sha256"
+                ],
+                "validated_candidate_sha256": holdout["candidate_sha256"],
+            },
             "selection_rule": "quality constraints, maximum event work reduction",
         },
     }

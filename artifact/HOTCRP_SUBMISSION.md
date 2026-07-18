@@ -22,18 +22,17 @@ metadata.
    reproduce the nine-pair original-GPU and SCARF-Dataflow CUDA-event timings,
    combine them with positive SCARF architectural cycles at 1 GHz, and validate
    the reported 2.94x geometric-mean ASIC speedup and S1-S4 breakdown.
-2. **Table 1 and Figure 10, quality.** Reproduce the nine model/dataset quality
-   rows and deterministically regenerate the global worst FSDR/SAES views,
-   stage cycles, rendered images, and RGB error maps from all evaluated views.
+2. **Table 1, quality.** Reproduce the nine model/dataset quality rows from all
+   canonical target views.
 3. **Figure 11 and Tables 2-3, mechanisms.** Reproduce no-optimization,
    FSDR-only, SAES-only, and combined cycles plus discrete FSDR and SAES event
    counters for all nine model/dataset pairs.
-4. **Figure 12, utilization.** Reproduce S1-S3 useful/scheduled MMCU slot ratios
-   from simulator event traces.
-5. **Figures 13-16, sensitivity.** Reproduce the complete five-point cache,
-   Hamming, feature-threshold, depth-threshold, and tile-size grids using fixed
-   per-sample traces and all nine model/dataset pairs.
-6. **Public hardware proxy.** Regenerate routed ASAP7 PPA, the deterministic
+4. **Supporting results.** Deterministically regenerate Figure 10's global
+   worst FSDR/SAES views, Figure 12's S1-S3 utilization, and Figures 13-16's
+   complete five-point cache, Hamming, feature/depth-threshold, and tile-size
+   grids from the same raw records. These remain required evidence outputs but
+   do not replace any missing key result.
+5. **Public hardware proxy.** Regenerate routed ASAP7 PPA, the deterministic
    DeepScale 7-to-28 nm normalization, and the public counterparts to Figure 9
    and Table 4. These are not described as the paper's commercial TSMC28
    post-layout measurements.
@@ -44,11 +43,15 @@ validator-only comparison targets.
 
 All software results use one frozen global mechanism configuration. Its
 engineering bandwidths and conservative FSDR hit-validity tolerance are chosen
-from a pre-registered finite grid on 64 official training scenes that are
-hash-proven disjoint from evaluation. Calibration cannot access target RGB,
-ground truth, manuscript result files, or evaluator outputs. The reviewer may
-run the deterministic reviewer profile or shard the full profile; both retain
-the same canonical views and result schema.
+from a pre-registered finite grid using 24 official DL3DV calibration scenes
+and eight hash-selected DL3DV holdout scenes, all scene-disjoint from the 140
+evaluation scenes. Calibration cannot access target RGB, ground truth,
+manuscript result files, or evaluator outputs. The reviewer may run the
+deterministic reviewer profile or shard the full profile; both retain the same
+canonical views and result schema.
+
+A single-scene pilot is not a Table 1, Figure 11, or Tables 2-3 result. Only
+the complete frozen-protocol aggregate may be compared with those paper rows.
 
 ## Hardware Dependencies
 

@@ -95,6 +95,10 @@ SAES computes the two decision statistics specified by the mechanism:
 - Feature variance for L0 decisions.
 - Probe-depth standard deviation for L1 decisions after an L0 miss.
 
+L1 computes its depth-reliability mean and standard deviation from the primary
+K routing probes. The declared 2K lightweight anchor expansion occurs only
+after that route and does not alter the L1 reference statistics.
+
 Frozen thresholds may only be selected through the disjoint training-calibration
 contract. They are never selected from evaluation RGB, paper tables, or
 evaluation aggregates. A tile takes a lower-cost path only when this fixed

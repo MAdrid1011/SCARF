@@ -21,6 +21,7 @@ def test_preregistered_config_has_portable_nonclaim_provenance():
     assert provenance["candidate_records_sha256"] is None
     assert len(provenance["mechanism_config_sha256"]) == 64
     assert len(provenance["manifest_sha256"]) == 64
+    assert config["fixed"]["saes_l1_depth_reference"] == "primary-routing-probes-v1"
     assert config["fixed"]["saes_moment_geometry"] == "c2w-probe-depth-ray-v1"
 
 
