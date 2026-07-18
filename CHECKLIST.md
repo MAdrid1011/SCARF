@@ -920,6 +920,12 @@ Verified on 2026-07-16 and 2026-07-17:
   transient terminal log SHA256 is
   `ef3501040e0b5d92420fbcd8c2c9e27a2c9dbf59eadae7423d839071e2686475`;
   the record separately reports the non-runtime 46,896 full-S3 oracle reads.
+- [x] Repeat the no-output smoke from the v3 mapping-repair commit
+  `95fdc87ca4c37befb14140f177ee887adb00c4aa`. The fresh CUDA process passed
+  input/checkpoint hashes, both sentinels, exact partition, Full passthrough,
+  and finite `[3,256,256]` view-0 rendering without target RGB, teacher
+  metrics, optimizer, or an output directory. Terminal SHA256:
+  `18d1f15598613e9ecf8d3170dc6723db113f2e002cdf2e6218a3664253cb0cfe`.
 - [x] Preserve the aborted `...parameter_attribution_v2/` record (results
   SHA256 `5c804d5b1445d8e5c5fb474318dddb8081bcd0d9430db14dc2b5dda8d9c29906`,
   terminal SHA256 `c912b34a0f2867d4d44187d879745844d73d6d2bf1e8eb996f517b00343056a8`).
@@ -935,9 +941,9 @@ Verified on 2026-07-16 and 2026-07-17:
   `transplat_sample0_same_budget_render_teacher_parameter_attribution_v3/`.
   It is a v3 execution identity over the immutable v2 scientific protocol:
   use only the frozen oracle assets, partition, seed, twelve variants and
-  teacher-only metric contract. From a clean committed source, first repeat
-  the no-output smoke, then map dense global representatives to compact local
-  slots and verify the mapping before any render. Reject any source, artifact,
+  teacher-only metric contract. The clean-source v3 smoke has passed; the
+  execution must map dense global representatives to compact local slots and
+  verify the mapping before any render. Reject any source, artifact,
   partition, camera, Full-slot, index-domain, teacher-fidelity, target-RGB, or
   optimizer-boundary violation. A failure ends this attribution campaign; a
   completion is capacity evidence only and cannot launch a new materialization

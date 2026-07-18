@@ -2007,6 +2007,16 @@
   same no-output smoke from a clean committed source identity before its sole
   twelve-variant execution; that smoke carries no teacher metric or new result
   artifact and does not consume the one v3 attribution run.
+- v3 smoke result: the 2026-07-18 fresh-process replay at clean commit
+  `95fdc87ca4c37befb14140f177ee887adb00c4aa` passed with no output directory.
+  It reverified the fixed input/checkpoint hashes, both finite sentinels, the
+  exact partition and Full passthrough, and a finite `[3,256,256]` view-0
+  render. Its terminal capture SHA256 is
+  `18d1f15598613e9ecf8d3170dc6723db113f2e002cdf2e6218a3664253cb0cfe`;
+  the JSON terminal line SHA256 is
+  `f39151f9b24e0fbedbc95ad5bb96d5d55ee66959fed90c0474a5e3c2283d104c`.
+  It records `target_rgb_accessed=false`, `teacher_metrics_computed=false`,
+  `optimizer_executed=false`, and `runtime_execution=false`.
 - Isolation boundary: target RGB must not be loaded, decoded, transferred, or
   passed to any model component. The only target-side input is the frozen
   target-camera metadata needed to render against the saved dense-render
