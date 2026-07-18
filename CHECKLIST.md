@@ -109,7 +109,14 @@ diagnostics, and repeat the clean-room checks on the final DOI-bound bundles.
 - [x] Add probe-only SAES materialization, FSDR local-validity event evidence,
   and matching RTL control tests.
 - [x] Complete a strict v2.1 Functional quick run after the mechanism update.
-- [ ] Complete official Re10K/ACID train downloads and compile 32+32 scenes.
+- [ ] Complete the official Re10K training download and compile 32 scenes.
+- [x] Verify the official ACID training archive and prepare its fixed
+  evaluation-disjoint 32-scene calibration tree. Archive SHA256:
+  ddecee0c6cbb3a5e4fa5cd0182b6b7e31dc7dc23e586437ad8489199f16a18d0;
+  prepared-tree SHA256:
+  9ba8600d156e90a17c98f6599bedb4a0c17ec370835978f5cc02961c83e6726d.
+  This is author-side Functional calibration material only, not a
+  Results-Reproduced configuration freeze.
 - [x] Keep the 554 GB/174 GB full-training archives author-side only; reviewer
   commands are regression-tested not to reference the calibration path.
 - [ ] Run all registered calibration candidates and freeze one global tuple.
@@ -747,6 +754,23 @@ Verified on 2026-07-16 and 2026-07-17:
   `e1e21de6f3d5f5509e676415ecf7314743af1b3aae453d0f17036cc973c858b1`:
   PSNR loss `9.1464` dB, SSIM loss `0.12203`, and LPIPS increase `0.18550`.
   This candidate fails and must not be retried.
+- [x] Implement the separate adapter-offset SH/opacity transport diagnostic
+  without changing its geometry, covariance, router, thresholds, L1 primary-K
+  reference, or 2K anchor layout. Synthetic constant/range/poison/PSD and
+  analytic-accounting tests pass.
+- [x] Pass the fixed target-free attribute-transport audit in
+  transplat_sample0_l1_primary_reference_attribute_transport_target_free_attribute_audit_v2/
+  (SHA256 d4ed058d8227be3e371919d7edc32585eaa11b5472084e423041e9d5db7fc4bc):
+  26,496 skipped descriptors, zero target RGB and skipped-S3 reads, identical
+  poison events, nonzero SH/opacity updates, and a charged 175,488-pair
+  analytic attribute-reconstruction ledger. This is not a quality or saving
+  claim.
+- [ ] Run exactly one pre-registered attribute-transport selected-output
+  quality gate in transplat_sample0_adapter_offset_attribute_transport_quality_v1/
+  through scripts/saes_adapter_offset_attribute_transport_quality_gate.py.
+  The fixed sample, seed, thresholds, views, limits, and target-RGB-after-mask
+  boundary may not be changed. Any failure remains non-claim evidence and
+  prohibits DL3DV expansion.
 - [x] Add a fail-closed DL3DV training-calibration archive path: enumerate the
   authenticated official tree, freeze an evaluation-disjoint 24+8 plan before
   download, verify selected ZIP byte counts and upstream object ids, record

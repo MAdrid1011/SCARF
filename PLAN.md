@@ -1469,6 +1469,47 @@
   thresholds, or expand DL3DV; a future branch requires an independently
   justified implementation hypothesis and then resumes from target-free tests.
 
+### 33.2 Adapter-Offset Attribute-Transport Diagnostic
+
+- Rationale: the adapter-offset path preserved the receiver-specific C2W-ray
+  geometry but constructed every skipped SH/opacity contribution by copying the
+  receiving anchor. Its range-constrained average therefore reduced to an
+  identity. conditional-adapter-offset-attribute-transport-diagnostic keeps
+  that geometry and covariance path unchanged, reconstructs each skipped SH
+  and opacity as the existing bilateral selected-anchor convex estimate, then
+  absorbs it with the existing receiver assignment. It adds no route level,
+  threshold, source tensor, target view, or target RGB access.
+- Synthetic gate: constant SH/opacity is preserved; nonuniform selected anchors
+  produce the exact two-stage assignment update within the selected-source
+  range; skipped-descriptor poison remains observationally irrelevant; L0/L1/
+  Full routing, the primary-K L1 depth reference, 2K L1 anchors, adapter
+  geometry, PSD covariances, and S2/S3 path counts are unchanged. The analytic
+  ledger now charges the new selected-anchor SH/opacity reduction and its
+  conservative FP16 reads rather than treating it as free.
+- Target-free result: preserve
+  transplat_sample0_l1_primary_reference_attribute_transport_target_free_attribute_audit_v2/results.json
+  (SHA256 d4ed058d8227be3e371919d7edc32585eaa11b5472084e423041e9d5db7fc4bc,
+  source 7c2d180). The fixed sample has 26,496 skipped descriptors, L0/L1/Full
+  760/2172/5260, no geometry fallback, no skipped-S3 read, identical poisoned
+  events and retained attributes, PSD output covariances, and nonzero retained
+  SH/opacity updates of 0.259789/0.0614094 maximum absolute value. The trace
+  records 175,488 attribute reconstruction pairs, 350,976 analytic reduction
+  cycles, and 26,674,176 charged FP16 attribute bytes. It reads no target RGB,
+  renderer, decoder, quality metric, or hardware cycle simulator and remains
+  non-claim evidence.
+- Pre-registered quality gate: run exactly once in
+  outputs/ae_dl3dv_repair_diagnostics/
+  transplat_sample0_adapter_offset_attribute_transport_quality_v1/ with
+  scripts/saes_adapter_offset_attribute_transport_quality_gate.py. The
+  entrypoint fixes TranSplat/DL3DV sample 0, seed 0, two context/four target
+  views, tau_f=0.20, tau_d=0.10, primary-K L1 reference, 2K anchors, the
+  unchanged 0.15/0.005/0.005 limits, and this materialization; it exposes no
+  materialization, threshold, scene, or seed override. Target RGB may be read
+  only after the selected-output mask and target-free semantic checks commit.
+  A failure is preserved and prohibits an 8/32/140-scene expansion; a pass
+  still cannot claim S2/S3 savings until the separate real-execution contract
+  passes.
+
 ## 34. DL3DV Training-Calibration Preparation
 
 - The author-side training calibration path now has an executable, fail-closed

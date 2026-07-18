@@ -37,18 +37,22 @@
   but was stopped for sustained swap thrashing; it is
   `NOT_CLAIMED_RESOURCE_LIMIT` and cannot be used before complete reports
   exist. The standard flow remains gated on stable 48 GiB `MemAvailable`.
-- Next action: continue the official train-split download, compile the
-  evaluation-disjoint calibration protocol, freeze one global configuration,
-  and rerun mechanism gates before any full matrix. Do not publish or mark
-  HotCRP ready until mandatory key results pass.
+- Next action: run the one pre-registered adapter-offset attribute-transport
+  quality gate, preserve its result, then either repair from target-free
+  evidence or resume the evaluation-disjoint calibration route. Do not publish
+  or mark HotCRP ready until mandatory key results pass.
 - Active closure contract: retain the paper's routing mechanisms while adding
   only disclosed engineering details. A disjoint 32-Re10K/32-ACID training
   calibration chooses one global FSDR validity tolerance and SAES bandwidth
   tuple; evaluation targets and manuscript results are inaccessible. A compiled
   target-free sidecar carries only context RGB plus camera geometry, and frozen
   reviewer/full profiles remain blocked on the calibration and pilot gates.
-- Calibration preparation: the compiler now consumes only the official prepared
-  training subsets and verifies the full-index hash, fixed SHA256-ranked 32
-  scenes, selected-index hash, evaluation-disjoint provenance, and target-free
-  sidecar tree before any trace is run. The official archive download is still
-  incomplete.
+- Calibration preparation: ACID is complete author-side material:
+  /home/madrid/Downloads/acid.zip is 173,691,377,409 bytes with SHA256
+  ddecee0c6cbb3a5e4fa5cd0182b6b7e31dc7dc23e586437ad8489199f16a18d0;
+  its fixed 32-scene prepared tree hashes to
+  9ba8600d156e90a17c98f6599bedb4a0c17ec370835978f5cc02961c83e6726d
+  and is disjoint from the ACID evaluation index. Re10K and official
+  evaluation-disjoint DL3DV training archives remain incomplete or upstream
+  authorization-blocked, so no global Results-Reproduced configuration is
+  frozen.

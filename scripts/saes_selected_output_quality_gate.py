@@ -46,6 +46,19 @@ DEPTH_ROUTING_SEMANTICS = "metric-depth-standard-deviation"
 # This entrypoint is deliberately bound to the single post-audit diagnostic
 # registered in PLAN.md. It must not become a free-form quality retry surface.
 MATERIALIZATION = "conditional-adapter-offset-transport-diagnostic"
+ATTRIBUTE_TRANSPORT_MATERIALIZATION = (
+    "conditional-adapter-offset-attribute-transport-diagnostic"
+)
+QUALITY_PILOT_KIND = "saes_selected_output_quality_pilot"
+ATTRIBUTE_TRANSPORT_QUALITY_PILOT_KIND = (
+    "saes_adapter_offset_attribute_transport_selected_output_quality_pilot"
+)
+FIXED_QUALITY_PILOT_MATERIALIZATIONS = frozenset(
+    (
+        MATERIALIZATION,
+        ATTRIBUTE_TRANSPORT_MATERIALIZATION,
+    )
+)
 SEMANTIC_EQ_ATOL = 1.0e-5
 SEMANTIC_EQ_RTOL = 1.0e-5
 
@@ -228,6 +241,7 @@ def _apply_fixed_saes(
     height: int,
     width: int,
     views: int,
+    materialization: str,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     modified, stats, _ = apply_progressive_saes(
         gaussians,
@@ -239,7 +253,7 @@ def _apply_fixed_saes(
         features=features,
         depths=depths,
         view_count=views,
-        materialization=MATERIALIZATION,
+        materialization=materialization,
         decision_semantics=DECISION_SEMANTICS,
         depth_routing_semantics=DEPTH_ROUTING_SEMANTICS,
         context_extrinsics=context["extrinsics"],
@@ -248,12 +262,21 @@ def _apply_fixed_saes(
     return modified, stats
 
 
-def collect_quality_pilot(*, device: torch.device) -> dict[str, Any]:
+def collect_quality_pilot(
+    *,
+    device: torch.device,
+    materialization: str = MATERIALIZATION,
+    pilot_kind: str = QUALITY_PILOT_KIND,
+) -> dict[str, Any]:
     """Execute the pre-registered sample-0 selected-output quality pilot."""
     from scripts.ae_config import resolve_claim_selection, resolve_experiment
     from scripts.demo import load_model_and_data
     from scripts.result_record import cached_sha256_file, source_identity
 
+    if materialization not in FIXED_QUALITY_PILOT_MATERIALIZATIONS:
+        raise ValueError("quality pilot has an unsupported fixed materialization")
+    if not isinstance(pilot_kind, str) or not pilot_kind:
+        raise ValueError("quality pilot has an invalid kind")
     experiment = resolve_experiment("transplat", "dl3dv", ROOT)
     selection = resolve_claim_selection("transplat", "dl3dv", ROOT)
     model, batch, _cfg, loaded_device = load_model_and_data(
@@ -303,6 +326,7 @@ def collect_quality_pilot(*, device: torch.device) -> dict[str, Any]:
             height=height,
             width=width,
             views=views,
+            materialization=materialization,
         )
         provisional_gaussians, provisional_head_events = _sparse_encoder_pass(
             model, context, schedule.selection_mask
@@ -315,6 +339,7 @@ def collect_quality_pilot(*, device: torch.device) -> dict[str, Any]:
             height=height,
             width=width,
             views=views,
+            materialization=materialization,
         )
         final_selection = retained_mask_from_saes_modified(
             provisional_modified, views=views, height=height, width=width
@@ -330,6 +355,7 @@ def collect_quality_pilot(*, device: torch.device) -> dict[str, Any]:
             height=height,
             width=width,
             views=views,
+            materialization=materialization,
         )
     if not torch.equal(provisional_modified, final_modified):
         raise RuntimeError("guard-resolved SAES mask changed between selected-output passes")
@@ -377,7 +403,7 @@ def collect_quality_pilot(*, device: torch.device) -> dict[str, Any]:
     ]
     return {
         "schema_version": "1.0",
-        "kind": "saes_selected_output_quality_pilot",
+        "kind": pilot_kind,
         "paper_result_eligible": False,
         "model": "transplat",
         "dataset": "dl3dv",
@@ -407,7 +433,7 @@ def collect_quality_pilot(*, device: torch.device) -> dict[str, Any]:
             "depth_threshold": 0.1,
             "decision_semantics": DECISION_SEMANTICS,
             "depth_routing_semantics": DEPTH_ROUTING_SEMANTICS,
-            "materialization": MATERIALIZATION,
+            "materialization": materialization,
             "schedule": schedule.events,
             "provisional_mask_sha256": _sha256_mask(schedule.selection_mask),
             "final_mask_sha256": _sha256_mask(final_selection),
@@ -457,35 +483,53 @@ def collect_quality_pilot(*, device: torch.device) -> dict[str, Any]:
     }
 
 
-def main() -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    materialization: str = MATERIALIZATION,
+    pilot_kind: str = QUALITY_PILOT_KIND,
+    command_path: Path | None = None,
+    fixed_seed: int | None = None,
+) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--seed", type=int, default=0)
-    args = parser.parse_args()
+    if fixed_seed is None:
+        parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args(argv)
     if args.output_dir.exists():
         parser.error("--output-dir must be a new directory")
     device = torch.device(args.device)
     if device.type != "cuda" or not torch.cuda.is_available():
         parser.error("this fixed quality pilot requires an available CUDA device")
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
+    seed = fixed_seed if fixed_seed is not None else args.seed
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     try:
-        record = collect_quality_pilot(device=device)
+        record = collect_quality_pilot(
+            device=device,
+            materialization=materialization,
+            pilot_kind=pilot_kind,
+        )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    script_path = (command_path or Path(__file__)).resolve()
+    try:
+        rendered_script_path = str(script_path.relative_to(ROOT))
+    except ValueError:
+        rendered_script_path = str(script_path)
     record["command"] = [
         "python",
-        str(Path(__file__).relative_to(ROOT)),
+        rendered_script_path,
         "--output-dir",
         str(args.output_dir),
         "--device",
         args.device,
         "--seed",
-        str(args.seed),
+        str(seed),
     ]
     args.output_dir.mkdir(parents=True, exist_ok=False)
     destination = args.output_dir / "results.json"
