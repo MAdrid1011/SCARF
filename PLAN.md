@@ -251,6 +251,16 @@
   classic model. CPU contract coverage and a fresh CUDA encoder-only MVSplat
   load passed; the previous partial ACID collection remains invalid and must
   be replaced by a new output directory.
+- MVSplat sample-0 quality-pilot contract: this is a development-only DL3DV
+  sample-0 run after the fresh ACID V15 `fe356...e5eb` and V16
+  `912c2...d036` freeze plus target-free audit `99cb...7894`. Parameterize
+  only the compact-packet pilot's classic model boundary, use the live
+  MVSplat decoder's `Gaussians` type, and retain the exact target-free audit
+  before native target loading. The unchanged acceptance gate is PSNR loss at
+  most `0.15 dB`, SSIM loss at most `0.005`, and LPIPS increase at most
+  `0.005`; any failure stops before MVSplat eight-scene, 140-scene, timing,
+  S2/S3, Figure 11, or Table 1 work. The output root is
+  `outputs/ae_dl3dv_repair_diagnostics/mvsplat_sample0_v16_native_dense_evidence_v1/quality`.
 
 ## 2. Baseline And Comparability
 

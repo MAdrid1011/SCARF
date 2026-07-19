@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -17,19 +19,30 @@ def _sha(character: str) -> str:
     return character * 64
 
 
-def _calibration(character: str, *, native_dense: bool = False) -> dict:
+def _calibration(
+    character: str,
+    *,
+    native_dense: bool = False,
+    model_name: str = "transplat",
+    classic_backend_identity: dict | None = None,
+) -> dict:
+    application = {
+        "model": model_name,
+        "dataset": "dl3dv",
+        "checkpoint_sha256": _sha("b"),
+    }
+    if classic_backend_identity is not None:
+        application["classic_backend_identity"] = dict(classic_backend_identity)
     record = {
         "sha256": _sha(character),
         "threshold_value": 0.25,
         "acid_binding": {"plan_sha256": _sha("a")},
-        "application": {
-            "model": "transplat",
-            "dataset": "dl3dv",
-            "checkpoint_sha256": _sha("b"),
-        },
+        "application": application,
     }
     if native_dense:
-        from saes.incremental_selected_output_execution import RAW_HEAD_EXECUTION_CONTRACT
+        from saes.incremental_selected_output_execution import (
+            RAW_HEAD_EXECUTION_CONTRACT,
+        )
 
         record["raw_head_execution_contract"] = RAW_HEAD_EXECUTION_CONTRACT
     return record
@@ -74,12 +87,29 @@ def _native_dense_execution(pilot, *, finalized: bool) -> dict:
     }
 
 
-def _audit_record(pilot, *, sample_index: int | None = None) -> tuple[dict, dict, dict, dict]:
+def _audit_record(
+    pilot,
+    *,
+    sample_index: int | None = None,
+    model_name: str | None = None,
+    classic_backend_identity: dict | None = None,
+) -> tuple[dict, dict, dict, dict]:
     if sample_index is None:
         sample_index = pilot.SAMPLE_INDEX
+    if model_name is None:
+        model_name = pilot.MODEL
     checkpoint_sha256 = _sha("b")
-    v15 = _calibration("c")
-    v16 = _calibration("d", native_dense=True)
+    v15 = _calibration(
+        "c",
+        model_name=model_name,
+        classic_backend_identity=classic_backend_identity,
+    )
+    v16 = _calibration(
+        "d",
+        native_dense=True,
+        model_name=model_name,
+        classic_backend_identity=classic_backend_identity,
+    )
     initial_native_dense_execution = _native_dense_execution(pilot, finalized=False)
     guarded_native_dense_execution = _native_dense_execution(pilot, finalized=True)
     route = {
@@ -92,7 +122,7 @@ def _audit_record(pilot, *, sample_index: int | None = None) -> tuple[dict, dict
         "kind": pilot.TARGET_FREE_AUDIT_KIND,
         "status": pilot.TARGET_FREE_AUDIT_STATUS,
         "paper_result_eligible": False,
-        "model": pilot.MODEL,
+        "model": model_name,
         "dataset": pilot.DATASET,
         "scene": "sample-zero",
         "checkpoint_sha256": checkpoint_sha256,
@@ -161,6 +191,12 @@ def _audit_record(pilot, *, sample_index: int | None = None) -> tuple[dict, dict
         },
         "route_binding": dict(route),
     }
+    if classic_backend_identity is not None:
+        record["execution"]["model"] = model_name
+        record["execution"]["classic_backend_identity"] = dict(classic_backend_identity)
+        record["execution_boundary"]["backend_coordinate_semantics"] = (
+            classic_backend_identity["coordinate_semantics"]
+        )
     return record, v15, v16, route
 
 
@@ -178,22 +214,85 @@ def _validate(
     route: dict,
     *,
     sample_index: int | None = None,
+    model_name: str | None = None,
+    classic_backend_identity: dict | None = None,
 ) -> dict:
     if sample_index is None:
         sample_index = pilot.SAMPLE_INDEX
+    kwargs = {
+        "scene": "sample-zero",
+        "context_indices": [0, 9],
+        "checkpoint_sha256": _sha("b"),
+        "v15_calibration": v15,
+        "v16_calibration": v16,
+        "sample_index": sample_index,
+        **route,
+    }
+    if model_name is not None:
+        kwargs["model_name"] = model_name
+    if classic_backend_identity is not None:
+        kwargs["classic_backend_identity"] = classic_backend_identity
     return pilot._validate_target_free_quality_audit(
         path,
-        scene="sample-zero",
-        context_indices=[0, 9],
-        checkpoint_sha256=_sha("b"),
-        v15_calibration=v15,
-        v16_calibration=v16,
-        sample_index=sample_index,
-        **route,
+        **kwargs,
     )
 
 
-def test_quality_gate_binds_the_target_free_audit_to_packet_and_calibrations(tmp_path: Path):
+def _native_decoder_modules(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pilot
+) -> tuple[object, type, SimpleNamespace, ModuleType, ModuleType]:
+    model_root = tmp_path / "mvsplat"
+    decoder_source = (
+        model_root / "src" / "model" / "decoder" / "decoder_splatting_cuda.py"
+    )
+    gaussians_source = model_root / "src" / "model" / "types.py"
+    decoder_source.parent.mkdir(parents=True, exist_ok=True)
+    gaussians_source.parent.mkdir(parents=True, exist_ok=True)
+    decoder_source.write_text("# fixture decoder\n", encoding="utf-8")
+    gaussians_source.write_text("# fixture Gaussians\n", encoding="utf-8")
+
+    gaussians_module = ModuleType("fixture_mvsplat.src.model.types")
+    gaussians_module.__file__ = str(gaussians_source)
+
+    @dataclass
+    class DecoderGaussians:
+        means: object
+        covariances: object
+        harmonics: object
+        opacities: object
+
+    DecoderGaussians.__module__ = gaussians_module.__name__
+    gaussians_module.Gaussians = DecoderGaussians
+
+    decoder_module = ModuleType(
+        "fixture_mvsplat.src.model.decoder.decoder_splatting_cuda"
+    )
+    decoder_module.__file__ = str(decoder_source)
+    decoder_module.Gaussians = DecoderGaussians
+
+    class Decoder:
+        def forward(self, *_args, **_kwargs):
+            raise AssertionError("fixture decoder should not render")
+
+    Decoder.__module__ = decoder_module.__name__
+    decoder_module.Decoder = Decoder
+    monkeypatch.setitem(sys.modules, gaussians_module.__name__, gaussians_module)
+    monkeypatch.setitem(sys.modules, decoder_module.__name__, decoder_module)
+    monkeypatch.setattr(pilot, "ROOT", tmp_path)
+
+    checkpoint = model_root / "checkpoints" / "re10k.ckpt"
+    return (
+        Decoder(),
+        DecoderGaussians,
+        SimpleNamespace(model="mvsplat", checkpoint=checkpoint),
+        decoder_module,
+        gaussians_module,
+    )
+
+
+def test_quality_gate_binds_the_target_free_audit_to_packet_and_calibrations(
+    tmp_path: Path,
+):
     from scripts import saes_paper_l0_l1_compact_packet_pilot as pilot
 
     record, v15, v16, route = _audit_record(pilot)
@@ -202,12 +301,117 @@ def test_quality_gate_binds_the_target_free_audit_to_packet_and_calibrations(tmp
 
     gate = _validate(path, pilot, v15, v16, route)
 
-    assert gate["record_sha256"] == json.loads(path.read_text(encoding="utf-8"))["sha256"]
+    assert (
+        gate["record_sha256"] == json.loads(path.read_text(encoding="utf-8"))["sha256"]
+    )
     assert gate["file_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
     assert gate["v15_calibration_sha256"] == v15["sha256"]
     assert gate["v16_calibration_sha256"] == v16["sha256"]
     assert gate["sample_index"] == pilot.SAMPLE_INDEX
     assert gate["packed_source_trace_sha256"] == route["packed_source_trace_sha256"]
+
+
+def test_decoder_gaussian_resolver_uses_the_active_mvsplat_decoder_module(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from scripts import saes_paper_l0_l1_compact_packet_pilot as pilot
+
+    decoder, gaussians_type, contract, _decoder_module, _gaussians_module = (
+        _native_decoder_modules(monkeypatch, tmp_path, pilot)
+    )
+
+    resolved_type, binding = pilot._resolve_decoder_gaussians_type(
+        decoder, backend_contract=contract
+    )
+
+    assert resolved_type is gaussians_type
+    assert binding["model"] == "mvsplat"
+    assert binding["decoder_module"]["path"] == (
+        "mvsplat/src/model/decoder/decoder_splatting_cuda.py"
+    )
+    assert binding["gaussians_module"]["path"] == "mvsplat/src/model/types.py"
+
+
+@pytest.mark.parametrize("foreign_module", ("decoder", "gaussians"))
+def test_decoder_gaussian_resolver_rejects_foreign_mvsplat_module_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, foreign_module: str
+):
+    from scripts import saes_paper_l0_l1_compact_packet_pilot as pilot
+
+    decoder, _gaussians_type, contract, decoder_module, gaussians_module = (
+        _native_decoder_modules(monkeypatch, tmp_path, pilot)
+    )
+    foreign_source = tmp_path / "foreign" / f"{foreign_module}.py"
+    foreign_source.parent.mkdir()
+    foreign_source.write_text("# foreign fixture\n", encoding="utf-8")
+    if foreign_module == "decoder":
+        decoder_module.__file__ = str(foreign_source)
+    else:
+        gaussians_module.__file__ = str(foreign_source)
+
+    with pytest.raises(RuntimeError, match="foreign source tree"):
+        pilot._resolve_decoder_gaussians_type(decoder, backend_contract=contract)
+
+
+def test_quality_gate_binds_mvsplat_audit_to_the_matching_backend_identity(
+    tmp_path: Path,
+):
+    from scripts import saes_paper_l0_l1_compact_packet_pilot as pilot
+
+    backend_identity = {
+        "schema_version": "classic-backend-frozen-identity-v1",
+        "model": "mvsplat",
+        "coordinate_semantics": "mvsplat-inline-pixel-center-plus-sigmoid-offset",
+        "source_files": {"raw_head": {"sha256": _sha("a")}},
+    }
+    record, v15, v16, route = _audit_record(
+        pilot,
+        model_name="mvsplat",
+        classic_backend_identity=backend_identity,
+    )
+    path = tmp_path / "mvsplat-target-free-audit.json"
+    _write_audit(path, record, pilot)
+
+    gate = _validate(
+        path,
+        pilot,
+        v15,
+        v16,
+        route,
+        model_name="mvsplat",
+        classic_backend_identity=backend_identity,
+    )
+
+    assert gate["model"] == "mvsplat"
+    with pytest.raises(ValueError, match="classic backend identity"):
+        _validate(path, pilot, v15, v16, route, model_name="mvsplat")
+    with pytest.raises(ValueError, match="classic backend identity"):
+        _validate(
+            path,
+            pilot,
+            v15,
+            v16,
+            route,
+            model_name="mvsplat",
+            classic_backend_identity={**backend_identity, "source_files": {}},
+        )
+    with pytest.raises(ValueError, match="identity"):
+        _validate(path, pilot, v15, v16, route)
+
+    record["execution_boundary"]["backend_coordinate_semantics"] = (
+        "transplat-inline-pixel-center-plus-sigmoid-offset"
+    )
+    _write_audit(path, record, pilot)
+    with pytest.raises(ValueError, match="rendering boundary"):
+        _validate(
+            path,
+            pilot,
+            v15,
+            v16,
+            route,
+            model_name="mvsplat",
+            classic_backend_identity=backend_identity,
+        )
 
 
 def test_quality_gate_requires_the_audited_nondefault_sample_index(tmp_path: Path):
@@ -218,9 +422,12 @@ def test_quality_gate_requires_the_audited_nondefault_sample_index(tmp_path: Pat
     path = tmp_path / "target-free-audit.json"
     _write_audit(path, record, pilot)
 
-    assert _validate(path, pilot, v15, v16, route, sample_index=sample_index)[
-        "sample_index"
-    ] == sample_index
+    assert (
+        _validate(path, pilot, v15, v16, route, sample_index=sample_index)[
+            "sample_index"
+        ]
+        == sample_index
+    )
     with pytest.raises(ValueError, match="input identity"):
         _validate(path, pilot, v15, v16, route, sample_index=sample_index + 1)
 
@@ -235,7 +442,10 @@ def test_quality_gate_requires_the_audited_nondefault_sample_index(tmp_path: Pat
             ),
             "route binding",
         ),
-        (lambda record: record.update({"target_rgb_accessed": True}), "target_rgb_accessed"),
+        (
+            lambda record: record.update({"target_rgb_accessed": True}),
+            "target_rgb_accessed",
+        ),
         (lambda record: record.update({"checkpoint_sha256": _sha("3")}), "checkpoint"),
         (
             lambda record: record["frozen_l1_15_mechanism"].update(
@@ -295,7 +505,9 @@ def test_quality_gate_rejects_legacy_audit_without_the_calibration_and_packet_bi
         _validate(path, pilot, v15, v16, route)
 
 
-def test_quality_gate_rejects_rehashed_route_or_threshold_identity_drift(tmp_path: Path):
+def test_quality_gate_rejects_rehashed_route_or_threshold_identity_drift(
+    tmp_path: Path,
+):
     from scripts import saes_paper_l0_l1_compact_packet_pilot as pilot
 
     record, v15, v16, route = _audit_record(pilot)
@@ -329,7 +541,9 @@ def test_quality_gate_requires_the_full_audited_context_input_identity():
     }
     audit = {"input_identity": identity}
 
-    assert pilot._require_exact_audited_context_input_identity(audit, identity) == identity
+    assert (
+        pilot._require_exact_audited_context_input_identity(audit, identity) == identity
+    )
 
     changed = {**identity, "sidecar": {"record_sha256": _sha("6")}}
     with pytest.raises(ValueError, match="input identity"):
@@ -358,11 +572,54 @@ def test_quality_gate_rejects_a_context_root_with_changed_identity(
     monkeypatch.setattr(
         context_only_audit_input,
         "validate_context_only_audit_input",
-        lambda _root: {**identity, "tree_sha256": _sha("6")},
+        lambda _root, *, model: (
+            {**identity, "tree_sha256": _sha("6")}
+            if model == pilot.MODEL
+            else pytest.fail("legacy context validator received the wrong model")
+        ),
     )
 
     with pytest.raises(ValueError, match="input identity"):
         pilot._validate_target_free_context_input(audit, tmp_path / "other-root")
+
+
+def test_quality_gate_context_validator_forwards_mvsplat_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from data import context_only_audit_input
+    from scripts import saes_paper_l0_l1_compact_packet_pilot as pilot
+
+    identity = {
+        "scene": "sample-zero",
+        "context_indices": [0, 9],
+        "tree_sha256": _sha("1"),
+        "manifest_sha256": _sha("2"),
+        "audit_input_sha256": _sha("3"),
+        "source_sample_index": 0,
+        "source_binding": {"canonical_index_sha256": _sha("4")},
+        "sidecar": {"record_sha256": _sha("5")},
+        "target_rgb_accessed": False,
+        "target_camera_metadata_accessed": False,
+    }
+    calls: list[tuple[Path, str]] = []
+
+    def validate(input_root: Path, *, model: str) -> dict:
+        calls.append((input_root, model))
+        return identity
+
+    monkeypatch.setattr(
+        context_only_audit_input, "validate_context_only_audit_input", validate
+    )
+
+    assert (
+        pilot._validate_target_free_context_input(
+            {"input_identity": identity},
+            tmp_path / "mvsplat-context",
+            model_name="mvsplat",
+        )
+        == identity
+    )
+    assert calls == [(tmp_path / "mvsplat-context", "mvsplat")]
 
 
 def test_native_target_loader_uses_the_audited_execution_index_after_gate():
@@ -453,7 +710,9 @@ def test_quality_cli_requires_disjoint_calibrations_and_target_free_audit(
     assert "--target-free-input-root" in stderr
 
 
-def test_quality_collector_rejects_a_negative_sample_index_before_loading(tmp_path: Path):
+def test_quality_collector_rejects_a_negative_sample_index_before_loading(
+    tmp_path: Path,
+):
     from scripts import saes_paper_l0_l1_compact_packet_pilot as pilot
 
     with pytest.raises(ValueError, match="sample_index"):

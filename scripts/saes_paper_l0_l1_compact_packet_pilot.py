@@ -38,6 +38,10 @@ from saes.evaluation_disjoint_l1_calibration import (
     load_frozen_v15_threshold,
     load_frozen_v16_threshold,
 )
+from saes.classic_backend import (
+    freeze_classic_backend_identity,
+    resolve_classic_backend_contract,
+)
 from saes.incremental_selected_output_execution import (
     RAW_HEAD_EXECUTION_CONTRACT,
     validate_native_dense_head_execution_evidence,
@@ -87,6 +91,13 @@ L1_ANCHOR_SEMANTICS = ADAPTIVE_L1_15_ANCHOR_SEMANTICS
 COMPACT_AGGREGATION = CONDITIONAL_DIRECT_SPATIAL_ATTRIBUTE_AGGREGATION
 TARGET_FREE_AUDIT_KIND = "saes_incremental_selected_output_packed_adapter_audit"
 TARGET_FREE_AUDIT_STATUS = "PASS"
+CLASSIC_MODELS = ("transplat", "mvsplat")
+
+
+def _model_name(value: Any) -> str:
+    if value not in CLASSIC_MODELS:
+        raise ValueError("compact packet pilot requires a supported classic model")
+    return str(value)
 
 
 def _require_nonnegative_sample_index(sample_index: Any) -> int:
@@ -145,6 +156,69 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _loaded_module_source_identity(
+    module_name: str, *, expected_root: Path, label: str
+) -> dict[str, str]:
+    """Bind a runtime module to the selected classic-model source tree."""
+
+    module = sys.modules.get(module_name)
+    source = getattr(module, "__file__", None) if module is not None else None
+    if not isinstance(source, str) or not source:
+        raise RuntimeError(f"compact packet pilot has no loaded {label} module source")
+    source_path = Path(source).resolve()
+    expected_root = Path(expected_root).resolve()
+    if expected_root not in source_path.parents or not source_path.is_file():
+        raise RuntimeError(
+            f"compact packet pilot loaded {label} from a foreign source tree"
+        )
+    return {
+        "module": module_name,
+        "path": source_path.relative_to(ROOT).as_posix(),
+        "sha256": _sha256_file(source_path),
+    }
+
+
+def _resolve_decoder_gaussians_type(
+    decoder: Any, *, backend_contract: Any
+) -> tuple[type[Any], dict[str, Any]]:
+    """Resolve the actual decoder's Gaussian container without using global ``src``."""
+
+    if not callable(getattr(decoder, "forward", None)):
+        raise TypeError("compact packet pilot requires a native decoder with forward")
+    decoder_type = type(decoder)
+    decoder_module_name = decoder_type.__module__
+    expected_root = Path(backend_contract.checkpoint).resolve().parent.parent
+    decoder_module = sys.modules.get(decoder_module_name)
+    gaussians_type = (
+        getattr(decoder_module, "Gaussians", None)
+        if decoder_module is not None
+        else None
+    )
+    if not isinstance(gaussians_type, type):
+        raise RuntimeError("compact packet pilot decoder module has no Gaussians type")
+    fields = getattr(gaussians_type, "__dataclass_fields__", None)
+    if not isinstance(fields, Mapping) or set(fields) != {
+        "means",
+        "covariances",
+        "harmonics",
+        "opacities",
+    }:
+        raise RuntimeError("compact packet pilot decoder Gaussians type changed")
+    return gaussians_type, {
+        "model": backend_contract.model,
+        "decoder_class": f"{decoder_type.__module__}.{decoder_type.__qualname__}",
+        "decoder_module": _loaded_module_source_identity(
+            decoder_module_name, expected_root=expected_root, label="decoder"
+        ),
+        "gaussians_class": (
+            f"{gaussians_type.__module__}.{gaussians_type.__qualname__}"
+        ),
+        "gaussians_module": _loaded_module_source_identity(
+            gaussians_type.__module__, expected_root=expected_root, label="Gaussians"
+        ),
+    }
+
+
 def _require_sha256(value: Any, *, label: str) -> str:
     if (
         not isinstance(value, str)
@@ -160,7 +234,9 @@ def _read_target_free_quality_audit(path: Path) -> tuple[dict[str, Any], str]:
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ValueError("target-free quality audit is unavailable or invalid") from error
+        raise ValueError(
+            "target-free quality audit is unavailable or invalid"
+        ) from error
     if not isinstance(record, dict):
         raise ValueError("target-free quality audit must be an object")
     recorded_sha256 = record.pop("sha256", None)
@@ -179,7 +255,10 @@ def _frozen_calibration_identity(
     _require_sha256(calibration["sha256"], label="frozen calibration SHA256")
     identity = {key: calibration[key] for key in sorted(required)}
     if require_native_dense_head_execution:
-        if calibration.get("raw_head_execution_contract") != RAW_HEAD_EXECUTION_CONTRACT:
+        if (
+            calibration.get("raw_head_execution_contract")
+            != RAW_HEAD_EXECUTION_CONTRACT
+        ):
             raise ValueError("V16 calibration native dense head contract changed")
         identity["raw_head_execution_contract"] = RAW_HEAD_EXECUTION_CONTRACT
     return identity
@@ -204,13 +283,14 @@ def _require_exact_audited_context_input_identity(
 
 
 def _validate_target_free_context_input(
-    audit: Mapping[str, Any], input_root: Path
+    audit: Mapping[str, Any], input_root: Path, *, model_name: str = MODEL
 ) -> dict[str, Any]:
     """Validate the context-only root before any native data loader can run."""
     from data.context_only_audit_input import validate_context_only_audit_input
 
+    model_name = _model_name(model_name)
     return _require_exact_audited_context_input_identity(
-        audit, validate_context_only_audit_input(input_root)
+        audit, validate_context_only_audit_input(input_root, model=model_name)
     )
 
 
@@ -226,15 +306,18 @@ def _validate_target_free_quality_audit(
     selected_output_mask_sha256: str,
     packed_source_trace_sha256: str,
     sample_index: int = SAMPLE_INDEX,
+    model_name: str = MODEL,
+    classic_backend_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Require a frozen target-free audit for the exact packet about to render."""
     sample_index = _require_nonnegative_sample_index(sample_index)
+    model_name = _model_name(model_name)
     audit, file_sha256 = _read_target_free_quality_audit(path)
     if (
         audit.get("kind") != TARGET_FREE_AUDIT_KIND
         or audit.get("status") != TARGET_FREE_AUDIT_STATUS
         or audit.get("paper_result_eligible") is not False
-        or audit.get("model") != MODEL
+        or audit.get("model") != model_name
         or audit.get("dataset") != DATASET
         or audit.get("scene") != scene
     ):
@@ -262,14 +345,31 @@ def _validate_target_free_quality_audit(
     if audit.get("checkpoint_sha256") != checkpoint_sha256:
         raise ValueError("target-free quality audit checkpoint changed")
     execution = audit.get("execution")
+    execution_model = execution.get("model") if isinstance(execution, Mapping) else None
     if (
         not isinstance(execution, Mapping)
         or execution.get("checkpoint_sha256") != checkpoint_sha256
         or execution.get("encoder_only") is not True
         or execution.get("decoder_constructed") is not False
+        or (model_name == "mvsplat" and execution_model != "mvsplat")
+        or (model_name == "transplat" and execution_model not in (None, "transplat"))
     ):
         raise ValueError("target-free quality audit execution identity changed")
+    if model_name == "mvsplat":
+        if not isinstance(classic_backend_identity, Mapping) or execution.get(
+            "classic_backend_identity"
+        ) != dict(classic_backend_identity):
+            raise ValueError(
+                "target-free quality audit classic backend identity changed"
+            )
+    elif classic_backend_identity is not None:
+        raise ValueError("TranSplat quality pilot must not carry a backend identity")
     boundary = audit.get("execution_boundary")
+    expected_coordinate_semantics = (
+        classic_backend_identity.get("coordinate_semantics")
+        if isinstance(classic_backend_identity, Mapping)
+        else None
+    )
     if (
         not isinstance(boundary, Mapping)
         or boundary.get("renderer_executed") is not False
@@ -278,6 +378,11 @@ def _validate_target_free_quality_audit(
         or boundary.get("frozen_l1_15_packed_guard_executed") is not True
         or boundary.get("frozen_calibrations_verified_before_encoder_execution")
         is not True
+        or (
+            model_name == "mvsplat"
+            and boundary.get("backend_coordinate_semantics")
+            != expected_coordinate_semantics
+        )
     ):
         raise ValueError("target-free quality audit crossed the rendering boundary")
     input_identity = audit.get("input_identity")
@@ -369,6 +474,7 @@ def _validate_target_free_quality_audit(
         "file_sha256": file_sha256,
         "record_sha256": audit["sha256"],
         "checkpoint_sha256": checkpoint_sha256,
+        "model": model_name,
         "sample_index": sample_index,
         "v15_calibration_sha256": expected_v15["sha256"],
         "v16_calibration_sha256": expected_v16["sha256"],
@@ -427,6 +533,7 @@ def _route_summary(capture: Mapping[str, Any]) -> dict[str, Any]:
     preflight = capture["compact_materialization_preflight"]
     if preflight is None:
         raise RuntimeError("compact packet pilot has no materialization preflight")
+
     def compact_events(events: Mapping[str, Any]) -> dict[str, Any]:
         return {
             key: value
@@ -439,7 +546,9 @@ def _route_summary(capture: Mapping[str, Any]) -> dict[str, Any]:
         "final_route": compact_events(route.events),
         "preflight": preflight.events,
         "final_output_descriptor_count": int(route.selected_output_mask.sum().item()),
-        "raw_head_request_descriptor_count": int(route.raw_head_request_mask.sum().item()),
+        "raw_head_request_descriptor_count": int(
+            route.raw_head_request_mask.sum().item()
+        ),
     }
 
 
@@ -574,7 +683,9 @@ def _posthoc_dense_domain_coverage_reference(
     provide a diagnostic reference and cannot influence routing, assignments,
     coverage closure, or the committed packet.
     """
-    from saes.projected_domain_coverage_audit import audit_projected_dense_domain_coverage
+    from saes.projected_domain_coverage_audit import (
+        audit_projected_dense_domain_coverage,
+    )
 
     height, width = image_shape
     dense_means = getattr(dense_gaussians, "means", None)
@@ -622,17 +733,27 @@ def _posthoc_dense_domain_coverage_reference(
         else:
             raw_anchors = record.get("retained_local_positions")
             if not isinstance(raw_anchors, list) or len(raw_anchors) != 15:
-                raise RuntimeError("compact packet pilot has no bound adaptive L1 anchors")
+                raise RuntimeError(
+                    "compact packet pilot has no bound adaptive L1 anchors"
+                )
             try:
-                anchors = tuple((int(position[0]), int(position[1])) for position in raw_anchors)
+                anchors = tuple(
+                    (int(position[0]), int(position[1])) for position in raw_anchors
+                )
             except (IndexError, TypeError, ValueError) as error:
-                raise RuntimeError("compact packet pilot has invalid adaptive L1 anchors") from error
+                raise RuntimeError(
+                    "compact packet pilot has invalid adaptive L1 anchors"
+                ) from error
             if (
                 len(set(anchors)) != 15
                 or anchors[:4] != primary
-                or any(not 0 <= row < 4 or not 0 <= column < 4 for row, column in anchors)
+                or any(
+                    not 0 <= row < 4 or not 0 <= column < 4 for row, column in anchors
+                )
             ):
-                raise RuntimeError("compact packet pilot adaptive L1 anchors violate their contract")
+                raise RuntimeError(
+                    "compact packet pilot adaptive L1 anchors violate their contract"
+                )
         anchor_slots = [
             view * height * width
             + (tile_y * 4 + local_y) * width
@@ -641,7 +762,10 @@ def _posthoc_dense_domain_coverage_reference(
             for local_y, local_x in anchors
         ]
         nonprobe_slots = [
-            view * height * width + (tile_y * 4 + local_y) * width + tile_x * 4 + local_x
+            view * height * width
+            + (tile_y * 4 + local_y) * width
+            + tile_x * 4
+            + local_x
             for local_y in range(4)
             for local_x in range(4)
             if (local_y, local_x) not in set(anchors)
@@ -679,10 +803,14 @@ def _posthoc_dense_domain_coverage_reference(
             )
             continue
         aggregates["valid_tile_count"] += 1
-        aggregates["active_dense_descriptor_count"] += audit.active_dense_descriptor_count
+        aggregates[
+            "active_dense_descriptor_count"
+        ] += audit.active_dense_descriptor_count
         aggregates["hole_count"] += int(audit.hole_count or 0)
         aggregates["dense_optical_mass"] += float(audit.dense_optical_mass or 0.0)
-        aggregates["contained_optical_mass"] += float(audit.contained_optical_mass or 0.0)
+        aggregates["contained_optical_mass"] += float(
+            audit.contained_optical_mass or 0.0
+        )
     mass = aggregates["dense_optical_mass"]
     active = aggregates["active_dense_descriptor_count"]
     aggregates["mass_weighted_recall"] = (
@@ -724,7 +852,9 @@ def _load_native_target_batch_after_packet_gate(
     )
     native_batch = data.batch
     if native_batch.get("scene") != [scene]:
-        raise RuntimeError("native target batch scene does not match the audited context")
+        raise RuntimeError(
+            "native target batch scene does not match the audited context"
+        )
     native_context = native_batch.pop("context", None)
     if not isinstance(native_context, Mapping) or not torch.is_tensor(
         native_context.get("index")
@@ -735,7 +865,9 @@ def _load_native_target_batch_after_packet_gate(
         for value in native_context["index"][0].detach().to(device="cpu").tolist()
     ]
     if native_context_indices != context_indices:
-        raise RuntimeError("native target batch context does not match the audited context")
+        raise RuntimeError(
+            "native target batch context does not match the audited context"
+        )
     target = native_batch.get("target")
     if not isinstance(target, dict):
         raise RuntimeError("compact packet pilot requires a native target mapping")
@@ -743,7 +875,9 @@ def _load_native_target_batch_after_packet_gate(
     if not torch.is_tensor(native_target_indices):
         raise RuntimeError("native target batch has no target index identity")
     if [int(value) for value in native_target_indices[0].tolist()] != target_indices:
-        raise RuntimeError("native target batch target indices do not match the canonical selection")
+        raise RuntimeError(
+            "native target batch target indices do not match the canonical selection"
+        )
     return {"scene": [scene], "target": target}
 
 
@@ -760,17 +894,41 @@ def collect_paper_compact_packet_pilot(
     native_sample_count: int | None = None,
     acid_plan_path: Path = DEFAULT_PLAN_PATH,
     acid_materialization_root: Path = DEFAULT_MATERIALIZATION_ROOT,
+    model_name: str = MODEL,
 ) -> dict[str, Any]:
     """Run one packet pilot, optionally stopping at the target-free domain audit."""
     if not isinstance(posthoc_domain_audit_only, bool):
         raise TypeError("posthoc domain audit mode must be boolean")
     sample_index = _require_nonnegative_sample_index(sample_index)
+    model_name = _model_name(model_name)
     from integration import create_model_loader, load_context_only_audit_data
     from scripts.ae_config import resolve_claim_selection, resolve_experiment
     from scripts.result_record import cached_sha256_file, source_identity
 
-    experiment = resolve_experiment(MODEL, DATASET, PACKET_ROOT)
-    selection = resolve_claim_selection(MODEL, DATASET, PACKET_ROOT)
+    backend_contract = resolve_classic_backend_contract(model_name, ROOT)
+    experiment = resolve_experiment(model_name, DATASET, PACKET_ROOT)
+    selection = resolve_claim_selection(model_name, DATASET, PACKET_ROOT)
+    if (
+        experiment.model != backend_contract.model
+        or experiment.dataset != backend_contract.dataset
+        or experiment.experiment != backend_contract.experiment
+        or experiment.checkpoint.resolve() != backend_contract.checkpoint
+    ):
+        raise RuntimeError("compact packet pilot classic backend identity changed")
+    classic_backend_identity = (
+        freeze_classic_backend_identity(backend_contract)
+        if model_name == "mvsplat"
+        else None
+    )
+    backend_binding = {
+        "model": backend_contract.model,
+        "raw_head_module": backend_contract.raw_head_module,
+        "gaussian_adapter_module": backend_contract.gaussian_adapter_module,
+        "decoder_module": backend_contract.decoder_module,
+        "coordinate_semantics": backend_contract.coordinate_semantics,
+    }
+    if classic_backend_identity is not None:
+        backend_binding["classic_backend_identity"] = classic_backend_identity
     execution_index = (
         sample_index
         if execution_index is None
@@ -787,12 +945,14 @@ def collect_paper_compact_packet_pilot(
     v15_calibration = load_frozen_v15_threshold(
         v15_calibration_record,
         checkpoint_path=experiment.checkpoint,
+        application_model=model_name,
         plan_path=acid_plan_path,
         materialization_root=acid_materialization_root,
     )
     v16_calibration = load_frozen_v16_threshold(
         v16_calibration_record,
         checkpoint_path=experiment.checkpoint,
+        application_model=model_name,
         v15_record_path=v15_calibration_record,
         plan_path=acid_plan_path,
         materialization_root=acid_materialization_root,
@@ -804,9 +964,9 @@ def collect_paper_compact_packet_pilot(
         target_free_audit_artifact
     )
     context_input_identity = _validate_target_free_context_input(
-        target_free_audit, target_free_input_root
+        target_free_audit, target_free_input_root, model_name=model_name
     )
-    loader = create_model_loader(MODEL)
+    loader = create_model_loader(model_name)
     bundle = loader.load_model(
         str(experiment.checkpoint),
         device=device,
@@ -818,10 +978,15 @@ def collect_paper_compact_packet_pilot(
     if bundle.decoder is None:
         raise RuntimeError("compact packet pilot requires the native packet decoder")
     context_data = load_context_only_audit_data(
-        loader, bundle, input_root=target_free_input_root
+        loader,
+        bundle,
+        input_root=target_free_input_root,
+        model_name=model_name,
     )
     if "target" in context_data.batch:
-        raise RuntimeError("compact packet pilot context route exposed a target mapping")
+        raise RuntimeError(
+            "compact packet pilot context route exposed a target mapping"
+        )
     loaded_context_identity = context_data.batch.get("calibration")
     if not isinstance(loaded_context_identity, Mapping) or any(
         loaded_context_identity.get(key) != value
@@ -834,7 +999,9 @@ def collect_paper_compact_packet_pilot(
     model = bundle.model
     loaded_device = bundle.device
     model.eval()
-    from src.model.types import Gaussians
+    decoder_gaussians_type, decoder_binding = _resolve_decoder_gaussians_type(
+        model.decoder, backend_contract=backend_contract
+    )
 
     context = {
         key: value.to(loaded_device) if torch.is_tensor(value) else value
@@ -844,8 +1011,7 @@ def collect_paper_compact_packet_pilot(
         raise RuntimeError("compact packet pilot requires batch size one")
     _, _views, _, height, width = context["image"].shape
     context_indices = [
-        int(value)
-        for value in context["index"][0].detach().to(device="cpu").tolist()
+        int(value) for value in context["index"][0].detach().to(device="cpu").tolist()
     ]
 
     with strict_fp32_convolution_execution() as numerical_execution:
@@ -868,13 +1034,20 @@ def collect_paper_compact_packet_pilot(
             plan=plan,
             compact_nonzero_materialization=True,
             compact_execution_policy=ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
-            adaptive_l1_maximum_leave_one_out_residual=v15_calibration["threshold_value"],
-            selected_anchor_v4_attribute_loo_maximum_risk=v16_calibration["threshold_value"],
+            adaptive_l1_maximum_leave_one_out_residual=v15_calibration[
+                "threshold_value"
+            ],
+            selected_anchor_v4_attribute_loo_maximum_risk=v16_calibration[
+                "threshold_value"
+            ],
             require_native_dense_head_execution=True,
+            model_name=model_name,
         )
         native_dense_head_execution = capture.get("native_dense_head_execution")
         if not isinstance(native_dense_head_execution, Mapping):
-            raise RuntimeError("quality capture did not retain native dense head evidence")
+            raise RuntimeError(
+                "quality capture did not retain native dense head evidence"
+            )
         initial_native_dense_execution = validate_native_dense_head_execution_evidence(
             native_dense_head_execution.get("initial"), expected_phase_count=3
         )
@@ -883,7 +1056,9 @@ def collect_paper_compact_packet_pilot(
         )
         preflight = capture["compact_materialization_preflight"]
         if preflight is None:
-            raise RuntimeError("compact packet pilot did not retain materialization evidence")
+            raise RuntimeError(
+                "compact packet pilot did not retain materialization evidence"
+            )
         final_packed = capture["final_packed"]
         if not isinstance(final_packed, PackedGaussianAttributes):
             raise RuntimeError("compact packet pilot did not produce packed attributes")
@@ -921,12 +1096,16 @@ def collect_paper_compact_packet_pilot(
                 label="compact packet source trace",
             ),
             sample_index=sample_index,
+            model_name=model_name,
+            classic_backend_identity=classic_backend_identity,
         )
         if (
             quality_gate["record_sha256"] != target_free_audit["sha256"]
             or quality_gate["file_sha256"] != target_free_audit_file_sha256
         ):
-            raise RuntimeError("target-free quality audit changed after input validation")
+            raise RuntimeError(
+                "target-free quality audit changed after input validation"
+            )
         quality_gate = {
             **quality_gate,
             "context_input_identity": context_input_identity,
@@ -945,14 +1124,16 @@ def collect_paper_compact_packet_pilot(
             or context_input_identity.get("source_sample_index")
             != source_selection["source_sample_index"]
         ):
-            raise RuntimeError("context-only input does not match the canonical source selection")
+            raise RuntimeError(
+                "context-only input does not match the canonical source selection"
+            )
         if compact_anchor_count == 0:
             return {
                 "schema_version": "1.0",
                 "kind": PILOT_KIND,
                 "status": "NO_COMPACT_TILES",
                 "paper_result_eligible": False,
-                "model": MODEL,
+                "model": model_name,
                 "dataset": DATASET,
                 "sample_index": sample_index,
                 "execution_index": execution_index,
@@ -971,6 +1152,8 @@ def collect_paper_compact_packet_pilot(
                     "timing_claim": False,
                 },
                 "paper_identity": paper_identity,
+                "backend_binding": backend_binding,
+                "decoder_binding": decoder_binding,
                 "adaptive_l1_calibration": v15_calibration,
                 "adaptive_l1_v4_attribute_loo_calibration": v16_calibration,
                 "raw_head_execution": {
@@ -989,6 +1172,10 @@ def collect_paper_compact_packet_pilot(
         if posthoc_domain_audit_only:
             with torch.no_grad():
                 baseline_gaussians = model.encoder(context, 0, deterministic=True)
+            if type(baseline_gaussians) is not decoder_gaussians_type:
+                raise RuntimeError(
+                    "native dense baseline Gaussians type does not match the active decoder"
+                )
             posthoc_dense_reference = _posthoc_dense_domain_coverage_reference(
                 dense_gaussians=baseline_gaussians,
                 final_packed=renderable,
@@ -1001,7 +1188,7 @@ def collect_paper_compact_packet_pilot(
                 "kind": PILOT_KIND,
                 "status": "POSTHOC_DOMAIN_AUDIT_COMPLETE",
                 "paper_result_eligible": False,
-                "model": MODEL,
+                "model": model_name,
                 "dataset": DATASET,
                 "sample_index": sample_index,
                 "execution_index": execution_index,
@@ -1022,6 +1209,8 @@ def collect_paper_compact_packet_pilot(
                     "timing_claim": False,
                 },
                 "paper_identity": paper_identity,
+                "backend_binding": backend_binding,
+                "decoder_binding": decoder_binding,
                 "adaptive_l1_calibration": v15_calibration,
                 "adaptive_l1_v4_attribute_loo_calibration": v16_calibration,
                 "raw_head_execution": {
@@ -1057,19 +1246,27 @@ def collect_paper_compact_packet_pilot(
             native_sample_count=native_sample_count,
         )
         target_mapping = target_batch.get("target")
-        if not isinstance(target_mapping, dict) or not torch.is_tensor(target_mapping.get("image")):
-            raise RuntimeError("compact packet pilot requires native target RGB for metrics")
+        if not isinstance(target_mapping, dict) or not torch.is_tensor(
+            target_mapping.get("image")
+        ):
+            raise RuntimeError(
+                "compact packet pilot requires native target RGB for metrics"
+            )
         target_cameras = _target_cameras(target_batch, loaded_device)
         _packet_gaussians, packet_color = render_packed_gaussians(
             model.decoder,
             renderable,
-            gaussians_type=Gaussians,
+            gaussians_type=decoder_gaussians_type,
             target=target_cameras,
             image_shape=(height, width),
             expected_descriptor_count=int(final_packed.dense_slots.numel()),
         )
         with torch.no_grad():
             baseline_gaussians = model.encoder(context, 0, deterministic=True)
+        if type(baseline_gaussians) is not decoder_gaussians_type:
+            raise RuntimeError(
+                "native dense baseline Gaussians type does not match the active decoder"
+            )
         posthoc_dense_reference = _posthoc_dense_domain_coverage_reference(
             dense_gaussians=baseline_gaussians,
             final_packed=renderable,
@@ -1095,7 +1292,7 @@ def collect_paper_compact_packet_pilot(
         "kind": PILOT_KIND,
         "status": "PASS" if verdict["pass"] else "QUALITY_FAILED",
         "paper_result_eligible": False,
-        "model": MODEL,
+        "model": model_name,
         "dataset": DATASET,
         "sample_index": sample_index,
         "execution_index": execution_index,
@@ -1123,6 +1320,8 @@ def collect_paper_compact_packet_pilot(
             "timing_claim": False,
         },
         "paper_identity": paper_identity,
+        "backend_binding": backend_binding,
+        "decoder_binding": decoder_binding,
         "adaptive_l1_calibration": v15_calibration,
         "adaptive_l1_v4_attribute_loo_calibration": v16_calibration,
         "raw_head_execution": {
@@ -1166,6 +1365,7 @@ def collect_paper_compact_packet_pilot(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--model", choices=CLASSIC_MODELS, default=MODEL)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--posthoc-domain-audit-only", action="store_true")
     parser.add_argument("--sample-index", type=int, default=SAMPLE_INDEX)
@@ -1221,15 +1421,18 @@ def main(argv: list[str] | None = None) -> int:
             native_sample_count=args.native_sample_count,
             acid_plan_path=args.acid_plan_path,
             acid_materialization_root=args.acid_materialization_root,
+            model_name=args.model,
         )
-        exit_code = 0 if record["status"] in {"PASS", "POSTHOC_DOMAIN_AUDIT_COMPLETE"} else 1
+        exit_code = (
+            0 if record["status"] in {"PASS", "POSTHOC_DOMAIN_AUDIT_COMPLETE"} else 1
+        )
     except Exception as exc:
         record = {
             "schema_version": "1.0",
             "kind": PILOT_KIND,
             "status": "FAILED",
             "paper_result_eligible": False,
-            "model": MODEL,
+            "model": args.model,
             "dataset": DATASET,
             "sample_index": args.sample_index,
             "execution_index": args.execution_index,

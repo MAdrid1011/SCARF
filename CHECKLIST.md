@@ -98,9 +98,20 @@
   frozen `classic_backend_identity`, revalidate it against live source, and
   reject a foreign or mixed cached `src` namespace. A fresh CUDA encoder-only
   loading smoke passed; this is infrastructure evidence only.
-- [ ] Run a new MVSplat ACID 24/8 evaluation-disjoint calibration in a new
-  output root, then require its sample-0 target-free audit, one quality gate,
-  and a fixed eight-scene gate before any 140-scene or Table 1 claim path.
+- [ ] Complete the MVSplat sample-0 quality gate, then require its fixed
+  eight-scene gate before any 140-scene or Table 1 claim path.
+- [x] Complete the new MVSplat ACID 24/8 V15/V16 freeze at
+  `mvsplat_acid_disjoint_l1_15_16_calibration_v16_native_dense_classic_backend_identity_v2`
+  (V15 `fe356...e5eb`, V16 `912c2...d036`) and independently reload both
+  records against the live MVSplat source. Both holdout records keep
+  `threshold_updated=false`.
+- [x] Run the MVSplat/DL3DV sample-0 target-free selected-output audit at
+  `mvsplat_sample0_v16_native_dense_evidence_v1/audit` (self-hash
+  `99cb...7894`, route `L0/L1/Full=0/211/7981`, no target access, no render,
+  no quality metric). It does not yet authorize a quality result.
+- [ ] Parameterize the compact-packet quality pilot for MVSplat's live decoder
+  type and source identity, pass its CPU smoke, then run exactly one sample-0
+  quality gate under the unchanged `0.15 dB / 0.005 / 0.005` tolerances.
 - [ ] Parameterize DepthSplat separately with its own native raw head, Adapter,
   decoder, ACID evaluation-disjoint calibration, sample-0 audit, quality gate,
   and fixed eight-scene gate. It must not reuse classic-model identity code.
