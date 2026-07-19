@@ -38,7 +38,10 @@ from saes.evaluation_disjoint_l1_calibration import (
     load_frozen_v15_threshold,
     load_frozen_v16_threshold,
 )
-from saes.incremental_selected_output_execution import RAW_HEAD_EXECUTION_CONTRACT
+from saes.incremental_selected_output_execution import (
+    RAW_HEAD_EXECUTION_CONTRACT,
+    validate_native_dense_head_execution_evidence,
+)
 from saes.guarded_selected_route import (
     ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
 )
@@ -167,12 +170,19 @@ def _read_target_free_quality_audit(path: Path) -> tuple[dict[str, Any], str]:
     return {**record, "sha256": recorded_sha256}, _sha256_file(path)
 
 
-def _frozen_calibration_identity(calibration: Mapping[str, Any]) -> dict[str, Any]:
+def _frozen_calibration_identity(
+    calibration: Mapping[str, Any], *, require_native_dense_head_execution: bool = False
+) -> dict[str, Any]:
     required = {"sha256", "threshold_value", "acid_binding", "application"}
     if not isinstance(calibration, Mapping) or not required.issubset(calibration):
         raise ValueError("frozen calibration is incomplete")
     _require_sha256(calibration["sha256"], label="frozen calibration SHA256")
-    return {key: calibration[key] for key in sorted(required)}
+    identity = {key: calibration[key] for key in sorted(required)}
+    if require_native_dense_head_execution:
+        if calibration.get("raw_head_execution_contract") != RAW_HEAD_EXECUTION_CONTRACT:
+            raise ValueError("V16 calibration native dense head contract changed")
+        identity["raw_head_execution_contract"] = RAW_HEAD_EXECUTION_CONTRACT
+    return identity
 
 
 def _target_free_audit_path(path: Path) -> str:
@@ -302,11 +312,46 @@ def _validate_target_free_quality_audit(
     ):
         raise ValueError("target-free quality audit route plan mechanism changed")
     expected_v15 = _frozen_calibration_identity(v15_calibration)
-    expected_v16 = _frozen_calibration_identity(v16_calibration)
+    expected_v16 = _frozen_calibration_identity(
+        v16_calibration, require_native_dense_head_execution=True
+    )
     if audit.get("v15_calibration") != expected_v15:
         raise ValueError("target-free quality audit V15 calibration changed")
     if audit.get("v16_calibration") != expected_v16:
         raise ValueError("target-free quality audit V16 calibration changed")
+    raw_head = audit.get("raw_head")
+    if not isinstance(raw_head, Mapping):
+        raise ValueError("target-free quality audit has no raw-head evidence")
+    native_dense_execution = raw_head.get("native_dense_head_execution")
+    if not isinstance(native_dense_execution, Mapping):
+        raise ValueError("target-free quality audit has no native dense head evidence")
+    initial_dense_execution = validate_native_dense_head_execution_evidence(
+        native_dense_execution.get("initial"), expected_phase_count=3
+    )
+    guarded_dense_execution = validate_native_dense_head_execution_evidence(
+        native_dense_execution.get("guarded")
+    )
+    if (
+        initial_dense_execution["raw_head_execution_contract"]
+        != expected_v16["raw_head_execution_contract"]
+        or guarded_dense_execution["raw_head_execution_contract"]
+        != expected_v16["raw_head_execution_contract"]
+    ):
+        raise ValueError("target-free quality audit native dense contract changed")
+    packed_adapter = audit.get("packed_adapter")
+    if not isinstance(packed_adapter, Mapping):
+        raise ValueError("target-free quality audit has no packed source trace")
+    final_source_trace = packed_adapter.get("final_packet_source_trace")
+    if (
+        not isinstance(final_source_trace, Mapping)
+        or final_source_trace.get("raw_head_execution_contract")
+        != expected_v16["raw_head_execution_contract"]
+        or validate_native_dense_head_execution_evidence(
+            final_source_trace.get("native_dense_head_execution")
+        )
+        != guarded_dense_execution
+    ):
+        raise ValueError("target-free quality audit packed native dense trace changed")
     route_binding = audit.get("route_binding")
     expected_route_binding = {
         "source_selection_mask_sha256": source_selection_mask_sha256,
@@ -825,6 +870,16 @@ def collect_paper_compact_packet_pilot(
             compact_execution_policy=ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
             adaptive_l1_maximum_leave_one_out_residual=v15_calibration["threshold_value"],
             selected_anchor_v4_attribute_loo_maximum_risk=v16_calibration["threshold_value"],
+            require_native_dense_head_execution=True,
+        )
+        native_dense_head_execution = capture.get("native_dense_head_execution")
+        if not isinstance(native_dense_head_execution, Mapping):
+            raise RuntimeError("quality capture did not retain native dense head evidence")
+        initial_native_dense_execution = validate_native_dense_head_execution_evidence(
+            native_dense_head_execution.get("initial"), expected_phase_count=3
+        )
+        guarded_native_dense_execution = validate_native_dense_head_execution_evidence(
+            native_dense_head_execution.get("guarded")
         )
         preflight = capture["compact_materialization_preflight"]
         if preflight is None:
@@ -832,6 +887,17 @@ def collect_paper_compact_packet_pilot(
         final_packed = capture["final_packed"]
         if not isinstance(final_packed, PackedGaussianAttributes):
             raise RuntimeError("compact packet pilot did not produce packed attributes")
+        final_source_trace = final_packed.source_trace
+        if (
+            not isinstance(final_source_trace, Mapping)
+            or final_source_trace.get("raw_head_execution_contract")
+            != RAW_HEAD_EXECUTION_CONTRACT
+            or validate_native_dense_head_execution_evidence(
+                final_source_trace.get("native_dense_head_execution")
+            )
+            != guarded_native_dense_execution
+        ):
+            raise RuntimeError("quality packet native dense head trace changed")
         compact_anchor_count = int(preflight.update_dense_slots.numel())
         route_summary = _route_summary(capture)
         route_diagnostics = _route_diagnostics(plan, capture)
@@ -907,6 +973,10 @@ def collect_paper_compact_packet_pilot(
                 "paper_identity": paper_identity,
                 "adaptive_l1_calibration": v15_calibration,
                 "adaptive_l1_v4_attribute_loo_calibration": v16_calibration,
+                "raw_head_execution": {
+                    "initial": initial_native_dense_execution,
+                    "guarded": guarded_native_dense_execution,
+                },
                 "target_free_quality_gate": quality_gate,
                 "route_plan": plan.events,
                 "compact_route": route_summary,
@@ -954,6 +1024,10 @@ def collect_paper_compact_packet_pilot(
                 "paper_identity": paper_identity,
                 "adaptive_l1_calibration": v15_calibration,
                 "adaptive_l1_v4_attribute_loo_calibration": v16_calibration,
+                "raw_head_execution": {
+                    "initial": initial_native_dense_execution,
+                    "guarded": guarded_native_dense_execution,
+                },
                 "target_free_quality_gate": quality_gate,
                 "route_plan": plan.events,
                 "compact_route": route_summary,
@@ -1051,6 +1125,10 @@ def collect_paper_compact_packet_pilot(
         "paper_identity": paper_identity,
         "adaptive_l1_calibration": v15_calibration,
         "adaptive_l1_v4_attribute_loo_calibration": v16_calibration,
+        "raw_head_execution": {
+            "initial": initial_native_dense_execution,
+            "guarded": guarded_native_dense_execution,
+        },
         "target_free_quality_gate": quality_gate,
         "route_plan": plan.events,
         "compact_route": route_summary,

@@ -13,9 +13,6 @@ from typing import Any, Mapping
 
 import torch
 
-from integration.acid_joint_context import AcidJointContext
-
-
 def _finite_positive_scale(value: torch.Tensor, *, label: str) -> torch.Tensor:
     if value.numel() != 1 or not bool(torch.isfinite(value).all()) or float(value) <= 0.0:
         raise ValueError(f"ACID joint {label} must be finite and positive")
@@ -44,7 +41,7 @@ def _clone_context_tensors(context: Mapping[str, torch.Tensor]) -> dict[str, tor
 
 
 def prepare_acid_joint_model_context(
-    source: AcidJointContext,
+    source: Any,
     *,
     dataset_cfg: Any,
     encoder_cfg: Any,
@@ -56,6 +53,11 @@ def prepare_acid_joint_model_context(
     added to the context mapping. The returned audit is logging provenance
     only; it is never supplied to the calibrator descriptor.
     """
+    # Tests and archive validation intentionally reload the context module.
+    # Resolve the class at the boundary so a valid freshly loaded record does
+    # not fail an otherwise strict type check against a stale module object.
+    from integration.acid_joint_context import AcidJointContext
+
     if not isinstance(source, AcidJointContext):
         raise TypeError("ACID joint source must be an AcidJointContext")
     context = _clone_context_tensors(source.context)

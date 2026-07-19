@@ -119,6 +119,8 @@ def test_dense_primary_closure_uses_native_first_kernel_and_selected_second_outp
     from saes.incremental_selected_output_execution import (
         RAW_HEAD_EXECUTION_CONTRACT,
         IncrementalSelectedOutputProducer,
+        native_dense_head_execution_evidence,
+        validate_native_dense_head_execution_evidence,
     )
 
     torch.manual_seed(75)
@@ -165,6 +167,27 @@ def test_dense_primary_closure_uses_native_first_kernel_and_selected_second_outp
     assert replay.events["second_conv_native_kernel_aligned"] is True
     assert replay.events["second_conv_positions_executed"] == 2 * 8 * 8
     assert replay.events["actual_head_macs"] == replay.events["dense_head_macs"]
+    assert replay.events["head_mac_delta"] == 0
+    for key in (
+        "first_conv_positions_executed",
+        "native_dense_first_conv_positions_executed",
+        "second_conv_positions_executed",
+        "native_dense_second_conv_positions_executed",
+    ):
+        assert sum(entry[key] for entry in replay.events["per_tile"]) == replay.events[key]
+    execution_events = {
+        **replay.events,
+        "head_forward_invocations": 1,
+        "head_execution_mode": "scoped_native_dense_head_selected_packet_no_s3_saving",
+    }
+    evidence = native_dense_head_execution_evidence(execution_events)
+    assert evidence["execution_finalized"] is True
+    assert validate_native_dense_head_execution_evidence(evidence)["phases"][0][
+        "first_conv_positions_executed"
+    ] == 2 * 8 * 8
+    invalid_events = {**execution_events, "head_mac_delta": 1}
+    with pytest.raises(ValueError, match="does not conserve dense work"):
+        native_dense_head_execution_evidence(invalid_events)
     assert torch.count_nonzero(
         replay.values.masked_select((~primary).unsqueeze(1).expand_as(replay.values))
     ) == 0

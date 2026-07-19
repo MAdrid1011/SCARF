@@ -45,6 +45,9 @@ from saes.evaluation_disjoint_l1_calibration import (
 from saes.guarded_selected_route import (
     ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_DEV_POLICY,
 )
+from saes.incremental_selected_output_execution import (
+    native_dense_head_execution_evidence,
+)
 from saes.probe_first_schedule import (
     ADAPTIVE_L1_15_ANCHOR_SEMANTICS,
     build_incremental_probe_first_plan,
@@ -236,6 +239,39 @@ def _observed_v16_risks(
     return values
 
 
+def _native_dense_v16_execution_evidence(
+    capture: Mapping[str, Any], *, plan: Any
+) -> dict[str, Any]:
+    """Bind ACID V16 risks to the actual native-dense raw-head capture."""
+    if not isinstance(capture, Mapping):
+        raise TypeError("ACID V16 capture must be a mapping")
+    initial_events = capture.get("initial_head_events")
+    final_events = capture.get("final_head_events")
+    initial = native_dense_head_execution_evidence(initial_events)
+    final = native_dense_head_execution_evidence(final_events)
+    if (
+        initial["execution_finalized"] is not False
+        or final["execution_finalized"] is not True
+    ):
+        raise RuntimeError("ACID V16 capture changed its initial/final head boundary")
+    expected_final = {**initial, "execution_finalized": True}
+    if final != expected_final:
+        raise RuntimeError("ACID V16 capture changed after the native dense initial route")
+    plan_events = getattr(plan, "events", None)
+    if not isinstance(plan_events, Mapping):
+        raise RuntimeError("ACID V16 capture has no route-plan events")
+    selection_digest = plan_events.get("selection_mask_sha256")
+    if (
+        not isinstance(selection_digest, str)
+        or initial_events.get("computed_mask_sha256") != selection_digest
+        or final_events.get("computed_mask_sha256") != selection_digest
+        or initial_events.get("full_extension_dispatched") is not False
+        or final_events.get("full_extension_dispatched") is not False
+    ):
+        raise RuntimeError("ACID V16 capture does not bind the native dense route plan")
+    return initial
+
+
 def _load_application_encoder(device: torch.device) -> tuple[Any, Any, Any, str]:
     """Load only the DL3DV application encoder, never the ACID checkpoint."""
 
@@ -376,13 +412,16 @@ def _collect_v16_split(
                     ),
                     adaptive_l1_maximum_leave_one_out_residual=float(v15_threshold),
                     collect_selected_anchor_v4_attribute_loo_risk=True,
+                    require_native_dense_head_execution=True,
                 )
+                execution = _native_dense_v16_execution_evidence(capture, plan=plan)
                 risks = _observed_v16_risks(capture)
             records.append(
                 {
                     "scene": str(raw.identity["scene"]),
                     "risks": risks,
                     "access": _context_access(),
+                    "native_dense_head_execution": execution,
                 }
             )
             _emit_progress(

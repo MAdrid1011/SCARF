@@ -12,10 +12,48 @@ import torch
 
 import saes.evaluation_disjoint_l1_calibration as records
 import scripts.saes_acid_disjoint_l1_calibration as collector
+from saes.incremental_selected_output_execution import (
+    NATIVE_DENSE_HEAD_EXECUTION_EVIDENCE_VERSION,
+    RAW_HEAD_EXECUTION_CONTRACT,
+)
 
 
 def _sha(character: str) -> str:
     return character * 64
+
+
+def _native_dense_execution(*, finalized: bool) -> dict:
+    dense_positions = 32
+    phases = []
+    for index, phase in enumerate(("primary", "secondary", "full")):
+        positions = dense_positions if index == 0 else 0
+        phases.append(
+            {
+                "phase": phase,
+                "mask_sha256": _sha("a" if index == 0 else "b" if index == 1 else "c"),
+                "tile_trace_sha256": _sha(
+                    "d" if index == 0 else "e" if index == 1 else "f"
+                ),
+                "first_conv_positions_executed": positions,
+                "native_dense_first_conv_positions_executed": positions,
+                "second_conv_positions_executed": positions,
+                "native_dense_second_conv_positions_executed": positions,
+            }
+        )
+    return {
+        "schema_version": NATIVE_DENSE_HEAD_EXECUTION_EVIDENCE_VERSION,
+        "raw_head_execution_contract": RAW_HEAD_EXECUTION_CONTRACT,
+        "head_weight_sha256": _sha("0"),
+        "head_input_sha256": _sha("1"),
+        "phase_trace_sha256": _sha("2"),
+        "tile_trace_sha256": _sha("3"),
+        "execution_finalized": finalized,
+        "dense_head_positions": dense_positions,
+        "dense_head_macs": 4096,
+        "actual_head_macs": 4096,
+        "head_mac_delta": 0,
+        "phases": phases,
+    }
 
 
 def _binding() -> dict:
@@ -120,6 +158,7 @@ def test_collector_uses_acid_context_and_reloads_v15_before_v16(
     def fake_plan(_model, context):
         marker = int(context["index"][0, 0].item())
         return SimpleNamespace(
+            events={"selection_mask_sha256": _sha("a")},
             tile_trace=[
                 {
                     "pre_guard_route": "L1",
@@ -133,6 +172,18 @@ def test_collector_uses_acid_context_and_reloads_v15_before_v16(
         thresholds.append(float(kwargs["adaptive_l1_maximum_leave_one_out_residual"]))
         marker = int(context["index"][0, 0].item())
         return {
+            "initial_head_events": {
+                "marker": marker,
+                "execution_finalized": False,
+                "computed_mask_sha256": _sha("a"),
+                "full_extension_dispatched": False,
+            },
+            "final_head_events": {
+                "marker": marker,
+                "execution_finalized": True,
+                "computed_mask_sha256": _sha("a"),
+                "full_extension_dispatched": False,
+            },
             "compact_materialization_preflight": SimpleNamespace(
                 events={
                     "target_rgb_accessed": False,
@@ -169,6 +220,12 @@ def test_collector_uses_acid_context_and_reloads_v15_before_v16(
     monkeypatch.setattr(collector, "prepare_acid_joint_model_context", fake_prepare)
     monkeypatch.setattr(collector, "_build_plan", fake_plan)
     monkeypatch.setattr(collector, "_capture_guarded_incremental_packed_adapter", fake_capture)
+    def fake_native_dense_evidence(events):
+        return _native_dense_execution(finalized=events["execution_finalized"])
+
+    monkeypatch.setattr(
+        collector, "native_dense_head_execution_evidence", fake_native_dense_evidence
+    )
     monkeypatch.setattr(
         collector, "strict_fp32_convolution_execution", lambda: contextlib.nullcontext()
     )

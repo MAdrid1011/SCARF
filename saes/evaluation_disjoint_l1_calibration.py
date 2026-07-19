@@ -8,7 +8,10 @@ import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from saes.incremental_selected_output_execution import RAW_HEAD_EXECUTION_CONTRACT
+from saes.incremental_selected_output_execution import (
+    RAW_HEAD_EXECUTION_CONTRACT,
+    validate_native_dense_head_execution_evidence,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -259,6 +262,7 @@ def _normalize_scene_records(
     binding: Mapping[str, Any],
     split: str,
     value_key: str,
+    require_native_dense_head_execution: bool = False,
 ) -> list[dict[str, Any]]:
     if not isinstance(records, Sequence) or isinstance(records, (str, bytes)):
         raise ValueError(f"{split} calibration records are invalid")
@@ -267,7 +271,10 @@ def _normalize_scene_records(
         raise ValueError(f"{split} calibration record count changed")
     normalized: list[dict[str, Any]] = []
     for position, (scene, record) in enumerate(zip(expected_scenes, records)):
-        if not isinstance(record, Mapping) or set(record) != {"scene", value_key, "access"}:
+        expected_fields = {"scene", value_key, "access"}
+        if require_native_dense_head_execution:
+            expected_fields.add("native_dense_head_execution")
+        if not isinstance(record, Mapping) or set(record) != expected_fields:
             raise ValueError(f"{split} calibration scene record has unexpected fields")
         if record.get("scene") != scene:
             raise ValueError(f"{split} calibration scene order changed at {position}")
@@ -287,13 +294,21 @@ def _normalize_scene_records(
             raise ValueError(f"{split} calibration values must be finite and nonnegative")
         if record.get("access") != _access_record():
             raise ValueError(f"{split} calibration crossed the context-only boundary")
-        normalized.append(
-            {
-                "scene": scene,
-                value_key: values,
-                "access": _access_record(),
-            }
-        )
+        normalized_record = {
+            "scene": scene,
+            value_key: values,
+            "access": _access_record(),
+        }
+        if require_native_dense_head_execution:
+            execution = validate_native_dense_head_execution_evidence(
+                record.get("native_dense_head_execution"), expected_phase_count=3
+            )
+            if execution["execution_finalized"] is not False:
+                raise ValueError(
+                    f"{split} calibration must retain the initial native dense head trace"
+                )
+            normalized_record["native_dense_head_execution"] = execution
+        normalized.append(normalized_record)
     return normalized
 
 
@@ -322,16 +337,22 @@ def _base_record(
     value_key: str,
     threshold: float,
     threshold_rule: str,
+    require_native_dense_head_execution: bool = False,
 ) -> dict[str, Any]:
     validated_binding = _validate_binding(binding)
     train = _normalize_scene_records(
-        train_records, binding=validated_binding, split=TRAIN_SPLIT, value_key=value_key
+        train_records,
+        binding=validated_binding,
+        split=TRAIN_SPLIT,
+        value_key=value_key,
+        require_native_dense_head_execution=require_native_dense_head_execution,
     )
     holdout = _normalize_scene_records(
         holdout_records,
         binding=validated_binding,
         split=HOLDOUT_SPLIT,
         value_key=value_key,
+        require_native_dense_head_execution=require_native_dense_head_execution,
     )
     train_values = [value for record in train for value in record[value_key]]
     return {
@@ -408,6 +429,7 @@ def build_v16_record(
         binding=validated_binding,
         split=TRAIN_SPLIT,
         value_key="risks",
+        require_native_dense_head_execution=True,
     )
     per_scene_q25 = [
         _finite_quantile(record["risks"], 0.25)
@@ -423,6 +445,7 @@ def build_v16_record(
         value_key="risks",
         threshold=threshold,
         threshold_rule="train-minimum-per-scene-q25",
+        require_native_dense_head_execution=True,
     )
     record["base_v15_sha256"] = _require_sha256(v15_record_sha256, "V15 record")
     record["raw_head_execution_contract"] = RAW_HEAD_EXECUTION_CONTRACT
@@ -498,12 +521,14 @@ def _validate_loaded_record(
         binding=live_binding,
         split=TRAIN_SPLIT,
         value_key=value_key,
+        require_native_dense_head_execution=(kind == V16_KIND),
     )
     holdout = _normalize_scene_records(
         record["holdout_scene_records"],
         binding=live_binding,
         split=HOLDOUT_SPLIT,
         value_key=value_key,
+        require_native_dense_head_execution=(kind == V16_KIND),
     )
     values = [value for scene in train for value in scene[value_key]]
     threshold = record.get("threshold")

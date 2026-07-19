@@ -10,6 +10,49 @@ import pytest
 torch = pytest.importorskip("torch")
 
 
+def _sha(character: str) -> str:
+    return character * 64
+
+
+def _native_dense_execution(*, finalized: bool) -> dict:
+    from saes.incremental_selected_output_execution import (
+        NATIVE_DENSE_HEAD_EXECUTION_EVIDENCE_VERSION,
+        RAW_HEAD_EXECUTION_CONTRACT,
+    )
+
+    dense_positions = 32
+    phases = []
+    for index, phase in enumerate(("primary", "secondary", "full")):
+        positions = dense_positions if index == 0 else 0
+        phases.append(
+            {
+                "phase": phase,
+                "mask_sha256": _sha("1" if index == 0 else "2" if index == 1 else "3"),
+                "tile_trace_sha256": _sha(
+                    "4" if index == 0 else "5" if index == 1 else "6"
+                ),
+                "first_conv_positions_executed": positions,
+                "native_dense_first_conv_positions_executed": positions,
+                "second_conv_positions_executed": positions,
+                "native_dense_second_conv_positions_executed": positions,
+            }
+        )
+    return {
+        "schema_version": NATIVE_DENSE_HEAD_EXECUTION_EVIDENCE_VERSION,
+        "raw_head_execution_contract": RAW_HEAD_EXECUTION_CONTRACT,
+        "head_weight_sha256": _sha("7"),
+        "head_input_sha256": _sha("8"),
+        "phase_trace_sha256": _sha("9"),
+        "tile_trace_sha256": _sha("0"),
+        "execution_finalized": finalized,
+        "dense_head_positions": dense_positions,
+        "dense_head_macs": 4096,
+        "actual_head_macs": 4096,
+        "head_mac_delta": 0,
+        "phases": phases,
+    }
+
+
 def _metric(psnr: float, ssim: float, lpips: float) -> dict[str, float]:
     return {"psnr_db": psnr, "ssim": ssim, "lpips": lpips}
 
@@ -94,6 +137,7 @@ def _install_fake_pipeline(monkeypatch: pytest.MonkeyPatch, module, tmp_path: Pa
         "_validate_prepared_contract",
         lambda _experiment: {"tree_sha256": module.EXPECTED_PREPARED_TREE_SHA256},
     )
+    monkeypatch.setattr(module, "_validate_frozen_gate_calibrations", lambda **_kwargs: None)
 
     def source_prepare(_raw_root: Path, *, output_dir: Path, sample_index: int):
         calls.append(("source", sample_index))
@@ -149,9 +193,17 @@ def _install_fake_pipeline(monkeypatch: pytest.MonkeyPatch, module, tmp_path: Pa
                 "target_index_accessed": False,
             },
             "sha256": "1" * 64,
+            "raw_head": {
+                "native_dense_head_execution": {
+                    "initial": _native_dense_execution(finalized=False),
+                    "guarded": _native_dense_execution(finalized=True),
+                }
+            },
         }
 
     def quality_collect(*, target_free_input_root: Path, sample_index: int, **_kwargs):
+        from saes.incremental_selected_output_execution import RAW_HEAD_EXECUTION_CONTRACT
+
         calls.append(("quality", sample_index))
         context = context_by_index[sample_index]
         baseline = _metric(35.0, 0.975, 0.03)
@@ -167,7 +219,10 @@ def _install_fake_pipeline(monkeypatch: pytest.MonkeyPatch, module, tmp_path: Pa
             "target_indices": [1, 3, 5, 7],
             "checkpoint_sha256": identity["checkpoint"],
             "adaptive_l1_calibration": {"sha256": identity["v15"]},
-            "adaptive_l1_v4_attribute_loo_calibration": {"sha256": identity["v16"]},
+            "adaptive_l1_v4_attribute_loo_calibration": {
+                "sha256": identity["v16"],
+                "raw_head_execution_contract": RAW_HEAD_EXECUTION_CONTRACT,
+            },
             "paper_identity": {"sha256": identity["mechanism"]},
             "target_free_quality_gate": {
                 "sample_index": sample_index,
@@ -180,6 +235,10 @@ def _install_fake_pipeline(monkeypatch: pytest.MonkeyPatch, module, tmp_path: Pa
                 "whole_pipeline_s2_s3_sparse_execution_verified": False,
                 "s2_s3_saving": 0.0,
                 "timing_claim": False,
+            },
+            "raw_head_execution": {
+                "initial": _native_dense_execution(finalized=False),
+                "guarded": _native_dense_execution(finalized=True),
             },
             "compact_route": {"final_route": {"route_counts": {"L0": 0, "L1": 2, "Full": 6}}},
             "quality": {

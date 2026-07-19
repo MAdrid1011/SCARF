@@ -314,6 +314,9 @@ def test_audit_loads_the_verified_disjoint_pair_against_the_active_re10k_checkpo
             checkpoint_sha256=checkpoint_sha256, acid_binding=acid_binding, threshold=0.2
         ),
         "sha256": "b" * 64,
+        "raw_head_execution_contract": (
+            "native-dense-head-closure-selected-packet-v2"
+        ),
     }
     calls = []
 
@@ -355,6 +358,9 @@ def test_audit_loads_the_verified_disjoint_pair_against_the_active_re10k_checkpo
             "threshold_value": 0.2,
             "acid_binding": acid_binding,
             "application": v16["application"],
+            "raw_head_execution_contract": (
+                "native-dense-head-closure-selected-packet-v2"
+            ),
         },
     }
 

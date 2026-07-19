@@ -9,10 +9,48 @@ from pathlib import Path
 import pytest
 
 import saes.evaluation_disjoint_l1_calibration as calibration
+from saes.incremental_selected_output_execution import (
+    NATIVE_DENSE_HEAD_EXECUTION_EVIDENCE_VERSION,
+    RAW_HEAD_EXECUTION_CONTRACT,
+)
 
 
 def _sha(character: str) -> str:
     return character * 64
+
+
+def _native_dense_head_execution() -> dict:
+    dense_positions = 32
+    phases = []
+    for index, phase in enumerate(("primary", "secondary", "full")):
+        positions = dense_positions if index == 0 else 0
+        phases.append(
+            {
+                "phase": phase,
+                "mask_sha256": _sha("a" if index == 0 else "b" if index == 1 else "c"),
+                "tile_trace_sha256": _sha(
+                    "d" if index == 0 else "e" if index == 1 else "f"
+                ),
+                "first_conv_positions_executed": positions,
+                "native_dense_first_conv_positions_executed": positions,
+                "second_conv_positions_executed": positions,
+                "native_dense_second_conv_positions_executed": positions,
+            }
+        )
+    return {
+        "schema_version": NATIVE_DENSE_HEAD_EXECUTION_EVIDENCE_VERSION,
+        "raw_head_execution_contract": RAW_HEAD_EXECUTION_CONTRACT,
+        "head_weight_sha256": _sha("0"),
+        "head_input_sha256": _sha("1"),
+        "phase_trace_sha256": _sha("2"),
+        "tile_trace_sha256": _sha("3"),
+        "execution_finalized": False,
+        "dense_head_positions": dense_positions,
+        "dense_head_macs": 4096,
+        "actual_head_macs": 4096,
+        "head_mac_delta": 0,
+        "phases": phases,
+    }
 
 
 def _binding() -> dict:
@@ -56,14 +94,17 @@ def _records(binding: dict, *, value_key: str, offset: float) -> tuple[list[dict
     access = binding["access"]
 
     def records(split: str, base: float) -> list[dict]:
-        return [
-            {
+        output = []
+        for index, scene in enumerate(binding["splits"][split]["scenes"]):
+            record = {
                 "scene": scene,
                 value_key: [base + index, base + index + 0.25, base + index + 0.5],
                 "access": access,
             }
-            for index, scene in enumerate(binding["splits"][split]["scenes"])
-        ]
+            if value_key == "risks":
+                record["native_dense_head_execution"] = _native_dense_head_execution()
+            output.append(record)
+        return output
 
     return (
         records(calibration.TRAIN_SPLIT, offset),

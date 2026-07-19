@@ -17,8 +17,8 @@ def _sha(character: str) -> str:
     return character * 64
 
 
-def _calibration(character: str) -> dict:
-    return {
+def _calibration(character: str, *, native_dense: bool = False) -> dict:
+    record = {
         "sha256": _sha(character),
         "threshold_value": 0.25,
         "acid_binding": {"plan_sha256": _sha("a")},
@@ -28,6 +28,50 @@ def _calibration(character: str) -> dict:
             "checkpoint_sha256": _sha("b"),
         },
     }
+    if native_dense:
+        from saes.incremental_selected_output_execution import RAW_HEAD_EXECUTION_CONTRACT
+
+        record["raw_head_execution_contract"] = RAW_HEAD_EXECUTION_CONTRACT
+    return record
+
+
+def _native_dense_execution(pilot, *, finalized: bool) -> dict:
+    from saes.incremental_selected_output_execution import (
+        NATIVE_DENSE_HEAD_EXECUTION_EVIDENCE_VERSION,
+        RAW_HEAD_EXECUTION_CONTRACT,
+    )
+
+    dense_positions = 32
+    phases = []
+    for index, phase in enumerate(("primary", "secondary", "full")):
+        positions = dense_positions if index == 0 else 0
+        phases.append(
+            {
+                "phase": phase,
+                "mask_sha256": _sha("1" if index == 0 else "2" if index == 1 else "3"),
+                "tile_trace_sha256": _sha(
+                    "4" if index == 0 else "5" if index == 1 else "6"
+                ),
+                "first_conv_positions_executed": positions,
+                "native_dense_first_conv_positions_executed": positions,
+                "second_conv_positions_executed": positions,
+                "native_dense_second_conv_positions_executed": positions,
+            }
+        )
+    return {
+        "schema_version": NATIVE_DENSE_HEAD_EXECUTION_EVIDENCE_VERSION,
+        "raw_head_execution_contract": RAW_HEAD_EXECUTION_CONTRACT,
+        "head_weight_sha256": _sha("7"),
+        "head_input_sha256": _sha("8"),
+        "phase_trace_sha256": _sha("9"),
+        "tile_trace_sha256": _sha("0"),
+        "execution_finalized": finalized,
+        "dense_head_positions": dense_positions,
+        "dense_head_macs": 4096,
+        "actual_head_macs": 4096,
+        "head_mac_delta": 0,
+        "phases": phases,
+    }
 
 
 def _audit_record(pilot, *, sample_index: int | None = None) -> tuple[dict, dict, dict, dict]:
@@ -35,7 +79,9 @@ def _audit_record(pilot, *, sample_index: int | None = None) -> tuple[dict, dict
         sample_index = pilot.SAMPLE_INDEX
     checkpoint_sha256 = _sha("b")
     v15 = _calibration("c")
-    v16 = _calibration("d")
+    v16 = _calibration("d", native_dense=True)
+    initial_native_dense_execution = _native_dense_execution(pilot, finalized=False)
+    guarded_native_dense_execution = _native_dense_execution(pilot, finalized=True)
     route = {
         "source_selection_mask_sha256": _sha("e"),
         "selected_output_mask_sha256": _sha("f"),
@@ -98,7 +144,21 @@ def _audit_record(pilot, *, sample_index: int | None = None) -> tuple[dict, dict
             "depth_threshold": pilot.DEPTH_THRESHOLD,
         },
         "v15_calibration": pilot._frozen_calibration_identity(v15),
-        "v16_calibration": pilot._frozen_calibration_identity(v16),
+        "v16_calibration": pilot._frozen_calibration_identity(
+            v16, require_native_dense_head_execution=True
+        ),
+        "raw_head": {
+            "native_dense_head_execution": {
+                "initial": initial_native_dense_execution,
+                "guarded": guarded_native_dense_execution,
+            }
+        },
+        "packed_adapter": {
+            "final_packet_source_trace": {
+                "raw_head_execution_contract": v16["raw_head_execution_contract"],
+                "native_dense_head_execution": guarded_native_dense_execution,
+            }
+        },
         "route_binding": dict(route),
     }
     return record, v15, v16, route

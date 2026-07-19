@@ -21,7 +21,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from saes.incremental_selected_output_execution import (  # noqa: E402
+    RAW_HEAD_EXECUTION_CONTRACT,
     incremental_selected_output_head_execution,
+    native_dense_head_execution_evidence,
+    validate_native_dense_head_execution_evidence,
 )
 from saes.guarded_selected_route import (  # noqa: E402
     ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
@@ -377,6 +380,51 @@ def _validate_appended_full_extension_binding(
         raise ValueError("Full extension binding cannot claim native Full identity")
 
 
+def _require_native_dense_head_capture_binding(
+    plan_events: Mapping[str, Any],
+    initial_head_events: Mapping[str, Any],
+    final_head_events: Mapping[str, Any],
+    *,
+    extension_event: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Bind one packet capture to the native-dense raw-head execution path."""
+    initial = native_dense_head_execution_evidence(initial_head_events)
+    final = native_dense_head_execution_evidence(final_head_events)
+    if (
+        initial["execution_finalized"] is not False
+        or final["execution_finalized"] is not True
+        or initial_head_events.get("computed_mask_sha256")
+        != plan_events.get("selection_mask_sha256")
+        or initial_head_events.get("phases") != final_head_events.get("phases")[:3]
+    ):
+        raise ValueError("native dense head capture changed its initial route")
+    for key in (
+        "raw_head_execution_contract",
+        "head_weight_sha256",
+        "head_input_sha256",
+        "dense_head_positions",
+        "dense_head_macs",
+        "actual_head_macs",
+        "head_mac_delta",
+    ):
+        if initial.get(key) != final.get(key):
+            raise ValueError(f"native dense head capture changed {key}")
+    if extension_event is None:
+        if (
+            final != {**initial, "execution_finalized": True}
+            or final_head_events.get("computed_mask_sha256")
+            != initial_head_events.get("computed_mask_sha256")
+            or final_head_events.get("full_extension_dispatched") is not False
+        ):
+            raise ValueError("native dense head capture changed without a Full extension")
+    elif (
+        len(final["phases"]) != 4
+        or final_head_events.get("full_extension_dispatched") is not True
+    ):
+        raise ValueError("native dense head capture has an invalid Full extension")
+    return {"initial": initial, "guarded": final}
+
+
 def _build_sparse_packet(
     raw_head: torch.Tensor,
     selection_mask: torch.Tensor,
@@ -385,6 +433,7 @@ def _build_sparse_packet(
     head_events: Mapping[str, Any],
     plan_events: Mapping[str, Any],
     coordinates_source: str = "native_adapter_inputs",
+    native_dense_head_execution: Mapping[str, Any] | None = None,
 ) -> SparseRawGaussianPacket:
     """Bind selected raw descriptors and same-pass Adapter side inputs together."""
     positions, height, width = _selected_positions(selection_mask)
@@ -456,6 +505,13 @@ def _build_sparse_packet(
     route_selection_mask_sha256 = _require_source_trace_value(
         plan_events, "selection_mask_sha256", str
     )
+    dense_execution = None
+    if native_dense_head_execution is not None:
+        dense_execution = validate_native_dense_head_execution_evidence(
+            native_dense_head_execution
+        )
+        if native_dense_head_execution_evidence(head_events) != dense_execution:
+            raise ValueError("packet native dense head evidence changed")
 
     view = positions[:, 0].to(dtype=torch.int64)
     pixel = (positions[:, 1] * width + positions[:, 2]).to(dtype=torch.int64)
@@ -486,6 +542,11 @@ def _build_sparse_packet(
         "route_full_mask_sha256": route_full_mask_sha256,
         "route_selection_mask_sha256": route_selection_mask_sha256,
     }
+    if dense_execution is not None:
+        source_trace["raw_head_execution_contract"] = dense_execution[
+            "raw_head_execution_contract"
+        ]
+        source_trace["native_dense_head_execution"] = dense_execution
     return SparseRawGaussianPacket(
         descriptor_keys=descriptor_keys,
         raw_descriptors=raw_descriptors,
@@ -635,7 +696,7 @@ def _frozen_calibration_identity(
         )
     ):
         raise RuntimeError(f"{label} calibration is not target-free")
-    return {
+    identity = {
         "sha256": _require_sha256(record.get("sha256"), name=f"{label} calibration"),
         "threshold_value": _require_finite_nonnegative(
             record.get("threshold_value"), name=f"{label} calibration threshold"
@@ -643,6 +704,11 @@ def _frozen_calibration_identity(
         "acid_binding": dict(acid_binding),
         "application": dict(application),
     }
+    if label == "V16":
+        if record.get("raw_head_execution_contract") != RAW_HEAD_EXECUTION_CONTRACT:
+            raise RuntimeError("V16 calibration native dense head contract changed")
+        identity["raw_head_execution_contract"] = RAW_HEAD_EXECUTION_CONTRACT
+    return identity
 
 
 def _load_evaluation_disjoint_l1_calibrations(
@@ -1416,6 +1482,7 @@ def _capture_guarded_incremental_packed_adapter(
     adaptive_l1_maximum_leave_one_out_residual: float | None = None,
     selected_anchor_v4_attribute_loo_maximum_risk: float | None = None,
     collect_selected_anchor_v4_attribute_loo_risk: bool = False,
+    require_native_dense_head_execution: bool = False,
 ) -> dict[str, Any]:
     """Run guard resolution and one optional Full extension in one encoder call.
 
@@ -1436,6 +1503,8 @@ def _capture_guarded_incremental_packed_adapter(
         raise ValueError("compact nonzero materialization must be boolean")
     if not isinstance(collect_selected_anchor_v4_attribute_loo_risk, bool):
         raise ValueError("compact V4 replay collection must be boolean")
+    if not isinstance(require_native_dense_head_execution, bool):
+        raise TypeError("native dense head requirement must be boolean")
     if (
         selected_anchor_v4_attribute_loo_maximum_risk is not None
         and compact_execution_policy
@@ -1496,6 +1565,11 @@ def _capture_guarded_incremental_packed_adapter(
         if {"features", "depths", "head_input"} - set(captured):
             raise RuntimeError("packed Adapter lacks same-invocation S1/S2/head capture")
         initial_events = trace.initial_events
+        initial_native_dense_execution = (
+            native_dense_head_execution_evidence(initial_events)
+            if require_native_dense_head_execution
+            else None
+        )
         initial_mask = trace.initial_selection_mask
         initial_inputs = _extract_selected_adapter_inputs(inputs, initial_mask)
         initial_packet = _build_sparse_packet(
@@ -1504,6 +1578,7 @@ def _capture_guarded_incremental_packed_adapter(
             initial_inputs,
             head_events=initial_events,
             plan_events=plan.events,
+            native_dense_head_execution=initial_native_dense_execution,
         )
         adapter_cameras = (
             inputs[0][:, :, 0, 0, 0],
@@ -1608,6 +1683,16 @@ def _capture_guarded_incremental_packed_adapter(
                 final_events,
                 guarded_route.events,
             )
+        native_dense_execution = (
+            _require_native_dense_head_capture_binding(
+                plan.events,
+                initial_events,
+                final_events,
+                extension_event=extension_event,
+            )
+            if require_native_dense_head_execution
+            else None
+        )
         final_output_mask = guarded_route.selected_output_mask.to(
             final_replay.values.device
         )
@@ -1647,6 +1732,9 @@ def _capture_guarded_incremental_packed_adapter(
                 "source_native_raw_offset_geometry_after_extension"
                 if final_coordinates_rebuilt_from_source_geometry_after_extension
                 else "source_native_raw_offset_geometry"
+            ),
+            native_dense_head_execution=(
+                None if native_dense_execution is None else native_dense_execution["guarded"]
             ),
         )
         final_capturing_adapter = _CapturingAdapter(original_adapter_forward)
@@ -1696,6 +1784,7 @@ def _capture_guarded_incremental_packed_adapter(
                 "compact_materialization_preflight": compact_preflight,
                 "compact_nonzero_materialization": compact_nonzero_materialization,
                 "extension_event": extension_event,
+                "native_dense_head_execution": native_dense_execution,
             }
         )
 
@@ -1745,6 +1834,7 @@ def _capture_guarded_incremental_packed_adapter(
         "compact_materialization_preflight",
         "compact_nonzero_materialization",
         "extension_event",
+        "native_dense_head_execution",
     }
     if trace is None or set(captured) != required:
         raise RuntimeError(
@@ -1870,9 +1960,21 @@ def collect_incremental_selected_output_audit(
             selected_anchor_v4_attribute_loo_maximum_risk=v16_calibration[
                 "threshold_value"
             ],
+            require_native_dense_head_execution=True,
         )
         initial_head_events = incremental_capture["initial_head_events"]
         final_head_events = incremental_capture["final_head_events"]
+        native_dense_head_execution = incremental_capture[
+            "native_dense_head_execution"
+        ]
+        if not isinstance(native_dense_head_execution, Mapping):
+            raise RuntimeError("V16 audit did not retain native dense head evidence")
+        initial_native_dense_execution = validate_native_dense_head_execution_evidence(
+            native_dense_head_execution.get("initial"), expected_phase_count=3
+        )
+        guarded_native_dense_execution = validate_native_dense_head_execution_evidence(
+            native_dense_head_execution.get("guarded")
+        )
         _validate_phase_plan_binding(plan.events, initial_head_events)
         _release_cuda_cache(device)
         dense_selected = _selected_head_descriptors(
@@ -1985,6 +2087,10 @@ def collect_incremental_selected_output_audit(
             "final_guard_request_raw_body_matches_native_adapter_input": final_body_binding,
             "initial_incremental_execution": initial_head_events,
             "guarded_incremental_execution": final_head_events,
+            "native_dense_head_execution": {
+                "initial": initial_native_dense_execution,
+                "guarded": guarded_native_dense_execution,
+            },
         },
         "packed_adapter": {
             "selected_descriptor_count": int(packet.descriptor_keys.shape[0]),
@@ -1992,6 +2098,8 @@ def collect_incremental_selected_output_audit(
             "packed_inputs_match_native_selected_inputs": adapter_inputs,
             "packed_attributes_vs_dense_reference": adapter_attributes,
             "scope": "initial_route_attributes_used_only_to_resolve_guard",
+            "initial_packet_source_trace": dict(packet.source_trace),
+            "final_packet_source_trace": dict(final_packed.source_trace),
         },
         "guarded_selected_route": guarded_route.events,
         "v15_calibration": v15_calibration,

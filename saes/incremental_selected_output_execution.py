@@ -14,7 +14,7 @@ import hashlib
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 import torch
 import torch.nn as nn
@@ -31,6 +31,9 @@ from saes.selected_output_replay import (
 
 INCREMENTAL_HEAD_EXECUTION_VERSION = "saes-incremental-head-execution-v1"
 RAW_HEAD_EXECUTION_CONTRACT = "native-dense-head-closure-selected-packet-v2"
+NATIVE_DENSE_HEAD_EXECUTION_EVIDENCE_VERSION = (
+    "saes-native-dense-head-execution-evidence-v1"
+)
 _PHASE_ORDER = {
     "primary": 0,
     "secondary": 1,
@@ -171,6 +174,315 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _require_event_count(value: Any, *, label: str, positive: bool = False) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"native dense head evidence has invalid {label}")
+    if positive and value == 0:
+        raise ValueError(f"native dense head evidence requires positive {label}")
+    return value
+
+
+def _require_event_sha256(value: Any, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"native dense head evidence has invalid {label}")
+    return value
+
+
+def native_dense_head_execution_evidence(events: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and summarize a fully native dense raw-head closure ledger.
+
+    This is deliberately stricter than a string version check.  V16 can use
+    this contract only when the source-weight first and second convolutions
+    both executed once at native dense shape, while the packet still exposes
+    only route-selected outputs.
+    """
+    if not isinstance(events, Mapping):
+        raise TypeError("native dense head evidence requires an execution mapping")
+    if events.get("raw_head_execution_contract") != RAW_HEAD_EXECUTION_CONTRACT:
+        raise ValueError("native dense head execution contract changed")
+    if events.get("head_forward_invocations") != 1:
+        raise ValueError("native dense head evidence requires one head invocation")
+    if events.get("head_execution_mode") != (
+        "scoped_native_dense_head_selected_packet_no_s3_saving"
+    ):
+        raise ValueError("native dense head execution mode changed")
+    if (
+        events.get("source_bound") is not True
+        or events.get("execution_scope") != "s3_raw_gaussian_head_only"
+        or events.get("claim_scope") != "raw_gaussian_head_only"
+        or events.get("whole_pipeline_s2_s3_sparse_execution_verified") is not False
+        or events.get("upstream_s2_saving") != 0.0
+        or events.get("full_execution_mode")
+        != "native_dense_head_closure_selected_packet_no_s3_saving"
+        or events.get("full_tile_native_identity_verified") is not False
+        or not isinstance(events.get("execution_finalized"), bool)
+    ):
+        raise ValueError("native dense head evidence cannot claim Full tile identity")
+
+    dense_positions = _require_event_count(
+        events.get("dense_head_positions"), label="dense head positions", positive=True
+    )
+    dense_macs = _require_event_count(
+        events.get("dense_head_macs"), label="dense head MACs", positive=True
+    )
+    if (
+        events.get("first_conv_positions_executed") != dense_positions
+        or events.get("native_dense_first_conv_positions_executed") != dense_positions
+        or events.get("second_conv_positions_executed") != dense_positions
+        or events.get("native_dense_second_conv_positions_executed") != dense_positions
+        or events.get("first_conv_execution_mode") != "native_dense_closure"
+        or events.get("second_conv_execution_mode") != "native_dense_closure"
+        or events.get("first_conv_native_kernel_aligned") is not True
+        or events.get("second_conv_native_kernel_aligned") is not True
+        or events.get("actual_head_macs") != dense_macs
+        or events.get("head_mac_delta") != 0
+    ):
+        raise ValueError("native dense head execution does not conserve dense work")
+
+    phases = events.get("phases")
+    if not isinstance(phases, list) or len(phases) not in (3, 4):
+        raise ValueError("native dense head evidence has an invalid phase trace")
+    expected_phase_names = ["primary", "secondary", "full"]
+    if len(phases) == 4:
+        expected_phase_names.append("full_extension")
+    if [phase.get("phase") if isinstance(phase, Mapping) else None for phase in phases] != (
+        expected_phase_names
+    ):
+        raise ValueError("native dense head evidence phase order changed")
+    if events.get("phase_trace_sha256") != _canonical_sha256(phases):
+        raise ValueError("native dense head evidence phase trace digest changed")
+
+    flattened_tiles: list[dict[str, Any]] = []
+    phase_evidence: list[dict[str, Any]] = []
+    for phase_index, phase in enumerate(phases):
+        assert isinstance(phase, Mapping)
+        phase_name = expected_phase_names[phase_index]
+        tile_trace = phase.get("per_tile")
+        if not isinstance(tile_trace, list):
+            raise ValueError(f"native dense head {phase_name} tile trace is invalid")
+        if phase.get("tile_trace_sha256") != _canonical_sha256(tile_trace):
+            raise ValueError(f"native dense head {phase_name} tile trace digest changed")
+        first_executed = _require_event_count(
+            phase.get("first_conv_positions_executed"),
+            label=f"{phase_name} first-convolution positions",
+        )
+        native_first = _require_event_count(
+            phase.get("native_dense_first_conv_positions_executed"),
+            label=f"{phase_name} native first-convolution positions",
+        )
+        second_executed = _require_event_count(
+            phase.get("second_conv_positions_executed"),
+            label=f"{phase_name} second-convolution positions",
+        )
+        native_second = _require_event_count(
+            phase.get("native_dense_second_conv_positions_executed"),
+            label=f"{phase_name} native second-convolution positions",
+        )
+        expected_positions = dense_positions if phase_name == "primary" else 0
+        expected_mode = (
+            "native_dense_closure"
+            if phase_name == "primary"
+            else "native_dense_closure_reuse"
+        )
+        if (
+            first_executed != expected_positions
+            or native_first != expected_positions
+            or second_executed != expected_positions
+            or native_second != expected_positions
+            or phase.get("first_conv_execution_mode") != expected_mode
+            or phase.get("second_conv_execution_mode") != expected_mode
+            or phase.get("first_conv_native_kernel_aligned") is not True
+            or phase.get("second_conv_native_kernel_aligned") is not True
+        ):
+            raise ValueError(f"native dense head {phase_name} work changed")
+        for tile in tile_trace:
+            if not isinstance(tile, Mapping):
+                raise ValueError(f"native dense head {phase_name} tile is invalid")
+            for key in (
+                "first_conv_positions_executed",
+                "native_dense_first_conv_positions_executed",
+                "second_conv_positions_executed",
+                "native_dense_second_conv_positions_executed",
+            ):
+                _require_event_count(tile.get(key), label=f"{phase_name} tile {key}")
+            flattened_tiles.append(dict(tile))
+        if (
+            sum(int(tile["first_conv_positions_executed"]) for tile in tile_trace)
+            != first_executed
+            or sum(
+                int(tile["native_dense_first_conv_positions_executed"])
+                for tile in tile_trace
+            )
+            != native_first
+            or sum(int(tile["second_conv_positions_executed"]) for tile in tile_trace)
+            != second_executed
+            or sum(
+                int(tile["native_dense_second_conv_positions_executed"])
+                for tile in tile_trace
+            )
+            != native_second
+        ):
+            raise ValueError(f"native dense head {phase_name} tile work does not conserve")
+        phase_evidence.append(
+            {
+                "phase": phase_name,
+                "mask_sha256": _require_event_sha256(
+                    phase.get("mask_sha256"), label=f"{phase_name} mask"
+                ),
+                "tile_trace_sha256": _require_event_sha256(
+                    phase.get("tile_trace_sha256"), label=f"{phase_name} tile trace"
+                ),
+                "first_conv_positions_executed": first_executed,
+                "native_dense_first_conv_positions_executed": native_first,
+                "second_conv_positions_executed": second_executed,
+                "native_dense_second_conv_positions_executed": native_second,
+            }
+        )
+    if (
+        events.get("per_tile") != flattened_tiles
+        or events.get("tile_trace_records") != len(flattened_tiles)
+        or events.get("tile_trace_sha256") != _canonical_sha256(flattened_tiles)
+    ):
+        raise ValueError("native dense head aggregate tile trace changed")
+    return {
+        "schema_version": NATIVE_DENSE_HEAD_EXECUTION_EVIDENCE_VERSION,
+        "raw_head_execution_contract": RAW_HEAD_EXECUTION_CONTRACT,
+        "head_weight_sha256": _require_event_sha256(
+            events.get("head_weight_sha256"), label="head weights"
+        ),
+        "head_input_sha256": _require_event_sha256(
+            events.get("head_input_sha256"), label="head input"
+        ),
+        "phase_trace_sha256": _require_event_sha256(
+            events.get("phase_trace_sha256"), label="phase trace"
+        ),
+        "tile_trace_sha256": _require_event_sha256(
+            events.get("tile_trace_sha256"), label="tile trace"
+        ),
+        "execution_finalized": events["execution_finalized"],
+        "dense_head_positions": dense_positions,
+        "dense_head_macs": dense_macs,
+        "actual_head_macs": dense_macs,
+        "head_mac_delta": 0,
+        "phases": phase_evidence,
+    }
+
+
+def validate_native_dense_head_execution_evidence(
+    evidence: Mapping[str, Any], *, expected_phase_count: int | None = None
+) -> dict[str, Any]:
+    """Validate the persisted, compact form of native dense execution evidence."""
+    if not isinstance(evidence, Mapping):
+        raise TypeError("persisted native dense head evidence requires a mapping")
+    required = {
+        "schema_version",
+        "raw_head_execution_contract",
+        "head_weight_sha256",
+        "head_input_sha256",
+        "phase_trace_sha256",
+        "tile_trace_sha256",
+        "execution_finalized",
+        "dense_head_positions",
+        "dense_head_macs",
+        "actual_head_macs",
+        "head_mac_delta",
+        "phases",
+    }
+    if set(evidence) != required:
+        raise ValueError("persisted native dense head evidence has unexpected fields")
+    if (
+        evidence.get("schema_version") != NATIVE_DENSE_HEAD_EXECUTION_EVIDENCE_VERSION
+        or evidence.get("raw_head_execution_contract") != RAW_HEAD_EXECUTION_CONTRACT
+    ):
+        raise ValueError("persisted native dense head evidence contract changed")
+    if not isinstance(evidence.get("execution_finalized"), bool):
+        raise ValueError("persisted native dense head finalization state is invalid")
+    dense_positions = _require_event_count(
+        evidence.get("dense_head_positions"), label="persisted dense head positions", positive=True
+    )
+    dense_macs = _require_event_count(
+        evidence.get("dense_head_macs"), label="persisted dense head MACs", positive=True
+    )
+    if (
+        evidence.get("actual_head_macs") != dense_macs
+        or evidence.get("head_mac_delta") != 0
+    ):
+        raise ValueError("persisted native dense head MAC accounting changed")
+    phases = evidence.get("phases")
+    if not isinstance(phases, list) or len(phases) not in (3, 4):
+        raise ValueError("persisted native dense head phase evidence is invalid")
+    if expected_phase_count is not None and len(phases) != expected_phase_count:
+        raise ValueError("persisted native dense head phase count changed")
+    expected_phase_names = ["primary", "secondary", "full"]
+    if len(phases) == 4:
+        expected_phase_names.append("full_extension")
+    normalized_phases: list[dict[str, Any]] = []
+    for position, (phase, phase_name) in enumerate(zip(phases, expected_phase_names)):
+        if not isinstance(phase, Mapping) or set(phase) != {
+            "phase",
+            "mask_sha256",
+            "tile_trace_sha256",
+            "first_conv_positions_executed",
+            "native_dense_first_conv_positions_executed",
+            "second_conv_positions_executed",
+            "native_dense_second_conv_positions_executed",
+        }:
+            raise ValueError("persisted native dense head phase has unexpected fields")
+        expected_positions = dense_positions if position == 0 else 0
+        for key in (
+            "first_conv_positions_executed",
+            "native_dense_first_conv_positions_executed",
+            "second_conv_positions_executed",
+            "native_dense_second_conv_positions_executed",
+        ):
+            if _require_event_count(phase.get(key), label=f"persisted {phase_name} {key}") != expected_positions:
+                raise ValueError("persisted native dense head phase work changed")
+        if phase.get("phase") != phase_name:
+            raise ValueError("persisted native dense head phase order changed")
+        normalized_phases.append(
+            {
+                "phase": phase_name,
+                "mask_sha256": _require_event_sha256(
+                    phase.get("mask_sha256"), label=f"persisted {phase_name} mask"
+                ),
+                "tile_trace_sha256": _require_event_sha256(
+                    phase.get("tile_trace_sha256"),
+                    label=f"persisted {phase_name} tile trace",
+                ),
+                "first_conv_positions_executed": expected_positions,
+                "native_dense_first_conv_positions_executed": expected_positions,
+                "second_conv_positions_executed": expected_positions,
+                "native_dense_second_conv_positions_executed": expected_positions,
+            }
+        )
+    return {
+        "schema_version": NATIVE_DENSE_HEAD_EXECUTION_EVIDENCE_VERSION,
+        "raw_head_execution_contract": RAW_HEAD_EXECUTION_CONTRACT,
+        "head_weight_sha256": _require_event_sha256(
+            evidence.get("head_weight_sha256"), label="persisted head weights"
+        ),
+        "head_input_sha256": _require_event_sha256(
+            evidence.get("head_input_sha256"), label="persisted head input"
+        ),
+        "phase_trace_sha256": _require_event_sha256(
+            evidence.get("phase_trace_sha256"), label="persisted phase trace"
+        ),
+        "tile_trace_sha256": _require_event_sha256(
+            evidence.get("tile_trace_sha256"), label="persisted tile trace"
+        ),
+        "execution_finalized": evidence["execution_finalized"],
+        "dense_head_positions": dense_positions,
+        "dense_head_macs": dense_macs,
+        "actual_head_macs": dense_macs,
+        "head_mac_delta": 0,
+        "phases": normalized_phases,
+    }
 
 
 class IncrementalSelectedOutputProducer:
@@ -350,6 +662,9 @@ class IncrementalSelectedOutputProducer:
                 "head_final_positions_executed": 0,
                 "first_conv_positions_reused": 0,
                 "first_conv_positions_executed": 0,
+                "native_dense_first_conv_positions_executed": 0,
+                "second_conv_positions_executed": 0,
+                "native_dense_second_conv_positions_executed": 0,
             }
         coordinates = local_coordinates.clone()
         coordinates[:, 0] += tile_y
@@ -367,6 +682,9 @@ class IncrementalSelectedOutputProducer:
                 "head_final_positions_executed": 0,
                 "first_conv_positions_reused": 0,
                 "first_conv_positions_executed": 0,
+                "native_dense_first_conv_positions_executed": 0,
+                "second_conv_positions_executed": 0,
+                "native_dense_second_conv_positions_executed": 0,
             }
 
         hidden_linear = _same_conv3_closure(
@@ -431,7 +749,68 @@ class IncrementalSelectedOutputProducer:
             "head_final_positions_executed": executed_final,
             "first_conv_positions_reused": reused_hidden,
             "first_conv_positions_executed": executed_hidden,
+            "native_dense_first_conv_positions_executed": 0,
+            "second_conv_positions_executed": (
+                0 if self._native_dense_second_values is not None else executed_final
+            ),
+            "native_dense_second_conv_positions_executed": 0,
         }
+
+    def _allocate_native_dense_phase_work(
+        self, per_tile: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Attach the physical dense closure to its spatial tile ledger.
+
+        The selected-output rows still describe only exposed descriptors.  The
+        native first and second convolutions, however, cover every spatial
+        tile and must remain reconstructible from the same ledger rather than
+        appearing only in a phase-level counter.
+        """
+        rows = {
+            (entry["batch_item"], entry["tile_y"], entry["tile_x"]): dict(entry)
+            for entry in per_tile
+        }
+        if len(rows) != len(per_tile):
+            raise RuntimeError("native dense head phase has duplicate tile records")
+        allocated: list[dict[str, Any]] = []
+        for batch_item in range(self._batch):
+            for tile_y, tile_x in self._tile_origins():
+                tile_height = min(self._tile_size, self._height - tile_y)
+                tile_width = min(self._tile_size, self._width - tile_x)
+                key = (batch_item, tile_y // self._tile_size, tile_x // self._tile_size)
+                entry = rows.pop(
+                    key,
+                    {
+                        "phase": "primary",
+                        "batch_item": batch_item,
+                        "tile_y": key[1],
+                        "tile_x": key[2],
+                        "head_final_positions_requested": 0,
+                        "head_final_positions_reused": 0,
+                        "head_final_positions_executed": 0,
+                        "first_conv_positions_reused": 0,
+                        "first_conv_positions_executed": 0,
+                        "native_dense_first_conv_positions_executed": 0,
+                        "second_conv_positions_executed": 0,
+                        "native_dense_second_conv_positions_executed": 0,
+                    },
+                )
+                if (
+                    entry["first_conv_positions_executed"] != 0
+                    or entry["native_dense_first_conv_positions_executed"] != 0
+                    or entry["second_conv_positions_executed"] != 0
+                    or entry["native_dense_second_conv_positions_executed"] != 0
+                ):
+                    raise RuntimeError("native dense head closure mixed with patch work")
+                positions = tile_height * tile_width
+                entry["first_conv_positions_executed"] = positions
+                entry["native_dense_first_conv_positions_executed"] = positions
+                entry["second_conv_positions_executed"] = positions
+                entry["native_dense_second_conv_positions_executed"] = positions
+                allocated.append(entry)
+        if rows:
+            raise RuntimeError("native dense head phase has an out-of-range tile record")
+        return allocated
 
     def execute(self, phase: str, selection_mask: torch.Tensor) -> dict[str, Any]:
         """Execute one route phase and return its source-bound per-tile ledger."""
@@ -449,6 +828,9 @@ class IncrementalSelectedOutputProducer:
             "head_final_positions_executed": 0,
             "first_conv_positions_reused": 0,
             "first_conv_positions_executed": 0,
+            "native_dense_first_conv_positions_executed": 0,
+            "second_conv_positions_executed": 0,
+            "native_dense_second_conv_positions_executed": 0,
         }
         for batch_item in range(self._batch):
             for tile_y, tile_x in self._tile_origins():
@@ -476,6 +858,19 @@ class IncrementalSelectedOutputProducer:
                     )
                     for key in totals:
                         totals[key] += values[key]
+        if native_dense_head_positions:
+            per_tile = self._allocate_native_dense_phase_work(per_tile)
+        for key, expected in totals.items():
+            observed = sum(int(entry[key]) for entry in per_tile)
+            if key.startswith("native_dense_") and native_dense_head_positions:
+                expected = native_dense_head_positions
+            elif key in {
+                "first_conv_positions_executed",
+                "second_conv_positions_executed",
+            } and native_dense_head_positions:
+                expected = native_dense_head_positions
+            if observed != expected:
+                raise RuntimeError(f"incremental head {phase} tile ledger does not conserve {key}")
         event = {
             "schema_version": INCREMENTAL_HEAD_EXECUTION_VERSION,
             "phase": phase,
@@ -486,10 +881,13 @@ class IncrementalSelectedOutputProducer:
             "head_final_positions_reused": totals["head_final_positions_reused"],
             "head_final_positions_executed": totals["head_final_positions_executed"],
             "first_conv_positions_reused": totals["first_conv_positions_reused"],
-            "first_conv_positions_executed": (
-                totals["first_conv_positions_executed"] + native_dense_head_positions
+            "first_conv_positions_executed": sum(
+                int(entry["first_conv_positions_executed"]) for entry in per_tile
             ),
-            "native_dense_first_conv_positions_executed": native_dense_head_positions,
+            "native_dense_first_conv_positions_executed": sum(
+                int(entry["native_dense_first_conv_positions_executed"])
+                for entry in per_tile
+            ),
             "first_conv_execution_mode": (
                 "native_dense_closure"
                 if native_dense_head_positions
@@ -498,7 +896,10 @@ class IncrementalSelectedOutputProducer:
                 else "incremental_patch_closure"
             ),
             "first_conv_native_kernel_aligned": self._native_dense_first_closure,
-            "native_dense_second_conv_positions_executed": native_dense_head_positions,
+            "native_dense_second_conv_positions_executed": sum(
+                int(entry["native_dense_second_conv_positions_executed"])
+                for entry in per_tile
+            ),
             "second_conv_execution_mode": (
                 "native_dense_closure"
                 if native_dense_head_positions
@@ -507,12 +908,8 @@ class IncrementalSelectedOutputProducer:
                 else "incremental_patch_selected_outputs"
             ),
             "second_conv_native_kernel_aligned": self._native_dense_second_values is not None,
-            "second_conv_positions_executed": (
-                native_dense_head_positions
-                if native_dense_head_positions
-                else 0
-                if self._native_dense_second_values is not None
-                else totals["head_final_positions_executed"]
+            "second_conv_positions_executed": sum(
+                int(entry["second_conv_positions_executed"]) for entry in per_tile
             ),
             "full_tile_native_identity_verified": False,
             "full_execution_mode": (
@@ -583,6 +980,9 @@ class IncrementalSelectedOutputProducer:
             "batch_size": self._batch,
             "dense_head_positions": dense_positions,
             "first_conv_positions_executed": first_positions,
+            "native_dense_first_conv_positions_executed": (
+                dense_positions if self._native_dense_first_closure else 0
+            ),
             "raw_head_execution_contract": RAW_HEAD_EXECUTION_CONTRACT,
             "first_conv_execution_mode": (
                 "native_dense_closure"
@@ -592,6 +992,9 @@ class IncrementalSelectedOutputProducer:
             "first_conv_native_kernel_aligned": self._native_dense_first_closure,
             "head_final_positions_executed": final_positions,
             "second_conv_positions_executed": second_positions,
+            "native_dense_second_conv_positions_executed": (
+                dense_positions if self._native_dense_second_values is not None else 0
+            ),
             "second_conv_execution_mode": (
                 "native_dense_closure"
                 if self._native_dense_second_values is not None

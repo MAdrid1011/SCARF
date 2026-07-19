@@ -7,6 +7,8 @@ development gate for the V16 compact-materialization simulator, not paper
 quality, sparse-execution, timing, or Figure 11 evidence.
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
@@ -38,6 +40,12 @@ from data.verify_prepared_dataset import prepared_scene_order
 from saes.evaluation_disjoint_l1_calibration import (
     DEFAULT_MATERIALIZATION_ROOT,
     DEFAULT_PLAN_PATH,
+    load_frozen_v15_threshold,
+    load_frozen_v16_threshold,
+)
+from saes.incremental_selected_output_execution import (
+    RAW_HEAD_EXECUTION_CONTRACT,
+    validate_native_dense_head_execution_evidence,
 )
 from scripts.result_record import source_identity, write_result
 from scripts.ae_config import (
@@ -52,6 +60,7 @@ from scripts.saes_incremental_selected_output_audit import (
 )
 from scripts.saes_paper_l0_l1_compact_packet_pilot import (
     SEED,
+    _paper_identity,
     collect_paper_compact_packet_pilot,
 )
 from scripts.saes_selected_output_quality_gate import _mean_metrics, _quality_verdict
@@ -318,6 +327,22 @@ def _validate_target_free_audit(
         or context_identity.get("context_indices") != expected["context_indices"]
     ):
         raise ValueError("target-free audit sample index changed")
+    raw_head = _require_mapping(audit.get("raw_head"), "target-free audit raw head")
+    native_dense_execution = _require_mapping(
+        raw_head.get("native_dense_head_execution"),
+        "target-free audit native dense head execution",
+    )
+    initial = validate_native_dense_head_execution_evidence(
+        native_dense_execution.get("initial"), expected_phase_count=3
+    )
+    guarded = validate_native_dense_head_execution_evidence(
+        native_dense_execution.get("guarded")
+    )
+    if (
+        initial["raw_head_execution_contract"] != RAW_HEAD_EXECUTION_CONTRACT
+        or guarded["raw_head_execution_contract"] != RAW_HEAD_EXECUTION_CONTRACT
+    ):
+        raise ValueError("target-free audit native dense head contract changed")
 
 
 def _validate_quality_record(
@@ -351,6 +376,10 @@ def _validate_quality_record(
         "sha256"
     ) != EXPECTED_V16_SHA256:
         raise ValueError("quality V16 calibration changed")
+    if _require_mapping(
+        quality.get("adaptive_l1_v4_attribute_loo_calibration"), "V16"
+    ).get("raw_head_execution_contract") != RAW_HEAD_EXECUTION_CONTRACT:
+        raise ValueError("quality V16 native dense head contract changed")
     if _require_mapping(quality.get("paper_identity"), "mechanism").get(
         "sha256"
     ) != EXPECTED_MECHANISM_SHA256:
@@ -373,6 +402,48 @@ def _validate_quality_record(
         or boundary.get("timing_claim") is not False
     ):
         raise ValueError("quality record crossed its sparse-execution boundary")
+    raw_head = _require_mapping(quality.get("raw_head_execution"), "quality raw head")
+    initial = validate_native_dense_head_execution_evidence(
+        raw_head.get("initial"), expected_phase_count=3
+    )
+    guarded = validate_native_dense_head_execution_evidence(raw_head.get("guarded"))
+    if (
+        initial["raw_head_execution_contract"] != RAW_HEAD_EXECUTION_CONTRACT
+        or guarded["raw_head_execution_contract"] != RAW_HEAD_EXECUTION_CONTRACT
+    ):
+        raise ValueError("quality native dense head contract changed")
+
+
+def _validate_frozen_gate_calibrations(
+    *,
+    experiment: Any,
+    v15_calibration_record: Path,
+    v16_calibration_record: Path,
+    acid_plan_path: Path,
+    acid_materialization_root: Path,
+) -> None:
+    """Reject superseded calibration/mechanism identities before GPU work."""
+    v15 = load_frozen_v15_threshold(
+        v15_calibration_record,
+        checkpoint_path=experiment.checkpoint,
+        plan_path=acid_plan_path,
+        materialization_root=acid_materialization_root,
+    )
+    v16 = load_frozen_v16_threshold(
+        v16_calibration_record,
+        checkpoint_path=experiment.checkpoint,
+        v15_record_path=v15_calibration_record,
+        plan_path=acid_plan_path,
+        materialization_root=acid_materialization_root,
+    )
+    if v15.get("sha256") != EXPECTED_V15_SHA256:
+        raise ValueError("fixed eight-scene V15 calibration is not promoted")
+    if v16.get("sha256") != EXPECTED_V16_SHA256:
+        raise ValueError("fixed eight-scene V16 calibration is not promoted")
+    if v16.get("raw_head_execution_contract") != RAW_HEAD_EXECUTION_CONTRACT:
+        raise ValueError("fixed eight-scene V16 native dense contract changed")
+    if _paper_identity(v15, v16).get("sha256") != EXPECTED_MECHANISM_SHA256:
+        raise ValueError("fixed eight-scene mechanism is not promoted")
 
 
 def _quality_views(record: Mapping[str, Any]) -> list[dict[str, float]]:
@@ -638,6 +709,13 @@ def run_fixed_eight_scene_gate(
     output_dir = Path(output_dir).resolve()
     if output_dir.exists():
         raise FileExistsError(f"eight-scene output already exists: {output_dir}")
+    _validate_frozen_gate_calibrations(
+        experiment=experiment,
+        v15_calibration_record=v15_calibration_record,
+        v16_calibration_record=v16_calibration_record,
+        acid_plan_path=acid_plan_path,
+        acid_materialization_root=acid_materialization_root,
+    )
     output_dir.mkdir(parents=True, exist_ok=False)
     samples: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
