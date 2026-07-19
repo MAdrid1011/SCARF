@@ -37,6 +37,10 @@ from data.prepare_dl3dv_target_free_audit_inputs import (
     prepare_inputs,
 )
 from data.verify_prepared_dataset import prepared_scene_order
+from saes.classic_backend import (
+    freeze_classic_backend_identity,
+    resolve_classic_backend_contract,
+)
 from saes.evaluation_disjoint_l1_calibration import (
     DEFAULT_MATERIALIZATION_ROOT,
     DEFAULT_PLAN_PATH,
@@ -68,6 +72,8 @@ from scripts.saes_selected_output_quality_gate import _mean_metrics, _quality_ve
 
 GATE_KIND = "saes-paper-l0-l1-v16-fixed-eight-scene-quality-gate"
 FIXED_SAMPLE_INDICES = tuple(range(8))
+CLASSIC_MODELS = ("transplat", "mvsplat")
+DEFAULT_MODEL = "transplat"
 EXPECTED_SOURCE_INDEX_SHA256 = (
     "eab21290cfab8eff12e208377b089b2a65e15f7ba44f7bb085963511354863f4"
 )
@@ -102,6 +108,18 @@ EXPECTED_RAW_FILELIST_SHA256 = (
 EXPECTED_RAW_SCENE_SOURCE_PLANS_SHA256 = (
     "9283d6840a774acf893639259a17fb8029622fc214003e8772851015701a1b3b"
 )
+EXPECTED_MVSPLAT_CHECKPOINT_SHA256 = (
+    "83d0d9eaa753fa4a1f925288dc1f90b8c3297fad0ab0f6ed1f11a1c5946da25a"
+)
+EXPECTED_MVSPLAT_V15_SHA256 = (
+    "fe356589bce3c6e232234b742f8be2a62a03892c5311973213e830c45757e5eb"
+)
+EXPECTED_MVSPLAT_V16_SHA256 = (
+    "912c2b5dcd0e78fccafe95d65fd93332f96c22b5f9cb48cba6ccd2863f1fd036"
+)
+EXPECTED_MVSPLAT_MECHANISM_SHA256 = (
+    "42156d7b4e4c562d8c9a28eda3849dcc28e111c35326a04976ee540f24655e97"
+)
 _QUALITY_KEYS = ("psnr_db", "ssim", "lpips")
 
 
@@ -111,6 +129,43 @@ def _canonical_sha256(value: Mapping[str, Any]) -> str:
             "utf-8"
         )
     ).hexdigest()
+
+
+def _model_name(value: Any) -> str:
+    if value not in CLASSIC_MODELS:
+        raise ValueError("fixed eight-scene gate requires a supported classic model")
+    return str(value)
+
+
+def _expected_identity(model_name: str) -> dict[str, str]:
+    """Return the frozen identity for one model-specific eight-scene gate."""
+
+    model_name = _model_name(model_name)
+    if model_name == "mvsplat":
+        checkpoint_sha256 = EXPECTED_MVSPLAT_CHECKPOINT_SHA256
+        v15_calibration_sha256 = EXPECTED_MVSPLAT_V15_SHA256
+        v16_calibration_sha256 = EXPECTED_MVSPLAT_V16_SHA256
+        mechanism_sha256 = EXPECTED_MVSPLAT_MECHANISM_SHA256
+    else:
+        checkpoint_sha256 = EXPECTED_CHECKPOINT_SHA256
+        v15_calibration_sha256 = EXPECTED_V15_SHA256
+        v16_calibration_sha256 = EXPECTED_V16_SHA256
+        mechanism_sha256 = EXPECTED_MECHANISM_SHA256
+    return {
+        "model": model_name,
+        "source_index_sha256": EXPECTED_SOURCE_INDEX_SHA256,
+        "sample_selection_sha256": EXPECTED_SAMPLE_SELECTION_SHA256,
+        "checkpoint_sha256": checkpoint_sha256,
+        "v15_calibration_sha256": v15_calibration_sha256,
+        "v16_calibration_sha256": v16_calibration_sha256,
+        "mechanism_sha256": mechanism_sha256,
+        "prepared_tree_sha256": EXPECTED_PREPARED_TREE_SHA256,
+        "raw_source_record_sha256": EXPECTED_RAW_SOURCE_RECORD_SHA256,
+        "raw_source_revision": EXPECTED_RAW_SOURCE_REVISION,
+        "raw_benchmark_metadata_sha256": EXPECTED_RAW_BENCHMARK_METADATA_SHA256,
+        "raw_filelist_sha256": EXPECTED_RAW_FILELIST_SHA256,
+        "raw_scene_source_plans_sha256": EXPECTED_RAW_SCENE_SOURCE_PLANS_SHA256,
+    }
 
 
 def _sha256_file(path: Path) -> str:
@@ -164,13 +219,16 @@ def _sample_root(output_dir: Path, sample_index: int) -> Path:
     return output_dir / "samples" / f"sample_{sample_index:05d}"
 
 
-def _fixed_selections() -> tuple[Any, Any, list[dict[str, Any]]]:
+def _fixed_selections(
+    *, model_name: str = DEFAULT_MODEL
+) -> tuple[Any, Any, list[dict[str, Any]]]:
     """Resolve fixed source ordinals to the prepared dataloader's execution order."""
-    selection = resolve_claim_selection("transplat", "dl3dv", ROOT)
-    experiment = resolve_experiment("transplat", "dl3dv", ROOT)
+    identity = _expected_identity(model_name)
+    selection = resolve_claim_selection(identity["model"], "dl3dv", ROOT)
+    experiment = resolve_experiment(identity["model"], "dl3dv", ROOT)
     if (
-        selection.source_index_sha256 != EXPECTED_SOURCE_INDEX_SHA256
-        or selection.sample_selection_sha256 != EXPECTED_SAMPLE_SELECTION_SHA256
+        selection.source_index_sha256 != identity["source_index_sha256"]
+        or selection.sample_selection_sha256 != identity["sample_selection_sha256"]
     ):
         raise ValueError("fixed eight-scene canonical selection changed")
     source_rows, summary = canonicalize_index(
@@ -195,17 +253,37 @@ def _fixed_selections() -> tuple[Any, Any, list[dict[str, Any]]]:
     return selection, experiment, fixed
 
 
-def _validate_prepared_contract(experiment: Any) -> dict[str, Any]:
+def _validate_prepared_contract(
+    experiment: Any, *, model_name: str = DEFAULT_MODEL
+) -> dict[str, Any]:
+    identity = _expected_identity(model_name)
     manifest = Path(experiment.dataset_root) / ".scarf-manifest.json"
     prepared = validate_prepared_dataset(
         experiment, experiment.dataset_root, manifest
     )
-    validate_claim_dataset_tree(
-        "transplat", "dl3dv", prepared["tree_sha256"], ROOT
-    )
-    if prepared["tree_sha256"] != EXPECTED_PREPARED_TREE_SHA256:
+    validate_claim_dataset_tree(identity["model"], "dl3dv", prepared["tree_sha256"], ROOT)
+    if prepared["tree_sha256"] != identity["prepared_tree_sha256"]:
         raise ValueError("prepared DL3DV tree changed")
     return prepared
+
+
+def _live_classic_backend_identity(
+    experiment: Any, *, model_name: str
+) -> Mapping[str, Any] | None:
+    """Bind MVSplat's eight-scene route to its live classic source tree."""
+
+    model_name = _model_name(model_name)
+    if model_name == "transplat":
+        return None
+    contract = resolve_classic_backend_contract(model_name, ROOT)
+    if (
+        contract.model != model_name
+        or contract.dataset != "dl3dv"
+        or contract.experiment != experiment.experiment
+        or contract.checkpoint != Path(experiment.checkpoint).resolve()
+    ):
+        raise RuntimeError("fixed eight-scene classic backend identity changed")
+    return freeze_classic_backend_identity(contract)
 
 
 def _selection_identity(selection: Mapping[str, Any]) -> dict[str, Any]:
@@ -243,11 +321,17 @@ def _selection_identity(selection: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _source_contract(
-    source: Mapping[str, Any], selection: Mapping[str, Any]
+    source: Mapping[str, Any],
+    selection: Mapping[str, Any],
+    *,
+    model_name: str = DEFAULT_MODEL,
 ) -> dict[str, Any]:
+    identity = _expected_identity(model_name)
     expected = _selection_identity(selection)
     if (
-        source.get("source_sample_index") != expected["source_sample_index"]
+        source.get("model") != identity["model"]
+        or source.get("dataset") != "dl3dv"
+        or source.get("source_sample_index") != expected["source_sample_index"]
         or source.get("target_rgb_included") is not False
         or source.get("target_rgb_opened") is not False
     ):
@@ -257,11 +341,11 @@ def _source_contract(
     selection_sha256 = _require_sha256(
         protocol.get("sample_selection_sha256"), "source sample selection"
     )
-    if source_index != EXPECTED_SOURCE_INDEX_SHA256:
+    if source_index != identity["source_index_sha256"]:
         raise ValueError("fixed eight-scene source index changed")
-    if selection_sha256 != EXPECTED_SAMPLE_SELECTION_SHA256:
+    if selection_sha256 != identity["sample_selection_sha256"]:
         raise ValueError("fixed eight-scene sample selection changed")
-    if protocol.get("dataset_tree_sha256") != EXPECTED_PREPARED_TREE_SHA256:
+    if protocol.get("dataset_tree_sha256") != identity["prepared_tree_sha256"]:
         raise ValueError("target-free source dataset tree changed")
     canonical_selection = _require_mapping(
         source.get("canonical_selection"), "source canonical selection"
@@ -276,15 +360,21 @@ def _source_contract(
     if any(selected.get(key) != value for key, value in expected_source_selection.items() if key != "source_sample_index"):
         raise ValueError("target-free source selected sample changed")
     raw_source = _require_mapping(source.get("source"), "raw DL3DV source")
-    if raw_source.get("source_record_sha256") != EXPECTED_RAW_SOURCE_RECORD_SHA256:
+    if raw_source.get("source_record_sha256") != identity["raw_source_record_sha256"]:
         raise ValueError("raw DL3DV source record changed")
-    if raw_source.get("revision") != EXPECTED_RAW_SOURCE_REVISION:
+    if raw_source.get("revision") != identity["raw_source_revision"]:
         raise ValueError("raw DL3DV source revision changed")
-    if raw_source.get("benchmark_metadata_sha256") != EXPECTED_RAW_BENCHMARK_METADATA_SHA256:
+    if (
+        raw_source.get("benchmark_metadata_sha256")
+        != identity["raw_benchmark_metadata_sha256"]
+    ):
         raise ValueError("raw DL3DV benchmark metadata changed")
-    if raw_source.get("filelist_sha256") != EXPECTED_RAW_FILELIST_SHA256:
+    if raw_source.get("filelist_sha256") != identity["raw_filelist_sha256"]:
         raise ValueError("raw DL3DV file list changed")
-    if raw_source.get("scene_source_plans_sha256") != EXPECTED_RAW_SCENE_SOURCE_PLANS_SHA256:
+    if (
+        raw_source.get("scene_source_plans_sha256")
+        != identity["raw_scene_source_plans_sha256"]
+    ):
         raise ValueError("raw DL3DV scene source plans changed")
     return {
         "source_index_sha256": source_index,
@@ -299,9 +389,32 @@ def _validate_target_free_audit(
     *,
     context_identity: Mapping[str, Any],
     selection: Mapping[str, Any],
+    model_name: str = DEFAULT_MODEL,
+    classic_backend_identity: Mapping[str, Any] | None = None,
 ) -> None:
+    identity = _expected_identity(model_name)
     if audit.get("status") != "PASS":
         raise ValueError("target-free selected-output audit did not pass")
+    if audit.get("model") not in (None, identity["model"]):
+        raise ValueError("target-free audit model identity changed")
+    if identity["model"] == "mvsplat":
+        if not isinstance(classic_backend_identity, Mapping):
+            raise ValueError("target-free audit has no MVSplat backend identity")
+        execution = _require_mapping(audit.get("execution"), "target-free audit execution")
+        if (
+            execution.get("model") != "mvsplat"
+            or execution.get("checkpoint_sha256") != identity["checkpoint_sha256"]
+            or execution.get("classic_backend_identity")
+            != dict(classic_backend_identity or {})
+        ):
+            raise ValueError("target-free audit MVSplat backend identity changed")
+        boundary = _require_mapping(
+            audit.get("execution_boundary"), "target-free audit boundary"
+        )
+        if boundary.get("backend_coordinate_semantics") != classic_backend_identity.get(
+            "coordinate_semantics"
+        ):
+            raise ValueError("target-free audit MVSplat coordinate semantics changed")
     if audit.get("input_identity") != dict(context_identity):
         raise ValueError("target-free audit input identity changed")
     if audit.get("target_mapping_present") is not False:
@@ -351,7 +464,10 @@ def _validate_quality_record(
     context_identity: Mapping[str, Any],
     selection: Mapping[str, Any],
     native_sample_count: int,
+    model_name: str = DEFAULT_MODEL,
+    classic_backend_identity: Mapping[str, Any] | None = None,
 ) -> None:
+    identity = _expected_identity(model_name)
     expected = _selection_identity(selection)
     if quality.get("sample_index") != expected["source_sample_index"]:
         raise ValueError("quality record sample index changed")
@@ -366,15 +482,17 @@ def _validate_quality_record(
         raise ValueError("quality record canonical selection changed")
     if quality.get("paper_result_eligible") is not False:
         raise ValueError("development quality gate became paper-eligible")
-    if quality.get("checkpoint_sha256") != EXPECTED_CHECKPOINT_SHA256:
+    if quality.get("model") not in (None, identity["model"]):
+        raise ValueError("quality model identity changed")
+    if quality.get("checkpoint_sha256") != identity["checkpoint_sha256"]:
         raise ValueError("quality checkpoint changed")
     if _require_mapping(quality.get("adaptive_l1_calibration"), "V15").get(
         "sha256"
-    ) != EXPECTED_V15_SHA256:
+    ) != identity["v15_calibration_sha256"]:
         raise ValueError("quality V15 calibration changed")
     if _require_mapping(quality.get("adaptive_l1_v4_attribute_loo_calibration"), "V16").get(
         "sha256"
-    ) != EXPECTED_V16_SHA256:
+    ) != identity["v16_calibration_sha256"]:
         raise ValueError("quality V16 calibration changed")
     if _require_mapping(
         quality.get("adaptive_l1_v4_attribute_loo_calibration"), "V16"
@@ -382,9 +500,11 @@ def _validate_quality_record(
         raise ValueError("quality V16 native dense head contract changed")
     if _require_mapping(quality.get("paper_identity"), "mechanism").get(
         "sha256"
-    ) != EXPECTED_MECHANISM_SHA256:
+    ) != identity["mechanism_sha256"]:
         raise ValueError("quality mechanism identity changed")
     gate = _require_mapping(quality.get("target_free_quality_gate"), "quality gate")
+    if gate.get("model") not in (None, identity["model"]):
+        raise ValueError("quality target-free gate model identity changed")
     if gate.get("sample_index") != expected["source_sample_index"]:
         raise ValueError("quality gate sample index changed")
     if gate.get("context_input_identity") != dict(context_identity):
@@ -412,6 +532,29 @@ def _validate_quality_record(
         or guarded["raw_head_execution_contract"] != RAW_HEAD_EXECUTION_CONTRACT
     ):
         raise ValueError("quality native dense head contract changed")
+    if identity["model"] == "mvsplat":
+        if not isinstance(classic_backend_identity, Mapping):
+            raise ValueError("quality record has no MVSplat backend identity")
+        backend = _require_mapping(quality.get("backend_binding"), "quality backend")
+        if (
+            backend.get("model") != "mvsplat"
+            or backend.get("classic_backend_identity")
+            != dict(classic_backend_identity or {})
+            or backend.get("coordinate_semantics")
+            != classic_backend_identity.get("coordinate_semantics")
+        ):
+            raise ValueError("quality MVSplat backend identity changed")
+        decoder = _require_mapping(quality.get("decoder_binding"), "quality decoder")
+        decoder_source = _require_mapping(decoder.get("decoder_module"), "decoder source")
+        gaussians_source = _require_mapping(
+            decoder.get("gaussians_module"), "Gaussians source"
+        )
+        if (
+            decoder.get("model") != "mvsplat"
+            or not str(decoder_source.get("path", "")).startswith("mvsplat/")
+            or not str(gaussians_source.get("path", "")).startswith("mvsplat/")
+        ):
+            raise ValueError("quality MVSplat decoder source changed")
 
 
 def _validate_frozen_gate_calibrations(
@@ -421,29 +564,43 @@ def _validate_frozen_gate_calibrations(
     v16_calibration_record: Path,
     acid_plan_path: Path,
     acid_materialization_root: Path,
+    model_name: str = DEFAULT_MODEL,
+    classic_backend_identity: Mapping[str, Any] | None = None,
 ) -> None:
     """Reject superseded calibration/mechanism identities before GPU work."""
+    identity = _expected_identity(model_name)
     v15 = load_frozen_v15_threshold(
         v15_calibration_record,
         checkpoint_path=experiment.checkpoint,
+        application_model=identity["model"],
         plan_path=acid_plan_path,
         materialization_root=acid_materialization_root,
     )
     v16 = load_frozen_v16_threshold(
         v16_calibration_record,
         checkpoint_path=experiment.checkpoint,
+        application_model=identity["model"],
         v15_record_path=v15_calibration_record,
         plan_path=acid_plan_path,
         materialization_root=acid_materialization_root,
     )
-    if v15.get("sha256") != EXPECTED_V15_SHA256:
+    if v15.get("sha256") != identity["v15_calibration_sha256"]:
         raise ValueError("fixed eight-scene V15 calibration is not promoted")
-    if v16.get("sha256") != EXPECTED_V16_SHA256:
+    if v16.get("sha256") != identity["v16_calibration_sha256"]:
         raise ValueError("fixed eight-scene V16 calibration is not promoted")
     if v16.get("raw_head_execution_contract") != RAW_HEAD_EXECUTION_CONTRACT:
         raise ValueError("fixed eight-scene V16 native dense contract changed")
-    if _paper_identity(v15, v16).get("sha256") != EXPECTED_MECHANISM_SHA256:
+    if _paper_identity(v15, v16).get("sha256") != identity["mechanism_sha256"]:
         raise ValueError("fixed eight-scene mechanism is not promoted")
+    if identity["model"] == "mvsplat":
+        if (
+            not isinstance(classic_backend_identity, Mapping)
+            or v15.get("application", {}).get("classic_backend_identity")
+            != dict(classic_backend_identity)
+            or v16.get("application", {}).get("classic_backend_identity")
+            != dict(classic_backend_identity)
+        ):
+            raise ValueError("fixed eight-scene MVSplat backend identity changed")
 
 
 def _quality_views(record: Mapping[str, Any]) -> list[dict[str, float]]:
@@ -579,6 +736,7 @@ def _sample_summary(
     audit: Mapping[str, Any],
     quality_path: Path,
     quality: Mapping[str, Any],
+    model_name: str = DEFAULT_MODEL,
 ) -> dict[str, Any]:
     expected = _selection_identity(selection)
     return {
@@ -586,7 +744,7 @@ def _sample_summary(
         "execution_index": expected["execution_index"],
         "native_sample_count": native_sample_count,
         "scene": quality.get("scene"),
-        "source_protocol": _source_contract(source, selection),
+        "source_protocol": _source_contract(source, selection, model_name=model_name),
         "context_input_identity": dict(context_identity),
         "target_free_audit": {
             "path": str(audit_path.relative_to(audit_path.parents[3])),
@@ -617,7 +775,10 @@ def _run_sample(
     v16_calibration_record: Path,
     acid_plan_path: Path,
     acid_materialization_root: Path,
+    model_name: str = DEFAULT_MODEL,
+    classic_backend_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    model_name = _model_name(model_name)
     expected = _selection_identity(selection)
     sample_index = expected["source_sample_index"]
     root = _sample_root(output_dir, sample_index)
@@ -625,10 +786,17 @@ def _run_sample(
     context_root = root / "context-only"
     audit_root = root / "audit"
     quality_root = root / "quality"
-    source = prepare_inputs(raw_root, output_dir=source_root, sample_index=sample_index)
-    source_contract = _source_contract(source, selection)
-    prepare_context_only_audit_input(source_root, output_root=context_root)
-    context_identity = validate_context_only_audit_input(context_root)
+    source = prepare_inputs(
+        raw_root,
+        output_dir=source_root,
+        model=model_name,
+        sample_index=sample_index,
+    )
+    source_contract = _source_contract(source, selection, model_name=model_name)
+    prepare_context_only_audit_input(
+        source_root, output_root=context_root, model=model_name
+    )
+    context_identity = validate_context_only_audit_input(context_root, model=model_name)
     if (
         context_identity.get("source_sample_index") != sample_index
         or context_identity.get("scene") != expected["scene"]
@@ -636,9 +804,13 @@ def _run_sample(
     ):
         raise ValueError("context-only input canonical selection changed")
     source_binding = _require_mapping(context_identity.get("source_binding"), "context binding")
-    if source_binding.get("canonical_index_sha256") != EXPECTED_SOURCE_INDEX_SHA256:
+    identity = _expected_identity(model_name)
+    if source_binding.get("canonical_index_sha256") != identity["source_index_sha256"]:
         raise ValueError("context-only source index changed")
-    if source_binding.get("canonical_sample_selection_sha256") != EXPECTED_SAMPLE_SELECTION_SHA256:
+    if (
+        source_binding.get("canonical_sample_selection_sha256")
+        != identity["sample_selection_sha256"]
+    ):
         raise ValueError("context-only sample selection changed")
     if source_binding.get("canonical_selection_sha256") != _canonical_sha256(
         source_contract["canonical_selection"]
@@ -653,11 +825,16 @@ def _run_sample(
         v16_calibration_record=v16_calibration_record,
         acid_calibration_plan=acid_plan_path,
         acid_materialization_root=acid_materialization_root,
+        model_name=model_name,
     )
     audit_path = audit_root / "results.json"
     write_result(audit, audit_path)
     _validate_target_free_audit(
-        audit, context_identity=context_identity, selection=selection
+        audit,
+        context_identity=context_identity,
+        selection=selection,
+        model_name=model_name,
+        classic_backend_identity=classic_backend_identity,
     )
 
     _set_seed(device)
@@ -672,6 +849,7 @@ def _run_sample(
         native_sample_count=native_sample_count,
         acid_plan_path=acid_plan_path,
         acid_materialization_root=acid_materialization_root,
+        model_name=model_name,
     )
     quality_path = quality_root / "results.json"
     write_result(quality, quality_path)
@@ -680,6 +858,8 @@ def _run_sample(
         context_identity=context_identity,
         selection=selection,
         native_sample_count=native_sample_count,
+        model_name=model_name,
+        classic_backend_identity=classic_backend_identity,
     )
     return _sample_summary(
         selection=selection,
@@ -690,6 +870,7 @@ def _run_sample(
         audit=audit,
         quality_path=quality_path,
         quality=quality,
+        model_name=model_name,
     )
 
 
@@ -702,10 +883,16 @@ def run_fixed_eight_scene_gate(
     v16_calibration_record: Path,
     acid_plan_path: Path = DEFAULT_PLAN_PATH,
     acid_materialization_root: Path = DEFAULT_MATERIALIZATION_ROOT,
+    model_name: str = DEFAULT_MODEL,
 ) -> dict[str, Any]:
     """Execute the fixed V16 quality contract serially for DL3DV indices 0..7."""
-    claim_selection, experiment, fixed_selections = _fixed_selections()
-    prepared_dataset = _validate_prepared_contract(experiment)
+    model_name = _model_name(model_name)
+    identity = _expected_identity(model_name)
+    claim_selection, experiment, fixed_selections = _fixed_selections(model_name=model_name)
+    prepared_dataset = _validate_prepared_contract(experiment, model_name=model_name)
+    classic_backend_identity = _live_classic_backend_identity(
+        experiment, model_name=model_name
+    )
     output_dir = Path(output_dir).resolve()
     if output_dir.exists():
         raise FileExistsError(f"eight-scene output already exists: {output_dir}")
@@ -715,6 +902,8 @@ def run_fixed_eight_scene_gate(
         v16_calibration_record=v16_calibration_record,
         acid_plan_path=acid_plan_path,
         acid_materialization_root=acid_materialization_root,
+        model_name=model_name,
+        classic_backend_identity=classic_backend_identity,
     )
     output_dir.mkdir(parents=True, exist_ok=False)
     samples: list[dict[str, Any]] = []
@@ -732,6 +921,8 @@ def run_fixed_eight_scene_gate(
                 v16_calibration_record=v16_calibration_record,
                 acid_plan_path=acid_plan_path,
                 acid_materialization_root=acid_materialization_root,
+                model_name=model_name,
+                classic_backend_identity=classic_backend_identity,
             )
             samples.append(sample)
         except Exception as exc:
@@ -760,24 +951,13 @@ def run_fixed_eight_scene_gate(
         "kind": GATE_KIND,
         "status": status,
         "paper_result_eligible": False,
+        "model": model_name,
         "fixed_sample_indices": list(FIXED_SAMPLE_INDICES),
         "fixed_selections": [
             _selection_identity(selection) for selection in fixed_selections
         ],
-        "expected_identity": {
-            "source_index_sha256": EXPECTED_SOURCE_INDEX_SHA256,
-            "sample_selection_sha256": EXPECTED_SAMPLE_SELECTION_SHA256,
-            "checkpoint_sha256": EXPECTED_CHECKPOINT_SHA256,
-            "v15_calibration_sha256": EXPECTED_V15_SHA256,
-            "v16_calibration_sha256": EXPECTED_V16_SHA256,
-            "mechanism_sha256": EXPECTED_MECHANISM_SHA256,
-            "prepared_tree_sha256": EXPECTED_PREPARED_TREE_SHA256,
-            "raw_source_record_sha256": EXPECTED_RAW_SOURCE_RECORD_SHA256,
-            "raw_source_revision": EXPECTED_RAW_SOURCE_REVISION,
-            "raw_benchmark_metadata_sha256": EXPECTED_RAW_BENCHMARK_METADATA_SHA256,
-            "raw_filelist_sha256": EXPECTED_RAW_FILELIST_SHA256,
-            "raw_scene_source_plans_sha256": EXPECTED_RAW_SCENE_SOURCE_PLANS_SHA256,
-        },
+        "expected_identity": identity,
+        "classic_backend_identity": classic_backend_identity,
         "sample_count_completed": len(samples),
         "prepared_dataset": prepared_dataset,
         "samples": samples,
@@ -801,6 +981,7 @@ def run_fixed_eight_scene_gate(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--model", choices=CLASSIC_MODELS, default=DEFAULT_MODEL)
     parser.add_argument("--raw-root", type=Path, default=DEFAULT_RAW_ROOT)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--v15-calibration-record", type=Path, required=True)
@@ -824,6 +1005,7 @@ def main(argv: list[str] | None = None) -> int:
             v16_calibration_record=args.v16_calibration_record,
             acid_plan_path=args.acid_plan_path,
             acid_materialization_root=args.acid_materialization_root,
+            model_name=args.model,
         )
     except Exception as exc:
         parser.error(f"eight-scene V16 gate could not start: {exc}")

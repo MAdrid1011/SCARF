@@ -98,8 +98,13 @@
   frozen `classic_backend_identity`, revalidate it against live source, and
   reject a foreign or mixed cached `src` namespace. A fresh CUDA encoder-only
   loading smoke passed; this is infrastructure evidence only.
-- [ ] Complete the MVSplat sample-0 quality gate, then require its fixed
-  eight-scene gate before any 140-scene or Table 1 claim path.
+- [x] Complete the MVSplat sample-0 quality gate: PASS at
+  `35.606287 -> 35.581249 dB` (PSNR loss `0.025038 dB`), SSIM loss
+  `0.000186`, and LPIPS increase `0.000416`, all within the fixed
+  `0.15 dB / 0.005 / 0.005` gate. It remains non-paper and non-timing evidence.
+- [ ] Run the model-bound MVSplat fixed eight-scene quality gate before any
+  140-scene or Table 1 path; it must bind the live backend/decoder source
+  identity and retain the same per-scene target-free audit boundary.
 - [x] Complete the new MVSplat ACID 24/8 V15/V16 freeze at
   `mvsplat_acid_disjoint_l1_15_16_calibration_v16_native_dense_classic_backend_identity_v2`
   (V15 `fe356...e5eb`, V16 `912c2...d036`) and independently reload both
@@ -109,8 +114,8 @@
   `mvsplat_sample0_v16_native_dense_evidence_v1/audit` (self-hash
   `99cb...7894`, route `L0/L1/Full=0/211/7981`, no target access, no render,
   no quality metric). It does not yet authorize a quality result.
-- [ ] Parameterize the compact-packet quality pilot for MVSplat's live decoder
-  type and source identity, pass its CPU smoke, then run exactly one sample-0
+- [x] Parameterize the compact-packet quality pilot for MVSplat's live decoder
+  type and source identity, pass its CPU smoke, and run exactly one sample-0
   quality gate under the unchanged `0.15 dB / 0.005 / 0.005` tolerances.
 - [ ] Parameterize DepthSplat separately with its own native raw head, Adapter,
   decoder, ACID evaluation-disjoint calibration, sample-0 audit, quality gate,

@@ -57,7 +57,9 @@ def _metric(psnr: float, ssim: float, lpips: float) -> dict[str, float]:
     return {"psnr_db": psnr, "ssim": ssim, "lpips": lpips}
 
 
-def _configure_expected(monkeypatch: pytest.MonkeyPatch, module) -> dict[str, str]:
+def _configure_expected(
+    monkeypatch: pytest.MonkeyPatch, module, *, model_name: str = "transplat"
+) -> dict[str, str]:
     identity = {
         "source": "a" * 64,
         "selection": "b" * 64,
@@ -84,12 +86,32 @@ def _configure_expected(monkeypatch: pytest.MonkeyPatch, module) -> dict[str, st
     monkeypatch.setattr(module, "EXPECTED_RAW_BENCHMARK_METADATA_SHA256", identity["raw_metadata"])
     monkeypatch.setattr(module, "EXPECTED_RAW_FILELIST_SHA256", identity["raw_filelist"])
     monkeypatch.setattr(module, "EXPECTED_RAW_SCENE_SOURCE_PLANS_SHA256", identity["raw_plans"])
+    if model_name == "mvsplat":
+        monkeypatch.setattr(module, "EXPECTED_MVSPLAT_CHECKPOINT_SHA256", identity["checkpoint"])
+        monkeypatch.setattr(module, "EXPECTED_MVSPLAT_V15_SHA256", identity["v15"])
+        monkeypatch.setattr(module, "EXPECTED_MVSPLAT_V16_SHA256", identity["v16"])
+        monkeypatch.setattr(
+            module, "EXPECTED_MVSPLAT_MECHANISM_SHA256", identity["mechanism"]
+        )
     return identity
 
 
-def _install_fake_pipeline(monkeypatch: pytest.MonkeyPatch, module, tmp_path: Path):
-    identity = _configure_expected(monkeypatch, module)
+def _install_fake_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    module,
+    tmp_path: Path,
+    *,
+    model_name: str = "transplat",
+):
+    expected_model = model_name
+    identity = _configure_expected(monkeypatch, module, model_name=expected_model)
     calls: list[tuple[str, int]] = []
+    model_calls: list[tuple[str, str]] = []
+    backend_identity = {
+        "model": "mvsplat",
+        "coordinate_semantics": "mvsplat-inline-pixel-center-plus-sigmoid-offset",
+        "source_files": {"coordinates": {"sha256": "a" * 64}},
+    }
     selections = [
         {
             "sample_index": index,
@@ -123,26 +145,38 @@ def _install_fake_pipeline(monkeypatch: pytest.MonkeyPatch, module, tmp_path: Pa
         for index in range(8)
     }
 
-    monkeypatch.setattr(
-        module,
-        "_fixed_selections",
-        lambda: (
-            type("Selection", (), {"sample_count": 8})(),
-            object(),
-            selections,
-        ),
-    )
-    monkeypatch.setattr(
-        module,
-        "_validate_prepared_contract",
-        lambda _experiment: {"tree_sha256": module.EXPECTED_PREPARED_TREE_SHA256},
-    )
-    monkeypatch.setattr(module, "_validate_frozen_gate_calibrations", lambda **_kwargs: None)
+    def fixed_selections(*, model_name: str):
+        if model_name != expected_model:
+            pytest.fail("fixed selections received the wrong model")
+        return type("Selection", (), {"sample_count": 8})(), object(), selections
 
-    def source_prepare(_raw_root: Path, *, output_dir: Path, sample_index: int):
+    monkeypatch.setattr(module, "_fixed_selections", fixed_selections)
+
+    def validate_prepared(_experiment, *, model_name: str):
+        if model_name != expected_model:
+            pytest.fail("prepared contract received the wrong model")
+        return {"tree_sha256": module.EXPECTED_PREPARED_TREE_SHA256}
+
+    monkeypatch.setattr(module, "_validate_prepared_contract", validate_prepared)
+
+    def validate_frozen(**kwargs) -> None:
+        if kwargs.get("model_name") != expected_model:
+            pytest.fail("frozen calibration validation received the wrong model")
+        model_calls.append(("calibration", kwargs["model_name"]))
+
+    monkeypatch.setattr(module, "_validate_frozen_gate_calibrations", validate_frozen)
+
+    def source_prepare(
+        _raw_root: Path, *, output_dir: Path, model: str, sample_index: int
+    ):
+        if model != expected_model:
+            pytest.fail("source preparation received the wrong model")
+        model_calls.append(("source", model))
         calls.append(("source", sample_index))
         output_dir.mkdir(parents=True)
-        return {
+        record = {
+            "model": model,
+            "dataset": "dl3dv",
             "source_sample_index": sample_index,
             "target_rgb_included": False,
             "target_rgb_opened": False,
@@ -170,18 +204,26 @@ def _install_fake_pipeline(monkeypatch: pytest.MonkeyPatch, module, tmp_path: Pa
                 "scene_source_plans_sha256": identity["raw_plans"],
             },
         }
+        return record
 
-    def context_prepare(_source_root: Path, *, output_root: Path):
+    def context_prepare(_source_root: Path, *, output_root: Path, model: str):
+        if model != expected_model:
+            pytest.fail("context preparation received the wrong model")
         sample_index = int(_source_root.parent.name.rsplit("_", 1)[1])
+        model_calls.append(("context", model))
         calls.append(("context", sample_index))
         output_root.mkdir(parents=True)
         return context_by_index[sample_index]
 
     def audit_collect(*, input_root: Path, **_kwargs):
+        if _kwargs.get("model_name") != expected_model:
+            pytest.fail("target-free audit received the wrong model")
         sample_index = int(input_root.parent.name.rsplit("_", 1)[1])
+        model_calls.append(("audit", _kwargs["model_name"]))
         calls.append(("audit", sample_index))
-        return {
+        record = {
             "status": "PASS",
+            "model": expected_model,
             "input_identity": context_by_index[sample_index],
             "target_mapping_present": False,
             "target_rgb_accessed": False,
@@ -200,16 +242,32 @@ def _install_fake_pipeline(monkeypatch: pytest.MonkeyPatch, module, tmp_path: Pa
                 }
             },
         }
+        if expected_model == "mvsplat":
+            record["execution"] = {
+                "model": "mvsplat",
+                "checkpoint_sha256": identity["checkpoint"],
+                "classic_backend_identity": backend_identity,
+            }
+            record["execution_boundary"] = {
+                "backend_coordinate_semantics": backend_identity[
+                    "coordinate_semantics"
+                ]
+            }
+        return record
 
     def quality_collect(*, target_free_input_root: Path, sample_index: int, **_kwargs):
         from saes.incremental_selected_output_execution import RAW_HEAD_EXECUTION_CONTRACT
 
+        if _kwargs.get("model_name") != expected_model:
+            pytest.fail("quality pilot received the wrong model")
+        model_calls.append(("quality", _kwargs["model_name"]))
         calls.append(("quality", sample_index))
         context = context_by_index[sample_index]
         baseline = _metric(35.0, 0.975, 0.03)
         compact = _metric(34.95, 0.974, 0.031)
-        return {
+        record = {
             "status": "PASS",
+            "model": expected_model,
             "paper_result_eligible": False,
             "sample_index": sample_index,
             "execution_index": _kwargs["execution_index"],
@@ -225,6 +283,7 @@ def _install_fake_pipeline(monkeypatch: pytest.MonkeyPatch, module, tmp_path: Pa
             },
             "paper_identity": {"sha256": identity["mechanism"]},
             "target_free_quality_gate": {
+                "model": expected_model,
                 "sample_index": sample_index,
                 "context_input_identity": context,
                 "source_selection_mask_sha256": "2" * 64,
@@ -251,18 +310,44 @@ def _install_fake_pipeline(monkeypatch: pytest.MonkeyPatch, module, tmp_path: Pa
                 ],
             },
         }
+        if expected_model == "mvsplat":
+            record["backend_binding"] = {
+                "model": "mvsplat",
+                "coordinate_semantics": backend_identity["coordinate_semantics"],
+                "classic_backend_identity": backend_identity,
+            }
+            record["decoder_binding"] = {
+                "model": "mvsplat",
+                "decoder_module": {"path": "mvsplat/src/model/decoder/decoder.py"},
+                "gaussians_module": {"path": "mvsplat/src/model/types.py"},
+            }
+        return record
 
     monkeypatch.setattr(module, "prepare_inputs", source_prepare)
     monkeypatch.setattr(module, "prepare_context_only_audit_input", context_prepare)
+
+    def validate_context(root: Path, *, model: str):
+        if model != expected_model:
+            pytest.fail("context validation received the wrong model")
+        model_calls.append(("validate_context", model))
+        return context_by_index[int(Path(root).parent.name.rsplit("_", 1)[1])]
+
     monkeypatch.setattr(
         module,
         "validate_context_only_audit_input",
-        lambda root: context_by_index[int(Path(root).parent.name.rsplit("_", 1)[1])],
+        validate_context,
     )
     monkeypatch.setattr(module, "collect_incremental_selected_output_audit", audit_collect)
     monkeypatch.setattr(module, "collect_paper_compact_packet_pilot", quality_collect)
     monkeypatch.setattr(module, "source_identity", lambda: {"fixture": True})
-    return calls
+    monkeypatch.setattr(
+        module,
+        "_live_classic_backend_identity",
+        lambda _experiment, *, model_name: (
+            backend_identity if model_name == "mvsplat" else None
+        ),
+    )
+    return calls, model_calls
 
 
 def test_fixed_eight_scene_gate_runs_audit_before_quality_and_aggregates(
@@ -270,7 +355,7 @@ def test_fixed_eight_scene_gate_runs_audit_before_quality_and_aggregates(
 ):
     from scripts import saes_paper_l0_l1_eight_scene_gate as gate
 
-    calls = _install_fake_pipeline(monkeypatch, gate, tmp_path)
+    calls, _model_calls = _install_fake_pipeline(monkeypatch, gate, tmp_path)
     output = tmp_path / "eight"
     record = gate.run_fixed_eight_scene_gate(
         output_dir=output,
@@ -290,12 +375,43 @@ def test_fixed_eight_scene_gate_runs_audit_before_quality_and_aggregates(
     assert (output / "results.json").is_file()
 
 
+def test_fixed_eight_scene_gate_forwards_mvsplat_identity_through_every_stage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    from scripts import saes_paper_l0_l1_eight_scene_gate as gate
+
+    calls, model_calls = _install_fake_pipeline(
+        monkeypatch, gate, tmp_path, model_name="mvsplat"
+    )
+    record = gate.run_fixed_eight_scene_gate(
+        output_dir=tmp_path / "mvsplat-eight",
+        raw_root=tmp_path / "raw",
+        device=torch.device("cpu"),
+        v15_calibration_record=tmp_path / "v15.json",
+        v16_calibration_record=tmp_path / "v16.json",
+        model_name="mvsplat",
+    )
+
+    assert record["status"] == "PASS"
+    assert record["model"] == "mvsplat"
+    assert record["classic_backend_identity"]["model"] == "mvsplat"
+    assert record["expected_identity"]["checkpoint_sha256"] == "c" * 64
+    assert all(model == "mvsplat" for _stage, model in model_calls)
+    assert model_calls.count(("calibration", "mvsplat")) == 1
+    assert model_calls.count(("source", "mvsplat")) == 8
+    assert model_calls.count(("context", "mvsplat")) == 8
+    assert model_calls.count(("validate_context", "mvsplat")) == 8
+    assert model_calls.count(("audit", "mvsplat")) == 8
+    assert model_calls.count(("quality", "mvsplat")) == 8
+    assert calls.index(("audit", 0)) < calls.index(("quality", 0))
+
+
 def test_fixed_eight_scene_gate_fails_closed_when_quality_identity_drifts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     from scripts import saes_paper_l0_l1_eight_scene_gate as gate
 
-    _install_fake_pipeline(monkeypatch, gate, tmp_path)
+    _calls, _model_calls = _install_fake_pipeline(monkeypatch, gate, tmp_path)
     original = gate.collect_paper_compact_packet_pilot
 
     def drifted_quality(*args, **kwargs):

@@ -25,11 +25,12 @@
    source ordinals `0..7`, with one context-only sidecar and target-free audit
    per scene before native targets load. Its result is a development quality
    gate, not Table 1, Figure 11, sparse-execution, or timing evidence.
-3. Next, parameterize the native-dense V16 simulator by explicit model,
-   checkpoint, raw-head, Adapter, and decoder contracts. MVSplat and
-   DepthSplat each require their own evaluation-disjoint calibration, sample-0
-   target-free audit, quality gate, and fixed eight-scene gate. Do not reuse
-   TranSplat thresholds, route evidence, or result eligibility across models.
+3. MVSplat has now passed its fresh sample-0 quality gate under its own
+   evaluation-disjoint calibration and live decoder-source identity. Next run
+   only its fixed eight-scene gate, whose source/context/audit/quality chain is
+   parameterized by the same MVSplat contract. DepthSplat remains separate.
+   Do not reuse TranSplat thresholds, route evidence, or result eligibility
+   across models.
 
 ### Current L0/L1 Repair Contract (2026-07-19)
 
@@ -261,6 +262,19 @@
   `0.005`; any failure stops before MVSplat eight-scene, 140-scene, timing,
   S2/S3, Figure 11, or Table 1 work. The output root is
   `outputs/ae_dl3dv_repair_diagnostics/mvsplat_sample0_v16_native_dense_evidence_v1/quality`.
+- MVSplat sample-0 result: the source-bound quality gate passed with baseline
+  `35.606287 dB / 0.974350 / 0.031250` and compact
+  `35.581249 dB / 0.974164 / 0.031666`, hence PSNR loss `0.025038 dB`, SSIM
+  loss `0.000186`, and LPIPS increase `0.000416`. It remains development-only:
+  `L0/L1/Full=0/211/7981`, direct deletion is false, and S2/S3 timing claims
+  remain zero.
+- MVSplat fixed-eight-scene contract: bind source inputs, context-only
+  sidecars, target-free audits, calibrations, compact quality records, and the
+  live MVSplat `classic_backend_identity` to one explicit `--model mvsplat`
+  route. The run must use source ordinals `0..7`, V15 `fe356...e5eb`, V16
+  `912c...d036`, mechanism `42156d...655e97`, and output a new root under
+  `outputs/ae_dl3dv_repair_diagnostics/`. Any per-scene failure stops before
+  140-scene, Table 1, Figure 11, timing, or sparse S2/S3 work.
 
 ## 2. Baseline And Comparability
 
