@@ -192,3 +192,45 @@ def test_mvsplat_loader_rejects_a_mixed_src_namespace_package(tmp_path, monkeypa
         model_loader._validate_mvsplat_src_module_origins(
             mvsplat_root, require_loaded=True
         )
+
+
+def test_depthsplat_loader_rejects_a_foreign_cached_src_module(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import integration.model_loader as model_loader
+
+    depthsplat_root = tmp_path / "depthsplat"
+    foreign_origin = tmp_path / "mvsplat" / "src" / "__init__.py"
+    foreign_origin.parent.mkdir(parents=True)
+    foreign_origin.write_text("fixture = True\n", encoding="utf-8")
+    _clear_classic_src_modules(monkeypatch, model_loader.sys.modules)
+    monkeypatch.setitem(
+        model_loader.sys.modules,
+        "src",
+        SimpleNamespace(__file__=str(foreign_origin)),
+    )
+
+    with pytest.raises(RuntimeError, match="foreign preloaded DepthSplat src module"):
+        model_loader._validate_depthsplat_src_module_origins(
+            depthsplat_root, require_loaded=True
+        )
+
+
+def test_depthsplat_loader_accepts_its_cached_src_namespace_module(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import integration.model_loader as model_loader
+
+    depthsplat_root = tmp_path / "depthsplat"
+    namespace_root = depthsplat_root / "src" / "model" / "encoder"
+    namespace_root.mkdir(parents=True)
+    _clear_classic_src_modules(monkeypatch, model_loader.sys.modules)
+    monkeypatch.setitem(
+        model_loader.sys.modules,
+        "src.model.encoder",
+        SimpleNamespace(__path__=[str(namespace_root)]),
+    )
+
+    model_loader._validate_depthsplat_src_module_origins(
+        depthsplat_root, require_loaded=True
+    )

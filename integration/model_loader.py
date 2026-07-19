@@ -134,6 +134,43 @@ def _validate_mvsplat_src_module_origins(
         raise RuntimeError("MVSplat did not load its pinned src source tree")
 
 
+def _validate_depthsplat_src_module_origins(
+    depthsplat_root: Path, *, require_loaded: bool = False
+) -> None:
+    """Reject a cached top-level ``src`` package from another 3DGS backend."""
+
+    expected_root = Path(depthsplat_root).resolve()
+    loaded = False
+    for module_name, module in tuple(sys.modules.items()):
+        if module_name != "src" and not module_name.startswith("src."):
+            continue
+        origin = getattr(module, "__file__", None)
+        if isinstance(origin, str) and origin:
+            origins = (Path(origin).resolve(),)
+        else:
+            namespace_paths = getattr(module, "__path__", None)
+            if isinstance(namespace_paths, (str, bytes)):
+                namespace_paths = None
+            try:
+                origins = tuple(Path(path).resolve() for path in namespace_paths)
+            except TypeError as error:
+                raise RuntimeError(
+                    f"DepthSplat src module has no file or namespace origin: {module_name}"
+                ) from error
+            if not origins:
+                raise RuntimeError(
+                    f"DepthSplat src module has no file or namespace origin: {module_name}"
+                )
+        for resolved in origins:
+            if resolved != expected_root and expected_root not in resolved.parents:
+                raise RuntimeError(
+                    f"foreign preloaded DepthSplat src module is not permitted: {module_name}"
+                )
+        loaded = True
+    if require_loaded and not loaded:
+        raise RuntimeError("DepthSplat did not load its pinned src source tree")
+
+
 def get_depthsplat_encoder(get_encoder, encoder_cfg):
     _validate_pinned_dinov2_module_origins()
     original_hub_load = torch.hub.load
@@ -913,6 +950,8 @@ class DepthSplatLoader(BaseModelLoader):
         """Setup sys.path for DepthSplat imports."""
         import sys
         import os
+
+        _validate_depthsplat_src_module_origins(self.depthsplat_root)
         
         self._original_cwd = os.getcwd()
         os.chdir(self.depthsplat_root)
@@ -948,6 +987,9 @@ class DepthSplatLoader(BaseModelLoader):
         
         try:
             from src.model.encoder import get_encoder
+            _validate_depthsplat_src_module_origins(
+                self.depthsplat_root, require_loaded=True
+            )
             
             if device is None:
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -967,6 +1009,9 @@ class DepthSplatLoader(BaseModelLoader):
             # must not instantiate renderer/loss components.
             encoder, encoder_visualizer = get_depthsplat_encoder(
                 get_encoder, cfg.model.encoder
+            )
+            _validate_depthsplat_src_module_origins(
+                self.depthsplat_root, require_loaded=True
             )
             if encoder_only:
                 model = EncoderOnlyModel(encoder)

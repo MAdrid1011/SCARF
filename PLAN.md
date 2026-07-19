@@ -25,12 +25,11 @@
    source ordinals `0..7`, with one context-only sidecar and target-free audit
    per scene before native targets load. Its result is a development quality
    gate, not Table 1, Figure 11, sparse-execution, or timing evidence.
-3. MVSplat has now passed its fresh sample-0 quality gate under its own
-   evaluation-disjoint calibration and live decoder-source identity. Next run
-   only its fixed eight-scene gate, whose source/context/audit/quality chain is
-   parameterized by the same MVSplat contract. DepthSplat remains separate.
-   Do not reuse TranSplat thresholds, route evidence, or result eligibility
-   across models.
+3. MVSplat has passed its source-bound fixed eight-scene gate. The next line is
+   DepthSplat, which requires a separate native simulator: its
+   `gaussian_regressor -> gaussian_head` raw path, selected-RGB/SH Adapter
+   input, z-depth geometry, checkpoint/source identity, ACID calibration, and
+   quality gate may not reuse any classic threshold or coordinate helper.
 
 ### Current L0/L1 Repair Contract (2026-07-19)
 
@@ -284,6 +283,16 @@
   `mvsplat/src/model/decoder/decoder_splatting_cuda.py` and
   `mvsplat/src/model/types.py`; this remains development-only, without a
   direct-deletion, sparse-S2/S3, timing, Figure 11, or Table 1 claim.
+- DepthSplat repair contract: before GPU calibration, install a fail-closed
+  DepthSplat `src` origin guard alongside its pinned DINOv2 guard; capture the
+  native four-convolution `gaussian_regressor -> gaussian_head` descriptor
+  path with replicate-padding semantics; preserve selected context RGB for the
+  source Adapter's SH initialization; and reconstruct DepthSplat's native
+  z-depth pixel-ray geometry without importing classic coordinate helpers.
+  Only then may a new evaluation-disjoint V15/V16 calibration bind
+  `depthsplat/checkpoints/dl3dv.ckpt`, followed by exactly one sample-0 audit,
+  quality gate, and fixed eight-scene gate. Existing DepthSplat dependency
+  audits are diagnostic-only and cannot be promoted into this chain.
 
 ## 2. Baseline And Comparability
 

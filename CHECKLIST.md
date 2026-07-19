@@ -120,9 +120,16 @@
 - [x] Parameterize the compact-packet quality pilot for MVSplat's live decoder
   type and source identity, pass its CPU smoke, and run exactly one sample-0
   quality gate under the unchanged `0.15 dB / 0.005 / 0.005` tolerances.
-- [ ] Parameterize DepthSplat separately with its own native raw head, Adapter,
-  decoder, ACID evaluation-disjoint calibration, sample-0 audit, quality gate,
-  and fixed eight-scene gate. It must not reuse classic-model identity code.
+- [ ] Add DepthSplat `src` loader isolation and a live source/checkpoint
+  identity suitable for its native DL3DV `dl3dv.ckpt` route.
+- [ ] Add a source-faithful DepthSplat L0/L1 simulator over the native
+  `gaussian_regressor -> gaussian_head` path, selected RGB/SH Adapter input,
+  replicate padding, and z-depth coordinates. It must not reuse classic raw
+  head, Adapter, or coordinate code.
+- [ ] Freeze independent DepthSplat evaluation-disjoint V15/V16 calibration,
+  then run exactly one DL3DV sample-0 target-free audit and quality gate.
+- [ ] Run the DepthSplat fixed eight-scene quality gate before any three-model
+  140-scene expansion or Table 1 claim.
 - [x] Preserve `transplat_dl3dv_l1_15_v16_acid_disjoint_8scene_v1` as an
   invalid CPU-only preflight: the driver used the preparation record instead
   of the validated context identity, so all eight scenes failed before an
