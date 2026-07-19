@@ -2,20 +2,24 @@
 
 This document describes the two scene-adaptive mechanisms used by SCARF:
 Feature Similarity Depth Reuse (FSDR) and Scene-Adaptive Early Sparsification
-(SAES). Both mechanisms reduce encoder work before it reaches the most
-expensive depth-search and Gaussian-generation paths.
+(SAES). FSDR narrows a depth-search window when its cache conditions pass. The
+current SAES software path is a route and materialization diagnostic applied
+after the dense model has completed S2/S3 and materialized full Gaussian
+descriptors. It does not verify sparse S2/S3 execution, RTL-cycle timing, or an
+SAES speedup.
 
 ## 1. Overview
 
 | Mechanism | Redundancy source | Stage | Main action |
 |-----------|-------------------|-------|-------------|
 | FSDR | Feature-space similarity | S2 depth prediction | Reuse a cached depth anchor to narrow the candidate window |
-| SAES | Local 3D continuity | S2 and S3 | Select a lower-cost Gaussian-generation path for regular tiles |
+| SAES | Local 3D continuity | After dense S2/S3 | Classify tiles and materialize diagnostic retained output from dense descriptors |
 
-FSDR and SAES are applied to disjoint work. SAES first classifies a tile and
-bypasses depth prediction or Gaussian generation when the probe evidence is
-sufficient. FSDR then handles the remaining pixels that still require depth
-prediction. This keeps their cycle savings additive in the simulator.
+FSDR and SAES are represented as distinct mechanism paths. That separation does
+not make their accounting results additive hardware evidence. In the current
+demo, all S2/S3 model work completes before SAES receives cloned full Gaussian
+descriptors. SAES therefore provides route and materialization diagnostics
+rather than a measured bypass of depth prediction or Gaussian generation.
 
 ## 2. FSDR
 
@@ -71,16 +75,19 @@ FSDR is implemented with a small hash-and-CAM subsystem:
 
 ## 3. SAES
 
-SAES targets redundant Gaussian materialization in locally regular tiles. It
-uses a small set of probes and follows the published first-hit decision order:
-feature statistic for L0, then depth statistic for L1 after an L0 miss, then
-Full. It does not use a Gaussian-similarity or quality-validation routing gate.
+SAES specifies a route for redundant Gaussian materialization in locally regular
+tiles. It uses a small set of probes and follows the published first-hit
+decision order: feature statistic for L0, then depth statistic for L1 after an
+L0 miss, then Full. The current software performs this classification after
+dense Gaussian materialization and uses the available descriptors to construct
+diagnostic output. Route counts and retained-descriptor counts therefore do not
+show physical sparse S2/S3 work.
 
-| Path | Trigger condition | Action |
+| Path | Trigger condition | Diagnostic action |
 |------|-------------------|--------|
-| L0 representative path | Low feature variance | Use representative Gaussians for the tile |
-| L1 lightweight path | L0 miss and low probe-depth standard deviation | Retain the declared lightweight anchor path |
-| Full path | Irregular tile | Run full per-pixel Gaussian generation |
+| L0 representative path | Low feature variance | Construct representative output from already materialized descriptors |
+| L1 lightweight path | L0 miss and low probe-depth standard deviation | Retain the declared anchors for diagnostic materialization |
+| Full path | Irregular tile | Keep the dense descriptor output |
 
 ### 3.1 Probe Selection
 
@@ -95,21 +102,23 @@ SAES computes the two decision statistics specified by the mechanism:
 - Feature variance for L0 decisions.
 - Probe-depth standard deviation for L1 decisions after an L0 miss.
 
-L1 computes its depth-reliability mean and standard deviation from the primary
-K routing probes. The declared 2K lightweight anchor expansion occurs only
-after that route and does not alter the L1 reference statistics.
+At T=4, L1 computes its depth-reliability mean and standard deviation from four
+primary corner routing probes. If L1 is selected, it retains those four primary
+anchors plus eight boundary anchors, for twelve anchors total. The boundary
+anchors do not alter the L1 reference statistics.
 
-Frozen thresholds may only be selected through the disjoint training-calibration
-contract. They are never selected from evaluation RGB, paper tables, or
-evaluation aggregates. A tile takes a lower-cost path only when this fixed
-first-hit rule accepts it.
+A claim-run threshold must be selected through the disjoint training-calibration
+contract. It may not use evaluation RGB, paper tables, or evaluation aggregates.
+The checked-in configuration is preregistered without a selected tuple, so it
+does not authorize an SAES quality, work-reduction, or speed claim.
 
 ### 3.3 Representative Gaussian Generation
 
-For L0 tiles, SAES builds representative Gaussians by weighted moment matching.
-Position and covariance use first- and second-moment statistics. Opacity and
-spherical-harmonic coefficients are averaged with range checks. This keeps the
-representative path conservative in textured or geometrically complex areas.
+For L0 diagnostic output, SAES builds representative Gaussians from already
+materialized descriptors by weighted moment matching. Position and covariance
+use first- and second-moment statistics. Opacity and spherical-harmonic
+coefficients are averaged with range checks. This keeps the representative path
+conservative in textured or geometrically complex areas.
 
 ## 4. Simulator Integration
 
@@ -129,26 +138,30 @@ python scripts/demo.py --model transplat --no-saes
 python scripts/demo.py --model transplat --no-fsdr --no-saes
 ```
 
-The simulator reports cycle counts, path statistics, cache hit rates, Gaussian
-counts, and image-quality metrics. These records become paper evidence only
-when the fixed validator accepts a complete raw result set; diagnostics and
-partial runs remain non-claiming.
+The demo reports path statistics, cache hit rates, Gaussian counts, image
+metrics, and analytical accounting. The hardware ledger is no-overlap analytic
+accounting, not RTL-cycle-equivalent timing. Its derived S2-evaluation count is
+not an observed sparse kernel invocation. Runtime statistics also omit direct
+primary-probe, secondary-probe, and Full replay counts, so they cannot bind a
+complete event schedule. A caller-configured stage-event schedule can audit
+declared assumptions, but it is not RTL timing evidence.
 
 ### 4.1 Artifact claim boundary
 
-The current artifact does not claim the sparse-SAES Table 1 or Tables 2--3
-rows. Corrected real-model probes keep the no-optimization and FSDR paths
-numerically aligned, but representative sparsification exceeds the declared
-quality tolerance and produces no L1 tiles for the tested TranSplat/MVSplat
-Re10K samples. A separately guarded dense interpolation diagnostic retains all
-Gaussians; it is useful for failure analysis but is not pruning evidence.
+The current artifact claims no sparse-SAES Table 1 or Tables 2--3 rows. The
+current Python path materializes full S3 descriptor tensors before SAES and has
+not verified sparse S2/S3 execution. The analytical ledger and any
+caller-declared stage-event schedule are diagnostic only. Neither can support a
+SAES timing, PPA, work-reduction, or quality claim.
 
 ### 4.2 Target-Free FSDR Audits
 
-`--claim-run --fsdr-only` is the calibrated, paper-eligible FSDR evidence
-path. `--diagnostic-run --fsdr-only --image-output-policy none` instead emits
-an `fsdr_target_free_audit`: it removes target RGB before device transfer and
-records that RGB was not passed to the model, routing, or metrics. The FSDR
+`--claim-run --fsdr-only` becomes a paper-eligible FSDR evidence path only after
+the global configuration has been selected and frozen by the calibration
+contract. The checked-in preregistered configuration does not meet that
+condition. `--diagnostic-run --fsdr-only --image-output-policy none` instead
+emits an `fsdr_target_free_audit`: it removes target RGB before device transfer
+and records that RGB was not passed to the model, routing, or metrics. The FSDR
 aggregator rejects this diagnostic kind, so it cannot become Table 2 evidence
 without a fresh calibrated claim run.
 

@@ -1,8 +1,9 @@
 """Exact same-weight replay for retained outputs of a two-convolution head.
 
-TranSplat and MVSplat emit raw Gaussian descriptors through the same spatial
-head: ``Conv3x3 -> GELU -> Conv3x3``.  A retained output only needs a 5x5
-input halo, but a repeated four-corner-per-T=4 selection makes the first
+TranSplat, MVSplat, and DepthSplat emit raw Gaussian descriptors through a
+spatial ``Conv3x3 -> GELU -> Conv3x3`` head.  The first two use zero padding;
+DepthSplat uses replicate padding.  A retained output only needs a 5x5 input
+halo, but a repeated four-corner-per-T=4 selection can make the first
 convolution's closure dense.  This module executes that closure explicitly,
 then executes the second convolution only for retained outputs.  It never
 changes, trains, or approximates the source head's parameters.
@@ -63,10 +64,10 @@ def _require_supported_conv(conv: nn.Conv2d, *, name: str) -> None:
         or _pair(conv.dilation) != (1, 1)
         or _pair(conv.padding) != (1, 1)
         or conv.groups != 1
-        or conv.padding_mode != "zeros"
+        or conv.padding_mode not in {"zeros", "replicate"}
     ):
         raise ValueError(
-            f"{name} must be an ungrouped zero-padded stride-1 3x3 convolution"
+            f"{name} must be an ungrouped zero- or replicate-padded stride-1 3x3 convolution"
         )
 
 
@@ -83,6 +84,8 @@ def unpack_two_conv_head(head: nn.Module) -> tuple[nn.Conv2d, nn.Module, nn.Conv
         raise ValueError("selected-output replay requires the original nn.GELU")
     if first.out_channels != second.in_channels:
         raise ValueError("head convolution channel dimensions are inconsistent")
+    if first.padding_mode != second.padding_mode:
+        raise ValueError("selected-output replay requires one shared padding mode")
     return first, activation, second
 
 
@@ -99,7 +102,12 @@ def selected_output_coordinates(selection_mask: torch.Tensor) -> torch.Tensor:
 def _same_conv3_closure(
     coordinates: torch.Tensor, *, height: int, width: int
 ) -> torch.Tensor:
-    """Return row-major valid input positions for a zero-padded 3x3 output set."""
+    """Return row-major valid positions for a padded 3x3 output set.
+
+    Both supported padding modes map off-image positions to an in-image
+    source: zeros need no source value and replicate uses the nearest edge.
+    The valid closure therefore remains sufficient for either mode.
+    """
     offsets = torch.arange(-1, 2, device=coordinates.device)
     rows = coordinates[:, 0, None, None] + offsets[None, :, None]
     columns = coordinates[:, 1, None, None] + offsets[None, None, :]
@@ -112,27 +120,33 @@ def _linear_to_coordinates(linear: torch.Tensor, *, width: int) -> torch.Tensor:
     return torch.stack((torch.div(linear, width, rounding_mode="floor"), linear % width), dim=1)
 
 
-def _gather_zero_padded_patches(
-    activations: torch.Tensor, coordinates: torch.Tensor
+def _gather_padded_patches(
+    activations: torch.Tensor,
+    coordinates: torch.Tensor,
+    *,
+    padding_mode: str,
 ) -> torch.Tensor:
-    """Gather one native 3x3 patch per valid output coordinate.
+    """Gather one native 3x3 patch per output coordinate.
 
-    Padding is materialized only as a one-pixel border.  No dense hidden
-    activation map is evaluated by this helper.
+    The source head's one-pixel zero or replicate border is materialized
+    locally.  No dense hidden activation map is evaluated by this helper.
     """
     if activations.ndim != 4:
         raise ValueError("head input must be [N,C,H,W]")
     height, width = activations.shape[-2:]
     if coordinates.ndim != 2 or coordinates.shape[1] != 2:
         raise ValueError("coordinates must be [K,2]")
-    padded = F.pad(activations, (1, 1, 1, 1))
+    if padding_mode not in {"zeros", "replicate"}:
+        raise ValueError("selected-output replay has an unsupported padding mode")
+    pad_mode = "constant" if padding_mode == "zeros" else "replicate"
+    padded = F.pad(activations, (1, 1, 1, 1), mode=pad_mode)
     offsets = torch.arange(3, device=activations.device)
     rows = coordinates[:, 0, None, None] + offsets[None, :, None]
     columns = coordinates[:, 1, None, None] + offsets[None, None, :]
     if bool((rows < 0).any()) or bool((rows >= height + 2).any()):
-        raise ValueError("patch coordinate is outside the zero-padded activation")
+        raise ValueError("patch coordinate is outside the padded activation")
     if bool((columns < 0).any()) or bool((columns >= width + 2).any()):
-        raise ValueError("patch coordinate is outside the zero-padded activation")
+        raise ValueError("patch coordinate is outside the padded activation")
     # Advanced indexing yields [N,C,K,3,3]; the convolution batch is K.
     return padded[:, :, rows, columns].permute(0, 2, 1, 3, 4).contiguous()
 
@@ -157,8 +171,9 @@ def _hidden_patches_for_selected_outputs(
     *,
     height: int,
     width: int,
+    padding_mode: str,
 ) -> torch.Tensor:
-    """Gather zero-padded hidden 3x3 neighborhoods for selected final outputs."""
+    """Gather source-padding-faithful hidden neighborhoods for final outputs."""
     batch, hidden_count, channels = hidden_values.shape
     if hidden_count != hidden_linear.numel():
         raise ValueError("hidden values and coordinate map disagree")
@@ -180,7 +195,11 @@ def _hidden_patches_for_selected_outputs(
         raise RuntimeError("first-convolution closure omitted a required hidden output")
     gathered = hidden_values[:, slots.clamp_min(0).reshape(-1), :]
     patches = gathered.reshape(batch, -1, 3, 3, channels).permute(0, 1, 4, 2, 3)
-    return patches * valid.to(dtype=patches.dtype).view(1, -1, 1, 3, 3)
+    if padding_mode == "zeros":
+        return patches * valid.to(dtype=patches.dtype).view(1, -1, 1, 3, 3)
+    if padding_mode == "replicate":
+        return patches
+    raise ValueError("selected-output replay has an unsupported padding mode")
 
 
 def _conv_macs_per_position(conv: nn.Conv2d) -> int:
@@ -216,7 +235,9 @@ def replay_two_conv_selected_outputs(
     )
     hidden_coordinates = _linear_to_coordinates(hidden_linear, width=width)
 
-    first_patches = _gather_zero_padded_patches(head_input, hidden_coordinates)
+    first_patches = _gather_padded_patches(
+        head_input, hidden_coordinates, padding_mode=first.padding_mode
+    )
     hidden_values = activation(_apply_conv_to_patches(first, first_patches))
     second_patches = _hidden_patches_for_selected_outputs(
         hidden_values,
@@ -224,6 +245,7 @@ def replay_two_conv_selected_outputs(
         selected_coordinates,
         height=height,
         width=width,
+        padding_mode=second.padding_mode,
     )
     selected_values = _apply_conv_to_patches(second, second_patches).transpose(1, 2)
 
@@ -238,6 +260,7 @@ def replay_two_conv_selected_outputs(
     events = {
         "contract_version": REPLAY_CONTRACT_VERSION,
         "head_structure": "Conv3x3->GELU->Conv3x3",
+        "padding_mode": first.padding_mode,
         "dense_spatial_positions": dense_positions,
         "selected_final_output_positions": int(selected_linear.numel()),
         "first_conv_required_output_positions": int(hidden_linear.numel()),
@@ -340,6 +363,7 @@ def replay_two_conv_selected_output_maps(
             first_macs = _conv_macs_per_position(first)
             second_macs = _conv_macs_per_position(second)
             event = {
+                "padding_mode": first.padding_mode,
                 "dense_spatial_positions": height * width,
                 "selected_final_output_positions": selected,
                 "first_conv_required_output_positions": height * width,
@@ -372,6 +396,7 @@ def replay_two_conv_selected_output_maps(
             "contract_version": REPLAY_CONTRACT_VERSION,
             "batch_size": batch,
             "head_structure": "Conv3x3->GELU->Conv3x3",
+            "padding_mode": first.padding_mode,
             "dense_head_macs": dense_head_macs,
             "actual_head_macs": actual_head_macs,
             "head_mac_delta": dense_head_macs - actual_head_macs,

@@ -106,14 +106,14 @@ def test_three_way_attribution_partitions_mixed_l0_l1_full_tiles():
         height=height,
         width=width,
         stats={
-            "zeroed_gaussians": 20,
-            "same_budget_dense_oracle_output_gaussians": 12,
+            "zeroed_gaussians": 16,
+            "same_budget_dense_oracle_output_gaussians": 16,
             "full_stage3_gaussians": 16,
             "level0_tiles": 1,
             "level1_tiles": 1,
         },
     )
 
-    assert accounting["removed_nonprobes"] == 20
-    assert accounting["representative_slots"] == 12
+    assert accounting["removed_nonprobes"] == 16
+    assert accounting["representative_slots"] == 16
     assert accounting["full_passthrough_gaussians"] == 16

@@ -24,10 +24,19 @@ from hardware.iflow.paper_table4 import (
     UNMODELED_COMPONENTS,
 )
 from scripts.execution_contract import require_paper_execution_contract
+from scripts.result_record import (
+    EXECUTION_TRACE_SET_SCHEMA_VERSION,
+    claim_ablation_speedups,
+    claim_timing_from_record,
+)
+from scripts.validate_result import (
+    aggregate_execution_binding_mismatches,
+    reject_reference_only_record,
+    validate,
+)
 
 
 STYLE = ROOT / "artifact/plot_style.mplstyle"
-EXPECTED = ROOT / "artifact/expected_results.json"
 METRICS = ("psnr_db", "ssim", "lpips")
 PAIR_LABELS = {
     "transplat/re10k": "Tran / Re10K",
@@ -40,6 +49,7 @@ PAIR_LABELS = {
     "depthsplat/acid": "Depth / ACID",
     "depthsplat/dl3dv": "Depth / DL3DV",
 }
+REQUIRED_PAIRS = tuple(PAIR_LABELS)
 COLORS = {"main": "#6F8F88", "neutral": "#A8A29E", "target": "#B67C6B", "quality": "#7C748C"}
 EVIDENCE_CLASSES = {
     "independent_measurement",
@@ -50,12 +60,193 @@ EVIDENCE_CLASSES = {
 
 
 def load(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(record, dict):
+        reject_reference_only_record(record)
+    return record
 
 
 def require_report_result(record: dict[str, Any], path: Path) -> None:
     """Reject a diagnostic virtual-output result before it reaches a table."""
     require_paper_execution_contract(record, surface=f"report input {path}")
+
+
+def report_execution_evidence_reason(
+    record: dict[str, Any], *, required_evidence_class: str
+) -> str | None:
+    """Return why an aggregate record cannot appear in reviewer-facing tables."""
+    if record.get("schema_version") != "2.1":
+        return "result does not use the trace-bound schema"
+    if record.get("evidence_class") != required_evidence_class:
+        return "result has the wrong evidence class"
+    provenance = record.get("provenance")
+    quality = record.get("quality")
+    performance = record.get("performance")
+    if (
+        not isinstance(provenance, dict)
+        or not isinstance(quality, dict)
+        or not isinstance(performance, dict)
+    ):
+        return "missing provenance, quality, or performance evidence"
+    dataset = provenance.get("dataset")
+    if not isinstance(dataset, dict) or dataset.get("paper_result_eligible") is not True:
+        return "record is not paper-result eligible"
+    contract = provenance.get("execution_contract")
+    if contract != {
+        "run_class": "claim",
+        "saes_materialization": "representative",
+    }:
+        return "record was not executed through the representative claim path"
+    if provenance.get("git_dirty") is not False:
+        return "claim-facing record was generated from a dirty worktree"
+    evaluation = provenance.get("evaluation")
+    if not isinstance(evaluation, dict) or evaluation.get("kind") != "dataset_aggregate":
+        return "record is not a dataset aggregate"
+    trace_set = evaluation.get("execution_trace_set")
+    trace_digest = evaluation.get("execution_trace_set_sha256")
+    if (
+        evaluation.get("execution_trace_set_schema_version")
+        != EXECUTION_TRACE_SET_SCHEMA_VERSION
+        or not isinstance(trace_set, list)
+        or not trace_set
+        or not isinstance(trace_digest, str)
+        or len(trace_digest) != 64
+        or any(character not in "0123456789abcdef" for character in trace_digest)
+        or quality.get("execution_trace_set_sha256") != trace_digest
+        or performance.get("execution_trace_set_sha256") != trace_digest
+    ):
+        return "record has no complete aggregate execution-trace binding"
+    try:
+        validate(record)
+    except (KeyError, TypeError, ValueError) as error:
+        return f"record fails result validation: {error}"
+    return None
+
+
+def quality_mechanism_binding_reason(
+    quality: dict[str, Any], mechanism: dict[str, Any]
+) -> str | None:
+    """Return why Table 1 and mechanism evidence cannot be combined."""
+    mismatches = aggregate_execution_binding_mismatches(quality, mechanism)
+    if not mismatches:
+        return None
+    return "quality/mechanism aggregate binding mismatch: " + ", ".join(
+        sorted(mismatches)
+    )
+
+
+def combined_quality_mechanism_reasons(
+    quality: dict[str, Any],
+    mechanism: dict[str, Any],
+    quality_reason: str | None,
+    mechanism_reason: str | None,
+) -> tuple[str | None, str | None]:
+    """Prevent either claim surface from passing on an uncombinable pair."""
+    if quality_reason is None and mechanism_reason is None:
+        binding_reason = quality_mechanism_binding_reason(quality, mechanism)
+        return binding_reason, binding_reason
+    if quality_reason is None:
+        return (
+            "quality aggregate cannot be combined with mechanism evidence: "
+            f"{mechanism_reason}",
+            mechanism_reason,
+        )
+    if mechanism_reason is None:
+        return (
+            quality_reason,
+            "mechanism aggregate cannot be combined with quality evidence: "
+            f"{quality_reason}",
+        )
+    return quality_reason, mechanism_reason
+
+
+def claim_quality_mechanism_pair_reasons(
+    quality: dict[str, Any] | None,
+    mechanism: dict[str, Any] | None,
+    quality_reason: str | None,
+    mechanism_reason: str | None,
+) -> tuple[str | None, str | None]:
+    """Require a matching claimable aggregate before either surface can pass."""
+    if quality is None:
+        if mechanism is not None and mechanism_reason is None:
+            return (
+                quality_reason,
+                "claimable mechanism aggregate requires a matching claim-quality "
+                "aggregate",
+            )
+        return quality_reason, mechanism_reason
+    if mechanism is None:
+        if quality_reason is None:
+            return (
+                "claim-quality aggregate requires a matching claimable mechanism "
+                "aggregate",
+                mechanism_reason,
+            )
+        return quality_reason, mechanism_reason
+    return combined_quality_mechanism_reasons(
+        quality, mechanism, quality_reason, mechanism_reason
+    )
+
+
+def strict_saes_mechanism_evidence_reason(record: dict[str, Any]) -> str | None:
+    """Return why a mechanism record cannot support a strict SAES result."""
+    provenance = record.get("provenance")
+    performance = record.get("performance")
+    events = record.get("events")
+    fsdr_saes = record.get("fsdr_saes")
+    if not isinstance(provenance, dict) or not isinstance(performance, dict):
+        return "missing provenance or performance evidence"
+    dataset = provenance.get("dataset")
+    if not isinstance(dataset, dict) or dataset.get("paper_result_eligible") is not True:
+        return "record is not paper-result eligible"
+    contract = provenance.get("execution_contract")
+    if not isinstance(contract, dict) or contract != {
+        "run_class": "claim",
+        "saes_materialization": "representative",
+    }:
+        return "record was not executed through the representative claim path"
+    if not isinstance(events, dict) or not isinstance(events.get("saes"), dict):
+        return "missing SAES runtime events"
+    saes_events = events["saes"]
+    dependency = saes_events.get("execution_dependency")
+    if (
+        not isinstance(dependency, dict)
+        or dependency.get("s2_s3_sparse_execution_verified") is not True
+    ):
+        return "SAES S2/S3 sparse execution is not verified"
+    if saes_events.get("s2_evaluations_available") is not True:
+        return "SAES S2 execution counters are unavailable"
+    full_s2 = saes_events.get("full_s2_evaluations")
+    executed_s2 = saes_events.get("executed_s2_evaluations")
+    if (
+        isinstance(full_s2, bool)
+        or isinstance(executed_s2, bool)
+        or not isinstance(full_s2, (int, float))
+        or not isinstance(executed_s2, (int, float))
+        or full_s2 <= 0
+        or not 0 <= executed_s2 < full_s2
+    ):
+        return "SAES runtime counters do not show executed sparse S2 work"
+    cycle_source = performance.get("cycle_source")
+    if not isinstance(cycle_source, str) or not cycle_source:
+        return "missing performance cycle source"
+    if cycle_source.startswith("scarf_component_simulators"):
+        return "performance cycles come from component simulators"
+    saes_summary = fsdr_saes.get("saes") if isinstance(fsdr_saes, dict) else None
+    ledger = (
+        saes_summary.get("hardware_accounting")
+        if isinstance(saes_summary, dict)
+        else None
+    )
+    if isinstance(ledger, dict) and ledger.get("timing_class") == (
+        "analytic_no_overlap_not_rtl_cycle_equivalent"
+    ):
+        return "SAES timing is an analytic no-overlap ledger"
+    try:
+        claim_ablation_speedups(record)
+    except (KeyError, TypeError, ValueError) as exc:
+        return f"missing or invalid source-bound claim timing: {exc}"
+    return None
 
 
 def sha256_file(path: Path) -> str:
@@ -66,20 +257,41 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def find_pair(output: Path, pair: str, modes: tuple[str, ...]) -> Path:
-    directory = pair.replace("/", "_")
-    matches = [output / mode / directory / "results.json" for mode in modes]
-    matches = [path for path in matches if path.is_file()]
-    if not matches:
-        raise FileNotFoundError(f"missing {pair} result in {', '.join(modes)}")
-    return matches[0]
-
-
-def find_pair_optional(output: Path, pair: str, modes: tuple[str, ...]) -> Path | None:
-    try:
-        return find_pair(output, pair, modes)
-    except FileNotFoundError:
+def pair_from_result(record: dict[str, Any]) -> str | None:
+    """Return the pair declared by a generated aggregate result record."""
+    provenance = record.get("provenance")
+    if not isinstance(provenance, dict):
         return None
+    model = provenance.get("model")
+    dataset = provenance.get("dataset")
+    dataset_name = dataset.get("name") if isinstance(dataset, dict) else None
+    if not isinstance(model, str) or not model or not isinstance(dataset_name, str) or not dataset_name:
+        return None
+    return f"{model}/{dataset_name}"
+
+
+def discover_pair_results(output: Path, modes: tuple[str, ...]) -> dict[str, Path]:
+    """Discover one generated aggregate result per pair in mode priority order."""
+    discovered: dict[str, Path] = {}
+    for mode in modes:
+        for path in sorted((output / mode).glob("*/results.json")):
+            pair = pair_from_result(load(path))
+            if pair is not None and pair not in discovered:
+                discovered[pair] = path
+    return discovered
+
+
+def ordered_pairs(*pair_maps: dict[str, Path]) -> list[str]:
+    """Keep the published display order while admitting evidence-only extras."""
+    pairs = set().union(*(set(pair_map) for pair_map in pair_maps))
+    return [
+        *(pair for pair in REQUIRED_PAIRS if pair in pairs),
+        *sorted(pairs - set(REQUIRED_PAIRS)),
+    ]
+
+
+def pair_label(pair: str) -> str:
+    return PAIR_LABELS.get(pair, pair)
 
 
 def geometric_mean(values: list[float]) -> float:
@@ -113,7 +325,7 @@ def validate_figure_catalog(
     """Validate one-to-one result coverage and evidence-class strength."""
     if generated.get("schema_version") != "2.0":
         raise ValueError("generated figure catalog schema must be 2.0")
-    expected = {item["id"]: item for item in contract.get("results", [])}
+    requirements = {item["id"]: item for item in contract.get("results", [])}
     rows = generated.get("results")
     if not isinstance(rows, list):
         raise ValueError("generated figure catalog results must be a list")
@@ -125,12 +337,12 @@ def validate_figure_catalog(
         if result_id in actual:
             raise ValueError(f"duplicate generated result: {result_id}")
         actual[result_id] = row
-    if set(actual) != set(expected):
-        missing = sorted(set(expected) - set(actual))
-        extra = sorted(set(actual) - set(expected))
+    if set(actual) != set(requirements):
+        missing = sorted(set(requirements) - set(actual))
+        extra = sorted(set(actual) - set(requirements))
         raise ValueError(f"generated result coverage mismatch: missing={missing}, extra={extra}")
 
-    for result_id, requirement in expected.items():
+    for result_id, requirement in requirements.items():
         row = actual[result_id]
         evidence_class = row.get("evidence_class")
         if evidence_class not in EVIDENCE_CLASSES:
@@ -167,145 +379,196 @@ def validate_figure_catalog(
             raise ValueError(f"mandatory key result did not pass: {result_id}")
 
 
-def build_tables(
-    output: Path, report_dir: Path, expected: dict[str, Any], claims: dict[str, Any]
-) -> dict[str, Any]:
+def build_tables(output: Path, report_dir: Path) -> dict[str, Any]:
     quality_rows = []
     speedup_rows = []
     ablation_rows = []
     fsdr_rows = []
     saes_rows = []
+    strict_quality_evidence: dict[str, str] = {}
+    strict_mechanism_evidence: dict[str, str] = {}
+    strict_speedup_evidence: dict[str, str] = {}
     sources = []
-    for pair in expected["table1"]:
-        quality_path = find_pair_optional(output, pair, ("quality", "all", "ablation"))
-        if quality_path is None:
-            continue
-        ablation_path = find_pair_optional(
-            output, pair, ("mechanisms", "ablation", "all", "quality")
-        )
-        quality = load(quality_path)
+    protocol = load(ROOT / "artifact/evaluation_protocol.json")
+    protocol_pairs = protocol.get("pairs", {})
+    quality_paths = discover_pair_results(
+        output, ("quality", "all", "ablation")
+    )
+    ablation_paths = discover_pair_results(
+        output, ("mechanisms", "ablation", "all", "quality")
+    )
+    speed_paths = discover_pair_results(output, ("performance", "speedup", "orin"))
+    for pair in ordered_pairs(quality_paths, ablation_paths, speed_paths):
+        quality_path = quality_paths.get(pair)
+        ablation_path = ablation_paths.get(pair)
+        quality = load(quality_path) if quality_path is not None else None
         ablation = load(ablation_path) if ablation_path is not None else None
-        require_report_result(quality, quality_path)
+        if ablation is not None and not isinstance(ablation.get("ablation"), dict):
+            ablation = None
+        quality_reason = None
+        mechanism_reason = None
+        if quality is not None:
+            require_report_result(quality, quality_path)
+            quality_reason = report_execution_evidence_reason(
+                quality, required_evidence_class="deterministic_execution"
+            )
         if ablation is not None:
             require_report_result(ablation, ablation_path)
-        sources.append(quality_path)
-        if ablation_path is not None:
-            sources.append(ablation_path)
-        row: dict[str, Any] = {"pair": pair, "sample_count": quality["provenance"]["evaluation"]["sample_count"]}
-        for variant in ("baseline", "scarf"):
-            for metric in METRICS:
-                row[f"{variant}_{metric}"] = quality["quality"][variant][metric]
-        quality_rows.append(row)
-        speed_path = find_pair_optional(output, pair, ("performance", "speedup", "orin"))
+            mechanism_reason = report_execution_evidence_reason(
+                ablation, required_evidence_class="deterministic_execution"
+            )
+            if mechanism_reason is None:
+                mechanism_reason = strict_saes_mechanism_evidence_reason(ablation)
+        quality_reason, mechanism_reason = claim_quality_mechanism_pair_reasons(
+            quality, ablation, quality_reason, mechanism_reason
+        )
+        if quality is not None:
+            if quality_reason is not None:
+                strict_quality_evidence[pair] = quality_reason
+            else:
+                sources.append(quality_path)
+                row: dict[str, Any] = {
+                    "pair": pair,
+                    "sample_count": quality["provenance"]["evaluation"]["sample_count"],
+                }
+                for variant in ("baseline", "scarf"):
+                    for metric in METRICS:
+                        row[f"{variant}_{metric}"] = quality["quality"][variant][metric]
+                quality_rows.append(row)
+        if ablation is not None:
+            if mechanism_reason is not None:
+                strict_mechanism_evidence[pair] = mechanism_reason
+            else:
+                sources.append(ablation_path)
+                speedups = claim_ablation_speedups(ablation)
+                ablation_rows.append(
+                    {
+                        "pair": pair,
+                        "fsdr_speedup": speedups["fsdr"],
+                        "saes_speedup": speedups["saes"],
+                        "combined_speedup": speedups["combined"],
+                    }
+                )
+                events = ablation.get("events", {})
+                fsdr_events = events.get("fsdr", {})
+                saes_events = events.get("saes", {})
+                fsdr = ablation.get("fsdr_saes", {}).get("fsdr", {})
+                saes = ablation.get("fsdr_saes", {}).get("saes", {})
+                preservation = ablation.get("fsdr_saes", {}).get("preservation", {})
+                guided_pixels = fsdr_events.get("guided_pixels")
+                total_pixels = fsdr_events.get("total_pixels")
+                top1_total = (
+                    fsdr_events.get("guided_top1_covered", 0)
+                    + fsdr_events.get("guided_top1_missed", 0)
+                    if fsdr_events.get("discrete_top1_available") is True
+                    else 0
+                )
+                fsdr_rows.append(
+                    {
+                        "pair": pair,
+                        "guided_rate": (
+                            float(guided_pixels) / float(total_pixels)
+                            if isinstance(guided_pixels, (int, float)) and total_pixels
+                            else fsdr.get("guided_rate")
+                        ),
+                        "top1_coverage": (
+                            float(fsdr_events["guided_top1_covered"])
+                            / float(top1_total)
+                            if top1_total
+                            else None
+                        ),
+                        "full_depth_evaluations": (
+                            fsdr_events.get("full_depth_evaluations")
+                            if fsdr_events.get("depth_evaluations_available") is True
+                            else None
+                        ),
+                        "executed_depth_evaluations": (
+                            fsdr_events.get("executed_depth_evaluations")
+                            if fsdr_events.get("depth_evaluations_available") is True
+                            else None
+                        ),
+                        "feature_buffer_bytes_baseline": (
+                            fsdr_events.get("feature_buffer_bytes_baseline")
+                            if fsdr_events.get("feature_buffer_bytes_available") is True
+                            else None
+                        ),
+                        "feature_buffer_bytes_actual": (
+                            fsdr_events.get("feature_buffer_bytes_actual")
+                            if fsdr_events.get("feature_buffer_bytes_available") is True
+                            else None
+                        ),
+                    }
+                )
+                total_tiles = saes_events.get("total_tiles")
+                baseline_gaussians = saes_events.get("baseline_gaussians")
+                saes_rows.append(
+                    {
+                        "pair": pair,
+                        "level0_rate": (
+                            float(saes_events["level0_tiles"]) / float(total_tiles)
+                            if saes_events.get("tile_path_available") is True
+                            and total_tiles
+                            else saes.get("level0_ratio")
+                        ),
+                        "level1_rate": (
+                            float(saes_events["level1_tiles"]) / float(total_tiles)
+                            if saes_events.get("tile_path_available") is True
+                            and total_tiles
+                            else saes.get("level1_ratio")
+                        ),
+                        "full_rate": (
+                            float(saes_events["full_tiles"]) / float(total_tiles)
+                            if saes_events.get("tile_path_available") is True
+                            and total_tiles
+                            else saes.get("full_ratio")
+                        ),
+                        "low_variance_agreement": preservation.get(
+                            "saes_low_var_agree"
+                        ),
+                        "gaussians_saved": (
+                            1.0
+                            - float(saes_events["actual_gaussians"])
+                            / float(baseline_gaussians)
+                            if saes_events.get("gaussian_counts_available") is True
+                            and baseline_gaussians
+                            else saes.get("modification_ratio")
+                        ),
+                        "full_s2_evaluations": (
+                            saes_events.get("full_s2_evaluations")
+                            if saes_events.get("s2_evaluations_available") is True
+                            else None
+                        ),
+                        "executed_s2_evaluations": (
+                            saes_events.get("executed_s2_evaluations")
+                            if saes_events.get("s2_evaluations_available") is True
+                            else None
+                        ),
+                    }
+                )
+        speed_path = speed_paths.get(pair)
         if speed_path is not None:
             speed = load(speed_path)
             require_report_result(speed, speed_path)
-            if speed.get("performance", {}).get("baseline_source") == "orin_nx_cuda_events":
-                sources.append(speed_path)
-                speedup_rows.append(
-                    {"pair": pair, "speedup": speed["performance"]["speedup"]}
-                )
+            expected_selection = (
+                protocol_pairs.get(pair, {}).get("sample_selection_sha256")
+                if isinstance(protocol_pairs, dict)
+                else None
+            )
+            if not isinstance(expected_selection, str):
+                strict_speedup_evidence[pair] = "pair has no frozen Orin selection"
+            else:
+                from scripts.validate_ae import orin_evidence_reason
 
-        if ablation is not None:
-            base = float(ablation["ablation"]["asic"]["eff_total"])
-            ablation_rows.append(
-                {
-                    "pair": pair,
-                    "fsdr_speedup": base / float(ablation["ablation"]["asic_fsdr"]["eff_total"]),
-                    "saes_speedup": base / float(ablation["ablation"]["asic_saes"]["eff_total"]),
-                    "combined_speedup": base / float(ablation["ablation"]["asic_fsdr_saes"]["eff_total"]),
-                }
-            )
-            events = ablation.get("events", {})
-            fsdr_events = events.get("fsdr", {})
-            saes_events = events.get("saes", {})
-            fsdr = ablation.get("fsdr_saes", {}).get("fsdr", {})
-            saes = ablation.get("fsdr_saes", {}).get("saes", {})
-            preservation = ablation.get("fsdr_saes", {}).get("preservation", {})
-            guided_pixels = fsdr_events.get("guided_pixels")
-            total_pixels = fsdr_events.get("total_pixels")
-            top1_total = (
-                fsdr_events.get("guided_top1_covered", 0)
-                + fsdr_events.get("guided_top1_missed", 0)
-                if fsdr_events.get("discrete_top1_available") is True
-                else 0
-            )
-            fsdr_rows.append(
-                {
-                    "pair": pair,
-                    "guided_rate": (
-                        float(guided_pixels) / float(total_pixels)
-                        if isinstance(guided_pixels, (int, float)) and total_pixels
-                        else fsdr.get("guided_rate")
-                    ),
-                    "top1_coverage": (
-                        float(fsdr_events["guided_top1_covered"]) / float(top1_total)
-                        if top1_total
-                        else None
-                    ),
-                    "full_depth_evaluations": (
-                        fsdr_events.get("full_depth_evaluations")
-                        if fsdr_events.get("depth_evaluations_available") is True
-                        else None
-                    ),
-                    "executed_depth_evaluations": (
-                        fsdr_events.get("executed_depth_evaluations")
-                        if fsdr_events.get("depth_evaluations_available") is True
-                        else None
-                    ),
-                    "feature_buffer_bytes_baseline": (
-                        fsdr_events.get("feature_buffer_bytes_baseline")
-                        if fsdr_events.get("feature_buffer_bytes_available") is True
-                        else None
-                    ),
-                    "feature_buffer_bytes_actual": (
-                        fsdr_events.get("feature_buffer_bytes_actual")
-                        if fsdr_events.get("feature_buffer_bytes_available") is True
-                        else None
-                    ),
-                }
-            )
-            total_tiles = saes_events.get("total_tiles")
-            baseline_gaussians = saes_events.get("baseline_gaussians")
-            saes_rows.append(
-                {
-                    "pair": pair,
-                    "level0_rate": (
-                        float(saes_events["level0_tiles"]) / float(total_tiles)
-                        if saes_events.get("tile_path_available") is True and total_tiles
-                        else saes.get("level0_ratio")
-                    ),
-                    "level1_rate": (
-                        float(saes_events["level1_tiles"]) / float(total_tiles)
-                        if saes_events.get("tile_path_available") is True and total_tiles
-                        else saes.get("level1_ratio")
-                    ),
-                    "full_rate": (
-                        float(saes_events["full_tiles"]) / float(total_tiles)
-                        if saes_events.get("tile_path_available") is True and total_tiles
-                        else saes.get("full_ratio")
-                    ),
-                    "low_variance_agreement": preservation.get("saes_low_var_agree"),
-                    "gaussians_saved": (
-                        1.0
-                        - float(saes_events["actual_gaussians"])
-                        / float(baseline_gaussians)
-                        if saes_events.get("gaussian_counts_available") is True
-                        and baseline_gaussians
-                        else saes.get("modification_ratio")
-                    ),
-                    "full_s2_evaluations": (
-                        saes_events.get("full_s2_evaluations")
-                        if saes_events.get("s2_evaluations_available") is True
-                        else None
-                    ),
-                    "executed_s2_evaluations": (
-                        saes_events.get("executed_s2_evaluations")
-                        if saes_events.get("s2_evaluations_available") is True
-                        else None
-                    ),
-                }
-            )
+                speed_reason = orin_evidence_reason(
+                    speed, expected_selection, speed_path.parent
+                )
+                if speed_reason is not None:
+                    strict_speedup_evidence[pair] = speed_reason
+                else:
+                    sources.append(speed_path)
+                    speedup_rows.append(
+                        {"pair": pair, "speedup": speed["performance"]["speedup"]}
+                    )
 
     quality_fields = [
         "pair",
@@ -343,41 +606,126 @@ def build_tables(
         "ablation": ablation_rows,
         "fsdr": fsdr_rows,
         "saes": saes_rows,
+        "strict_quality_evidence": strict_quality_evidence,
+        "strict_mechanism_evidence": strict_mechanism_evidence,
+        "strict_speedup_evidence": strict_speedup_evidence,
         "sources": sorted(set(sources)),
     }
 
 
-def sensitivity_summary(output: Path, report_dir: Path, expected: dict[str, Any]) -> dict[str, list[dict[str, float]]]:
+def sensitivity_summary(output: Path, report_dir: Path) -> dict[str, Any]:
     path = output / "sensitivity/results.json"
     record = load(path)
+    runs = record.get("runs")
+    if not isinstance(runs, list):
+        raise ValueError("sensitivity result runs must be a list")
     grouped: dict[tuple[str, float], list[dict[str, Any]]] = defaultdict(list)
-    for run in record["runs"]:
-        grouped[(run["study"], float(run["value"]))].append(run["metrics"])
-    summary: dict[str, list[dict[str, float]]] = {}
+    pair_coverage: dict[tuple[str, float], set[str]] = defaultdict(set)
+    observed_values: dict[str, set[float]] = defaultdict(set)
+    declared_defaults: dict[str, set[float]] = defaultdict(set)
+    for run in runs:
+        if not isinstance(run, dict):
+            raise ValueError("sensitivity result has an invalid run")
+        study = run.get("study")
+        value = run.get("value")
+        model = run.get("model")
+        dataset = run.get("dataset")
+        metrics = run.get("metrics")
+        if (
+            not isinstance(study, str)
+            or not study
+            or not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not isinstance(model, str)
+            or not model
+            or not isinstance(dataset, str)
+            or not dataset
+            or not isinstance(metrics, dict)
+        ):
+            raise ValueError("sensitivity result has an invalid run")
+        numeric_value = float(value)
+        grouped[(study, numeric_value)].append(metrics)
+        pair_coverage[(study, numeric_value)].add(f"{model}/{dataset}")
+        observed_values[study].add(numeric_value)
+        if run.get("is_default") is True:
+            declared_defaults[study].add(numeric_value)
+
+    generated_grids = record.get("grids")
+    grid_specs: dict[str, dict[str, Any]] = {}
+    if isinstance(generated_grids, dict):
+        for study, grid in generated_grids.items():
+            if not isinstance(study, str) or not isinstance(grid, dict):
+                raise ValueError("sensitivity result has an invalid grid")
+            values = grid.get("values")
+            if not isinstance(values, list) or not values:
+                raise ValueError(f"sensitivity grid {study} has no values")
+            numeric_values = [float(value) for value in values]
+            default = grid.get("default")
+            if default is not None and float(default) not in numeric_values:
+                raise ValueError(f"sensitivity grid {study} default is outside its values")
+            grid_specs[study] = {"values": numeric_values, "default": default}
+    else:
+        for study, values in observed_values.items():
+            defaults = declared_defaults[study]
+            grid_specs[study] = {
+                "values": sorted(values),
+                "default": next(iter(defaults)) if len(defaults) == 1 else None,
+            }
+
+    summary: dict[str, Any] = {}
     rows = []
-    for study, grid in expected["sensitivity_grids"].items():
+    complete = bool(grid_specs)
+    for study in sorted(grid_specs):
+        grid = grid_specs[study]
         study_rows = []
         for value in grid["values"]:
             metrics = grouped[(study, float(value))]
-            if len(metrics) != 9:
-                raise ValueError(f"{study}={value} has {len(metrics)} results instead of 9")
+            if not metrics:
+                complete = False
+                continue
             speedup = geometric_mean([float(item["performance"]["speedup"]) for item in metrics])
             degradation = max(float(item["quality"]["change"]["psnr_degradation_pct"]) for item in metrics)
             item = {"value": float(value), "speedup": speedup, "max_psnr_degradation_pct": degradation}
             study_rows.append(item)
-        default_speedup = next(item["speedup"] for item in study_rows if item["value"] == float(grid["default"]))
+            if pair_coverage[(study, float(value))] != set(REQUIRED_PAIRS):
+                complete = False
+        if not study_rows:
+            complete = False
+            continue
+        default = grid.get("default")
+        anchor_value = float(default) if default is not None else study_rows[0]["value"]
+        anchor_speedup = next(
+            (item["speedup"] for item in study_rows if item["value"] == anchor_value),
+            None,
+        )
+        if anchor_speedup is None:
+            complete = False
+            anchor_speedup = study_rows[0]["speedup"]
         for item in study_rows:
-            item["normalized_throughput"] = item["speedup"] / default_speedup
+            item["normalized_throughput"] = item["speedup"] / anchor_speedup
             rows.append(
                 {
                     "study": study,
                     **item,
-                    "is_default": item["value"] == float(grid["default"]),
+                    "is_default": default is not None and item["value"] == float(default),
                 }
             )
         summary[study] = study_rows
-    write_csv(report_dir / "figures13-16_sensitivity.csv", list(rows[0]), rows)
-    summary["_source"] = [str(path)]  # type: ignore[assignment]
+    write_csv(
+        report_dir / "figures13-16_sensitivity.csv",
+        [
+            "study",
+            "value",
+            "speedup",
+            "max_psnr_degradation_pct",
+            "normalized_throughput",
+            "is_default",
+        ],
+        rows,
+    )
+    summary["_source"] = [str(path)]
+    summary["_grids"] = grid_specs
+    summary["_complete"] = complete
     return summary
 
 
@@ -385,34 +733,28 @@ def render_figures(
     report_dir: Path,
     tables: dict[str, Any],
     sensitivity: dict[str, Any],
-    expected: dict[str, Any],
-    claims: dict[str, Any],
 ) -> list[dict[str, Any]]:
     import matplotlib.pyplot as plt
 
     plt.style.use(STYLE)
     catalog = []
     if tables["speedup"]:
-        labels = [PAIR_LABELS[item["pair"]] for item in tables["speedup"]]
+        labels = [pair_label(item["pair"]) for item in tables["speedup"]]
         values = [item["speedup"] for item in tables["speedup"]]
         fig, ax = plt.subplots(figsize=(7.2, 3.2))
-        target = expected["figure8"]["geometric_mean_speedup"]
         ax.bar(range(len(values)), values, color=COLORS["main"], width=0.68)
-        ax.axhline(target, color=COLORS["target"], linestyle="--")
         ax.set_ylabel("End-to-end speedup (x)")
         ax.set_xticks(range(len(labels)), labels, rotation=30, ha="right")
-        ax.set_ylim(0, max(max(values), target) * 1.16)
-        catalog.append({"id": "figure8", "exports": save_figure(fig, report_dir, "figure8_speedup"), "claim": "Per-pair Orin speedup and paper geometric-mean target"})
+        ax.set_ylim(0, max(max(values), 1.0) * 1.16)
+        catalog.append({"id": "figure8", "exports": save_figure(fig, report_dir, "figure8_speedup"), "claim": "Per-pair Orin speedup from generated measurement records"})
         plt.close(fig)
 
     if tables["ablation"]:
         names = ("fsdr", "saes", "combined")
         actual = [geometric_mean([row[f"{name}_speedup"] for row in tables["ablation"]]) for name in names]
-        targets = [expected["ablation"][name] for name in names]
         fig, ax = plt.subplots(figsize=(3.5, 2.4))
         x = list(range(3))
         ax.bar(x, actual, color=COLORS["main"], width=0.58, label="Measured aggregate")
-        ax.scatter(x, targets, color=COLORS["target"], marker="D", zorder=3, label="Paper target")
         ax.set_xticks(x, ["FSDR", "SAES", "Combined"])
         ax.set_ylabel("Speedup over no optimization (x)")
         ax.legend()
@@ -426,7 +768,9 @@ def render_figures(
         rows = sensitivity[study]
         xvals = [item["value"] for item in rows]
         ax.plot(xvals, [item["normalized_throughput"] for item in rows], marker="o", color=COLORS["main"], label="Normalized throughput")
-        ax.axvline(expected["sensitivity_grids"][study]["default"], color=COLORS["target"], linestyle="--", label="Selected default")
+        default = sensitivity["_grids"][study].get("default")
+        if default is not None:
+            ax.axvline(default, color=COLORS["target"], linestyle="--", label="Selected default")
         ax.set_xlabel(name)
         ax.set_ylabel("Throughput / default")
         quality_ax = ax.twinx()
@@ -447,6 +791,8 @@ def render_figures(
         ("fsdr_hamming_threshold", "figure14_hamming_sensitivity", "Hamming threshold"),
         ("saes_tile_size", "figure16_tile_sensitivity", "Tile width"),
     ):
+        if study not in sensitivity:
+            continue
         fig, ax = plt.subplots(figsize=(3.5, 2.4))
         quality_ax = plot_study(study, xlabel, ax)
         handles, labels_ = ax.get_legend_handles_labels()
@@ -455,42 +801,44 @@ def render_figures(
         catalog.append({"id": figure_name.split("_")[0], "exports": save_figure(fig, report_dir, figure_name), "claim": f"Measured {study} sensitivity"})
         plt.close(fig)
 
-    fig, axes = plt.subplots(2, 2, figsize=(7.2, 4.2), sharex="col")
-    for column, (study, xlabel) in enumerate(
-        (("saes_feature_variance", "Feature threshold"), ("saes_depth_variance", "Depth threshold"))
-    ):
-        rows = sensitivity[study]
-        xvals = [item["value"] for item in rows]
-        default = expected["sensitivity_grids"][study]["default"]
-        axes[0, column].plot(
-            xvals,
-            [item["normalized_throughput"] for item in rows],
-            marker="o",
-            color=COLORS["main"],
-            label="Normalized throughput",
-        )
-        axes[1, column].plot(
-            xvals,
-            [item["max_psnr_degradation_pct"] for item in rows],
-            marker="s",
-            color=COLORS["quality"],
-            label="Max PSNR degradation",
-        )
-        for row in range(2):
-            axes[row, column].axvline(
-                default,
-                color=COLORS["target"],
-                linestyle="--",
-                label="Selected default",
+    if {"saes_feature_variance", "saes_depth_variance"}.issubset(sensitivity):
+        fig, axes = plt.subplots(2, 2, figsize=(7.2, 4.2), sharex="col")
+        for column, (study, xlabel) in enumerate(
+            (("saes_feature_variance", "Feature threshold"), ("saes_depth_variance", "Depth threshold"))
+        ):
+            rows = sensitivity[study]
+            xvals = [item["value"] for item in rows]
+            default = sensitivity["_grids"][study].get("default")
+            axes[0, column].plot(
+                xvals,
+                [item["normalized_throughput"] for item in rows],
+                marker="o",
+                color=COLORS["main"],
+                label="Normalized throughput",
             )
-        axes[1, column].set_xlabel(xlabel)
-    axes[0, 0].set_ylabel("Throughput / default")
-    axes[1, 0].set_ylabel("PSNR degradation (%)")
-    axes[0, 0].legend(loc="best")
-    axes[1, 0].legend(loc="best")
-    fig.subplots_adjust(hspace=0.16, wspace=0.22)
-    catalog.append({"id": "figure15", "exports": save_figure(fig, report_dir, "figure15_saes_threshold_sensitivity"), "claim": "Measured SAES feature/depth threshold sensitivity"})
-    plt.close(fig)
+            axes[1, column].plot(
+                xvals,
+                [item["max_psnr_degradation_pct"] for item in rows],
+                marker="s",
+                color=COLORS["quality"],
+                label="Max PSNR degradation",
+            )
+            if default is not None:
+                for row in range(2):
+                    axes[row, column].axvline(
+                        default,
+                        color=COLORS["target"],
+                        linestyle="--",
+                        label="Selected default",
+                    )
+            axes[1, column].set_xlabel(xlabel)
+        axes[0, 0].set_ylabel("Throughput / selected value")
+        axes[1, 0].set_ylabel("PSNR degradation (%)")
+        axes[0, 0].legend(loc="best")
+        axes[1, 0].legend(loc="best")
+        fig.subplots_adjust(hspace=0.16, wspace=0.22)
+        catalog.append({"id": "figure15", "exports": save_figure(fig, report_dir, "figure15_saes_threshold_sensitivity"), "claim": "Measured SAES feature/depth threshold sensitivity"})
+        plt.close(fig)
     return catalog
 
 
@@ -545,6 +893,10 @@ def render_worstcase(output: Path, report_dir: Path) -> dict[str, Any] | None:
         kind: max(candidates, key=lambda item: float(item["loss_value"]))
         for kind, candidates in grouped.items()
     }
+    complete_pair_coverage = all(
+        {candidate["pair"] for candidate in candidates} == set(REQUIRED_PAIRS)
+        for candidates in grouped.values()
+    )
 
     import matplotlib.image as mpimg
     import matplotlib.pyplot as plt
@@ -584,12 +936,14 @@ def render_worstcase(output: Path, report_dir: Path) -> dict[str, Any] | None:
 
         source_result = load(item["source_path"])
         require_report_result(source_result, item["source_path"])
-        ablation = source_result["ablation"]
         optimized_key = "asic_fsdr" if kind == "fsdr" else "asic_saes"
-        stage_fields = ("eff_feature", "eff_dp_core", "eff_gauss_gen")
-        labels = ("S1", "S2", "S3")
-        reference = [float(ablation["asic"][field]) for field in stage_fields]
-        optimized = [float(ablation[optimized_key][field]) for field in stage_fields]
+        try:
+            timing = claim_timing_from_record(source_result, aggregate=False)
+        except (KeyError, TypeError, ValueError):
+            return None
+        labels = ("End-to-end",)
+        reference = [float(timing["variants"]["asic"])]
+        optimized = [float(timing["variants"][optimized_key])]
         x = np.arange(len(labels))
         axes[row, 4].bar(x - 0.18, reference, width=0.36, color=COLORS["neutral"], label="No opt")
         axes[row, 4].bar(x + 0.18, optimized, width=0.36, color=COLORS["main"], label=kind.upper())
@@ -635,26 +989,23 @@ def render_worstcase(output: Path, report_dir: Path) -> dict[str, Any] | None:
     return {
         "id": "figure10",
         "exports": [*exports, str(evidence_path)],
-        "acceptance_pass": True,
+        "acceptance_pass": complete_pair_coverage,
         "claim": "Worst views selected from raw per-view losses with matching RGB error maps and cycles",
     }
 
 
 def render_utilization(
-    output: Path, report_dir: Path, expected: dict[str, Any]
+    output: Path, report_dir: Path, _legacy_reference: dict[str, Any] | None = None
 ) -> dict[str, Any] | None:
-    targets = expected["figure12"]["utilization"]
+    """Render generated slot ratios without filling comparison-target columns."""
     paths = sorted(output.glob("utilization/*/results.json"))
-    records = {}
+    records: dict[str, dict[str, float]] = {}
     source_data = []
     for path in paths:
         record = load(path)
         require_report_result(record, path)
-        provenance = record.get("provenance", {})
-        model = provenance.get("model")
-        dataset = provenance.get("dataset", {}).get("name")
-        pair = f"{model}/{dataset}"
-        if pair not in targets or pair in records:
+        pair = pair_from_result(record)
+        if pair is None or pair in records:
             continue
         stages = record.get("performance", {}).get("stages")
         if not isinstance(stages, dict):
@@ -686,26 +1037,22 @@ def render_utilization(
                     "sha256": sha256_file(path),
                 }
             )
-    if set(records) != set(targets):
+    if not records:
         return None
 
-    tolerance = float(expected["figure12"]["tolerance_absolute"])
     rows = []
-    acceptance_pass = True
-    for pair in targets:
+    acceptance_pass = set(records) == set(REQUIRED_PAIRS)
+    for pair in ordered_pairs({pair: Path() for pair in records}):
         for stage in ("s1", "s2", "s3"):
             actual = records[pair][stage]
-            target = float(targets[pair][stage])
-            passed = abs(actual - target) <= tolerance
-            acceptance_pass = acceptance_pass and passed
             rows.append(
                 {
                     "pair": pair,
                     "stage": stage,
                     "utilization": actual,
-                    "paper_target": target,
-                    "absolute_error": abs(actual - target),
-                    "pass": passed,
+                    "paper_target": None,
+                    "absolute_error": None,
+                    "pass": None,
                 }
             )
     csv_path = report_dir / "figure12_utilization.csv"
@@ -716,7 +1063,7 @@ def render_utilization(
 
     plt.style.use(STYLE)
     fig, ax = plt.subplots(figsize=(9.0, 3.4))
-    pairs = list(targets)
+    pairs = ordered_pairs({pair: Path() for pair in records})
     x = np.arange(len(pairs))
     width = 0.24
     for offset, stage, color in (
@@ -732,7 +1079,7 @@ def render_utilization(
             color=color,
         )
     ax.set_ylabel("MMCU active utilization (%)")
-    ax.set_xticks(x, [PAIR_LABELS[pair] for pair in pairs], rotation=30, ha="right")
+    ax.set_xticks(x, [pair_label(pair) for pair in pairs], rotation=30, ha="right")
     ax.set_ylim(0, 105)
     ax.legend(ncols=3, loc="upper center")
     fig.tight_layout()
@@ -742,7 +1089,7 @@ def render_utilization(
             {
                 "schema_version": "1.0",
                 "definition": "useful MMCU slots divided by scheduled MMCU slots",
-                "tolerance_absolute": tolerance,
+                "paper_target_comparison": "not performed by this report generator",
                 "acceptance_pass": acceptance_pass,
                 "rows": rows,
                 "source_data": source_data,
@@ -766,9 +1113,10 @@ def render_utilization(
 def hardware_table(
     output: Path,
     report_dir: Path,
-    expected: dict[str, Any],
-    claims: dict[str, Any],
+    _legacy_reference: dict[str, Any] | None = None,
+    claims: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    claims = claims or {}
     raw_path = output / "physical/asap7/ppa.json"
     scaled_path = output / "physical/asap7/ppa_28nm_estimated.json"
     aggregate_fields = [
@@ -805,7 +1153,7 @@ def hardware_table(
             "hierarchy_rows": [],
             "sources": [],
             "status": row,
-            "target": expected["hardware_comparison_target"],
+            "target": None,
         }
     raw = load(raw_path)
     scaled = load(scaled_path)
@@ -822,25 +1170,18 @@ def hardware_table(
         raise ValueError("DeepScale result must be a non-foundry estimate preserving raw PPA")
     if scaled.get("raw") != raw:
         raise ValueError("DeepScale result is not bound to the supplied raw ASAP7 PPA")
-    target = expected["hardware_comparison_target"]
     rows = []
-    fields = (
-        ("area_mm2", "area_mm2"),
-        ("total_power_w", "total_power_w"),
-        ("max_frequency_mhz", "frequency_mhz"),
-    )
-    for metric, target_key in fields:
+    for metric in ("area_mm2", "total_power_w", "max_frequency_mhz"):
         raw_value = raw["metrics"][metric]
         estimate = scaled["scaled_metrics"][metric]
-        paper = target[target_key]
         rows.append(
             {
                 "metric": metric,
                 "asap7_raw": raw_value,
                 "deepscale_28nm_estimate": estimate,
-                "paper_tsmc28_target": paper,
-                "estimate_minus_target": estimate - paper,
-                "estimate_relative_difference": (estimate - paper) / paper,
+                "paper_tsmc28_target": None,
+                "estimate_minus_target": None,
+                "estimate_relative_difference": None,
                 "comparison_is_pass_fail": False,
             }
         )
@@ -848,14 +1189,11 @@ def hardware_table(
 
     raw_hierarchy = raw.get("metrics", {}).get("hierarchy")
     scaled_hierarchy = scaled.get("scaled_hierarchy")
-    target_hierarchy = target.get("hierarchy")
     if not all(
         isinstance(value, dict) and value
-        for value in (raw_hierarchy, scaled_hierarchy, target_hierarchy)
+        for value in (raw_hierarchy, scaled_hierarchy)
     ):
-        raise ValueError("Table 4 requires raw, scaled, and paper hierarchy records")
-    if tuple(target_hierarchy) != TABLE4_COMPONENTS:
-        raise ValueError("paper Table 4 hierarchy is not in the canonical paper order")
+        raise ValueError("Table 4 requires raw and scaled hierarchy records")
     if set(raw_hierarchy) != set(TABLE4_COMPONENTS):
         raise ValueError("ASAP7 hierarchy does not cover every Table 4 component")
     if set(scaled_hierarchy) != set(TABLE4_COMPONENTS):
@@ -865,7 +1203,6 @@ def hardware_table(
     for component in TABLE4_COMPONENTS:
         raw_component = raw_hierarchy.get(component, {})
         estimate_component = scaled_hierarchy.get(component, {})
-        paper_component = target_hierarchy[component]
         if component == "on_chip_buffers" or component.startswith(
             "on_chip_buffers_"
         ):
@@ -881,11 +1218,9 @@ def hardware_table(
         for metric in TABLE4_METRICS[component]:
             raw_value = raw_component.get(metric)
             estimate_value = estimate_component.get(metric)
-            paper_value = paper_component.get(metric)
             for label, value in (
                 ("ASAP7", raw_value),
                 ("DeepScale", estimate_value),
-                ("paper", paper_value),
             ):
                 if value is not None and (
                     not isinstance(value, (int, float))
@@ -904,7 +1239,7 @@ def hardware_table(
                     "public_proxy_scope": scope,
                     "asap7_raw": raw_value,
                     "deepscale_28nm_estimate": estimate_value,
-                    "paper_tsmc28_target": paper_value,
+                    "paper_tsmc28_target": None,
                     "asap7_evidence_class": (
                         "not_modeled"
                         if component in UNMODELED_COMPONENTS
@@ -915,7 +1250,7 @@ def hardware_table(
                         if component in UNMODELED_COMPONENTS
                         else "public_physical_proxy"
                     ),
-                    "paper_evidence_class": "paper_comparison_target",
+                    "paper_evidence_class": "not_loaded",
                     "comparison_is_pass_fail": False,
                 }
             )
@@ -928,7 +1263,7 @@ def hardware_table(
             "physical_asap7_status": "CLAIMED",
             "deepscale_status": "CLAIMED",
         },
-        "target": target,
+        "target": None,
     }
 
 
@@ -947,7 +1282,7 @@ def render_efficiency_proxy(
     output: Path,
     report_dir: Path,
     hardware: dict[str, Any],
-    expected: dict[str, Any],
+    _legacy_reference: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Render Figure 9 without treating smoke traces as inference energy."""
     if not hardware.get("rows"):
@@ -980,11 +1315,12 @@ def render_efficiency_proxy(
         }
         for path in hardware["sources"]
     ]
-    for pair in expected["table1"]:
-        software_path = find_pair_optional(output, pair, ("quality", "all"))
+    software_paths = discover_pair_results(output, ("quality", "all"))
+    for pair in ordered_pairs(software_paths):
+        software_path = software_paths[pair]
         dram_path = output / "dram/workloads" / pair.replace("/", "_") / "results.json"
-        if software_path is None or not dram_path.is_file():
-            return None
+        if not dram_path.is_file():
+            continue
         software = load(software_path)
         require_report_result(software, software_path)
         dataset = software.get("provenance", {}).get("dataset", {})
@@ -995,10 +1331,10 @@ def render_efficiency_proxy(
             or dataset.get("paper_result_eligible") is not True
             or evaluation.get("kind") != "dataset_aggregate"
         ):
-            return None
+            continue
         selection_hash = evaluation.get("sample_selection_sha256")
         if not isinstance(selection_hash, str) or len(selection_hash) != 64:
-            return None
+            continue
         dram = load(dram_path)
         workload = dram.get("workload", {})
         model, dataset_name = pair.split("/")
@@ -1013,7 +1349,7 @@ def render_efficiency_proxy(
             or workload.get("software_result", {}).get("sha256")
             != sha256_file(software_path)
         ):
-            return None
+            continue
         offchip_energy = _positive_number(
             dram.get("metrics", {}).get("drampower_offchip_energy_per_inference_j"),
             f"{pair} DRAM energy",
@@ -1044,6 +1380,7 @@ def render_efficiency_proxy(
                 "asap7_throughput_per_area": raw_throughput_per_area,
                 "deepscale_28nm_throughput_per_area": estimated_throughput_per_area,
                 "paper_values_are_normalized_targets_only": True,
+                "paper_values_loaded": False,
             }
         )
         source_data.extend(
@@ -1053,6 +1390,8 @@ def render_efficiency_proxy(
             }
             for path in (software_path, dram_path)
         )
+    if not rows:
+        return None
     csv_path = report_dir / "figure9_public_proxy.csv"
     write_csv(csv_path, list(rows[0]), rows)
 
@@ -1060,66 +1399,46 @@ def render_efficiency_proxy(
     import numpy as np
 
     plt.style.use(STYLE)
-    fig, axes = plt.subplots(2, 2, figsize=(10.0, 6.6))
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 3.4))
     x = np.arange(len(rows))
     width = 0.36
-    labels = [PAIR_LABELS[row["pair"]] for row in rows]
-    axes[0, 0].bar(
+    labels = [pair_label(row["pair"]) for row in rows]
+    axes[0].bar(
         x - width / 2,
         [row["asap7_energy_efficiency_inferences_per_j"] for row in rows],
         width,
         color=COLORS["main"],
         label="ASAP7 raw proxy",
     )
-    axes[0, 0].bar(
+    axes[0].bar(
         x + width / 2,
         [row["deepscale_28nm_energy_efficiency_inferences_per_j"] for row in rows],
         width,
         color=COLORS["neutral"],
         label="28 nm-equivalent proxy",
     )
-    axes[0, 0].set_ylabel("Inferences / J")
-    axes[0, 0].legend()
-    axes[0, 1].bar(
+    axes[0].set_ylabel("Inferences / J")
+    axes[0].legend()
+    axes[1].bar(
         x - width / 2,
         [row["asap7_throughput_per_area"] for row in rows],
         width,
         color=COLORS["main"],
         label="ASAP7 raw proxy",
     )
-    axes[0, 1].bar(
+    axes[1].bar(
         x + width / 2,
         [row["deepscale_28nm_throughput_per_area"] for row in rows],
         width,
         color=COLORS["neutral"],
         label="28 nm-equivalent proxy",
     )
-    axes[0, 1].set_ylabel("Inferences / s / mm$^2$")
-    axes[0, 1].legend()
-
-    targets = expected["figure9"]["paper_comparison_target"]
-    for column, metric in enumerate(("energy_efficiency", "throughput_per_area")):
-        axis = axes[1, column]
-        for offset, key, color, label in (
-            (-width, "orin_nx", COLORS["neutral"], "Paper Orin NX"),
-            (0.0, "tsmc28", COLORS["main"], "Paper TSMC28"),
-            (width, "nm8_equivalent", COLORS["target"], "Paper 8 nm-eq."),
-        ):
-            axis.bar(
-                x + offset,
-                [targets[row["pair"]][metric][key] for row in rows],
-                width,
-                color=color,
-                label=label,
-            )
-        axis.set_ylabel("Paper normalized target (x)")
-        axis.legend(ncols=3, fontsize=7)
-    for axis in axes.flat:
+    axes[1].set_ylabel("Inferences / s / mm$^2$")
+    axes[1].legend()
+    for axis in axes:
         axis.set_xticks(x, labels, rotation=35, ha="right")
-    axes[0, 0].set_title("Public energy-efficiency counterpart")
-    axes[0, 1].set_title("Public throughput/area counterpart")
-    axes[1, 0].set_title("Paper energy-efficiency targets (comparison only)")
-    axes[1, 1].set_title("Paper throughput/area targets (comparison only)")
+    axes[0].set_title("Public energy-efficiency counterpart")
+    axes[1].set_title("Public throughput/area counterpart")
     fig.tight_layout()
 
     evidence_path = report_dir / "figure9_public_proxy.json"
@@ -1135,7 +1454,7 @@ def render_efficiency_proxy(
                     "offchip_energy": "per-inference LPDDR5 public proxy from the matching workload trace; not paper LPDDR4X",
                     "deepscale_energy": "logic compute energy scaled with the DeepScale energy table; external DRAM energy is not technology-scaled",
                     "throughput_per_area": "ASAP7 value scaled directly with the DeepScale throughput-per-area table",
-                    "paper_targets": "read-only normalized comparison targets; not used for public-proxy PASS/FAIL",
+                    "paper_targets": "not loaded by this report generator; not used for public-proxy PASS/FAIL",
                 },
             },
             indent=2,
@@ -1149,7 +1468,7 @@ def render_efficiency_proxy(
     return {
         "id": "figure9",
         "exports": [*exports, str(csv_path), str(evidence_path)],
-        "acceptance_pass": True,
+        "acceptance_pass": {row["pair"] for row in rows} == set(REQUIRED_PAIRS),
         "claim": "Activity-aware ASAP7 and deterministic 28 nm-equivalent public counterparts",
     }
 
@@ -1163,7 +1482,7 @@ def write_markdown(
     lines = [
         "# SCARF Reproduction Report",
         "",
-        "All measured values below come from archived result records. Paper values are comparison targets only.",
+        "All measured values below come from archived result records. This generator does not load paper reference values.",
         "",
         "## Headline Results",
         "",
@@ -1179,15 +1498,15 @@ def write_markdown(
     if hardware["rows"]:
         lines.extend(
             (
-                "The ASAP7 values are predictive 7 nm results. The DeepScale values are deterministic 28 nm-equivalent estimates. The paper TSMC28 values include commercial SRAM/PHY collateral and are not a pass/fail target for this public flow.",
+                "The ASAP7 values are predictive 7 nm results. The DeepScale values are deterministic 28 nm-equivalent estimates.",
                 "",
-                "| Metric | ASAP7 raw | DeepScale 28 nm estimate | Paper TSMC28 target | Relative difference |",
-                "|---|---:|---:|---:|---:|",
+                "| Metric | ASAP7 raw | DeepScale 28 nm estimate |",
+                "|---|---:|---:|",
             )
         )
         for row in hardware["rows"]:
             lines.append(
-                f"| {row['metric']} | {row['asap7_raw']:.6g} | {row['deepscale_28nm_estimate']:.6g} | {row['paper_tsmc28_target']:.6g} | {row['estimate_relative_difference']:+.2%} |"
+                f"| {row['metric']} | {row['asap7_raw']:.6g} | {row['deepscale_28nm_estimate']:.6g} |"
             )
     else:
         lines.extend(
@@ -1223,44 +1542,21 @@ def _source_records(output: Path, patterns: list[str]) -> list[dict[str, str]]:
     ]
 
 
-def _table1_pass(rows: list[dict[str, Any]], expected: dict[str, Any]) -> bool:
-    if {row["pair"] for row in rows} != set(expected["table1"]):
+def _complete_pair_matrix(rows: list[dict[str, Any]]) -> bool:
+    return {row.get("pair") for row in rows} == set(REQUIRED_PAIRS)
+
+
+def _complete_numeric_rows(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> bool:
+    if not _complete_pair_matrix(rows):
         return False
-    tolerances = expected["tolerances"]
     for row in rows:
-        targets = expected["table1"][row["pair"]]
-        for variant in ("baseline", "scarf"):
-            for metric, target in zip(METRICS, targets[variant]):
-                if abs(float(row[f"{variant}_{metric}"]) - float(target)) > float(
-                    tolerances[metric]
-                ):
-                    return False
-    return True
-
-
-def _ablation_pass(rows: list[dict[str, Any]], expected: dict[str, Any]) -> bool:
-    if len(rows) != len(expected["table1"]):
-        return False
-    tolerance = float(expected["tolerances"]["speedup_relative"])
-    for name in ("fsdr", "saes", "combined"):
-        actual = geometric_mean([float(row[f"{name}_speedup"]) for row in rows])
-        target = float(expected["ablation"][name])
-        if abs(actual - target) / target > tolerance:
-            return False
-    return True
-
-
-def _mechanism_pass(
-    rows: list[dict[str, Any]], expected: dict[str, Any], fields: tuple[str, ...]
-) -> bool:
-    if {row["pair"] for row in rows} != set(expected["mechanisms"]):
-        return False
-    tolerance = float(expected["mechanism_tolerance_absolute"])
-    for row in rows:
-        targets = expected["mechanisms"][row["pair"]]
         for field in fields:
             value = row.get(field)
-            if value is None or abs(float(value) - float(targets[field])) > tolerance:
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+            ):
                 return False
     return True
 
@@ -1270,12 +1566,12 @@ def build_result_catalog(
     output: Path,
     report_dir: Path,
     contract: dict[str, Any],
-    expected: dict[str, Any],
     tables: dict[str, Any],
     sensitivity: dict[str, Any],
     hardware: dict[str, Any],
     figure_exports: list[dict[str, Any]],
     selected_ids: set[str],
+    claims: dict[str, Any],
 ) -> list[dict[str, Any]]:
     exports_by_id = {
         item["id"]: [_relative_export(path, report_dir) for path in item["exports"]]
@@ -1292,38 +1588,76 @@ def build_result_catalog(
             "table4": ["hardware_comparison.csv", "table4_hierarchy.csv"],
         }
     )
-    sensitivity_ready = bool(sensitivity.get("_source"))
-    readiness = {
-        "figure8": len(tables["speedup"]) == 9 and "figure8" in exports_by_id,
-        "figure9": bool(hardware["rows"])
-        and "figure9" in exports_by_id
-        and acceptance_by_id["figure9"],
-        "table1": _table1_pass(tables["quality"], expected),
-        "figure10": "figure10" in exports_by_id and acceptance_by_id["figure10"],
-        "figure11": _ablation_pass(tables["ablation"], expected),
-        "table2": _mechanism_pass(
-            tables["fsdr"], expected, ("guided_rate", "top1_coverage")
-        )
-        and all(
-            row.get(field) is not None
-            for row in tables["fsdr"]
-            for field in (
+    sensitivity_ready = sensitivity.get("_complete") is True
+    strict_quality_ready = (
+        _complete_pair_matrix(tables["quality"])
+        and not tables["strict_quality_evidence"]
+    )
+    strict_mechanism_ready = (
+        _complete_pair_matrix(tables["ablation"])
+        and not tables["strict_mechanism_evidence"]
+    )
+    table2_ready = (
+        _complete_pair_matrix(tables["fsdr"])
+        and _complete_numeric_rows(
+            tables["fsdr"],
+            (
+                "guided_rate",
+                "top1_coverage",
                 "full_depth_evaluations",
                 "executed_depth_evaluations",
                 "feature_buffer_bytes_baseline",
                 "feature_buffer_bytes_actual",
-            )
-        ),
-        "table3": _mechanism_pass(
-            tables["saes"],
-            expected,
-            ("level0_rate", "level1_rate", "low_variance_agreement", "gaussians_saved"),
+            ),
         )
-        and all(
-            row.get(field) is not None
-            for row in tables["saes"]
-            for field in ("full_rate", "full_s2_evaluations", "executed_s2_evaluations")
-        ),
+        and strict_mechanism_ready
+    )
+    table3_ready = (
+        _complete_pair_matrix(tables["saes"])
+        and _complete_numeric_rows(
+            tables["saes"],
+            (
+                "level0_rate",
+                "level1_rate",
+                "full_rate",
+                "low_variance_agreement",
+                "gaussians_saved",
+                "full_s2_evaluations",
+                "executed_s2_evaluations",
+            ),
+        )
+        and strict_mechanism_ready
+    )
+    figure11_ready = (
+        _complete_numeric_rows(
+            tables["ablation"],
+            ("fsdr_speedup", "saes_speedup", "combined_speedup"),
+        )
+        and strict_mechanism_ready
+        and table2_ready
+        and table3_ready
+    )
+    readiness = {
+        "figure8": _complete_numeric_rows(tables["speedup"], ("speedup",))
+        and not tables["strict_speedup_evidence"]
+        and claims.get("figure8") == "CLAIMED"
+        and "figure8" in exports_by_id,
+        "figure9": bool(hardware["rows"])
+        and "figure9" in exports_by_id
+        and acceptance_by_id["figure9"],
+        "table1": _complete_numeric_rows(
+            tables["quality"],
+            tuple(
+                f"{variant}_{metric}"
+                for variant in ("baseline", "scarf")
+                for metric in METRICS
+            ),
+        )
+        and strict_quality_ready,
+        "figure10": "figure10" in exports_by_id and acceptance_by_id["figure10"],
+        "figure11": figure11_ready,
+        "table2": table2_ready,
+        "table3": table3_ready,
         "figure12": "figure12" in exports_by_id and acceptance_by_id["figure12"],
         "figure13": sensitivity_ready and "figure13" in exports_by_id,
         "figure14": sensitivity_ready and "figure14" in exports_by_id,
@@ -1343,7 +1677,7 @@ def build_result_catalog(
         passed = selected and bool(readiness.get(result_id)) and bool(sources)
         if passed:
             status = "PASS"
-            reason = "generated from complete raw evidence and passed fixed checks"
+            reason = "generated from complete raw evidence; no paper-reference comparison was performed"
             exports = exports_by_id[result_id]
         else:
             critical_source_present = bool(sources)
@@ -1356,7 +1690,25 @@ def build_result_catalog(
                 "result was not selected for this report invocation"
                 if not selected
                 else (
-                    "raw evidence is present but incomplete or outside the fixed acceptance gate"
+                    "raw evidence contains a non-claimable analytic or "
+                    "unverified-sparse SAES mechanism record"
+                    if result_id in {"figure11", "table2", "table3"}
+                    and bool(tables["strict_mechanism_evidence"])
+                    else
+                    "raw evidence contains a non-claimable result record"
+                    if result_id == "table1"
+                    and bool(tables["strict_quality_evidence"])
+                    else
+                    "Figure 8 remains pending independent Orin evaluation"
+                    if result_id == "figure8"
+                    and claims.get("figure8")
+                    == "CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION"
+                    else
+                    "raw evidence contains an invalid or incomplete independent Orin measurement"
+                    if result_id == "figure8"
+                    and bool(tables["strict_speedup_evidence"])
+                    else
+                    "raw evidence is present but incomplete for this generated-evidence report"
                     if status == "FAIL"
                     else "required raw evidence is not present"
                 )
@@ -1412,26 +1764,25 @@ def parse_result_selection(value: str, contract: dict[str, Any]) -> set[str]:
 def generate(output: Path, report_dir: Path, figures: str = "all") -> dict[str, Any]:
     output = output.resolve()
     report_dir = report_dir.resolve()
-    expected = load(EXPECTED)
     contract = load(ROOT / "artifact/evaluation_catalog.json")
     selected_ids = parse_result_selection(figures, contract)
     claims = load(ROOT / "artifact/claim_status.json")
     report_dir.mkdir(parents=True, exist_ok=True)
-    tables = build_tables(output, report_dir, expected, claims)
+    tables = build_tables(output, report_dir)
     sensitivity = (
-        sensitivity_summary(output, report_dir, expected)
+        sensitivity_summary(output, report_dir)
         if (output / "sensitivity/results.json").is_file()
-        else {"_source": []}
+        else {"_source": [], "_grids": {}, "_complete": False}
     )
-    hardware = hardware_table(output, report_dir, expected, claims)
-    figure_exports = render_figures(report_dir, tables, sensitivity, expected, claims)
-    efficiency_export = render_efficiency_proxy(output, report_dir, hardware, expected)
+    hardware = hardware_table(output, report_dir, claims=claims)
+    figure_exports = render_figures(report_dir, tables, sensitivity)
+    efficiency_export = render_efficiency_proxy(output, report_dir, hardware)
     if efficiency_export is not None:
         figure_exports.append(efficiency_export)
     worstcase_export = render_worstcase(output, report_dir)
     if worstcase_export is not None:
         figure_exports.append(worstcase_export)
-    utilization_export = render_utilization(output, report_dir, expected)
+    utilization_export = render_utilization(output, report_dir)
     if utilization_export is not None:
         figure_exports.append(utilization_export)
     write_markdown(report_dir, tables, hardware, claims)
@@ -1439,12 +1790,12 @@ def generate(output: Path, report_dir: Path, figures: str = "all") -> dict[str, 
         output=output,
         report_dir=report_dir,
         contract=contract,
-        expected=expected,
         tables=tables,
         sensitivity=sensitivity,
         hardware=hardware,
         figure_exports=figure_exports,
         selected_ids=selected_ids,
+        claims=claims,
     )
     record = {
         "schema_version": "2.0",

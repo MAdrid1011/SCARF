@@ -405,7 +405,6 @@ def check_evaluation_protocol(path: Path | None = None) -> list[str]:
     from scripts.compile_protocol import compile_protocol
 
     path = path or ROOT / "artifact/evaluation_protocol.json"
-    expected_path = ROOT / "artifact/expected_results.json"
     if not path.is_file():
         return ["evaluation sample protocol is missing"]
     try:
@@ -413,10 +412,12 @@ def check_evaluation_protocol(path: Path | None = None) -> list[str]:
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return [f"evaluation protocol source contract is invalid: {exc}"]
     protocol = json.loads(path.read_text(encoding="utf-8"))
-    expected = json.loads(expected_path.read_text(encoding="utf-8"))
-    if set(compiled["pairs"]) != set(expected["table1"]):
-        return ["evaluation protocol does not cover every claimed model/dataset pair"]
     claim_status = json.loads((ROOT / "artifact/claim_status.json").read_text(encoding="utf-8"))
+    declared_pairs = set(claim_status.get("software_pairs", {})) | set(
+        claim_status.get("mechanism_pairs", {})
+    )
+    if set(compiled["pairs"]) != declared_pairs:
+        return ["evaluation protocol does not cover every declared model/dataset pair"]
     claimed_pairs = {
         pair for pair, state in claim_status["software_pairs"].items() if state == "CLAIMED"
     }
@@ -543,8 +544,12 @@ def check_reference_results(
     expected_binding: Mapping[str, Any] | None = None,
 ) -> list[str]:
     from scripts.stage_reference_results import (
+        evidence_categories,
+        is_reference_only_report,
         release_evidence_binding,
         required_categories,
+        selected_files,
+        validate_report_catalog,
         validate_generated_records,
     )
 
@@ -569,18 +574,30 @@ def check_reference_results(
     if not isinstance(files, dict) or not files:
         failures.append("reference evidence file manifest is empty")
         return failures
+    staged_relatives: list[Path] = []
+    staged_files: dict[Path, Path] = {}
     for relative, record in files.items():
+        if not isinstance(relative, str):
+            failures.append(f"unsafe reference evidence path: {relative}")
+            continue
         pure = PurePosixPath(relative)
         if pure.is_absolute() or ".." in pure.parts or pure.parts[:1] != ("evidence",):
             failures.append(f"unsafe reference evidence path: {relative}")
             continue
+        staged_relative = Path(*pure.parts[1:])
+        staged_relatives.append(staged_relative)
         path = reference_root / pure
+        if is_reference_only_report(Path(*pure.parts[1:]), path):
+            failures.append(
+                f"paper-reference preview is not reviewer evidence: {relative}"
+            )
         if not isinstance(record, dict):
             failures.append(f"invalid reference evidence record: {relative}")
             continue
         if not path.is_file():
             failures.append(f"missing reference evidence: {relative}")
             continue
+        staged_files[path] = staged_relative
         if path.stat().st_size != record.get("size") or sha256_file(path) != record.get("sha256"):
             failures.append(f"reference evidence hash mismatch: {relative}")
             continue
@@ -590,6 +607,28 @@ def check_reference_results(
             continue
         if any(pattern.search(text) for pattern in LOCAL_PATH_PATTERNS):
             failures.append(f"author-local path in reference evidence: {relative}")
+    staged_categories = evidence_categories(staged_relatives)
+    if not required <= staged_categories:
+        failures.append("reference evidence files do not cover every required category")
+    if staged_categories != set(manifest.get("categories", [])):
+        failures.append("reference evidence category declaration does not match files")
+    selected_relatives = {
+        relative.as_posix()
+        for relative in selected_files(reference_root / "evidence").values()
+    }
+    manifest_relatives = {relative.as_posix() for relative in staged_relatives}
+    if selected_relatives != manifest_relatives:
+        failures.append(
+            "reference evidence manifest file set does not match selected evidence"
+        )
+    failures.extend(
+        f"reference {failure}"
+        for failure in validate_report_catalog(
+            reference_root / "evidence",
+            staged_relatives,
+            project_root=root,
+        )
+    )
 
     provenance = manifest.get("provenance")
     if not isinstance(provenance, Mapping):
@@ -615,14 +654,7 @@ def check_reference_results(
     )
 
     generated_records, generated_failures = validate_generated_records(
-        {
-            reference_root / PurePosixPath(relative): PurePosixPath(relative).relative_to(
-                "evidence"
-            )
-            for relative in files
-            if PurePosixPath(relative).parts[:1] == ("evidence",)
-            and (reference_root / PurePosixPath(relative)).is_file()
-        },
+        staged_files,
         expected_binding=current_binding,
     )
     failures.extend(f"reference {failure}" for failure in generated_failures)

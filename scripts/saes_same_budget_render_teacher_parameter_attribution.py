@@ -599,7 +599,7 @@ def _build_parameter_variants(
 def _representative_level_masks(
     modified: torch.Tensor, representative_mask: torch.Tensor, *, views: int, height: int, width: int
 ) -> dict[str, torch.Tensor]:
-    """Recover L0/L1 representative groups from the immutable K/2K partition."""
+    """Recover L0/L1 groups from the immutable T=4 retained-anchor partition."""
     if height % 4 or width % 4:
         raise RuntimeError("frozen attribution grid is not divisible by the tile size")
     l0 = torch.zeros_like(representative_mask)
@@ -626,8 +626,8 @@ def _representative_level_masks(
                     if representatives.numel() != 4:
                         raise RuntimeError("an L0 tile has the wrong representative count")
                     l0[representatives] = True
-                elif removed == 8:
-                    if representatives.numel() != 8:
+                elif removed == 4:
+                    if representatives.numel() != 12:
                         raise RuntimeError("an L1 tile has the wrong representative count")
                     l1[representatives] = True
                 else:

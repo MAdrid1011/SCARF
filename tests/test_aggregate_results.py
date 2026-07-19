@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
 
@@ -250,6 +251,133 @@ def test_v21_aggregate_preserves_execution_dependency_contract(tmp_path):
     assert record["events"]["saes"]["s2_s3_saving"] == {"s2": 0.0, "s3": 0.0}
 
 
+def test_aggregate_zero_fills_sparse_saes_reason_counters(tmp_path):
+    from scripts.aggregate_results import aggregate
+    from scripts.validate_result import validate
+
+    records = [v21_sample_record(0), v21_sample_record(1)]
+    identity = {"tile_size": 4, "l1_anchor_count": 12}
+    for record, reasons in zip(
+        records,
+        ({}, {"nonzero_source_opacity": 4}),
+    ):
+        record["fsdr_saes"] = {
+            "fsdr": {"guided_rate": 0.5},
+            "saes": {
+                "deletion_certificate_rejection_reasons": reasons,
+                "same_budget_dense_oracle_failure_reasons": {},
+                "multicontext_tangent_fallback_reasons": {},
+                "saes_execution_identity": identity,
+                "route_sha256": "a" * 64,
+            },
+        }
+
+    aggregate_record = aggregate(write_samples(tmp_path, records), 2)
+    validate(aggregate_record)
+
+    assert aggregate_record["fsdr_saes"]["saes"][
+        "deletion_certificate_rejection_reasons"
+    ] == {"nonzero_source_opacity": 2.0}
+    assert aggregate_record["fsdr_saes"]["saes"][
+        "saes_execution_identity"
+    ] == identity
+
+
+def test_aggregate_binds_trace_set_to_quality_and_performance(tmp_path):
+    from scripts.aggregate_results import aggregate
+    from scripts.result_record import (
+        bind_execution_trace,
+        execution_trace_performance_evidence_from_record,
+        execution_trace_set_sha256,
+    )
+    from scripts.validate_result import validate
+
+    records = [v21_sample_record(0), v21_sample_record(1)]
+    for record in records:
+        record["provenance"]["execution_contract"] = {
+            "run_class": "diagnostic",
+            "saes_materialization": "representative",
+        }
+        bind_execution_trace(record)
+
+    aggregate_record = aggregate(write_samples(tmp_path, records), 2)
+    evaluation = aggregate_record["provenance"]["evaluation"]
+    digest = evaluation["execution_trace_set_sha256"]
+    performance_evidence = evaluation["execution_trace_performance_evidence"]
+
+    assert (
+        execution_trace_set_sha256(
+            evaluation["execution_trace_set"], performance_evidence
+        )
+        == digest
+    )
+    assert performance_evidence == execution_trace_performance_evidence_from_record(
+        aggregate_record
+    )
+    assert aggregate_record["quality"]["execution_trace_set_sha256"] == digest
+    assert aggregate_record["performance"]["execution_trace_set_sha256"] == digest
+    assert [entry["sample_index"] for entry in evaluation["execution_trace_set"]] == [0, 1]
+    assert all(
+        entry["execution_trace_sha256"]
+        == sample["provenance"]["execution_trace_sha256"]
+        for entry, sample in zip(evaluation["execution_trace_set"], records)
+    )
+    validate(aggregate_record)
+
+    aggregate_record["quality"]["execution_trace_set_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="quality execution trace set binding"):
+        validate(aggregate_record)
+
+    aggregate_record = aggregate(write_samples(tmp_path / "tamper", records), 2)
+    mutations = (
+        lambda result: result["performance"].update(
+            scarf_cycles=426,
+            speedup=result["performance"]["baseline_cycles"] / 426,
+        ),
+        lambda result: result["ablation"]["asic"].update(eff_total=506),
+        lambda result: result["events"]["saes"].update(source="tampered-events"),
+        lambda result: result["fsdr_saes"]["fsdr"].update(guided_rate=0.9),
+    )
+    for mutation in mutations:
+        tampered = copy.deepcopy(aggregate_record)
+        mutation(tampered)
+        with pytest.raises(ValueError, match="trace performance evidence"):
+            validate(tampered)
+
+
+def test_aggregate_trace_set_binds_orin_measurement_hash_without_its_path(tmp_path):
+    from scripts.aggregate_results import aggregate
+    from scripts.result_record import bind_execution_trace
+    from scripts.validate_result import validate
+
+    record = v21_sample_record(0)
+    record["provenance"]["execution_contract"] = {
+        "run_class": "diagnostic",
+        "saes_materialization": "representative",
+    }
+    bind_execution_trace(record)
+    sample_path = write_samples(tmp_path, [record])[0]
+    measurement_path = sample_path.parent / "orin-evidence" / "measurement.json"
+    measurement_path.parent.mkdir()
+    measurement_path.write_text('{"opaque":"external timing evidence"}\n', encoding="utf-8")
+    measurement_sha256 = hashlib.sha256(measurement_path.read_bytes()).hexdigest()
+
+    aggregate_record = aggregate([sample_path], 1)
+    trace_entry = aggregate_record["provenance"]["evaluation"][
+        "execution_trace_set"
+    ][0]
+
+    assert trace_entry["orin_measurement_sha256"] == measurement_sha256
+    assert "path" not in trace_entry
+    validate(aggregate_record)
+
+    aggregate_record["provenance"]["evaluation"]["sample_results"][0][
+        "orin_measurement"
+    ]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="Orin sample evidence does not match"):
+        validate(aggregate_record)
+
+
 def test_aggregate_rejects_assignment_consensus_result_records(tmp_path):
     from scripts.aggregate_results import aggregate
 
@@ -264,6 +392,19 @@ def test_aggregate_rejects_assignment_consensus_result_records(tmp_path):
 
     with pytest.raises(ValueError, match="assignment-consensus pseudo descriptors"):
         aggregate(write_samples(tmp_path, records), 2)
+
+
+def test_aggregate_rejects_reference_only_sample_markers(tmp_path):
+    from scripts.aggregate_results import aggregate
+    from scripts.validate_result import validate
+
+    marked = sample_record(0)
+    marked["artifact_class"] = "PAPER_REFERENCE_ONLY"
+
+    with pytest.raises(ValueError, match="PAPER_REFERENCE_ONLY"):
+        validate(marked)
+    with pytest.raises(ValueError, match="PAPER_REFERENCE_ONLY"):
+        aggregate(write_samples(tmp_path, [marked]), 1)
 
 
 def test_aggregate_results_rejects_missing_or_duplicate_samples(tmp_path):

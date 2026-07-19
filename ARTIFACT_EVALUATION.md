@@ -221,6 +221,15 @@ Re10K-compatible sidecars. The legacy Re10K/ACID `run_ae.sh calibrate` command
 is not a substitute for this DL3DV plan and cannot produce Results Reproduced
 evidence.
 
+ACID v5 is the sole active frozen author-side materialization epoch. Its local
+provenance was generated and live-validated, but is not execution proof. No
+registered deterministic verifier or external authority exists, so candidate
+runtime, promotion, and result remain fail-closed with no cache, train,
+runtime, or result evidence. It remains `paper_result_eligible=false` and
+cannot authorize DL3DV target-RGB quality or a Results Reproduced claim. All
+earlier ACID contracts, caches, smoke runs, runtime evidence, and results are
+superseded: do not run, resume, promote, or release them.
+
 Once the author-side protocol exists, `python scripts/run_ae.py calibrate
 --calibration-manifest outputs/calibration/dl3dv-protocol/manifest.json
 --output-root outputs/calibration/dl3dv-run` executes the fixed train-grid,
@@ -252,9 +261,9 @@ bash scripts/run_ae.sh quality
 ```
 
 Target state: mandatory Results Reproduced evidence for all nine pairs. Current
-state remains implementation-in-progress while the published FSDR/SAES
-semantics and full data matrix are restored. Existing failed sparse-SAES and
-LSH pilots remain diagnostic evidence; they are not overwritten or promoted.
+state is `NOT_RUN` while the published FSDR/SAES semantics and full data matrix
+are restored. Existing diagnostics remain non-claim evidence; they are not
+overwritten or promoted.
 Each
 sample result covers every target view selected by the configured sampler and
 records per-view metrics. The sample metric is their arithmetic mean. Signed
@@ -265,6 +274,18 @@ absolute deviation.
 The optional `--saes-materialization dense-diagnostic` path retains every
 Gaussian and is rejected by claim/Functional runs. Its closer image quality is
 not accepted as evidence for sparse Gaussian pruning.
+
+### Fixed SAES Sample-0 Diagnostic
+
+```bash
+bash scripts/run_ae.sh saes-quality --profile dl3dv-gate
+```
+
+This public selector is calibration-gated and, when available, runs only the
+fixed 12-anchor, guard-on DL3DV sample-0 diagnostic. It is non-claim evidence
+and cannot replace a nine-pair Table 1 aggregate. The current v5 record takes
+the Full path for every tile, so it demonstrates fallback fidelity only; it
+does not support SAES Table 3 or Figure 11.
 
 ### Figure 8: End-to-End Speedup
 
@@ -294,7 +315,7 @@ the public ASAP7 flow reports achieved timing independently. A routed ASAP7
 result that misses 1 GHz remains a visible timing failure and does not validate
 the unavailable commercial TSMC28 implementation.
 
-### Figure 10: Worst-Case Error Analysis (Supporting)
+### Figure 10: Worst-Case Error Analysis (Paused)
 
 ```bash
 bash scripts/run_ae.sh worstcase --output-root outputs/ae
@@ -306,7 +327,7 @@ a deterministic tie-break, then binds the loss trace, stage cycles, source
 images, and RGB error map to that same sample/view. Existing plotting metadata
 and transformed display values are comparison material only.
 
-### Figure 11 and Tables 2-3: Ablation and Mechanisms
+### Figure 11: Ablation and Mechanisms
 
 ```bash
 bash scripts/run_ae.sh mechanisms --output-root outputs/ae
@@ -326,13 +347,13 @@ duplicate pairs fail before execution, and omitting it preserves the complete
 nine-pair matrix.
 
 The output includes FSDR-only, SAES-only, combined, and no-optimization cycles.
-Table 2 uses discrete full-search Top-1 counts, not `in_window_rate`, and derives
-depth evaluations and feature-buffer bytes from events. Table 3 derives tile
-paths, low-variance agreement, Gaussian savings, and S2 evaluations from the
-same event stream. Historical failing pilots remain visible until new complete
+Tables 2-3 are Figure 11 supporting evidence: Table 2 uses discrete full-search
+Top-1 counts, not `in_window_rate`, while Table 3 derives tile paths,
+low-variance agreement, Gaussian savings, and S2 evaluations from the same
+event stream. Historical failing pilots remain visible until new complete
 aggregates pass the unchanged gates.
 
-### Figure 12: MMCU Utilization (Supporting)
+### Figure 12: MMCU Utilization (Paused)
 
 ```bash
 bash scripts/run_ae.sh utilization --output-root outputs/ae
@@ -341,11 +362,10 @@ bash scripts/run_ae.sh utilization --output-root outputs/ae
 Utilization is `useful_mmcu_slots / scheduled_mmcu_slots` for S1-S3. It cannot
 be supplied as a percentage constant or inferred from the manuscript CSV.
 
-### Figures 13-16: Sensitivity (Supporting)
+### Figures 13-16: Sensitivity (Paused)
 
-Target state: mandatory full nine-pair trace-and-replay evidence. A model runs
-once per sample trace; the five parameter values replay deterministic feature,
-depth, Gaussian, cycle, and mechanism inputs.
+These sensitivity studies are paused by scope. Their command remains available
+for a future explicitly resumed trace-and-replay campaign.
 
 ```bash
 bash scripts/run_ae.sh sensitivity --output-root outputs/ae
@@ -354,7 +374,6 @@ bash scripts/run_ae.sh sensitivity --output-root outputs/ae
 The configured grids include cache sizes 8-128, Hamming thresholds 1-5, the
 feature and depth thresholds from the paper, and tile sizes 2-32. Every grid point runs
 all protocol samples and produces a strict dataset aggregate before plotting.
-These figures are mandatory supporting outputs, not standalone key results.
 One-scene route mixes are diagnostics only and are never compared with the
 dataset-level Table 3 or Figure 11 aggregate.
 
@@ -362,15 +381,26 @@ dataset-level Table 3 or Figure 11 aggregate.
 
 ```bash
 bash scripts/run_ae.sh all-eval --profile full --output-root outputs/ae
-bash scripts/run_ae.sh figures --figures all --output-root outputs/ae
-bash scripts/run_ae.sh validate --require-key-results --output-root outputs/ae
+bash scripts/run_ae.sh figures --figures figure8,table1,figure11,table2,table3 --output-root outputs/ae
+
+# Author-side structural and provenance preflight; incomplete key results stay visible.
+python scripts/validate_ae.py --input outputs/ae --profile author-preflight
+
+# Evaluator-final gate; every mandatory key result must exist and pass.
+python scripts/validate_ae.py \
+  --input outputs/ae \
+  --profile evaluator-final \
+  --require-key-results
 ```
 
-`all-eval` schedules the complete paper matrix except workflows blocked by a
-declared external hardware/account gate. `validate --require-key-results`
-returns nonzero for every missing, structurally invalid, out-of-tolerance,
-wrong-class, or unfinalized key result. It cannot pass merely because a result
-is marked not claimed.
+`all-eval` schedules the active Figure 8(a), Table 1, and Figure 11 scope;
+Tables 2-3 stay attached as Figure 11 support. Paused sensitivity, utilization,
+and physical-proxy workflows require explicit manual invocation.
+`author-preflight` checks the evidence shape and provenance without treating
+missing mandatory rows as a pass.
+`evaluator-final --require-key-results` returns nonzero for every missing,
+structurally invalid, out-of-tolerance, wrong-class, or unfinalized key result.
+It cannot pass merely because a result is marked not claimed.
 
 ## RTL Validation
 

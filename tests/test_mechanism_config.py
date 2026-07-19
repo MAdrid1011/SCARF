@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_preregistered_config_has_portable_nonclaim_provenance():
     from scripts.mechanism_config import load_mechanism_config
+    from scripts.saes_execution_identity import build_saes_execution_identity
 
     config, provenance = load_mechanism_config(
         ROOT / "artifact/mechanism_config.json"
@@ -23,6 +24,65 @@ def test_preregistered_config_has_portable_nonclaim_provenance():
     assert len(provenance["manifest_sha256"]) == 64
     assert config["fixed"]["saes_l1_depth_reference"] == "primary-routing-probes-v1"
     assert config["fixed"]["saes_moment_geometry"] == "c2w-probe-depth-ray-v1"
+    assert config["saes_execution_identity"] == build_saes_execution_identity()
+    assert config["saes_execution_identity"]["l1_anchor_count"] == 12
+    assert config["saes_execution_identity"]["context_safety_guard"] is True
+    assert provenance["saes_execution_route_sha256"] == config[
+        "saes_execution_identity"
+    ]["route_sha256"]
+
+
+def test_execution_identity_builder_is_fresh_and_hash_bound():
+    from scripts.saes_execution_identity import build_saes_execution_identity
+
+    first = build_saes_execution_identity()
+    second = build_saes_execution_identity()
+
+    assert first == second
+    assert first is not second
+    first["l1_anchor_positions"][4][0] = 9
+    assert build_saes_execution_identity() == second
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    (
+        (
+            lambda value: value.pop("saes_execution_identity"),
+            "SAES execution identity is missing",
+        ),
+        (
+            lambda value: value["saes_execution_identity"].update(
+                l1_anchor_count=8
+            ),
+            "registered 12-anchor",
+        ),
+        (
+            lambda value: value["saes_execution_identity"].update(
+                context_safety_guard=False
+            ),
+            "registered 12-anchor",
+        ),
+        (
+            lambda value: value["saes_execution_identity"].update(
+                route_sha256="0" * 64
+            ),
+            "registered 12-anchor",
+        ),
+    ),
+)
+def test_mechanism_config_rejects_execution_identity_drift(tmp_path, mutate, message):
+    from scripts.mechanism_config import load_mechanism_config
+
+    payload = json.loads(
+        (ROOT / "artifact/mechanism_config.json").read_text(encoding="utf-8")
+    )
+    mutate(payload)
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_mechanism_config(path)
 
 
 def test_mechanism_config_rejects_pair_overrides_or_projection_seed_changes(tmp_path):

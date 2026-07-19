@@ -8,8 +8,8 @@ import hashlib
 import json
 import shutil
 import sys
-from pathlib import Path
-from typing import Any, Mapping
+from pathlib import Path, PurePosixPath
+from typing import Any, Collection, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +33,15 @@ SOURCE_PROVENANCE_FIELDS = (
 RAW_ASAP7_PPA_PATH = "physical/asap7/ppa.json"
 DEEPSCALE_PPA_PATH = "physical/asap7/ppa_28nm_estimated.json"
 PHYSICAL_RESULT_PATHS = {RAW_ASAP7_PPA_PATH, DEEPSCALE_PPA_PATH}
+REFERENCE_ONLY_REPORT_FILENAMES = frozenset(
+    {
+        "paper_reference.md",
+        "table1_reference.csv",
+        "mechanisms_reference.csv",
+        "summary_reference.csv",
+    }
+)
+REFERENCE_ONLY_MARKER = b"PAPER_REFERENCE_ONLY"
 
 
 def canonical_sha256(value: Any) -> str:
@@ -93,6 +102,41 @@ def is_generated_execution_record(relative: Path) -> bool:
     return relative.name == "results.json" or relative.as_posix() in PHYSICAL_RESULT_PATHS
 
 
+def is_scarf_execution_result(relative: Path) -> bool:
+    """Return whether a result must satisfy the traceable SCARF result schema."""
+    return relative.name == "results.json" and bool(relative.parts) and relative.parts[0] in {
+        "quick",
+        "quality",
+        "speedup",
+        "ablation",
+        "mechanisms",
+        "utilization",
+    }
+
+
+def has_reference_only_marker(path: Path) -> bool:
+    """Detect the explicit preview marker without loading large evidence files."""
+    trailing = b""
+    try:
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(64 * 1024), b""):
+                if REFERENCE_ONLY_MARKER in trailing + block:
+                    return True
+                trailing = (trailing + block)[-(len(REFERENCE_ONLY_MARKER) - 1) :]
+    except OSError:
+        return False
+    return False
+
+
+def is_reference_only_report(relative: Path, source: Path | None = None) -> bool:
+    """Keep reference-only previews out of reviewer-facing evidence."""
+    return (
+        relative.name in REFERENCE_ONLY_REPORT_FILENAMES
+        or relative.name.endswith("_reference.csv")
+        or (source is not None and has_reference_only_marker(source))
+    )
+
+
 def validate_deepscale_derivations(
     files: Mapping[Path, Path], parsed_records: Mapping[str, Mapping[str, Any]]
 ) -> list[str]:
@@ -125,6 +169,257 @@ def validate_deepscale_derivations(
     return []
 
 
+def _aggregate_projection(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Exclude only the invocation text when comparing a rebuilt aggregate."""
+    provenance = dict(record["provenance"])
+    provenance.pop("command", None)
+    return {
+        "schema_version": record.get("schema_version"),
+        "evidence_class": record.get("evidence_class"),
+        "provenance": provenance,
+        "quality": record.get("quality"),
+        "performance": record.get("performance"),
+        "events": record.get("events"),
+        "energy": record.get("energy"),
+        "ablation": record.get("ablation"),
+        "fsdr_saes": record.get("fsdr_saes"),
+        "hardware": record.get("hardware"),
+        "validation": record.get("validation"),
+    }
+
+
+def _sample_result_path(
+    aggregate_relative: Path, declared_path: Any
+) -> Path | None:
+    if not isinstance(declared_path, str) or not declared_path:
+        return None
+    pure = PurePosixPath(declared_path)
+    if pure.is_absolute() or ".." in pure.parts:
+        return None
+    candidate = aggregate_relative.parent / Path(*pure.parts)
+    try:
+        candidate.relative_to(aggregate_relative.parent)
+    except ValueError:
+        return None
+    return candidate
+
+
+def validate_aggregate_lineage(
+    files: Mapping[Path, Path], parsed_records: Mapping[str, Mapping[str, Any]]
+) -> list[str]:
+    """Rebuild every staged SCARF aggregate from its staged sample records."""
+    from scripts.aggregate_results import aggregate
+
+    paths_by_relative = {
+        relative.as_posix(): path for path, relative in files.items()
+    }
+    failures: list[str] = []
+    for aggregate_relative_text, aggregate_record in sorted(parsed_records.items()):
+        provenance = aggregate_record.get("provenance")
+        evaluation = provenance.get("evaluation") if isinstance(provenance, Mapping) else None
+        if not isinstance(evaluation, Mapping) or evaluation.get("kind") != "dataset_aggregate":
+            continue
+        aggregate_relative = Path(aggregate_relative_text)
+        label = str(Path("evidence") / aggregate_relative)
+        sample_entries = evaluation.get("sample_results")
+        sample_count = evaluation.get("sample_count")
+        if (
+            not isinstance(sample_entries, list)
+            or not sample_entries
+            or not isinstance(sample_count, int)
+            or isinstance(sample_count, bool)
+            or sample_count != len(sample_entries)
+        ):
+            failures.append(f"aggregate sample lineage is incomplete: {label}")
+            continue
+        sample_paths: list[Path] = []
+        lineage_valid = True
+        for entry in sample_entries:
+            if not isinstance(entry, Mapping):
+                lineage_valid = False
+                break
+            sample_relative = _sample_result_path(
+                aggregate_relative, entry.get("path")
+            )
+            if sample_relative is None:
+                lineage_valid = False
+                break
+            sample_path = paths_by_relative.get(sample_relative.as_posix())
+            sample_record = parsed_records.get(sample_relative.as_posix())
+            if sample_path is None or not isinstance(sample_record, Mapping):
+                lineage_valid = False
+                break
+            sample_evaluation = sample_record.get("provenance", {}).get("evaluation")
+            if (
+                not isinstance(sample_evaluation, Mapping)
+                or sample_evaluation.get("kind") != "sample"
+                or sample_evaluation.get("sample_index") != entry.get("sample_index")
+                or sha256_file(sample_path) != entry.get("sha256")
+            ):
+                lineage_valid = False
+                break
+            sample_paths.append(sample_path)
+        if not lineage_valid:
+            failures.append(f"aggregate sample lineage does not match staged samples: {label}")
+            continue
+        try:
+            rebuilt = aggregate(sample_paths, sample_count)
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            failures.append(f"aggregate sample lineage cannot be rebuilt: {label} ({exc})")
+            continue
+        if _aggregate_projection(aggregate_record) != _aggregate_projection(rebuilt):
+            failures.append(
+                f"aggregate result does not match its staged sample results: {label}"
+            )
+    return failures
+
+
+def validate_claim_timing_artifacts(
+    files: Mapping[Path, Path], parsed_records: Mapping[str, Mapping[str, Any]]
+) -> list[str]:
+    """Require every claim timing descriptor to resolve to a staged raw trace."""
+    paths_by_relative = {
+        relative.as_posix(): path for path, relative in files.items()
+    }
+    failures: list[str] = []
+    for relative_text, record in sorted(parsed_records.items()):
+        provenance = record.get("provenance")
+        contract = (
+            provenance.get("execution_contract")
+            if isinstance(provenance, Mapping)
+            else None
+        )
+        if not isinstance(contract, Mapping) or contract.get("run_class") != "claim":
+            continue
+        timing = record.get("performance", {}).get("claim_timing")
+        trace = timing.get("trace") if isinstance(timing, Mapping) else None
+        trace_path = trace.get("path") if isinstance(trace, Mapping) else None
+        if not isinstance(trace_path, str):
+            failures.append(
+                f"claim timing raw trace is missing: evidence/{relative_text}"
+            )
+            continue
+        trace_relative = Path(relative_text).parent / Path(*PurePosixPath(trace_path).parts)
+        raw_trace = paths_by_relative.get(trace_relative.as_posix())
+        if raw_trace is None or sha256_file(raw_trace) != trace.get("sha256"):
+            failures.append(
+                f"claim timing raw trace is not staged or hash-bound: evidence/{relative_text}"
+            )
+    return failures
+
+
+def validate_report_catalog(
+    output: Path,
+    included_relatives: Collection[Path],
+    *,
+    project_root: Path = ROOT,
+) -> list[str]:
+    """Validate report sources before a catalog can enter staged evidence."""
+    from scripts.generate_report import _source_records, validate_figure_catalog
+    from scripts.validate_ae import figure8_catalog_evidence_check
+
+    catalog_path = output / "reports" / "figure_catalog.json"
+    if not catalog_path.is_file():
+        return ["generated report catalog is missing"]
+    try:
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        contract = json.loads(
+            (project_root / "artifact" / "evaluation_catalog.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        claims = json.loads(
+            (project_root / "artifact" / "claim_status.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        protocol = json.loads(
+            (project_root / "artifact" / "evaluation_protocol.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        validate_figure_catalog(catalog, contract, require_key_results=False)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return [f"generated report catalog is invalid: {exc}"]
+
+    failures: list[str] = []
+    included = {Path(relative).as_posix() for relative in included_relatives}
+    for required_report in (
+        "reports/figure_catalog.json",
+        "reports/reproduction_report.md",
+    ):
+        if required_report not in included:
+            failures.append(
+                f"generated report artifact is not included in staged evidence: {required_report}"
+            )
+    requirements = {item["id"]: item for item in contract["results"]}
+    for row in catalog["results"]:
+        result_id = row["id"]
+        if not isinstance(row.get("selected"), bool):
+            failures.append(f"report catalog {result_id} has no boolean selected state")
+            continue
+        expected_sources = (
+            _source_records(output, requirements[result_id]["raw_inputs"])
+            if row["selected"]
+            else []
+        )
+        if row["source_data"] != expected_sources:
+            failures.append(
+                f"report catalog sources do not match regenerated inputs: {result_id}"
+            )
+        for source in row["source_data"]:
+            relative = source.get("path") if isinstance(source, Mapping) else None
+            if not isinstance(relative, str) or relative not in included:
+                failures.append(
+                    f"report catalog source is not included in staged evidence: {relative}"
+                )
+        for export in row["exports"]:
+            pure = PurePosixPath(export) if isinstance(export, str) else None
+            if (
+                pure is None
+                or pure.is_absolute()
+                or ".." in pure.parts
+                or not pure.parts
+                or pure.parts[0] == "reports"
+            ):
+                failures.append(f"report catalog has unsafe export path: {export}")
+                continue
+            relative = (Path("reports") / Path(*pure.parts)).as_posix()
+            if relative not in included or not (output / relative).is_file():
+                failures.append(
+                    f"report catalog export is not included in staged evidence: {export}"
+                )
+                continue
+            if pure.parts[:1] == ("status",) and pure.suffix == ".json":
+                try:
+                    status_record = json.loads((output / relative).read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    failures.append(
+                        f"report catalog status export is invalid: {export} ({exc})"
+                    )
+                    continue
+                if (
+                    not isinstance(status_record, Mapping)
+                    or status_record.get("id") != result_id
+                    or status_record.get("status") != row["status"]
+                    or status_record.get("required_evidence_class")
+                    != row["evidence_class"]
+                ):
+                    failures.append(
+                        f"report catalog status export does not match catalog row: {export}"
+                    )
+
+    check = figure8_catalog_evidence_check(
+        output, catalog, protocol, claims.get("figure8")
+    )
+    if check["pass"] is not True:
+        failures.append(
+            "Figure 8 catalog does not satisfy independent Orin evidence: "
+            f"{check['actual']}"
+        )
+    return failures
+
+
 def validate_generated_records(
     files: Mapping[Path, Path], *, expected_binding: Mapping[str, Any]
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
@@ -141,8 +436,11 @@ def validate_generated_records(
     ):
         raise ValueError("release evidence binding has an invalid schema")
 
+    from scripts.validate_result import reject_reference_only_record, validate
+
     records: dict[str, dict[str, Any]] = {}
     parsed_records: dict[str, Mapping[str, Any]] = {}
+    lineage_records: dict[str, Mapping[str, Any]] = {}
     failures: list[str] = []
     for path, relative in sorted(files.items(), key=lambda item: str(item[1])):
         if not is_generated_execution_record(relative):
@@ -153,8 +451,26 @@ def validate_generated_records(
         except (OSError, json.JSONDecodeError) as exc:
             failures.append(f"generated evidence is not valid JSON: {label} ({exc})")
             continue
+        schema_valid = True
         if isinstance(record, Mapping):
             parsed_records[relative.as_posix()] = record
+            try:
+                reject_reference_only_record(record)
+                if is_scarf_execution_result(relative):
+                    validate(dict(record))
+                    if relative.parts[0] != "quick" and record.get(
+                        "schema_version"
+                    ) != "2.1":
+                        raise ValueError(
+                            "claim-facing SCARF results require schema 2.1 "
+                            "execution-trace bindings"
+                        )
+            except (KeyError, TypeError, ValueError) as exc:
+                failures.append(f"generated SCARF result is invalid: {label} ({exc})")
+                schema_valid = False
+        else:
+            schema_valid = False
+            failures.append(f"generated evidence root is not an object: {label}")
         provenance = record.get("provenance") if isinstance(record, dict) else None
         if not isinstance(provenance, Mapping):
             failures.append(f"generated evidence provenance is missing: {label}")
@@ -209,10 +525,14 @@ def validate_generated_records(
                 )
                 mechanism_valid = False
 
-        if source_valid and mechanism_valid:
+        if source_valid and mechanism_valid and schema_valid:
             records[label] = _record_binding(provenance, calibration=calibration)
+            if is_scarf_execution_result(relative):
+                lineage_records[relative.as_posix()] = record
 
     failures.extend(validate_deepscale_derivations(files, parsed_records))
+    failures.extend(validate_aggregate_lineage(files, lineage_records))
+    failures.extend(validate_claim_timing_artifacts(files, lineage_records))
     if not records and not failures:
         failures.append("validated output has no generated execution result records")
     return records, failures
@@ -224,7 +544,7 @@ def required_categories() -> set[str]:
     if any(state == "CLAIMED" for state in claims.get("software_pairs", {}).values()):
         categories.add("quality")
     if any(state == "CLAIMED" for state in claims.get("mechanism_pairs", {}).values()):
-        categories.add("ablation")
+        categories.add("mechanisms")
     if claims.get("figure8") == "CLAIMED":
         categories.add("speedup")
     if claims.get("sensitivity") == "CLAIMED":
@@ -248,6 +568,17 @@ def required_environment_profiles() -> set[str]:
     if "depthsplat" in claimed_models:
         profiles.add("depthsplat")
     return profiles
+
+
+def evidence_categories(relatives: Collection[Path]) -> set[str]:
+    """Derive archive categories from the same relative paths used for staging."""
+    categories: set[str] = set()
+    for relative in relatives:
+        path = Path(relative)
+        if not path.parts:
+            continue
+        categories.add("validation" if path.name == "validation.json" else path.parts[0])
+    return categories
 
 
 def sha256_file(path: Path) -> str:
@@ -341,12 +672,18 @@ def selected_files(source: Path) -> dict[Path, Path]:
         "quick/*/pair-execution.json",
         "quick/*/progress.jsonl",
         "quick/*/samples/*/results.json",
+        "quick/*/timing-trace/*",
+        "quick/*/samples/*/timing-trace/*",
         "quality/*/results.json",
         "quality/*/pair-execution.json",
         "quality/*/progress.jsonl",
         "quality/*/samples/*/results.json",
+        "quality/*/timing-trace/*",
+        "quality/*/samples/*/timing-trace/*",
         "speedup/*/results.json",
         "speedup/*/samples/*/results.json",
+        "speedup/*/timing-trace/*",
+        "speedup/*/samples/*/timing-trace/*",
         "speedup/*/samples/*/orin-evidence/measurement.json",
         "speedup/*/samples/*/orin-evidence/cuda-events.json",
         "speedup/*/samples/*/orin-evidence/tegrastats.log",
@@ -356,6 +693,16 @@ def selected_files(source: Path) -> dict[Path, Path]:
         "ablation/*/pair-execution.json",
         "ablation/*/progress.jsonl",
         "ablation/*/samples/*/results.json",
+        "mechanisms/*/results.json",
+        "mechanisms/*/pair-execution.json",
+        "mechanisms/*/progress.jsonl",
+        "mechanisms/*/samples/*/results.json",
+        "ablation/*/timing-trace/*",
+        "ablation/*/samples/*/timing-trace/*",
+        "mechanisms/*/timing-trace/*",
+        "mechanisms/*/samples/*/timing-trace/*",
+        "utilization/*/timing-trace/*",
+        "utilization/*/samples/*/timing-trace/*",
         "sensitivity/results.json",
         "sensitivity/plan.json",
         "datasets/*.json",
@@ -376,6 +723,7 @@ def selected_files(source: Path) -> dict[Path, Path]:
         "physical/asap7/runtime/iflow/result/ScarfTop.droute.*/droute_drc.rpt",
         "physical/asap7/runtime/iflow/rtl/ScarfTop/sram-proxies.json",
         "reports/*",
+        "reports/**/*",
         "environments/*.json",
         "validation.json",
     )
@@ -383,8 +731,10 @@ def selected_files(source: Path) -> dict[Path, Path]:
     for pattern in patterns:
         for path in source.glob(pattern):
             if path.is_file():
-                selected[path] = path.relative_to(source)
-    for category in ("quick", "quality", "ablation"):
+                relative = path.relative_to(source)
+                if not is_reference_only_report(relative, path):
+                    selected[path] = relative
+    for category in ("quick", "quality", "ablation", "mechanisms"):
         category_root = source / category
         if not category_root.is_dir():
             continue
@@ -398,7 +748,9 @@ def selected_files(source: Path) -> dict[Path, Path]:
                 continue
             for path in sample_roots[0].glob("*.png"):
                 if path.is_file():
-                    selected[path] = path.relative_to(source)
+                    relative = path.relative_to(source)
+                    if not is_reference_only_report(relative, path):
+                        selected[path] = relative
     return selected
 
 
@@ -416,10 +768,7 @@ def stage(source: Path, destination: Path = DESTINATION) -> dict:
     if evidence.exists():
         raise FileExistsError(f"reference evidence already exists: {evidence}")
     files = selected_files(source)
-    categories = {
-        relative.parts[0] if relative.name != "validation.json" else "validation"
-        for relative in files.values()
-    }
+    categories = evidence_categories(files.values())
     missing = sorted(required_categories() - categories)
     if missing:
         raise ValueError("validated output is missing archive categories: " + ", ".join(missing))
@@ -442,6 +791,11 @@ def stage(source: Path, destination: Path = DESTINATION) -> dict:
         raise ValueError(
             "generated evidence does not match the current release provenance: "
             + "; ".join(provenance_failures)
+        )
+    report_failures = validate_report_catalog(source, files.values())
+    if report_failures:
+        raise ValueError(
+            "generated evidence report catalog is invalid: " + "; ".join(report_failures)
         )
     records = {}
     for path, relative in sorted(files.items(), key=lambda item: str(item[1])):

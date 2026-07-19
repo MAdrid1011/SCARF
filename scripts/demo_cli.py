@@ -4,13 +4,109 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from scripts.calibration_contract import canonical_parameters
 
 
 MODELS = ("transplat", "mvsplat", "depthsplat")
 DATASETS = ("re10k", "acid", "dl3dv")
+
+
+def resolve_frozen_saes_execution(
+    args: argparse.Namespace,
+    *,
+    tile_size: int,
+    feature_threshold: float,
+    depth_threshold: float,
+    cross_check_threshold: float,
+    execution_identity: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve the runtime SAES route, binding strict runs to the identity."""
+    strict_route = bool(
+        getattr(args, "claim_run", False)
+        or getattr(args, "functional_run", False)
+        or getattr(args, "frozen_saes_route", False)
+    )
+    diagnostic_route = {
+        "tile_size": tile_size,
+        "feature_threshold": feature_threshold,
+        "depth_threshold": depth_threshold,
+        "cross_check_threshold": cross_check_threshold,
+        "materialization": getattr(args, "saes_materialization", "representative"),
+        "decision_semantics": getattr(args, "saes_decision_semantics", "current"),
+        "depth_routing_semantics": "metric-depth-standard-deviation",
+        "materialization_guard": True,
+        "context_safety_guard": bool(
+            getattr(args, "context_safety_guard", False)
+        ),
+        "require_deletion_certificate": True,
+        "feature_source": getattr(args, "saes_feature_source", "pipeline"),
+        "execution_identity": None,
+        "route_sha256": None,
+    }
+    if not strict_route:
+        return diagnostic_route
+
+    from scripts.saes_execution_identity import validate_saes_execution_identity
+
+    identity = validate_saes_execution_identity(execution_identity)
+    overrides = [
+        option
+        for option, enabled in (
+            ("--tune-thresholds", bool(getattr(args, "tune_thresholds", False))),
+            ("--saes-fv", getattr(args, "saes_fv", None) is not None),
+            ("--saes-ds", getattr(args, "saes_ds", None) is not None),
+            ("--saes-cc", getattr(args, "saes_cc", None) is not None),
+            ("--tile-size", getattr(args, "tile_size", None) is not None),
+        )
+        if enabled
+    ]
+    if overrides:
+        raise ValueError(
+            "strict SAES execution forbids route overrides: " + ", ".join(overrides)
+        )
+    if getattr(args, "saes_materialization", "representative") != identity[
+        "materialization"
+    ]:
+        raise ValueError(
+            "strict SAES execution materialization does not match frozen identity"
+        )
+    if getattr(args, "saes_feature_source", "pipeline") != "pipeline":
+        raise ValueError(
+            "strict SAES execution feature source does not match frozen identity"
+        )
+    if getattr(args, "saes_decision_semantics", "current") != "current":
+        raise ValueError("strict SAES execution rejects CLI decision semantics")
+    if bool(getattr(args, "context_safety_guard", False)):
+        raise ValueError("strict SAES execution rejects CLI context safety guard")
+    for field, actual in (
+        ("tile_size", tile_size),
+        ("feature_threshold", feature_threshold),
+        ("depth_threshold", depth_threshold),
+        ("cross_check_threshold", cross_check_threshold),
+    ):
+        if actual != identity[field]:
+            raise ValueError(
+                f"strict SAES execution {field} does not match frozen identity"
+            )
+    return {
+        "tile_size": identity["tile_size"],
+        "feature_threshold": identity["feature_threshold"],
+        "depth_threshold": identity["depth_threshold"],
+        "cross_check_threshold": identity["cross_check_threshold"],
+        "materialization": identity["materialization"],
+        "decision_semantics": identity["decision_semantics"],
+        "depth_routing_semantics": identity["depth_routing_semantics"],
+        "materialization_guard": identity["materialization_guard"],
+        "context_safety_guard": identity["context_safety_guard"],
+        "require_deletion_certificate": True,
+        "feature_source": "pipeline",
+        "execution_identity": identity,
+        "route_sha256": identity["route_sha256"],
+    }
 
 
 def positive_int(value: str) -> int:
@@ -60,6 +156,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--diagnostic-run",
         action="store_true",
         help="Use strict execution without making the result claim-eligible",
+    )
+    parser.add_argument(
+        "--frozen-saes-route",
+        action="store_true",
+        help=(
+            "Bind a local SAES-only fidelity run to the registered route; "
+            "permits --no-fsdr only"
+        ),
     )
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or cuda:N")
     parser.add_argument("--seed", type=int, default=0)
@@ -143,6 +247,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record target-free SAES control, merge, and storage events without rendering",
     )
     parser.add_argument(
+        "--context-safety-guard",
+        action="store_true",
+        help="Enable the non-claim camera/depth SAES safety guard in a diagnostic run",
+    )
+    parser.add_argument(
         "--saes-feature-source",
         choices=("pipeline", "gaussian-head-input"),
         default="pipeline",
@@ -188,8 +297,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = build_parser().parse_args(argv)
     if args.sample_index >= args.num_samples:
         raise SystemExit("--sample-index must be smaller than --num-samples")
-    strict_run = args.claim_run or args.functional_run or args.diagnostic_run
+    if args.frozen_saes_route and any(
+        (args.claim_run, args.functional_run, args.diagnostic_run)
+    ):
+        build_parser().error(
+            "--frozen-saes-route is a standalone local fidelity mode"
+        )
+    strict_run = (
+        args.claim_run
+        or args.functional_run
+        or args.diagnostic_run
+        or args.frozen_saes_route
+    )
     claim_or_functional_run = args.claim_run or args.functional_run
+    route_bound_run = claim_or_functional_run or args.frozen_saes_route
     mode = (
         "--claim-run"
         if args.claim_run
@@ -209,24 +330,52 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
         if enabled
     ]
-    if strict_run and disabled:
+    disallowed_disabled = (
+        [option for option in disabled if option != "--no-fsdr"]
+        if args.frozen_saes_route
+        else disabled
+    )
+    if strict_run and disallowed_disabled:
         build_parser().error(
-            f"{mode} forbids disabled stages: " + ", ".join(disabled)
+            f"{mode} forbids disabled stages: " + ", ".join(disallowed_disabled)
         )
     # Diagnostic runs are still strict about executing every hardware stage,
     # but may exercise explicitly non-claiming mechanism variants.
-    if claim_or_functional_run and args.saes_materialization != "representative":
+    if route_bound_run and args.saes_materialization != "representative":
         build_parser().error(
             f"{mode} requires --saes-materialization representative"
         )
-    if claim_or_functional_run and args.saes_diagnostic_sweep:
+    if route_bound_run and args.saes_diagnostic_sweep:
         build_parser().error(f"{mode} forbids --saes-diagnostic-sweep")
-    if claim_or_functional_run and args.saes_decision_semantics != "current":
+    if route_bound_run and args.saes_decision_semantics != "current":
         build_parser().error(
             f"{mode} forbids non-default --saes-decision-semantics"
         )
-    if claim_or_functional_run and args.saes_feature_source != "pipeline":
+    if route_bound_run and args.saes_feature_source != "pipeline":
         build_parser().error(f"{mode} forbids non-default --saes-feature-source")
+    if route_bound_run:
+        route_overrides = [
+            option
+            for option, enabled in (
+                ("--tune-thresholds", args.tune_thresholds),
+                ("--saes-fv", args.saes_fv is not None),
+                ("--saes-ds", args.saes_ds is not None),
+                ("--saes-cc", args.saes_cc is not None),
+                ("--tile-size", args.tile_size is not None),
+            )
+            if enabled
+        ]
+        if route_overrides:
+            build_parser().error(
+                f"{mode} forbids frozen SAES route overrides: "
+                + ", ".join(route_overrides)
+            )
+    if args.context_safety_guard and not args.diagnostic_run:
+        build_parser().error("--context-safety-guard requires --diagnostic-run")
+    if args.context_safety_guard and args.sensitivity_trace:
+        build_parser().error(
+            "--context-safety-guard cannot be combined with --sensitivity-trace"
+        )
     if (args.claim_run or args.functional_run) and args.fsdr_guidance_policy != (
         "paper-hamming-local-validity"
     ):
@@ -247,6 +396,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             args.calibration_trace,
             args.saes_diagnostic_sweep,
             args.tune_thresholds,
+            args.context_safety_guard,
         )
     ):
         build_parser().error("--fsdr-only cannot be combined with other run modes")
@@ -275,6 +425,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 args.saes_s3_raw_audit,
                 args.saes_routing_audit,
                 args.saes_hardware_audit,
+                args.context_safety_guard,
             )
         ):
             build_parser().error(
@@ -324,6 +475,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     "--fsdr-guidance-policy",
                     args.fsdr_guidance_policy != "paper-hamming-local-validity",
                 ),
+                ("--context-safety-guard", args.context_safety_guard),
                 ("--seed", args.seed != 0),
             )
             if enabled
@@ -383,6 +535,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     "--fsdr-guidance-policy",
                     args.fsdr_guidance_policy != "paper-hamming-local-validity",
                 ),
+                ("--context-safety-guard", args.context_safety_guard),
                 ("--seed", args.seed != 0),
             )
             if enabled
@@ -441,6 +594,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     "--fsdr-guidance-policy",
                     args.fsdr_guidance_policy != "paper-hamming-local-validity",
                 ),
+                ("--context-safety-guard", args.context_safety_guard),
                 ("--seed", args.seed != 0),
             )
             if enabled
@@ -473,6 +627,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 ("--fsdr-cache-size", args.fsdr_cache_size is not None),
                 ("--fsdr-hamming", args.fsdr_hamming is not None),
                 ("--fsdr-guidance-policy", args.fsdr_guidance_policy != "paper-hamming-local-validity"),
+                ("--context-safety-guard", args.context_safety_guard),
                 ("--image-output-policy", args.image_output_policy != "none"),
                 ("--seed", args.seed != 0),
             )

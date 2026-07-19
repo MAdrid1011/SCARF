@@ -1,8 +1,11 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +21,8 @@ def dry_run(tmp_path: Path, mode: str, *extra: str):
             "--dry-run",
             "--output-root",
             str(tmp_path),
+            "--python",
+            sys.executable,
             *extra,
         ],
         capture_output=True,
@@ -165,8 +170,10 @@ def test_calibrate_mode_is_bound_to_the_public_contract(tmp_path):
 def test_calibrate_mode_uses_the_locked_classic_profile(tmp_path, monkeypatch):
     import scripts.run_ae as runner
 
-    classic = "/opt/scarf/classic/bin/python"
-    monkeypatch.setenv("SCARF_PYTHON_CLASSIC", classic)
+    classic = tmp_path / "classic-python"
+    classic.write_text("", encoding="utf-8")
+    classic.chmod(0o755)
+    monkeypatch.setenv("SCARF_PYTHON_CLASSIC", str(classic))
     plan = runner.build_plan(
         SimpleNamespace(
             mode="calibrate",
@@ -183,8 +190,8 @@ def test_calibrate_mode_uses_the_locked_classic_profile(tmp_path, monkeypatch):
         )
     )
 
-    assert plan["calibration_python"] == classic
-    assert all(command[0] == classic for command in plan["commands"])
+    assert plan["calibration_python"] == str(classic)
+    assert all(command[0] == str(classic) for command in plan["commands"])
 
 
 def test_pair_filter_intersects_each_composite_workflow(tmp_path, monkeypatch):
@@ -197,7 +204,7 @@ def test_pair_filter_intersects_each_composite_workflow(tmp_path, monkeypatch):
         SimpleNamespace(
             mode="all",
             output_root=tmp_path / "all",
-            python=None,
+            python=sys.executable,
             num_samples=1,
             pairs="transplat/dl3dv",
         )
@@ -211,12 +218,14 @@ def test_pair_filter_intersects_each_composite_workflow(tmp_path, monkeypatch):
         "transplat/re10k",
     )
 
-    assert [item["workflow"] for item in all_plan["experiments"]] == ["quality"]
+    assert [item["workflow"] for item in all_plan["experiments"]] == [
+        "quality",
+        "mechanisms",
+    ]
     assert [item["workflow"] for item in eval_plan["experiments"]] == [
         "quality",
         "performance",
         "mechanisms",
-        "utilization",
     ]
 
 
@@ -237,7 +246,7 @@ def test_quality_plan_contains_all_dataset_aware_commands_when_claimed(
             {
                 "mode": "quality",
                 "output_root": tmp_path,
-                "python": None,
+                "python": sys.executable,
                 "num_samples": 2,
             },
         )()
@@ -323,7 +332,7 @@ def test_full_fsdr_plan_remains_isolated_from_paper_targets(tmp_path):
             {
                 "mode": "fsdr",
                 "output_root": tmp_path,
-                "python": None,
+                "python": sys.executable,
                 "num_samples": None,
             },
         )()
@@ -346,17 +355,25 @@ def test_all_reuses_claimed_quality_runs_for_embedded_ablation_and_validation(
         SimpleNamespace(
             mode="all",
             output_root=tmp_path,
-            python=None,
+            python=sys.executable,
             num_samples=2,
         )
     )
 
-    assert len(plan["experiments"]) == 15
-    assert {item["workflow"] for item in plan["experiments"]} == {"quality", "fsdr"}
+    assert len(plan["experiments"]) == 18
+    assert {item["workflow"] for item in plan["experiments"]} == {
+        "quality",
+        "mechanisms",
+    }
     assert len(plan["dataset_commands"]) == 4
     assert plan["software_claim_scope"]["status"] == "ACTIVE"
     command_text = [" ".join(command) for command in plan["commands"]]
-    assert any("hardware/dram/run.sh" in command for command in command_text)
+    assert not any("hardware/dram/run.sh" in command for command in command_text)
+    assert any(
+        runner.CORE_RESULT_SELECTION in command
+        for command in command_text
+        if "generate_report.py" in command
+    )
     assert command_text[-1].endswith(f"validate_ae.py --input {tmp_path}")
 
 
@@ -373,7 +390,7 @@ def test_all_skips_unclaimed_software_but_executes_nonmodel_steps(
         SimpleNamespace(
             mode="all",
             output_root=tmp_path,
-            python=None,
+            python=sys.executable,
             num_samples=1,
         )
     )
@@ -387,7 +404,7 @@ def test_all_skips_unclaimed_software_but_executes_nonmodel_steps(
     }
     command_text = [" ".join(command) for command in plan["commands"]]
     assert any("scripts/run_rtl.sh" in command for command in command_text)
-    assert any("hardware/dram/run.sh" in command for command in command_text)
+    assert not any("hardware/dram/run.sh" in command for command in command_text)
     assert any("generate_report.py" in command for command in command_text)
     assert any("validate_ae.py" in command for command in command_text)
     assert not any(
@@ -461,7 +478,7 @@ def test_full_mode_uses_recovered_executable_sample_counts(tmp_path, monkeypatch
             {
                 "mode": "quality",
                 "output_root": tmp_path,
-                "python": None,
+                "python": sys.executable,
                 "num_samples": None,
             },
         )()
@@ -487,6 +504,84 @@ def test_awaiting_independent_orin_is_not_locally_planned_but_sensitivity_remain
     assert sensitivity["claim_status"]["sensitivity"].startswith("NOT_CLAIMED")
 
 
+def test_non_orin_performance_is_pending_and_does_not_schedule_orin_wrapper(
+    tmp_path, monkeypatch
+):
+    import scripts.run_ae as runner
+
+    monkeypatch.setattr(runner, "_is_orin_host", lambda: False)
+    plan = runner.build_plan(
+        SimpleNamespace(
+            mode="performance",
+            output_root=tmp_path,
+            python=sys.executable,
+            num_samples=1,
+            device="auto",
+        )
+    )
+
+    assert plan["pending_evaluators"] == [
+        {
+            "workflow": "performance",
+            "status": "PENDING_EVALUATOR",
+            "reason": "requires a Jetson Orin NX host",
+        }
+    ]
+    assert plan["experiments"]
+    assert all(item["execution_status"] == "PENDING_EVALUATOR" for item in plan["experiments"])
+    assert not any(
+        "hardware/orin/run.py" in " ".join(command)
+        for item in plan["experiments"]
+        for command in item["commands"]
+    )
+
+
+def test_execute_plan_skips_pending_evaluator_experiments(tmp_path, monkeypatch):
+    import scripts.run_ae as runner
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    plan = {
+        "schema_version": "1.0",
+        "mode": "performance",
+        "dataset_commands": [],
+        "commands": [],
+        "experiments": [
+            {
+                "workflow": "performance",
+                "model": "transplat",
+                "dataset": "re10k",
+                "execution_status": runner.PENDING_EVALUATOR,
+                "skip_reason": runner.ORIN_PENDING_REASON,
+                "environment_profile": "classic",
+                "command": ["python", "hardware/orin/run.py"],
+                "commands": [["python", "hardware/orin/run.py"]],
+                "aggregate_command": ["python", "aggregate.py"],
+            }
+        ],
+    }
+
+    assert runner.execute_plan(plan, tmp_path) == 0
+    assert calls == []
+
+
+def test_all_eval_validation_does_not_require_a_quick_run(tmp_path):
+    plan = dry_run(tmp_path, "all-eval", "--num-samples", "1")
+
+    validation_command = plan["commands"][-1]
+    assert validation_command[-4:] == [
+        "--profile",
+        "evaluator-final",
+        "--require-key-results",
+        "--allow-missing-quick",
+    ]
+
+
 def test_all_skips_downgraded_physical_claims(tmp_path, monkeypatch):
     import scripts.run_ae as runner
 
@@ -501,7 +596,7 @@ def test_all_skips_downgraded_physical_claims(tmp_path, monkeypatch):
             {
                 "mode": "all",
                 "output_root": tmp_path,
-                "python": None,
+                "python": sys.executable,
                 "num_samples": 1,
             },
         )()
@@ -512,6 +607,182 @@ def test_all_skips_downgraded_physical_claims(tmp_path, monkeypatch):
     assert not any("hardware/scaling/deepscale.py" in command for command in commands)
     assert "generate_report.py" in commands[-2]
     assert "validate_ae.py" in commands[-1]
+
+
+def test_saes_quality_dry_run_is_a_fixed_nonclaim_dl3dv_sample0_gate(tmp_path):
+    import scripts.run_ae as runner
+
+    plan = dry_run(tmp_path / "gate", "saes-quality", "--profile", "dl3dv-gate")
+
+    assert plan["evidence_profile"] == "not-applicable"
+    assert plan["profile_selector"] == "dl3dv-gate"
+    assert plan["experiments"] == []
+    assert plan["dataset_commands"] == []
+    assert plan["software_claim_scope"] == {
+        "status": "DIAGNOSTIC_PREFLIGHT",
+        "pair_count": 0,
+        "diagnostic_results_are_claim_evidence": False,
+    }
+    assert plan["saes_quality_gate"] == {
+        "model": "transplat",
+        "dataset": "dl3dv",
+        "sample_index": 0,
+        "candidate": {
+            "materialization": "representative",
+            "l1_anchor_count": 12,
+            "context_safety_guard": True,
+        },
+        "target_rgb_quality_execution_scheduled": False,
+        "paper_result_eligible": False,
+        "requires_calibrated_evaluation_disjoint_configuration": True,
+        "quality_execution_status": "UNAVAILABLE",
+        "quality_execution_reason": (
+            "the fixed representative quality wrapper is unavailable until the "
+            "global evaluation-disjoint mechanism configuration is calibrated"
+        ),
+        "status": runner.SAES_QUALITY_GATE_STATUS_INPUTS_UNAVAILABLE,
+        "ready": False,
+        "reason": (
+            "missing official DL3DV calibration manifest "
+            "outputs/calibration/dl3dv-protocol/manifest.json; prepare "
+            "the evaluation-disjoint inputs described in artifact/CALIBRATION.md "
+            "before running calibrate"
+        ),
+        "mechanism_config_reason": (
+            "artifact/mechanism_config.json has not been calibrated; run "
+            "`bash scripts/run_ae.sh calibrate` before a claim run"
+        ),
+    }
+    assert plan["commands"] == []
+    assert "saes_selected_output_quality_gate.py" not in json.dumps(plan)
+
+
+def test_saes_quality_rejects_evidence_profiles_and_variable_sample_inputs(tmp_path):
+    cases = (
+        (
+            ("saes-quality", "--profile", "full"),
+            "saes-quality requires --profile dl3dv-gate",
+        ),
+        (
+            ("quality", "--profile", "dl3dv-gate"),
+            "only valid with saes-quality",
+        ),
+        (
+            ("saes-quality", "--profile", "dl3dv-gate", "--num-samples", "2"),
+            "fixed to DL3DV sample index 0",
+        ),
+        (
+            ("saes-quality", "--profile", "dl3dv-gate", "--pairs", "transplat/dl3dv"),
+            "does not accept --pairs",
+        ),
+    )
+    for arguments, expected_error in cases:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(RUNNER),
+                *arguments,
+                "--dry-run",
+                "--output-root",
+                str(tmp_path / "invalid"),
+                "--python",
+                sys.executable,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert expected_error in result.stderr
+
+
+def test_saes_quality_blocks_before_writing_or_spawning_gt_quality_work(
+    tmp_path, monkeypatch
+):
+    import scripts.run_ae as runner
+
+    calls = []
+    monkeypatch.setattr(
+        runner,
+        "saes_quality_gate_preflight",
+        lambda: {
+            "status": runner.SAES_QUALITY_GATE_STATUS_BLOCKED,
+            "ready": False,
+            "reason": "DL3DV calibration is not frozen",
+        },
+    )
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda command, **_kwargs: calls.append(command),
+    )
+    output_root = tmp_path / "blocked"
+    plan = {
+        "mode": runner.SAES_QUALITY_MODE,
+        "experiments": [],
+        "dataset_commands": [],
+        "commands": [],
+    }
+
+    assert runner.execute_plan(plan, output_root) == 2
+    assert calls == []
+    assert not output_root.exists()
+
+
+def test_saes_quality_binds_the_fixed_wrapper_after_calibration_freezes(
+    tmp_path, monkeypatch
+):
+    import scripts.run_ae as runner
+    import scripts.mechanism_config as mechanism_config
+
+    monkeypatch.setattr(
+        mechanism_config,
+        "require_calibrated_mechanism",
+        lambda: (
+            {},
+            {
+                "mechanism_config_sha256": "a" * 64,
+                "status": "calibrated",
+                "evaluation_disjoint": True,
+                "saes_execution_route_sha256": "b" * 64,
+            },
+        ),
+    )
+    plan = runner.build_plan(
+        SimpleNamespace(
+            mode="saes-quality",
+            output_root=tmp_path,
+            python=sys.executable,
+            profile="dl3dv-gate",
+            num_samples=None,
+            pairs=None,
+            device="auto",
+        )
+    )
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    assert plan["saes_quality_gate"]["status"] == "READY_FIXED_NONCLAIM_DIAGNOSTIC"
+    assert plan["saes_quality_gate"]["ready"] is True
+    assert plan["saes_quality_gate"]["paper_result_eligible"] is False
+    assert plan["commands"] == [
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "saes_representative_quality_gate.py"),
+            "--output-dir",
+            str(tmp_path / "saes-quality" / "transplat_dl3dv_sample0"),
+            "--device",
+            "cuda",
+        ]
+    ]
+    assert plan["software_claim_scope"]["status"] == "DIAGNOSTIC_PREFLIGHT"
+    monkeypatch.setattr(runner, "saes_quality_gate_preflight", lambda: plan["saes_quality_gate"])
+    output_root = tmp_path / "calibrated-and-bound"
+    assert runner.execute_plan(plan, output_root) == 0
+    assert calls == plan["commands"]
 
 
 def test_unknown_mode_fails():
@@ -542,13 +813,53 @@ def test_profile_python_resolution_prefers_override_env_and_local_venv(
     local_python = tmp_path / ".venv/classic/bin/python"
     local_python.parent.mkdir(parents=True)
     local_python.write_text("", encoding="utf-8")
+    local_python.chmod(0o755)
     monkeypatch.setattr(runner, "ROOT", tmp_path)
     monkeypatch.delenv("SCARF_PYTHON_CLASSIC", raising=False)
 
     assert runner._python_for("classic", None) == str(local_python)
-    monkeypatch.setenv("SCARF_PYTHON_CLASSIC", "/profiles/classic/python")
-    assert runner._python_for("classic", None) == "/profiles/classic/python"
+    configured_python = tmp_path / "configured-classic-python"
+    configured_python.write_text("", encoding="utf-8")
+    configured_python.chmod(0o755)
+    monkeypatch.setenv("SCARF_PYTHON_CLASSIC", str(configured_python))
+    assert runner._python_for("classic", None) == str(configured_python)
     assert runner._python_for("classic", "/override/python") == "/override/python"
+    monkeypatch.setenv("SCARF_PYTHON_CLASSIC", str(tmp_path / "missing-python"))
+    with pytest.raises(ValueError, match="must name an executable"):
+        runner._python_for("classic", None)
+
+
+def test_profile_python_resolution_fails_closed_without_a_configured_source(
+    tmp_path, monkeypatch
+):
+    import scripts.run_ae as runner
+
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.delenv("SCARF_PYTHON_CLASSIC", raising=False)
+
+    with pytest.raises(ValueError, match="SCARF_PYTHON_CLASSIC"):
+        runner._python_for("classic", None)
+
+
+def test_dry_run_reports_an_invalid_profile_interpreter(tmp_path):
+    environment = os.environ.copy()
+    environment["SCARF_PYTHON_CLASSIC"] = str(tmp_path / "missing-python")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(RUNNER),
+            "quick",
+            "--dry-run",
+            "--output-root",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 2
+    assert "SCARF_PYTHON_CLASSIC must name an executable" in result.stderr
 
 
 def test_execute_plan_validates_each_profile_before_experiments(tmp_path, monkeypatch):

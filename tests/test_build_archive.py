@@ -52,6 +52,50 @@ def test_source_release_allowlist_excludes_unreviewed_artifact_content():
     assert not include_in_source_release(Path("status.md"))
 
 
+def test_source_release_excludes_internal_diagnostics_and_wip_candidates():
+    from scripts.build_archive import include_in_source_release
+
+    internal_paths = {
+        "artifact/CHECKLIST.md",
+        "artifact/PLAN.md",
+        "docs/saes-execution-dependency-audit.md",
+        "scripts/saes_dependency_audit.py",
+        "scripts/saes_same_budget_dense_oracle.py",
+        "scripts/saes_selected_output_quality_gate.py",
+        "data/prepare_dl3dv_target_free_audit_inputs.py",
+        "saes/frozen_audit_preflight.py",
+        "tests/test_saes_same_budget_dense_oracle.py",
+        "data/acid_joint_training_contract.py",
+        "data/plan_acid_joint_calibration.py",
+        "integration/acid_joint_context.py",
+        "saes/joint_materialization_calibrator.py",
+        "scripts/acid_joint_runtime_control_evidence.py",
+        "tests/test_acid_joint_context.py",
+    }
+
+    assert not any(include_in_source_release(Path(path)) for path in internal_paths)
+
+
+def test_source_release_keeps_runtime_calibration_docs_and_core_tests():
+    from scripts.build_archive import include_in_source_release
+
+    reviewer_paths = {
+        "docs/architecture.md",
+        "docs/fsdr-saes-mechanisms.md",
+        "data/plan_dl3dv_calibration.py",
+        "saes/progressive_saes.py",
+        "scripts/demo.py",
+        "scripts/saes_diagnostics.py",
+        "scripts/run_ae.py",
+        "tests/test_run_ae.py",
+        "tests/test_build_archive.py",
+        "environments/classic/requirements.lock",
+        "artifact/evaluation_protocol.json",
+    }
+
+    assert all(include_in_source_release(Path(path)) for path in reviewer_paths)
+
+
 def test_build_archive_cli_resolves_repository_modules():
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/build_archive.py"), "--help"],

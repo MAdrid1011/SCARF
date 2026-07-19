@@ -47,7 +47,12 @@ def test_all_model_loaders_accept_an_evaluation_index(monkeypatch):
             parameters = inspect.signature(loader.load_model).parameters
             assert "evaluation_index" in parameters
             assert "hydra_overrides" in parameters
-        assert "encoder_only" in inspect.signature(module.TransplatLoader.load_model).parameters
+        for loader in (
+            module.TransplatLoader,
+            module.MVSplatLoader,
+            module.DepthSplatLoader,
+        ):
+            assert "encoder_only" in inspect.signature(loader.load_model).parameters
     finally:
         sys.modules.pop("integration.model_loader", None)
         sys.modules.pop("integration", None)
@@ -66,7 +71,12 @@ def test_full_claim_dry_run_passes_index_to_pair_worker(
     monkeypatch.setattr(runner, "load_claim_status", lambda: status)
 
     plan = runner.build_plan(
-        Namespace(mode="quality", output_root=tmp_path, python=None, num_samples=None)
+        Namespace(
+            mode="quality",
+            output_root=tmp_path,
+            python=sys.executable,
+            num_samples=None,
+        )
     )
     assert len(plan["experiments"]) == 9
     for experiment in plan["experiments"]:

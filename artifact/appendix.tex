@@ -8,34 +8,40 @@ simulator, FSDR and SAES, three model adapters, Chisel RTL, experiment
 automation, result validators, and a public physical-design proxy.  The
 machine-readable catalog maps all nine Evaluation figures and four tables to
 their commands, raw inputs, evidence classes, and acceptance gates.  A result
-is marked reproduced only after a non-author evaluator obtains it; listing a
+is marked reproduced only after a non-author evaluator obtains it. Listing a
 result as mandatory does not turn missing evidence into a pass.
 
 \paragraph{Key results and hardware.}
-Figure~8 is a mandatory key result.  It requires a real Jetson Orin NX 16\,GB
-in MAXN mode with the GPU locked at 918\,MHz.  The wrapper records five CUDA
-event repetitions per sample, Nsight Systems output, \texttt{tegrastats},
-JetPack/L4T/CUDA/PyTorch versions, clocks, power mode, and temperature.  MICRO
-reviewers bid using declared hardware dependencies; if no assigned reviewer
-has the rare device, the AE FAQ permits chairs to broker exceptional remote
-access.  Workstation timings and calculated Orin estimates are rejected.
+Figure~8 is a mandatory key result only when it compares like-for-like real
+device measurements. It requires a real Jetson Orin NX 16\,GB in MAXN mode
+with the GPU locked at 918\,MHz. The wrapper records five CUDA event repetitions
+per sample, Nsight Systems output, \texttt{tegrastats}, JetPack/L4T/CUDA/PyTorch
+versions, clocks, power mode, and temperature. MICRO reviewers bid using
+declared hardware dependencies. If no assigned reviewer has the rare device,
+the AE FAQ permits chairs to broker exceptional remote access. Workstation
+timings and calculated Orin estimates are rejected.
 Full model evaluation requires an NVIDIA GPU with at least 24\,GB VRAM and the
 pinned classic and DepthSplat Python environments.  Quick Functional inference
 uses an 8\,GB CUDA GPU and a redistributable synthetic fixture.  CPU checks
-cover schemas and scaling; RTL needs JDK~11+, sbt~1.9+, Chisel~6.6, and
-Verilator~5+.
+cover schemas and scaling. RTL needs JDK~11+, sbt~1.9+, Chisel~6.6, and
+Verilator~5+. The current demo does not meet the Figure~8 comparison condition.
+CUDA events time the complete baseline encoder, whereas SCARF timing is derived
+from analytic ablation cycles. This comparison is diagnostic and cannot support
+a Figure~8 or SAES speed claim.
 
 \paragraph{Calibration boundary.}
-One global mechanism configuration is frozen before evaluation.  Unspecified
-engineering bandwidths and a conservative FSDR hit-validity tolerance are
-selected from a preregistered finite grid on 32 Re10K and 32 ACID training
-scenes.  Their hashes must be disjoint from all evaluation scenes.  Calibration
-cannot read target RGB, ground truth, manuscript tables, expected-result files,
-or evaluator outputs; it does not select an LSH seed or pair-specific values.
+One global mechanism configuration is required before an evaluation claim. The
+current author-side contract preregisters 24 DL3DV training scenes and eight
+disjoint DL3DV holdout scenes from the pinned upstream revision. The checked-in
+configuration remains preregistered and has no selected tuple. No SAES quality,
+sparse S2/S3 work-reduction, timing, or speed claim is valid until the upstream
+assets are available, one global tuple is selected on the training split, and
+that frozen tuple passes the disjoint holdout. Re10K and ACID calibration tools
+remain Functional regression only and cannot replace the DL3DV contract.
 
 \paragraph{Data and protocol.}
 Re10K, ACID, and official checkpoints are downloaded from manifest-pinned
-sources.  DL3DV-Benchmark is auto-gated; each evaluator accepts the upstream
+sources.  DL3DV-Benchmark is auto-gated. Each evaluator accepts the upstream
 terms independently, and the dataset is not redistributed in Zenodo.  The
 protocol uses the committed upstream evaluation indices: 6,474 executable
 Re10K samples, 1,595 ACID samples, and 140 DL3DV samples with their exact
@@ -44,16 +50,20 @@ selection, prepared tree, checkpoint, runtime assets, environment, and command
 by SHA256.  Partial, random, or bounded selections are not paper evidence.
 
 \paragraph{Evaluation workflow.}
-\texttt{run\_ae.sh quick} validates installation.  The \texttt{quality},
+\texttt{run\_ae.sh quick} validates installation. The \texttt{quality},
 \texttt{performance}, \texttt{worstcase}, \texttt{mechanisms},
-\texttt{utilization}, and \texttt{sensitivity} modes regenerate Figure~8,
-Table~1, and Figures~10--16/Tables~2--3.  Every target view stores PSNR, SSIM,
-and LPIPS; mechanism outputs use discrete cache, candidate, buffer, tile,
-Gaussian, and MMCU-slot events.  Figure~10 selects its displayed cases from the
-complete per-view records rather than a hand-picked metadata file.  Sensitivity
-replays fixed sample traces so a model forward pass is not repeated for each
-grid point.  The expected-result file is readable only by report validation,
-never by simulation or aggregation.
+\texttt{utilization}, and \texttt{sensitivity} modes exercise workflow checks
+and diagnostic record generation. They do not currently regenerate claimable
+SAES Figure~8, Table~1, or Tables~2--3 results. Every target view can store
+PSNR, SSIM, and LPIPS. Mechanism outputs record cache, candidate, buffer, tile,
+Gaussian, and MMCU-slot events. Those records remain diagnostic until the
+global configuration is selected, sparse S2/S3 execution is verified, and a
+comparable timing path is measured. A dense fallback, analytic ledger, or
+abstract stage-event schedule cannot satisfy an SAES claim. Figure~10 selects
+its displayed cases from complete per-view records rather than a hand-picked
+metadata file. Sensitivity replays fixed sample traces so a model forward pass
+is not repeated for each grid point. The expected-result file is readable only
+by report validation, never by simulation or aggregation.
 
 \paragraph{Public physical proxy.}
 The commercial TSMC 28\,nm PDK, memory compiler, Liberty files, and LPDDR PHY
@@ -69,8 +79,8 @@ hash evidence fails closed.
 \paragraph{Acceptance and variation.}
 Quality tolerances are 0.15\,dB PSNR, 0.005 SSIM, and 0.005 LPIPS.  Figure~8
 and Figure~11 geometric means allow 5\% relative variation under their fixed
-contracts.  Mechanism rates and utilization allow two percentage points;
-event counts allow 5\% relative variation.  Deterministic schemas, hashes,
+contracts. Mechanism rates and utilization allow two percentage points. Event
+counts allow 5\% relative variation. Deterministic schemas, hashes,
 selection identities, RTL, and scaling formulas must match exactly.  No
 manuscript constant, seed sweep, edited result JSON, dense diagnostic, or
 fallback path can satisfy a claim.

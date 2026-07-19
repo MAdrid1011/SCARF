@@ -6,6 +6,54 @@
 - [x] Paper-result mapping and badge scope documented.
 - [x] Implementation touchpoints and strict failure policy recorded.
 
+### Active L0/L1 Repair
+
+- [x] Confirm the original L0/L1 semantics: non-probes are soft-assigned and
+  merged into retained probe anchors, not directly deleted when nonzero.
+- [x] Separate producer request masks from final compact output masks.
+- [x] Add selected-anchor-only L0/L1 moment materialization with PSD and
+  range-constrained SH/opacity checks.
+- [x] Add failure-first synthetic, poison, and Full-promotion tests.
+- [x] Run the fixed local DL3DV sample-0 V8c compact quality gate after the
+  unit and packet checks: 34.8391 -> 30.1855 dB, so the candidate is rejected.
+- [x] Run the V9b target-free native-geometry/spatial-attribute/L0-depth-
+  continuity packet and coverage audit: `118136/131072` descriptors and
+  5,545 absolute dense-domain holes, with no skipped-S3 reads.
+- [x] Run the fixed V9 sample-0 quality gate: `34.8391 -> 33.0140 dB`; it is
+  improved but still outside every quality tolerance.
+- [x] Run the V10 L1-plane target-free packet and coverage audit: only two
+  fewer holes (`5,545 -> 5,543`), so no redundant quality gate was run.
+- [x] Run the V12 balanced-12 target-free packet and coverage audit: holes
+  worsened (`5,545 -> 6,607`) and omitted optical-mass recall fell
+  (`55.96% -> 45.18%`), so no GT quality gate was run.
+- [x] Implement and audit the S1-only adaptive L1-15 center single-omission
+  merge: absolute holes fell (`5,545 -> 1,667`) and uncontained omitted
+  optical mass fell (`0.00807 -> 0.00253`), while normalized recall fell
+  (`55.96% -> 44.83%`).
+- [x] Run the fixed V13 sample-0 quality gate: `33.0140 -> 33.9187 dB`, but
+  PSNR and LPIPS remain outside tolerance.
+- [x] Run the V14 S1-dominance L1-15 -> Full target-free audit: 3,231 of
+  3,234 L1 tiles promoted to Full, yielding `131069/131072` descriptors and
+  only two absolute holes without GT or skipped-S3 reads.
+- [x] Run the fixed V14c sample-0 quality gate after correcting target access
+  order: `34.8391 -> 34.8387 dB`, but it is an effectively Full upper bound
+  with only three L1 tiles and must not tune the S1 dominance threshold.
+- [ ] Rework V16's selected-anchor-only V4 center leave-one-out replay
+  certificate for L1-15 tiles as an evaluation-disjoint, immutable-manifest
+  route; any failed tile must promote Full.
+- [x] Freeze a target-free four-scene S1 absolute-LOO calibration record and
+  run V15: 1,008 risk tiles promoted, `128846/131072` descriptors, holes
+  `1667 -> 1122`, and no route/materializer target or skipped-S3 access.
+- [x] Run the fixed V15 quality gate: `33.9187 -> 34.2030 dB`, an improvement
+  of 0.2843 dB, but PSNR loss 0.6361 dB and LPIPS increase 0.00724 still fail.
+- [x] Select V16 as the distinct complementary mechanism: a frozen,
+  selected-anchor V4 center-LOO certificate. It is a risk filter only; V4's
+  output formula and V15's frozen p50 threshold remain unchanged.
+- [ ] Replace the legacy DL3DV sample-1--4 V15/V16 calibration records with
+  the ACID 24/8 context-only train/holdout contract. Freeze thresholds on the
+  train split, use the holdout only for verification, then run one DL3DV
+  sample-0 target-free audit and at most one quality gate.
+
 ## Documentation
 
 - [x] AE guide, claims, hardware scope, appendix, HotCRP draft, and checklist.
@@ -951,9 +999,169 @@ Verified on 2026-07-16 and 2026-07-17:
   materialization correction, tangent rerun, or DL3DV quality run is authorized
   by v3. Any later route must be separately registered as evaluation-disjoint
   joint-family calibration or a more conservative Full fallback.
+- [x] Register `saes-joint-materialization-calibration-acid-v1` as the only
+  active materialization route. The frozen v3 teacher attribution establishes
+  same-budget capacity but requires all four representative families, so
+  untrained single-family/two-family repairs remain closed. ACID is author-side
+  evaluation-disjoint source material only; this registration neither changes
+  `artifact/mechanism_config.json` nor authorizes a DL3DV quality run.
+- [x] Compile and hash a deterministic ACID 24/8 train/holdout partition from
+  the verified 32-scene prepared tree, with target-free sidecars, source and
+  checkpoint-binding requirements, evaluation-disjoint proof, teacher/runtime
+  isolation, and a holdout-no-training guard. The plan is
+  `artifact/protocol/acid_joint_calibration_plan.json` (file SHA256
+  `844710cd845ff65382f176ac1b936e770128bf021676a4ccc3ecf5368521143c`,
+  embedded `ad8f551652429a11512f80d516a36cac2ebc6537b461def81148af9a4584eeb5`).
+  The materialized context-only sidecars validate at outer tree
+  `863c6f5b221e6ef5f6141a27d3a2e1370b106433595806848c0e0c1b57e9596a`;
+  they are author-side only and do not bind checkpoint hashes until training.
+- [x] Implement the default-off coupled 32-to-8-to-40 shared calibrator and
+  prove route/K/2K/Full invariance, Full bit identity, selected-only S3
+  isolation, PSD/finite covariance, bounded opacity, SH degree masking, asset
+  hash binding, and fail-closed budget behavior. The synthetic runtime path
+  rejects an unpinned asset, non-representative materialization, a missing
+  selected-head trace, and a DepthSplat replicate-padding replay without its
+  required source-bound selected-head runtime evidence.
+- [x] Charge the calibrator's MACs, weight/activation traffic, selected reads,
+  and cycles. Reject a zero-cost ledger, a Full-slot call, a call-count mismatch,
+  or a missing/over-5% model-specific selected-head contract. Do not claim
+  S2/S3 saving while the execution-dependency contract remains unverified.
+  The ledger remains analytic and records no additional S2/S3 savings.
+- [x] Freeze the author-side shared-asset training contract at
+  `artifact/protocol/acid_joint_materialization_training_contract.json` before
+  any cache extraction or optimizer launch. It binds both context-only trees,
+  the exact TranSplat/ACID, MVSplat/ACID, and DepthSplat/Re10K checkpoints,
+  entrypoint/config-source hashes, the 24-file implementation binding, the
+  360x640-to-256x256 upstream LANCZOS crop/intrinsics plus patch-alignment
+  shims, and a fixed `T=4`, `tau_f=0.20`, `tau_d=0.10`, cross-check `0.02`,
+  representative `K/2K/Full` SAES route. It also freezes the one shared
+  12,000-update AdamW objective and all train/holdout teacher-fidelity gates.
+  The active embedded contract SHA256 is
+  `b3d98c23b842a36b9e0905f913bd601ca9ff27660fe2c7e88fb0c5c6a336dc6a`.
+  It supersedes the preliminary, pre-implementation-binding schema whose
+  embedded hash was `86c23fe3f275ffcec90fbed9546271a521d3932b2ce8ad84ae69be86e0717aff`.
+  This is `FROZEN_PENDING_EXECUTION`, not a successful optimizer run.
+- [x] Freeze the candidate-to-promotion ordering: `prepare-train` may write
+  only the hash-pinned `calibrator.pt.candidate`; each model/split then needs
+  source-bound context-only runtime-control evidence with an actual
+  same-weight selected-head replay; only `finalize-train` may validate teacher
+  fidelity and atomically promote that candidate to the canonical shared asset
+  and train result. The evidence records `selected_head_only=true`,
+  `s2_s3_sparse_execution_verified=false`, and
+  `global_s2_s3_savings_claimed=false`. At 2026-07-18 22:43 +0800, the
+  canonical TranSplat/ACID training-cache compiler was launched after the
+  three one-scene smoke caches passed. It writes only per-scene records under
+  `teacher_cache/transplat/calibration_train.partial` and cannot be consumed
+  by the runner until a complete manifest atomically promotes it. No complete
+  cache, candidate asset, train result, holdout result, or runtime-evidence
+  record exists yet.
+- [x] Require durable train/holdout teacher-fidelity result records with one
+  hash- and state-pinned asset. Every model must have non-worsening individual
+  mean/covariance/opacity/SH MSE and joint relative MSE at most `0.90` train,
+  `0.95` holdout; finite/PSD, route/count, Full, selected-only two-sentinel,
+  selected-head, and cost gates are mandatory. The holdout validator rehashes
+  the train result and rejects retraining, asset updates, reranking, reshuffle,
+  target/evaluation/expected-result access, or a changed resolved config. Dense
+  non-probe adaptor attributes are permitted only in the offline teacher after
+  the selected-only route/assignments are frozen; they never enter descriptor,
+  runtime, or persisted cache inputs.
+- [x] Superseded for local diagnostics (2026-07-19): the former ordering that
+  blocked every DL3DV quality/fallback check on ACID train/holdout is retained
+  as a paper-promotion constraint only. It does not block the user-prioritized
+  local DL3DV simulator-fidelity repair. No local diagnostic may be promoted to
+  a paper claim until the corresponding claim gates pass.
 - [x] Preserve the aborted `...parameter_attribution_v1/` record rather than
   overwriting it. It ended before any direct-teacher metric with a CUDA
   device-side assert; its retained record does not determine the cause. The
   designated v3 technical replay is hash-bound to the target-free source
   sidecar and must pass strict-FP32 exact-partition verification before
   rendering.
+
+### Local DL3DV Simulator Recovery
+
+- [x] Fix the local TranSplat DL3DV sample-0 simulator baseline with SAES/FSDR
+  disabled: `34.8380575 dB` versus native GPU `34.8380585 dB`.
+- [x] Add the uncertified-deletion Full fallback for the representative SAES
+  simulator route and cover it with a 4x4 regression test.
+- [x] Rerun SAES-only local sample-0 ablation: `34.8380575 dB`, zero deleted
+  Gaussians, and no SAES saving claimed.
+- [x] Replace the unconditional placeholder with the source-only
+  `exact-source-opacity-zero-v1` certificate. It is limited to the direct S2
+  density-to-opacity input of TranSplat/MVSplat, leaves retained anchors
+  bit-identical, and fails closed for DepthSplat, malformed tensors, NaN,
+  nonzero alpha, or an anchor mapping mismatch.
+- [x] Verify that certificate on local sample-0 with `--no-fsdr`:
+  `34.8380585 -> 34.8380575 dB`, zero deleted Gaussians, and no S2/S3 saving.
+  All 3,066 L0/L1 candidates had nonzero source alpha and correctly fell back
+  to Full; the result is
+  `outputs/ae_dl3dv_local_repro_v2/transplat_sample0_saes_only_exact_zero_certificate_v1/`.
+- [x] Record the historical, non-frozen no-FSDR quality regression for the fixed first eight local
+  DL3DV scenes. The complete aggregate at
+  `outputs/ae_dl3dv_local_repro_v2/transplat_saes_only_no_fsdr_8/results.json`
+  is reproducible with no reference fallback: mean PSNR
+  `26.8285265 -> 26.8285263 dB`, maximum per-scene PSNR delta
+  `9.54e-7 dB`, and all eight routes retained every Gaussian. It uses the
+  mutable diagnostic route and is not frozen-route SAES evidence.
+- [x] Complete the development-only source-scalar versus posthoc dense-S3
+  oracle audit at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_representative_deletion_risk_oracle_v1/`.
+  It accepted 1,760 representative candidates (L0 400, L1 1,360), but dense
+  S3 showed optical-depth relative error min/median `0.1579/0.2530` and median
+  covariance relative error `0.2827`. It neither altered runtime routing nor
+  produced a sparse quality/speedup claim.
+- [x] Close the empirical nonzero-opacity risk-gate route. Existing
+  source/anchor/feature/depth thresholds cannot certify deletion; retain only
+  `exact-source-opacity-zero-v1` as the runtime deletion certificate.
+- [x] Audit the existing local transmittance, conditional-optical-mass,
+  teacher-attribution, and simulator traces. No numerical violation exists in
+  the fixed Full/failed-certificate path; the actionable defect was that the
+  old local command did not bind the frozen SAES identity.
+- [x] Add `--frozen-saes-route` to bind the immutable route while permitting
+  only `--no-fsdr` for local SAES-only fidelity checks. It rejects route drift,
+  all other disabled hardware stages, and simulator fallback. Focused CLI and
+  quality-contract tests pass (`67 passed`).
+- [x] Run and validate the frozen-route TranSplat/DL3DV sample-0 simulator at
+  `outputs/ae_dl3dv_local_repro_v3/transplat_sample0_frozen_identity_simulator_v1/`.
+  It has no fallback, route SHA256 `fa2e79efbe89f54ed63ab9b6f083fa2a9af09a4d72cefa8218c9611911da0cbd`,
+  PSNR `34.83805847 -> 34.83805752 dB`, and all 8,192 tiles Full.
+- [x] Bind the same `exact-source-opacity-zero-v1` certificate to the
+  source-bound packet guard. New 4x4 regressions prove zero-alpha L0 output
+  remains compact while any nonzero source opacity fails closed to Full.
+- [x] Run the fixed sample-0 packet-to-native-Adapter-to-native-decoder quality
+  fidelity pilot at
+  `outputs/ae_dl3dv_local_repro_v5/transplat_sample0_sparse_packet_full_route_quality_v1/`.
+  It binds the frozen route SHA, has `8192/0/0` Full/L0/L1 and 131,072 decoder
+  Gaussians, and passes PSNR/SSIM/LPIPS with deltas
+  `-0.0000095/-0.000000134/+0.00000135`. It is explicitly zero deletion,
+  zero S2/S3 saving, and non-claiming Full-route fidelity evidence.
+- [ ] Rerun the fixed first eight local DL3DV scenes with
+- [x] Rerun the fixed first eight local DL3DV scenes with
+  `--frozen-saes-route --no-fsdr`, then validate aggregate provenance and
+  quality. The aggregate at
+  `outputs/ae_dl3dv_local_repro_v3/transplat_saes_only_frozen_identity_8/results.json`
+  passes with mean PSNR `26.82852650 -> 26.82852632 dB`, maximum per-scene
+  delta `9.5367e-7 dB`, 8/8 frozen route hashes, no fallback, and all tiles
+  Full with zero S2/S3 saving.
+- [x] Fix the aggregate path for scene-dependent SAES reason-counter maps and
+  preserve hash-bound SAES identity fields verbatim. The targeted aggregate
+  suite passes (`11 passed`); the repaired aggregate passes
+  `validate_result.py` without changing any sample JSON.
+- [ ] Do not launch a new external calibration, a 32/140-scene expansion, or
+  any cross-dataset quality run before a genuine non-Full sparse mechanism
+  independently passes the unchanged `<=0.15 dB` gate.
+- [ ] Implement a final-selected representative-materialization packet consumer
+  before treating a guard-expanded request packet as a nonzero deletion result.
+  It must bind the exact-zero certificate, preserve source-native geometry,
+  and pass the same local sample-0 quality gate before any wider DL3DV run.
+- [ ] Repair the selected-output diagnostic so its final guard-resolved packet
+  is converted and rendered without a dense Gaussian fallback. Require a
+  source-bound final mask, NaN-poison isolation for omitted raw-head positions,
+  a finite decoder render, and no target RGB, metric, or S2/S3 saving claim.
+- [x] Run only the fixed local DL3DV sample-3 sparse-consumer renderer smoke
+  after the CPU contract tests pass. Do not promote a finite render to a
+  nonzero-deletion quality or performance result.
+- [x] Run the local sample-3 packed renderer smoke. It proved NaN-poisoned
+  omitted slots do not reach the packet consumer, then correctly rejected the
+  source-bound selected-head route because Gaussian mean error reached
+  `0.17310333` against the dense native Adapter. Keep it diagnostic-only; do
+  not relax the attribute or image-quality tolerances.

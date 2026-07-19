@@ -11,31 +11,107 @@ import json
 import random
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
-import torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from saes.probe_first_schedule import (
-    build_conservative_probe_first_schedule,
-    retained_mask_from_saes_modified,
-)
-from saes.progressive_saes import apply_progressive_saes
-from saes.selected_output_execution import selected_output_head_execution
-from scripts.saes_dependency_audit import _context_on_device
-from scripts.saes_selected_output_replay_audit import (
-    _classic_raw_head,
-    strict_fp32_convolution_execution,
-)
-from scripts.saes_target_free_materialization_audit import (
-    _capture_encoder_execution,
-    _clone_gaussians,
-)
+if TYPE_CHECKING:
+    import torch
+
+
+# Keep this module importable in the CPU-only environment used by contract and
+# command-surface tests.  Lightweight helpers may require Torch tensors, but
+# the model stack is needed only for an actual quality execution.
+torch: Any | None = None
+_runtime_dependencies_loaded = False
+
+# Keep an explicit seam for unit tests which exercise route forwarding without
+# importing the CUDA/model stack.  `_load_runtime_dependencies` replaces it for
+# a real quality pilot.
+apply_progressive_saes: Any | None = None
+build_conservative_probe_first_schedule: Any | None = None
+retained_mask_from_saes_modified: Any | None = None
+selected_output_head_execution: Any | None = None
+_context_on_device: Any | None = None
+_classic_raw_head: Any | None = None
+strict_fp32_convolution_execution: Any | None = None
+_capture_encoder_execution: Any | None = None
+_clone_gaussians: Any | None = None
+
+
+def _load_torch() -> Any:
+    """Load Torch for tensor-only helpers without importing the model stack."""
+
+    global torch
+
+    if torch is not None:
+        return torch
+    try:
+        import torch as torch_module
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("this helper requires a Torch installation") from exc
+    torch = torch_module
+    return torch
+
+
+def _load_runtime_dependencies() -> None:
+    """Import the CUDA/model stack only for an actual quality execution."""
+
+    global torch
+    global _runtime_dependencies_loaded
+    global build_conservative_probe_first_schedule
+    global retained_mask_from_saes_modified
+    global apply_progressive_saes
+    global selected_output_head_execution
+    global _context_on_device
+    global _classic_raw_head
+    global strict_fp32_convolution_execution
+    global _capture_encoder_execution
+    global _clone_gaussians
+
+    if _runtime_dependencies_loaded:
+        return
+    try:
+        torch_module = _load_torch()
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "this quality pilot requires the locked CUDA model environment"
+        ) from exc
+
+    from saes.probe_first_schedule import (
+        build_conservative_probe_first_schedule as schedule_builder,
+        retained_mask_from_saes_modified as retained_mask_builder,
+    )
+    from saes.progressive_saes import apply_progressive_saes as saes_apply
+    from saes.selected_output_execution import (
+        selected_output_head_execution as selected_execution,
+    )
+    from scripts.saes_dependency_audit import _context_on_device as context_on_device
+    from scripts.saes_selected_output_replay_audit import (
+        _classic_raw_head as classic_raw_head,
+        strict_fp32_convolution_execution as strict_fp32_execution,
+    )
+    from scripts.saes_target_free_materialization_audit import (
+        _capture_encoder_execution as capture_encoder_execution,
+        _clone_gaussians as clone_gaussians,
+    )
+
+    torch = torch_module
+    build_conservative_probe_first_schedule = schedule_builder
+    retained_mask_from_saes_modified = retained_mask_builder
+    apply_progressive_saes = saes_apply
+    selected_output_head_execution = selected_execution
+    _context_on_device = context_on_device
+    _classic_raw_head = classic_raw_head
+    strict_fp32_convolution_execution = strict_fp32_execution
+    _capture_encoder_execution = capture_encoder_execution
+    _clone_gaussians = clone_gaussians
+    _runtime_dependencies_loaded = True
 
 
 QUALITY_LIMITS = {
@@ -55,24 +131,75 @@ QUALITY_PILOT_KIND = "saes_selected_output_quality_pilot"
 ATTRIBUTE_TRANSPORT_QUALITY_PILOT_KIND = (
     "saes_adapter_offset_attribute_transport_selected_output_quality_pilot"
 )
+REPRESENTATIVE_QUALITY_PILOT_KIND = "saes_representative_candidate_quality_pilot"
 FIXED_QUALITY_PILOT_MATERIALIZATIONS = frozenset(
     (
         MATERIALIZATION,
         ATTRIBUTE_TRANSPORT_MATERIALIZATION,
+        "representative",
     )
 )
 SEMANTIC_EQ_ATOL = 1.0e-5
 SEMANTIC_EQ_RTOL = 1.0e-5
 
 
+def resolve_quality_route(
+    *,
+    materialization: str,
+    context_safety_guard: bool,
+    execution_identity: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve the fixed diagnostic route, optionally against the frozen candidate."""
+    route = {
+        "tile_size": 4,
+        "feature_threshold": 0.2,
+        "depth_threshold": 0.1,
+        "cross_check_threshold": 0.015,
+        "decision_semantics": DECISION_SEMANTICS,
+        "depth_routing_semantics": DEPTH_ROUTING_SEMANTICS,
+        "materialization_guard": True,
+        "require_deletion_certificate": True,
+        "execution_identity": None,
+        "route_sha256": None,
+    }
+    if execution_identity is None:
+        return route
+
+    from scripts.saes_execution_identity import validate_saes_execution_identity
+
+    identity = validate_saes_execution_identity(execution_identity)
+    if materialization != identity["materialization"]:
+        raise ValueError("quality route materialization does not match its identity")
+    if context_safety_guard is not identity["context_safety_guard"]:
+        raise ValueError("quality route context safety guard does not match its identity")
+    for field in (
+        "tile_size",
+        "feature_threshold",
+        "depth_threshold",
+        "cross_check_threshold",
+        "decision_semantics",
+        "depth_routing_semantics",
+        "materialization_guard",
+    ):
+        if route[field] != identity[field]:
+            raise ValueError(f"quality route {field} does not match its identity")
+    return {
+        **route,
+        "execution_identity": identity,
+        "route_sha256": identity["route_sha256"],
+    }
+
+
 def _sha256_mask(mask: torch.Tensor) -> str:
+    torch_module = _load_torch()
     return hashlib.sha256(
-        mask.detach().to(device="cpu", dtype=torch.uint8).numpy().tobytes()
+        mask.detach().to(device="cpu", dtype=torch_module.uint8).numpy().tobytes()
     ).hexdigest()
 
 
 def _render(model: Any, gaussians: Any, target: dict[str, Any], image_shape: tuple[int, int]) -> torch.Tensor:
-    with torch.no_grad():
+    torch_module = _load_torch()
+    with torch_module.no_grad():
         output = model.decoder.forward(
             gaussians,
             target["extrinsics"],
@@ -89,14 +216,15 @@ def _view_metrics(images: torch.Tensor, references: torch.Tensor) -> list[dict[s
     from lpips import LPIPS
     from torchmetrics.functional.image import structural_similarity_index_measure
 
+    torch_module = _load_torch()
     metric = LPIPS(net="vgg").to(images.device).eval()
     values = []
-    with torch.no_grad():
+    with torch_module.no_grad():
         for image, reference in zip(images, references):
             mse = (image - reference).square().mean()
             values.append(
                 {
-                    "psnr_db": float((-10.0 * torch.log10(mse)).item()),
+                    "psnr_db": float((-10.0 * torch_module.log10(mse)).item()),
                     "ssim": float(
                         structural_similarity_index_measure(
                             image.unsqueeze(0), reference.unsqueeze(0), data_range=1.0
@@ -142,31 +270,40 @@ def _sparse_encoder_pass(
     context: dict[str, Any],
     selection_mask: torch.Tensor,
 ) -> tuple[Any, dict[str, Any]]:
+    if _classic_raw_head is None or selected_output_head_execution is None:
+        _load_runtime_dependencies()
+    if _classic_raw_head is None or selected_output_head_execution is None:
+        raise RuntimeError("selected-output runtime dependencies failed to load")
+    torch_module = _load_torch()
     head = _classic_raw_head(model, "transplat")
     with selected_output_head_execution(head, selection_mask) as trace:
-        with torch.no_grad():
+        with torch_module.no_grad():
             gaussians = model.encoder(context, False, deterministic=True)
     return gaussians, trace.events
 
 
 def _target_camera_inputs(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
     """Move only camera metadata needed by the decoder before the quality phase."""
+    torch_module = _load_torch()
     target = batch.get("target")
     if not isinstance(target, dict):
         raise RuntimeError("selected-output quality pilot batch has no target mapping")
     required = ("extrinsics", "intrinsics", "near", "far")
-    if any(key not in target or not torch.is_tensor(target[key]) for key in required):
+    if any(
+        key not in target or not torch_module.is_tensor(target[key]) for key in required
+    ):
         raise RuntimeError("selected-output quality pilot target camera metadata is incomplete")
     return {key: target[key].to(device) for key in required}
 
 
 def _take_target_rgb_for_metrics(batch: dict[str, Any], device: torch.device) -> torch.Tensor:
     """Remove and transfer target RGB only after sparse execution is committed."""
+    torch_module = _load_torch()
     target = batch.get("target")
     if not isinstance(target, dict):
         raise RuntimeError("selected-output quality pilot batch has no target mapping")
     images = target.pop("image", None)
-    if not torch.is_tensor(images):
+    if not torch_module.is_tensor(images):
         raise RuntimeError("selected-output quality pilot requires native target RGB")
     return images.to(device)
 
@@ -175,7 +312,12 @@ def _active_attribute_equivalence(
     dense_reference: Any, sparse_candidate: Any, retained: torch.Tensor
 ) -> dict[str, Any]:
     """Check selected-head materialization against a dense-SAes control only."""
-    if retained.ndim != 1 or retained.dtype != torch.bool or not bool(retained.any()):
+    torch_module = _load_torch()
+    if (
+        retained.ndim != 1
+        or retained.dtype != torch_module.bool
+        or not bool(retained.any())
+    ):
         raise ValueError("semantic equivalence requires a nonempty retained descriptor mask")
     deltas = {}
     equivalent = True
@@ -190,7 +332,9 @@ def _active_attribute_equivalence(
             "mean_absolute_delta": float(delta.mean().item()),
         }
         equivalent = equivalent and bool(
-            torch.allclose(reference, candidate, rtol=SEMANTIC_EQ_RTOL, atol=SEMANTIC_EQ_ATOL)
+            torch_module.allclose(
+                reference, candidate, rtol=SEMANTIC_EQ_RTOL, atol=SEMANTIC_EQ_ATOL
+            )
         )
     return {
         "retained_descriptor_count": int(retained.sum().item()),
@@ -203,6 +347,7 @@ def _active_attribute_equivalence(
 
 def _image_equivalence(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, Any]:
     """Record a target-free decoder equivalence check for the fixed sparse output."""
+    torch_module = _load_torch()
     if reference.shape != candidate.shape:
         raise RuntimeError("semantic render equivalence image shapes differ")
     delta = (reference - candidate).abs()
@@ -212,16 +357,19 @@ def _image_equivalence(reference: torch.Tensor, candidate: torch.Tensor) -> dict
         "maximum_absolute_delta": float(delta.max().item()),
         "mean_absolute_delta": float(delta.mean().item()),
         "equivalent": bool(
-            torch.allclose(reference, candidate, rtol=SEMANTIC_EQ_RTOL, atol=SEMANTIC_EQ_ATOL)
+            torch_module.allclose(
+                reference, candidate, rtol=SEMANTIC_EQ_RTOL, atol=SEMANTIC_EQ_ATOL
+            )
         ),
     }
 
 
 def _retain_renderable_gaussians(gaussians: Any, retained: torch.Tensor) -> Any:
     """Drop SAES-removed zero-opacity descriptors before native S4 rendering."""
+    torch_module = _load_torch()
     if (
         retained.ndim != 1
-        or retained.dtype != torch.bool
+        or retained.dtype != torch_module.bool
         or retained.numel() != gaussians.means.shape[1]
         or not bool(retained.any())
     ):
@@ -244,23 +392,41 @@ def _apply_fixed_saes(
     width: int,
     views: int,
     materialization: str,
+    context_safety_guard: bool = False,
     tile_trace: list[dict[str, Any]] | None = None,
+    route: Mapping[str, Any] | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
+    if apply_progressive_saes is None:
+        _load_runtime_dependencies()
+    if apply_progressive_saes is None:
+        raise RuntimeError("SAES runtime dependency failed to load")
+    route = dict(
+        route
+        if route is not None
+        else resolve_quality_route(
+            materialization=materialization,
+            context_safety_guard=context_safety_guard,
+        )
+    )
     modified, stats, _ = apply_progressive_saes(
         gaussians,
         height,
         width,
-        tile_size=4,
-        feature_var_threshold=0.2,
-        depth_std_threshold=0.1,
+        tile_size=route["tile_size"],
+        feature_var_threshold=route["feature_threshold"],
+        depth_std_threshold=route["depth_threshold"],
+        cross_check_threshold=route["cross_check_threshold"],
         features=features,
         depths=depths,
         view_count=views,
         materialization=materialization,
-        decision_semantics=DECISION_SEMANTICS,
-        depth_routing_semantics=DEPTH_ROUTING_SEMANTICS,
+        decision_semantics=route["decision_semantics"],
+        depth_routing_semantics=route["depth_routing_semantics"],
         context_extrinsics=context["extrinsics"],
         context_intrinsics=context["intrinsics"],
+        materialization_guard=route["materialization_guard"],
+        context_safety_guard=context_safety_guard,
+        require_deletion_certificate=route["require_deletion_certificate"],
         tile_trace=tile_trace,
     )
     return modified, stats
@@ -271,8 +437,11 @@ def collect_quality_pilot(
     device: torch.device,
     materialization: str = MATERIALIZATION,
     pilot_kind: str = QUALITY_PILOT_KIND,
+    context_safety_guard: bool = False,
+    execution_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute the pre-registered sample-0 selected-output quality pilot."""
+    _load_runtime_dependencies()
     from scripts.ae_config import resolve_claim_selection, resolve_experiment
     from scripts.demo import load_model_and_data
     from scripts.result_record import cached_sha256_file, source_identity
@@ -281,6 +450,13 @@ def collect_quality_pilot(
         raise ValueError("quality pilot has an unsupported fixed materialization")
     if not isinstance(pilot_kind, str) or not pilot_kind:
         raise ValueError("quality pilot has an invalid kind")
+    if not isinstance(context_safety_guard, bool):
+        raise ValueError("context_safety_guard must be boolean")
+    route = resolve_quality_route(
+        materialization=materialization,
+        context_safety_guard=context_safety_guard,
+        execution_identity=execution_identity,
+    )
     experiment = resolve_experiment("transplat", "dl3dv", ROOT)
     selection = resolve_claim_selection("transplat", "dl3dv", ROOT)
     model, batch, _cfg, loaded_device = load_model_and_data(
@@ -316,10 +492,10 @@ def collect_quality_pilot(
             depths,
             height=height,
             width=width,
-            tile_size=4,
-            feature_threshold=0.2,
-            depth_threshold=0.1,
-            decision_semantics=DECISION_SEMANTICS,
+            tile_size=route["tile_size"],
+            feature_threshold=route["feature_threshold"],
+            depth_threshold=route["depth_threshold"],
+            decision_semantics=route["decision_semantics"],
         )
         dense_saes_gaussians = _clone_gaussians(baseline_gaussians)
         dense_modified, dense_stats = _apply_fixed_saes(
@@ -331,6 +507,8 @@ def collect_quality_pilot(
             width=width,
             views=views,
             materialization=materialization,
+            context_safety_guard=context_safety_guard,
+            route=route,
         )
         provisional_gaussians, provisional_head_events = _sparse_encoder_pass(
             model, context, schedule.selection_mask
@@ -344,6 +522,8 @@ def collect_quality_pilot(
             width=width,
             views=views,
             materialization=materialization,
+            context_safety_guard=context_safety_guard,
+            route=route,
         )
         final_selection = retained_mask_from_saes_modified(
             provisional_modified, views=views, height=height, width=width
@@ -360,6 +540,8 @@ def collect_quality_pilot(
             width=width,
             views=views,
             materialization=materialization,
+            context_safety_guard=context_safety_guard,
+            route=route,
         )
     if not torch.equal(provisional_modified, final_modified):
         raise RuntimeError("guard-resolved SAES mask changed between selected-output passes")
@@ -433,11 +615,16 @@ def collect_quality_pilot(
             "reason_global_s2_s3_unverified": "shared S1/S2/refinement trunk remains dense",
         },
         "routing": {
-            "feature_threshold": 0.2,
-            "depth_threshold": 0.1,
-            "decision_semantics": DECISION_SEMANTICS,
-            "depth_routing_semantics": DEPTH_ROUTING_SEMANTICS,
+            "feature_threshold": route["feature_threshold"],
+            "depth_threshold": route["depth_threshold"],
+            "cross_check_threshold": route["cross_check_threshold"],
+            "decision_semantics": route["decision_semantics"],
+            "depth_routing_semantics": route["depth_routing_semantics"],
             "materialization": materialization,
+            "materialization_guard": route["materialization_guard"],
+            "context_safety_guard": context_safety_guard,
+            "saes_execution_identity": route["execution_identity"],
+            "route_sha256": route["route_sha256"],
             "schedule": schedule.events,
             "provisional_mask_sha256": _sha256_mask(schedule.selection_mask),
             "final_mask_sha256": _sha256_mask(final_selection),
@@ -494,19 +681,36 @@ def main(
     pilot_kind: str = QUALITY_PILOT_KIND,
     command_path: Path | None = None,
     fixed_seed: int | None = None,
+    fixed_context_safety_guard: bool | None = None,
+    execution_identity: Mapping[str, Any] | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
+    if fixed_context_safety_guard is None:
+        parser.add_argument(
+            "--context-safety-guard",
+            action="store_true",
+            help="Enable the diagnostic camera/depth SAES safety guard",
+        )
     if fixed_seed is None:
         parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args(argv)
     if args.output_dir.exists():
         parser.error("--output-dir must be a new directory")
+    try:
+        _load_runtime_dependencies()
+    except RuntimeError as exc:
+        parser.error(str(exc))
     device = torch.device(args.device)
     if device.type != "cuda" or not torch.cuda.is_available():
         parser.error("this fixed quality pilot requires an available CUDA device")
     seed = fixed_seed if fixed_seed is not None else args.seed
+    context_safety_guard = (
+        args.context_safety_guard
+        if fixed_context_safety_guard is None
+        else fixed_context_safety_guard
+    )
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -516,6 +720,8 @@ def main(
             device=device,
             materialization=materialization,
             pilot_kind=pilot_kind,
+            context_safety_guard=context_safety_guard,
+            execution_identity=execution_identity,
         )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -532,9 +738,11 @@ def main(
         str(args.output_dir),
         "--device",
         args.device,
-        "--seed",
-        str(seed),
     ]
+    if fixed_seed is None:
+        record["command"].extend(("--seed", str(seed)))
+    if fixed_context_safety_guard is None and context_safety_guard:
+        record["command"].append("--context-safety-guard")
     args.output_dir.mkdir(parents=True, exist_ok=False)
     destination = args.output_dir / "results.json"
     destination.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")

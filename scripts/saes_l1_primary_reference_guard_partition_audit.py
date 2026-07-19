@@ -85,6 +85,37 @@ GUARD_TRACE_FIELDS = frozenset(
         "nonprobe_s3_attribute_reads",
     )
 )
+PROBE_CROSS_CHECK_TRACE_FIELDS = frozenset(
+    (
+        "checked",
+        "passed",
+        "error_max",
+        "threshold",
+        "primary_anchor_count",
+        "nonprobe_s3_attribute_reads",
+    )
+)
+CONTEXT_SAFETY_TRACE_FIELDS = frozenset(
+    (
+        "passed",
+        "coverage_footprint_ratio",
+        "relative_depth_span",
+        "projected_center_mahalanobis_max",
+        "center_overlap_passed",
+        "reason",
+    )
+)
+FORCE_FULL_CONTEXT_REASONS = frozenset(
+    (
+        "missing_geometry",
+        "invalid_probe_depth",
+        "invalid_footprint",
+        "center_separation",
+    )
+)
+CONTEXT_SAFETY_REASONS = FORCE_FULL_CONTEXT_REASONS | frozenset(
+    ("accepted", "coverage_spread", "occlusion_span")
+)
 
 
 def _canonical_json_sha256(value: Any) -> str:
@@ -97,6 +128,16 @@ def _is_finite_scalar(value: Any) -> bool:
         isinstance(value, (float, int))
         and not isinstance(value, bool)
         and math.isfinite(float(value))
+    )
+
+
+def _is_nonnegative_scalar_or_infinity(value: Any) -> bool:
+    """Accept scalar context bounds, including the fail-closed infinity sentinel."""
+    return (
+        isinstance(value, (float, int))
+        and not isinstance(value, bool)
+        and not math.isnan(float(value))
+        and float(value) >= 0.0
     )
 
 
@@ -121,6 +162,11 @@ def _validate_trace(
     routes = {"L0": 0, "L1": 0, "Full": 0}
     checks = {"L0": 0, "L1": 0}
     rejected = {"L0": 0, "L1": 0}
+    cross_checks = {"L0": 0, "L1": 0}
+    cross_rejections = {"L0": 0, "L1": 0}
+    trace_has_cross_check = False
+    l0_rejections_requiring_l1 = 0
+    l0_force_full_rejections = 0
     anchor_descriptors = 0
     nonprobe_s3_reads = 0
     keys = set()
@@ -152,11 +198,26 @@ def _validate_trace(
         keys.add(key)
         routes[record["routing_level_before_materialization"]] += 1
 
+        l0_guard = None
+        l1_guard = None
         for guard in record["guard_checks"]:
-            if not isinstance(guard, dict) or set(guard) != GUARD_TRACE_FIELDS:
+            if not isinstance(guard, dict) or frozenset(guard) not in {
+                GUARD_TRACE_FIELDS,
+                GUARD_TRACE_FIELDS | {"probe_cross_check"},
+                GUARD_TRACE_FIELDS | {"context_safety"},
+                GUARD_TRACE_FIELDS | {"probe_cross_check", "context_safety"},
+            }:
                 raise RuntimeError("SAES trace exposed an unsupported guard field")
             if guard["level"] not in checks:
                 raise RuntimeError("SAES trace has an unsupported guard level")
+            if guard["level"] == "L0":
+                if l0_guard is not None:
+                    raise RuntimeError("SAES trace has duplicate L0 guard checks")
+                l0_guard = guard
+            else:
+                if l1_guard is not None:
+                    raise RuntimeError("SAES trace has duplicate L1 guard checks")
+                l1_guard = guard
             if not isinstance(guard["anchor_count"], int) or isinstance(
                 guard["anchor_count"], bool
             ):
@@ -180,6 +241,101 @@ def _validate_trace(
             rejected[guard["level"]] += int(not guard["passed"])
             anchor_descriptors += guard["anchor_count"]
             nonprobe_s3_reads += guard["nonprobe_s3_attribute_reads"]
+            cross_check = guard.get("probe_cross_check")
+            if cross_check is not None:
+                trace_has_cross_check = True
+                if (
+                    not isinstance(cross_check, dict)
+                    or set(cross_check) != PROBE_CROSS_CHECK_TRACE_FIELDS
+                ):
+                    raise RuntimeError("SAES trace has an invalid probe cross-check")
+                if not isinstance(cross_check["checked"], bool):
+                    raise RuntimeError("SAES trace has an invalid probe cross-check flag")
+                if not _is_finite_scalar(cross_check["threshold"]):
+                    raise RuntimeError("SAES trace has an invalid probe cross-check threshold")
+                if (
+                    not isinstance(cross_check["primary_anchor_count"], int)
+                    or isinstance(cross_check["primary_anchor_count"], bool)
+                    or cross_check["primary_anchor_count"] <= 0
+                ):
+                    raise RuntimeError("SAES trace has an invalid probe cross-check anchor count")
+                if (
+                    not isinstance(cross_check["nonprobe_s3_attribute_reads"], int)
+                    or isinstance(cross_check["nonprobe_s3_attribute_reads"], bool)
+                    or cross_check["nonprobe_s3_attribute_reads"] != 0
+                ):
+                    raise RuntimeError("SAES trace probe cross-check read a skipped S3 attribute")
+                if cross_check["checked"]:
+                    if (
+                        not isinstance(cross_check["passed"], bool)
+                        or not _is_finite_scalar(cross_check["error_max"])
+                    ):
+                        raise RuntimeError("SAES trace has an incomplete probe cross-check")
+                    cross_checks[guard["level"]] += 1
+                    cross_rejections[guard["level"]] += int(
+                        not cross_check["passed"]
+                    )
+                elif (
+                    cross_check["passed"] is not None
+                    or cross_check["error_max"] is not None
+                ):
+                    raise RuntimeError("SAES trace has an invalid skipped probe cross-check")
+
+            context_safety = guard.get("context_safety")
+            if context_safety is None:
+                continue
+            if (
+                not isinstance(context_safety, dict)
+                or set(context_safety) != CONTEXT_SAFETY_TRACE_FIELDS
+            ):
+                raise RuntimeError("SAES trace has an invalid context-safety guard")
+            if (
+                not isinstance(context_safety["passed"], bool)
+                or not isinstance(context_safety["center_overlap_passed"], bool)
+                or context_safety["reason"] not in CONTEXT_SAFETY_REASONS
+            ):
+                raise RuntimeError("SAES trace has invalid context-safety provenance")
+            for field in (
+                "coverage_footprint_ratio",
+                "relative_depth_span",
+                "projected_center_mahalanobis_max",
+            ):
+                if not _is_nonnegative_scalar_or_infinity(context_safety[field]):
+                    raise RuntimeError("SAES trace has an invalid context-safety scalar")
+            if context_safety["passed"] != (context_safety["reason"] == "accepted"):
+                raise RuntimeError("SAES trace context-safety reason disagrees with result")
+
+        if l0_guard is None:
+            continue
+        if l0_guard["passed"]:
+            if l1_guard is not None:
+                raise RuntimeError("SAES trace widened after an accepted L0 guard")
+            continue
+
+        cross_check = l0_guard.get("probe_cross_check")
+        cross_check_forces_full = bool(
+            isinstance(cross_check, dict)
+            and cross_check["checked"]
+            and cross_check["passed"] is False
+        )
+        context_safety = l0_guard.get("context_safety")
+        context_forces_full = bool(
+            isinstance(context_safety, dict)
+            and context_safety["reason"] in FORCE_FULL_CONTEXT_REASONS
+        )
+        if cross_check_forces_full or context_forces_full:
+            l0_force_full_rejections += 1
+            if l1_guard is not None:
+                raise RuntimeError("SAES trace widened after an L0 force-Full rejection")
+            if record["depth_candidate"] is not None:
+                raise RuntimeError("SAES trace evaluated L1 after an L0 force-Full rejection")
+            continue
+
+        l0_rejections_requiring_l1 += 1
+        if not isinstance(record["depth_candidate"], bool):
+            raise RuntimeError("SAES trace omitted L1 routing after an ordinary L0 rejection")
+        if (l1_guard is not None) != record["depth_candidate"]:
+            raise RuntimeError("SAES trace L1 guard does not match the L1 routing result")
 
     expected_routes = {
         "L0": stats.get("level0_tiles"),
@@ -202,12 +358,33 @@ def _validate_trace(
         }
         if checks != expected or rejected != expected_rejected:
             raise RuntimeError("SAES trace guard counters disagree with runtime statistics")
-        if stats.get("l1_guard_attempts_after_l0_rejection") != rejected["L0"]:
-            raise RuntimeError("SAES trace L0 rejection count disagrees with L1 attempts")
+        if (
+            stats.get("l1_guard_attempts_after_l0_rejection")
+            != l0_rejections_requiring_l1
+        ):
+            raise RuntimeError("SAES trace ordinary L0 rejection count disagrees with L1 attempts")
         if stats.get("guard_anchor_attribute_reads") != 3 * anchor_descriptors:
             raise RuntimeError("SAES trace guard anchor reads disagree with runtime statistics")
         if stats.get("guard_nonprobe_s3_attribute_reads") != nonprobe_s3_reads:
             raise RuntimeError("SAES trace S3 reads disagree with runtime statistics")
+        expected_cross_checks = {
+            "L0": stats.get("probe_cross_check_l0_checks", 0),
+            "L1": stats.get("probe_cross_check_l1_checks", 0),
+        }
+        expected_cross_rejections = {
+            "L0": stats.get("probe_cross_check_l0_rejections", 0),
+            "L1": stats.get("probe_cross_check_l1_rejections", 0),
+        }
+        if trace_has_cross_check:
+            if (
+                cross_checks != expected_cross_checks
+                or cross_rejections != expected_cross_rejections
+            ):
+                raise RuntimeError(
+                    "SAES trace probe cross-check counters disagree with runtime statistics"
+                )
+        elif any((*expected_cross_checks.values(), *expected_cross_rejections.values())):
+            raise RuntimeError("SAES trace omitted runtime probe cross-check activity")
     else:
         disabled_counters = (
             "l0_guard_checks",
@@ -217,12 +394,16 @@ def _validate_trace(
             "l1_guard_attempts_after_l0_rejection",
             "guard_anchor_attribute_reads",
             "guard_nonprobe_s3_attribute_reads",
+            "probe_cross_check_l0_checks",
+            "probe_cross_check_l1_checks",
+            "probe_cross_check_l0_rejections",
+            "probe_cross_check_l1_rejections",
         )
         if (
-            any(checks.values())
-            or any(rejected.values())
-            or anchor_descriptors
-            or any(stats.get(key) != 0 for key in disabled_counters)
+                any(checks.values())
+                or any(rejected.values())
+                or anchor_descriptors
+                or any(stats.get(key, 0) != 0 for key in disabled_counters)
         ):
             raise RuntimeError("disabled SAES guard emitted guard work")
 
@@ -234,6 +415,9 @@ def _validate_trace(
         "pre_materialization_routes": routes,
         "guard_checks": checks,
         "guard_rejections": rejected,
+        "probe_cross_check_checks": cross_checks,
+        "probe_cross_check_rejections": cross_rejections,
+        "l0_force_full_rejections": l0_force_full_rejections,
         "guard_anchor_descriptors": anchor_descriptors,
         "guard_nonprobe_s3_attribute_reads": nonprobe_s3_reads,
     }
@@ -637,7 +821,7 @@ def collect_guard_partition_audit(
                 "materialization": MATERIALIZATION,
                 "materialization_guard": "canonical-true-shadow-false-poisoned-true",
                 "l1_depth_reference": "primary-probes",
-                "l1_anchor_layout": "2K-native-selected-anchors",
+                "l1_anchor_layout": "t4-primary-plus-eight-boundary-anchors",
             },
             "input_provenance": {
                 "audit_input_sha256": sha256_file(input_root / "audit-input.json"),

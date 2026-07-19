@@ -29,7 +29,7 @@ def _l1_features() -> torch.Tensor:
     return features
 
 
-def _l1_depths(extra_anchor_depths: tuple[float, float, float, float]) -> torch.Tensor:
+def _l1_depths(extra_anchor_depths: tuple[float, ...]) -> torch.Tensor:
     from saes.probe_layout import compute_lightweight_positions
 
     depths = torch.full((1, 1, 16, 1, 1), 1.0)
@@ -93,15 +93,15 @@ def test_l1_assignment_uses_primary_depth_reference_with_2k_anchors(monkeypatch)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(progressive, "paper_assignment_weights", capture)
-    _, stats, _ = _run_l1(_l1_depths((4.0, 5.0, 6.0, 7.0)))
+    _, stats, _ = _run_l1(_l1_depths((4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0)))
 
     assert stats["l1_depth_reference"] == "primary-probes"
     assert stats["level0_tiles"] == 0
     assert stats["level1_tiles"] == 1
-    assert stats["l1_lightweight_anchors"] == 8
+    assert stats["l1_lightweight_anchors"] == 12
     assert captured
     for selected_depths, reference_depths in captured:
-        assert selected_depths.numel() == 8
+        assert selected_depths.numel() == 12
         torch.testing.assert_close(reference_depths, selected_depths[:4])
         torch.testing.assert_close(
             reference_depths, torch.tensor((1.00, 1.01, 0.99, 1.02))
@@ -109,8 +109,8 @@ def test_l1_assignment_uses_primary_depth_reference_with_2k_anchors(monkeypatch)
 
 
 def test_extra_l1_anchor_depths_do_not_change_route_or_anchor_counts():
-    _, baseline, _ = _run_l1(_l1_depths((1.0, 1.0, 1.0, 1.0)))
-    _, changed, _ = _run_l1(_l1_depths((10.0, 20.0, 30.0, 40.0)))
+    _, baseline, _ = _run_l1(_l1_depths((1.0,) * 8))
+    _, changed, _ = _run_l1(_l1_depths(tuple(float(value) for value in range(10, 18))))
 
     for key in (
         "level0_tiles",

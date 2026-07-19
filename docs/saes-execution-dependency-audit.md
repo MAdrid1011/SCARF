@@ -44,6 +44,16 @@ The report compares only raw-head values at the retained probe positions.
 The report is always `paper_result_eligible=false`. It must be preserved in a
 new directory and cannot authorize a quality retry or a full DL3DV run.
 
+## Selected Raw-CV Boundary
+
+`scripts/saes_mvsplat_raw_cost_volume_audit.py` separately checks only
+MVSplat's pre-refinement correlation primitive. It captures native FP32
+feature-pixel intrinsics, relative poses, inverse-depth candidates, and raw-CV
+input; then it verifies a fixed low-resolution primary -> secondary -> Full
+coverage trace against the native raw-CV tensor. It deliberately has no
+full-resolution head-grid mapping, final-depth output, renderer, metric, or
+positive S2/S3 saving. `corr_refine_net` and all later stages remain dense.
+
 ## Fixed Result And Accounting Policy
 
 All three fixed DL3DV sample-0 results report `dependency_detected=true` after
@@ -116,7 +126,7 @@ sparse execution. The submitted adaptor is four consecutive same-resolution
 positions backward through exactly that chain with replicate-padding geometry.
 
 For the native 256x448 DL3DV output, L0 requests 28,672 final-head positions
-and L1 requests 57,344, but one backward 3x3 expansion already covers all
+and L1 requests 86,016, but one backward 3x3 expansion already covers all
 114,688 spatial positions for either route. Therefore every preceding adaptor
 convolution must execute densely for bit-identical retained outputs. Only the
 last Gaussian-head convolution could be locally emitted, which is insufficient

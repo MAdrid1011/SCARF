@@ -34,18 +34,42 @@ K(T) probe count formula (Spec §Stage 3):
 import math
 import torch
 import torch.nn.functional as F
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Mapping, Tuple
 
 from saes.probe_layout import (
     compute_lightweight_positions as _compute_lightweight_positions,
 )
 from saes.probe_layout import compute_probe_positions as _compute_probe_positions
+from saes.guard_policy import (
+    CONTEXT_GUARD_MAX_CENTER_MAHALANOBIS,
+    CONTEXT_GUARD_MAX_FOOTPRINT_RATIO,
+    CONTEXT_GUARD_MAX_RELATIVE_DEPTH_SPAN,
+    MATERIALIZATION_GUARD_MAX_OPACITY_DISTANCE,
+    MATERIALIZATION_GUARD_MIN_COVARIANCE_COSINE,
+    MATERIALIZATION_GUARD_MIN_HARMONIC_COSINE,
+)
 
 
 LEGACY_L1_PRIMARY_DEPTH_REFERENCE_MATERIALIZATION = (
     "l1-primary-depth-reference-diagnostic"
 )
 
+DELETION_CERTIFICATE_POLICY = "exact-source-opacity-zero-v1"
+"""The only currently sound source-only representative deletion certificate."""
+
+DELETION_CERTIFICATE_SOURCE_KIND = "s2-density-adapter-opacity-v1"
+"""Opacity came directly from the TranSplat/MVSplat S2 density mapping."""
+
+PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS = (
+    "paper-probe-normalized-feature-first-hit"
+)
+"""Explicit engineering interpretation of the paper's unspecified feature scale.
+
+The literal ``paper-probe-feature-variance-first-hit`` diagnostic remains raw.
+This distinct mode compares ``tau_f`` with the standard deviation of
+unit-normalized probe feature vectors, then squares that score only when the
+bilateral assignment needs a variance.
+"""
 
 def paper_assignment_weights(
     spatial_distances: torch.Tensor,
@@ -257,6 +281,12 @@ class ProgressiveSAES:
         context_intrinsics: torch.Tensor | None = None,
         ray_depth_mode: str = "euclidean",
         materialization_guard: bool = True,
+        context_safety_guard: bool = False,
+        require_deletion_certificate: bool = False,
+        joint_calibrator: Any | None = None,
+        joint_calibrator_model: str | None = None,
+        joint_calibrator_selected_head: Mapping[str, Any] | None = None,
+        offline_joint_calibration_capture: Any | None = None,
     ):
         self.H = H
         self.W = W
@@ -270,6 +300,20 @@ class ProgressiveSAES:
             depth_std_threshold if depth_std_threshold is not None else 0.04
         )
         self.cross_check_threshold = cross_check_threshold
+        if (
+            isinstance(cross_check_threshold, bool)
+            or not isinstance(cross_check_threshold, (int, float))
+            or not math.isfinite(float(cross_check_threshold))
+            or cross_check_threshold < 0.0
+        ):
+            raise ValueError("cross_check_threshold must be a finite nonnegative scalar")
+        # A zero threshold has historically represented the diagnostic route
+        # without this registered materialization check.  The frozen SAES
+        # execution identity supplies 0.015, so its guarded route is always
+        # enabled while legacy/direct callers retain an explicit opt-out.
+        self.probe_cross_check_enabled = bool(
+            materialization_guard and cross_check_threshold > 0.0
+        )
         if view_count < 1 or primitives_per_pixel < 1:
             raise ValueError("view_count and primitives_per_pixel must be positive")
         self.view_count = view_count
@@ -301,6 +345,109 @@ class ProgressiveSAES:
         if not isinstance(materialization_guard, bool):
             raise ValueError("materialization_guard must be boolean")
         self.materialization_guard = materialization_guard
+        if not isinstance(context_safety_guard, bool):
+            raise ValueError("context_safety_guard must be boolean")
+        if context_safety_guard and not materialization_guard:
+            raise ValueError(
+                "context_safety_guard requires materialization_guard to be enabled"
+            )
+        self.context_safety_guard = context_safety_guard
+        if not isinstance(require_deletion_certificate, bool):
+            raise ValueError("require_deletion_certificate must be boolean")
+        self.require_deletion_certificate = require_deletion_certificate
+        self.joint_calibrator = None
+        self._joint_calibrator_contract: dict[str, Any] | None = None
+        self._offline_joint_calibration_capture = None
+        if offline_joint_calibration_capture is not None:
+            if joint_calibrator is not None:
+                raise ValueError(
+                    "offline joint-calibration capture cannot run with a calibrator"
+                )
+            if materialization != "representative":
+                raise ValueError(
+                    "offline joint-calibration capture only supports representative materialization"
+                )
+            if not callable(offline_joint_calibration_capture):
+                raise TypeError("offline joint-calibration capture must be callable")
+            # This is an author-side cache compiler hook, never a runtime
+            # correction path. It can observe only the already selected-only
+            # descriptor and ordinary representative output below.
+            self._offline_joint_calibration_capture = offline_joint_calibration_capture
+        if joint_calibrator is None:
+            if (
+                joint_calibrator_model is not None
+                or joint_calibrator_selected_head is not None
+            ):
+                raise ValueError(
+                    "joint calibrator model and selected-head events require a calibrator"
+                )
+        else:
+            from saes.joint_materialization_calibrator import (
+                ASSET_SCHEMA_VERSION,
+                FP16_PARAMETER_BYTES,
+                NETWORK_MACS_PER_DESCRIPTOR,
+                JointMaterializationCalibrator,
+            )
+
+            if not isinstance(joint_calibrator, JointMaterializationCalibrator):
+                raise TypeError(
+                    "joint_calibrator must be a JointMaterializationCalibrator"
+                )
+            if materialization != "representative":
+                raise ValueError(
+                    "joint calibrator only extends representative materialization"
+                )
+            if joint_calibrator_model not in {"transplat", "mvsplat", "depthsplat"}:
+                raise ValueError(
+                    "joint calibrator requires a model-specific selected-head replay contract"
+                )
+            if not isinstance(joint_calibrator_selected_head, Mapping):
+                raise ValueError("joint calibrator selected-head events are required")
+            selected_head = dict(joint_calibrator_selected_head)
+            if selected_head.get("model") != joint_calibrator_model:
+                raise ValueError("joint calibrator selected-head model does not match")
+            if selected_head.get("contract_version") != "saes-selected-output-replay-v1":
+                raise ValueError("joint calibrator selected-head contract is invalid")
+            for name in ("dense_head_macs", "replayed_head_macs"):
+                value = selected_head.get(name)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(
+                        f"joint calibrator selected-head {name} is invalid"
+                    )
+            if selected_head["dense_head_macs"] <= selected_head["replayed_head_macs"]:
+                raise ValueError("joint calibrator selected-head trace has no skipped MACs")
+            asset_sha256 = getattr(joint_calibrator, "runtime_asset_sha256", None)
+            if (
+                not isinstance(asset_sha256, str)
+                or len(asset_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in asset_sha256)
+            ):
+                raise ValueError("joint calibrator requires a hash-pinned asset")
+            cost = joint_calibrator.cost_contract()
+            if (
+                not isinstance(cost, Mapping)
+                or cost.get("schema_version") != ASSET_SCHEMA_VERSION
+                or cost.get("network_macs_per_descriptor")
+                != NETWORK_MACS_PER_DESCRIPTOR
+                or cost.get("fp16_parameter_bytes") != FP16_PARAMETER_BYTES
+            ):
+                raise ValueError("joint calibrator cost contract is invalid")
+            self.joint_calibrator = joint_calibrator.eval()
+            self._joint_calibrator_contract = {
+                "schema_version": ASSET_SCHEMA_VERSION,
+                "asset_sha256": asset_sha256,
+                "model": joint_calibrator_model,
+                "calls": 0,
+                "l0_calls": 0,
+                "l1_calls": 0,
+                "full_calls": 0,
+                "selected_descriptor_reads": 0,
+                "network_macs_per_call": NETWORK_MACS_PER_DESCRIPTOR,
+                # Biases are executable parameters too, so this is the total
+                # FP16 parameter footprint rather than matrix weights alone.
+                "weight_bytes": FP16_PARAMETER_BYTES,
+                "selected_head": selected_head,
+            }
         self.multicontext_tangent_enabled = (
             materialization == "multicontext-tangent-plane-diagnostic"
         )
@@ -344,6 +491,8 @@ class ProgressiveSAES:
             "probe-vector-first-hit",
             "probe-channel-variance-first-hit",
             "probe-normalized-std-first-hit",
+            "paper-probe-feature-variance-first-hit",
+            PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS,
         ):
             raise ValueError(
                 f"unsupported SAES decision semantics: {decision_semantics}"
@@ -407,15 +556,24 @@ class ProgressiveSAES:
         # Statistics
         self.stats: Dict = {
             "decision_semantics": self.decision_semantics,
+            "cross_check_threshold": self.cross_check_threshold,
             "l1_depth_reference": self.l1_depth_reference,
             "merge_semantics": self.merge_semantics,
             "feature_statistic": (
                 "raw-probe-mean-channel-variance"
-                if self.decision_semantics == "probe-channel-variance-first-hit"
+                if self.decision_semantics
+                in {
+                    "probe-channel-variance-first-hit",
+                    "paper-probe-feature-variance-first-hit",
+                }
                 else "raw-probe-vector-variance"
                 if self.decision_semantics == "probe-vector-first-hit"
                 else "normalized-probe-vector-standard-deviation"
-                if self.decision_semantics == "probe-normalized-std-first-hit"
+                if self.decision_semantics
+                in {
+                    "probe-normalized-std-first-hit",
+                    PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS,
+                }
                 else "normalized-probe-total-variance"
             ),
             "camera_aware_moment_matching": context_extrinsics is not None,
@@ -511,10 +669,47 @@ class ProgressiveSAES:
             "l1_guard_checks": 0,
             "l1_guard_rejections": 0,
             "l1_guard_attempts_after_l0_rejection": 0,
+            # The registered leave-one-out probe consistency check is a
+            # materialization guard, not another feature/depth routing tier.
+            # It reads only the primary anchors already requested for an L0
+            # or L1 candidate and fails closed to Full on disagreement.
+            "probe_cross_check_enabled": self.probe_cross_check_enabled,
+            "probe_cross_check_l0_checks": 0,
+            "probe_cross_check_l1_checks": 0,
+            "probe_cross_check_l0_rejections": 0,
+            "probe_cross_check_l1_rejections": 0,
             "guard_anchor_attribute_reads": 0,
             "guard_nonprobe_s3_attribute_reads": 0,
             "materialization_guard_enabled": self.materialization_guard,
+            "context_safety_guard_enabled": self.context_safety_guard,
+            "deletion_certificate_required": self.require_deletion_certificate,
+            "deletion_certificate_policy": DELETION_CERTIFICATE_POLICY,
+            "deletion_certificate_source_kind": None,
+            "deletion_certificate_source_status": "not_checked",
+            "deletion_certificate_checks": 0,
+            "deletion_certificate_accepted_tiles": 0,
+            "deletion_certificate_rejected_tiles": 0,
+            "deletion_certificate_zero_opacity_gaussians": 0,
+            "deletion_certificate_anchor_s3_opacity_reads": 0,
+            "deletion_certificate_nonprobe_s3_attribute_reads": 0,
+            "deletion_certificate_rejection_reasons": {},
+            "uncertified_deletion_fallback_tiles": 0,
+            "context_guard_checks": 0,
+            "context_guard_rejections": 0,
+            "context_guard_missing_geometry": 0,
+            "context_guard_invalid_footprint": 0,
+            "context_guard_coverage_rejections": 0,
+            "context_guard_occlusion_rejections": 0,
+            "context_guard_center_separation_rejections": 0,
+            "offline_joint_calibration_capture_calls": 0,
         }
+        if self._joint_calibrator_contract is not None:
+            self.stats["joint_calibrator"] = {
+                **self._joint_calibrator_contract,
+                "selected_head": dict(
+                    self._joint_calibrator_contract["selected_head"]
+                ),
+            }
 
     def _build_camera_rays(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Build C2W rays once for the resident model/sample session."""
@@ -1723,7 +1918,10 @@ class ProgressiveSAES:
             raise ValueError(
                 "feature decision statistic must be finite and nonnegative"
             )
-        if self.decision_semantics == "probe-normalized-std-first-hit":
+        if self.decision_semantics in {
+            "probe-normalized-std-first-hit",
+            PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS,
+        }:
             return float(decision_statistic) ** 2
         return float(decision_statistic)
 
@@ -2024,15 +2222,18 @@ class ProgressiveSAES:
         if K < 2:
             return float("inf")
 
-        harmo = gaussians_full.harmonics[0]
-        covs = gaussians_full.covariances[0]
+        # Keep the selected-only boundary observable: indexing ``[0]`` first
+        # would materialize the complete S3 tensor for wrapper tensors, even
+        # though this check needs only the declared primary anchors.
+        harmo = gaussians_full.harmonics[0, probe_indices]
+        covs = gaussians_full.covariances[0, probe_indices]
 
         max_err = 0.0
         for leave_out in range(K):
-            others = [probe_indices[j] for j in range(K) if j != leave_out]
+            others = [j for j in range(K) if j != leave_out]
 
             pred_h = sum(harmo[o] for o in others) / len(others)
-            actual_h = harmo[probe_indices[leave_out]]
+            actual_h = harmo[leave_out]
             h_flat_pred = pred_h.flatten()
             h_flat_actual = actual_h.flatten()
             if h_flat_actual.norm() > 1e-8 and h_flat_pred.norm() > 1e-8:
@@ -2042,7 +2243,7 @@ class ProgressiveSAES:
                 max_err = max(max_err, 1.0 - max(h_sim, 0.0))
 
             pred_c = sum(covs[o] for o in others) / len(others)
-            actual_c = covs[probe_indices[leave_out]]
+            actual_c = covs[leave_out]
             c_flat_pred = pred_c.flatten()
             c_flat_actual = actual_c.flatten()
             if c_flat_actual.norm() > 1e-8 and c_flat_pred.norm() > 1e-8:
@@ -2064,6 +2265,51 @@ class ProgressiveSAES:
             <= self.cross_check_threshold
         )
 
+    def probe_cross_check_validity(
+        self,
+        gaussians_full,
+        probe_indices: List[int],
+        *,
+        level: str,
+    ) -> Dict:
+        """Validate a candidate from its already selected primary anchors.
+
+        This is deliberately separate from S1/S2 routing.  It is evaluated
+        only after the ordinary anchor-attribute guard accepts a candidate,
+        and it has no access to a skipped S3 descriptor.  An invalid or
+        non-finite selected anchor is a fail-closed Full decision.
+        """
+        if level not in {"L0", "L1"}:
+            raise ValueError("probe cross-check level must be L0 or L1")
+        if (
+            not isinstance(probe_indices, list)
+            or len(probe_indices) != len(self.probe_positions)
+            or len(probe_indices) < 2
+            or len(probe_indices) != len(set(probe_indices))
+            or any(
+                isinstance(index, bool) or not isinstance(index, int)
+                for index in probe_indices
+            )
+        ):
+            raise ValueError("probe cross-check requires the unique primary anchors")
+        count = gaussians_full.means.shape[1]
+        if any(index < 0 or index >= count for index in probe_indices):
+            raise ValueError("probe cross-check anchor index is out of range")
+
+        covariances = gaussians_full.covariances[0, probe_indices]
+        harmonics = gaussians_full.harmonics[0, probe_indices]
+        finite = bool(torch.isfinite(covariances).all() and torch.isfinite(harmonics).all())
+        error = self.probe_cross_check_error(gaussians_full, probe_indices)
+        error_is_finite = math.isfinite(error)
+        return {
+            "level": level,
+            "anchor_count": len(probe_indices),
+            "error": float(error) if error_is_finite else None,
+            "threshold": self.cross_check_threshold,
+            "passed": bool(finite and error_is_finite and error <= self.cross_check_threshold),
+            "nonprobe_s3_attribute_reads": 0,
+        }
+
     def probe_materialization_validity(
         self,
         gaussians_full,
@@ -2074,11 +2320,10 @@ class ProgressiveSAES:
         """Validate a retained-anchor materialization without reading S3 skips.
 
         The existing paper-local consistency checks are applied only to the
-        native attributes that the selected L0/L1 anchors would execute:
-        covariance cosine and SH cosine must both be at least 0.7, and the
-        greatest pairwise opacity distance may not exceed 0.2.  The result is
-        a fail-closed Control decision.  It neither changes feature/depth
-        routing nor accesses a non-anchor Gaussian descriptor.
+        native attributes that the selected L0/L1 anchors would execute. The
+        fixed bounds are shared with the execution identity. The result is a
+        fail-closed Control decision. It neither changes feature/depth routing
+        nor accesses a non-anchor Gaussian descriptor.
         """
         if level not in {"L0", "L1"}:
             raise ValueError("materialization guard level must be L0 or L1")
@@ -2149,21 +2394,544 @@ class ProgressiveSAES:
             "covariance_cosine_minimum": covariance_minimum,
             "harmonic_cosine_minimum": harmonic_minimum,
             "opacity_distance_maximum": opacity_maximum,
-            "covariance_cosine_threshold": 0.7,
-            "harmonic_cosine_threshold": 0.7,
-            "opacity_distance_threshold": 0.2,
+            "covariance_cosine_threshold": MATERIALIZATION_GUARD_MIN_COVARIANCE_COSINE,
+            "harmonic_cosine_threshold": MATERIALIZATION_GUARD_MIN_HARMONIC_COSINE,
+            "opacity_distance_threshold": MATERIALIZATION_GUARD_MAX_OPACITY_DISTANCE,
             "passed": bool(
                 finite
-                and covariance_minimum >= 0.7
-                and harmonic_minimum >= 0.7
-                and opacity_maximum <= 0.2
+                and covariance_minimum >= MATERIALIZATION_GUARD_MIN_COVARIANCE_COSINE
+                and harmonic_minimum >= MATERIALIZATION_GUARD_MIN_HARMONIC_COSINE
+                and opacity_maximum <= MATERIALIZATION_GUARD_MAX_OPACITY_DISTANCE
             ),
             "nonprobe_s3_attribute_reads": 0,
         }
 
+    def _primary_probe_depth_values(
+        self,
+        depths: torch.Tensor | None,
+        *,
+        tile_row: int,
+        tile_column: int,
+        view_index: int,
+        primitive_slot: int,
+    ) -> torch.Tensor | None:
+        """Read only the declared primary-probe depths for one tile.
+
+        The context guard deliberately shares the L1 routing probes rather
+        than sampling another depth location.  Invalid layouts return
+        ``None`` so the caller can retain the Full tile.
+        """
+        if depths is None or not torch.is_tensor(depths):
+            return None
+        values = []
+        tile_y = tile_row * self.initial_tile_size
+        tile_x = tile_column * self.initial_tile_size
+        for local_y, local_x in self.probe_positions:
+            row = tile_y + local_y
+            column = tile_x + local_x
+            if not 0 <= row < self.H or not 0 <= column < self.W:
+                return None
+            if depths.ndim == 5:
+                pixel_index = row * self.W + column
+                candidates = depths[0, view_index, pixel_index].reshape(-1)
+                if primitive_slot >= candidates.numel():
+                    return None
+                values.append(candidates[primitive_slot])
+            elif depths.ndim == 4:
+                values.append(depths[0, view_index, row, column])
+            else:
+                return None
+        if len(values) != len(self.probe_positions):
+            return None
+        return torch.stack(values)
+
+    def context_coverage_occlusion_safety(
+        self,
+        gaussians_full,
+        anchor_indices: List[int],
+        probe_depths: torch.Tensor | None,
+        *,
+        view_index: int,
+        level: str,
+    ) -> Dict:
+        """Check selected-anchor coverage and probe-depth occlusion risk.
+
+        This optional guard has no route-selection input and never reads an
+        unselected descriptor. It rejects missing/invalid producer geometry,
+        large projected-footprint spread, large primary-probe depth span, and
+        selected anchors whose projected centers do not overlap at two-sigma
+        support. A rejection is deliberately conservative: the caller leaves
+        the tile on the dense Full path.
+        """
+        if level not in {"L0", "L1"}:
+            raise ValueError("context safety guard level must be L0 or L1")
+        if (
+            not isinstance(anchor_indices, list)
+            or not anchor_indices
+            or len(anchor_indices) != len(set(anchor_indices))
+            or any(isinstance(index, bool) or not isinstance(index, int) for index in anchor_indices)
+        ):
+            raise ValueError("context safety guard requires unique anchor indices")
+        total = gaussians_full.means.shape[1]
+        if any(index < 0 or index >= total for index in anchor_indices):
+            raise ValueError("context safety guard anchor index is out of range")
+
+        result = {
+            "level": level,
+            "anchor_count": len(anchor_indices),
+            "coverage_footprint_ratio": float("inf"),
+            "relative_depth_span": float("inf"),
+            "projected_center_mahalanobis_max": float("inf"),
+            "coverage_passed": False,
+            "occlusion_passed": False,
+            "center_overlap_passed": False,
+            "passed": False,
+            "reason": "missing_geometry",
+            "nonprobe_s3_attribute_reads": 0,
+        }
+        if self.context_extrinsics is None or self.context_intrinsics is None:
+            return result
+        if probe_depths is None or not torch.is_tensor(probe_depths):
+            result["reason"] = "invalid_probe_depth"
+            return result
+        probe_depths = probe_depths.reshape(-1)
+        if probe_depths.numel() != len(self.probe_positions) or not bool(
+            torch.isfinite(probe_depths).all()
+        ):
+            result["reason"] = "invalid_probe_depth"
+            return result
+
+        means = gaussians_full.means[0, anchor_indices]
+        covariances = gaussians_full.covariances[0, anchor_indices]
+        projected = self._context_projected_moments(
+            means, covariances, view_index=view_index
+        )
+        if projected is None:
+            result["reason"] = "invalid_footprint"
+            return result
+        centers, projected_covariances, _, _, _ = projected
+        determinants = torch.linalg.det(projected_covariances)
+        if not bool(torch.isfinite(determinants).all()) or bool(
+            (determinants <= 0.0).any()
+        ):
+            result["reason"] = "invalid_footprint"
+            return result
+        footprints = torch.sqrt(determinants)
+        minimum = footprints.amin()
+        maximum = footprints.amax()
+        tiny = torch.as_tensor(
+            torch.finfo(footprints.dtype).tiny,
+            device=footprints.device,
+            dtype=footprints.dtype,
+        )
+        if not bool(torch.isfinite(minimum)) or not bool(torch.isfinite(maximum)) or bool(
+            minimum <= tiny
+        ):
+            result["reason"] = "invalid_footprint"
+            return result
+        footprint_ratio = float((maximum / minimum).item())
+        depth_scale = probe_depths.abs().median().clamp_min(1.0e-6)
+        relative_depth_span = float(
+            ((probe_depths.max() - probe_depths.min()) / depth_scale).item()
+        )
+        maximum_center_mahalanobis = 0.0
+        try:
+            for first in range(len(anchor_indices)):
+                for second in range(first + 1, len(anchor_indices)):
+                    delta = centers[first] - centers[second]
+                    pair_covariance = (
+                        projected_covariances[first] + projected_covariances[second]
+                    )
+                    distance_squared = torch.dot(
+                        delta,
+                        torch.linalg.solve(pair_covariance, delta),
+                    )
+                    if not bool(torch.isfinite(distance_squared)):
+                        result["reason"] = "invalid_footprint"
+                        return result
+                    maximum_center_mahalanobis = max(
+                        maximum_center_mahalanobis,
+                        float(distance_squared.clamp_min(0.0).sqrt().item()),
+                    )
+        except RuntimeError:
+            result["reason"] = "invalid_footprint"
+            return result
+        coverage_passed = footprint_ratio <= CONTEXT_GUARD_MAX_FOOTPRINT_RATIO
+        occlusion_passed = relative_depth_span <= CONTEXT_GUARD_MAX_RELATIVE_DEPTH_SPAN
+        center_overlap_passed = (
+            maximum_center_mahalanobis <= CONTEXT_GUARD_MAX_CENTER_MAHALANOBIS
+        )
+        result.update(
+            {
+                "coverage_footprint_ratio": footprint_ratio,
+                "relative_depth_span": relative_depth_span,
+                "projected_center_mahalanobis_max": maximum_center_mahalanobis,
+                "coverage_passed": coverage_passed,
+                "occlusion_passed": occlusion_passed,
+                "center_overlap_passed": center_overlap_passed,
+                "passed": coverage_passed and occlusion_passed and center_overlap_passed,
+                "reason": (
+                    "accepted"
+                    if coverage_passed and occlusion_passed and center_overlap_passed
+                    else "coverage_spread"
+                    if not coverage_passed
+                    else "occlusion_span"
+                    if not occlusion_passed
+                    else "center_separation"
+                ),
+            }
+        )
+        return result
+
+    @staticmethod
+    def _prepare_source_opacities_for_deletion_certificate(
+        source_opacities: torch.Tensor | None,
+        *,
+        source_kind: str | None,
+        view_count: int,
+        height: int,
+        width: int,
+        primitives_per_pixel: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor | None, str]:
+        """Validate the source-only alpha layout before tile routing.
+
+        The certificate deliberately accepts only the direct S2 density mapping
+        used by TranSplat/MVSplat.  DepthSplat's alpha is produced by the raw
+        Gaussian head, so accepting it here would silently turn a Stage-3
+        value into a route input.
+        """
+        if source_kind != DELETION_CERTIFICATE_SOURCE_KIND:
+            return None, "untrusted_source_kind"
+        if source_opacities is None:
+            return None, "missing_source_opacities"
+        if not torch.is_tensor(source_opacities):
+            return None, "invalid_source_opacities"
+        expected_shape = (
+            1,
+            view_count,
+            height * width,
+            1,
+            primitives_per_pixel,
+        )
+        if tuple(source_opacities.shape) != expected_shape:
+            return None, "invalid_source_layout"
+        if (
+            source_opacities.device != device
+            or source_opacities.dtype != dtype
+            or not torch.is_floating_point(source_opacities)
+        ):
+            return None, "invalid_source_tensor_type"
+        if not bool(torch.isfinite(source_opacities).all()) or bool(
+            ((source_opacities < 0.0) | (source_opacities > 1.0)).any()
+        ):
+            return None, "invalid_source_opacity_values"
+        return source_opacities.reshape(1, -1), "ready"
+
+    def exact_source_opacity_zero_deletion_certificate(
+        self,
+        gaussians_full,
+        source_opacities: torch.Tensor | None,
+        *,
+        source_status: str,
+        anchor_indices: List[int],
+        nonprobe_indices: List[int],
+        level: str,
+    ) -> Dict:
+        """Certify a no-op deletion without opening any non-probe S3 value.
+
+        A Gaussian whose adapter input alpha is exactly zero has no raster
+        contribution.  The selected anchors are also required to match that
+        same source mapping exactly, which binds the known S2 opacity layout
+        to the active adapter path.  This path skips moment matching entirely:
+        changing a retained anchor would need a separate merge certificate.
+        """
+        result = {
+            "policy": DELETION_CERTIFICATE_POLICY,
+            "level": level,
+            "anchor_count": len(anchor_indices),
+            "nonprobe_count": len(nonprobe_indices),
+            "source_status": source_status,
+            "passed": False,
+            "reason": source_status,
+            "anchor_s3_opacity_reads": 0,
+            "nonprobe_s3_attribute_reads": 0,
+        }
+        if source_opacities is None:
+            return result
+        if (
+            not anchor_indices
+            or len(anchor_indices) != len(set(anchor_indices))
+            or len(nonprobe_indices) != len(set(nonprobe_indices))
+            or set(anchor_indices) & set(nonprobe_indices)
+        ):
+            result["reason"] = "invalid_tile_indices"
+            return result
+        gaussian_count = int(gaussians_full.opacities.shape[1])
+        if any(
+            not isinstance(index, int) or index < 0 or index >= gaussian_count
+            for index in (*anchor_indices, *nonprobe_indices)
+        ):
+            result["reason"] = "invalid_tile_indices"
+            return result
+
+        # This is the only Stage-3 read: selected anchors already executed by
+        # the candidate path.  Non-probe alpha comes exclusively from S2.
+        selected_source = source_opacities[0, anchor_indices]
+        selected_output = gaussians_full.opacities[0, anchor_indices]
+        result["anchor_s3_opacity_reads"] = len(anchor_indices)
+        if not torch.equal(selected_source, selected_output):
+            result["reason"] = "source_anchor_mapping_mismatch"
+            return result
+        if not bool((source_opacities[0, nonprobe_indices] == 0.0).all()):
+            result["reason"] = "nonzero_source_opacity"
+            return result
+        result.update({"passed": True, "reason": "exact_zero_alpha"})
+        return result
+
     # ------------------------------------------------------------------ #
     # Core interpolation / update methods                                  #
     # ------------------------------------------------------------------ #
+
+    def _joint_calibrator_descriptor(
+        self,
+        *,
+        probe_offset: int,
+        source_means: torch.Tensor,
+        source_covariances: torch.Tensor,
+        source_harmonics: torch.Tensor,
+        source_opacities: torch.Tensor,
+        merged_mean: torch.Tensor,
+        merged_covariance: torch.Tensor,
+        merged_harmonics: torch.Tensor,
+        merged_opacity: torch.Tensor,
+        assignment_matrix: torch.Tensor,
+        probe_depths: torch.Tensor,
+        depth_reference: torch.Tensor,
+        probe_rows: list[int],
+        probe_columns: list[int],
+        view_index: int,
+        feature_variance: float,
+        level: str,
+    ) -> torch.Tensor:
+        """Build the fixed target-free descriptor for one retained anchor.
+
+        Every statistic derives from the selected source anchors, ordinary
+        representative output, S1/S2 route state, or the already-resident
+        context camera. The helper deliberately has no argument for skipped
+        S3 attributes, target cameras, target RGB, model id, or dataset id.
+        """
+        source_mean = source_means[probe_offset]
+        source_covariance = source_covariances[probe_offset]
+        source_opacity = source_opacities[probe_offset].reshape(-1)
+        if source_opacity.numel() != 1 or merged_opacity.numel() != 1:
+            raise ValueError("joint calibrator requires one opacity per Gaussian")
+        mean_scale = source_mean.norm().clamp_min(1.0)
+        mean_delta = (merged_mean - source_mean) / mean_scale
+        upper = torch.stack(
+            (
+                merged_covariance[0, 0] - source_covariance[0, 0],
+                merged_covariance[0, 1] - source_covariance[0, 1],
+                merged_covariance[0, 2] - source_covariance[0, 2],
+                merged_covariance[1, 1] - source_covariance[1, 1],
+                merged_covariance[1, 2] - source_covariance[1, 2],
+                merged_covariance[2, 2] - source_covariance[2, 2],
+            )
+        )
+        covariance_scale = source_covariance.abs().mean().clamp_min(1e-6)
+        covariance_delta = upper / covariance_scale
+        source_alpha = source_opacity.clamp(1e-6, 1.0 - 1e-6)
+        merged_alpha = merged_opacity.reshape(-1).clamp(1e-6, 1.0 - 1e-6)
+        opacity_values = torch.stack(
+            (
+                torch.logit(source_alpha)[0],
+                torch.logit(merged_alpha)[0],
+            )
+        )
+        harmonic_values = merged_harmonics.reshape(merged_harmonics.shape[0], -1)
+        if harmonic_values.shape[0] != 3:
+            raise ValueError("joint calibrator requires RGB spherical harmonics")
+        harmonic_summary = torch.cat(
+            (
+                harmonic_values.mean(dim=1),
+                harmonic_values.std(dim=1, unbiased=False),
+            )
+        )
+        if assignment_matrix.numel():
+            assignment = assignment_matrix[:, probe_offset].clamp_min(0.0)
+            assignment_mass = assignment.sum()
+            assignment_probability = assignment / assignment_mass.clamp_min(1e-8)
+            assignment_entropy = -(
+                assignment_probability
+                * assignment_probability.clamp_min(1e-8).log()
+            ).sum()
+            assignment_summary = torch.stack(
+                (
+                    assignment_mass,
+                    assignment.mean(),
+                    assignment.std(unbiased=False),
+                    assignment.max(),
+                    assignment_entropy,
+                )
+            )
+        else:
+            assignment_summary = torch.zeros(
+                5, device=merged_mean.device, dtype=merged_mean.dtype
+            )
+        reference_mean = depth_reference.mean()
+        reference_scale = reference_mean.abs().clamp_min(1e-6)
+        depth_summary = torch.stack(
+            (
+                torch.as_tensor(
+                    feature_variance,
+                    device=merged_mean.device,
+                    dtype=merged_mean.dtype,
+                ),
+                (probe_depths[probe_offset] - reference_mean) / reference_scale,
+                depth_reference.std(unbiased=False) / reference_scale,
+            )
+        )
+        level_summary = torch.tensor(
+            (1.0 if level == "L0" else 0.0, 1.0 if level == "L1" else 0.0),
+            device=merged_mean.device,
+            dtype=merged_mean.dtype,
+        )
+        if self._camera_directions is None or self.context_intrinsics is None:
+            ray = torch.zeros(3, device=merged_mean.device, dtype=merged_mean.dtype)
+            intrinsics = torch.zeros(
+                2, device=merged_mean.device, dtype=merged_mean.dtype
+            )
+        else:
+            ray = self._camera_directions[
+                view_index, probe_rows[probe_offset], probe_columns[probe_offset]
+            ].to(device=merged_mean.device, dtype=merged_mean.dtype)
+            camera_intrinsics = self.context_intrinsics[0, view_index].to(
+                device=merged_mean.device, dtype=merged_mean.dtype
+            )
+            intrinsics = torch.stack(
+                (
+                    camera_intrinsics[0, 0] / float(max(self.W, 1)),
+                    camera_intrinsics[1, 1] / float(max(self.H, 1)),
+                )
+            )
+        descriptor = torch.cat(
+            (
+                mean_delta,
+                covariance_delta,
+                opacity_values,
+                harmonic_summary,
+                assignment_summary,
+                depth_summary,
+                level_summary,
+                ray,
+                intrinsics,
+            )
+        )
+        if descriptor.numel() != 32 or not bool(torch.isfinite(descriptor).all()):
+            raise RuntimeError("joint calibrator descriptor is invalid")
+        return descriptor.reshape(1, 32)
+
+    def _apply_joint_calibrator(
+        self,
+        *,
+        merged_mean: torch.Tensor,
+        merged_covariance: torch.Tensor,
+        merged_harmonics: torch.Tensor,
+        merged_opacity: torch.Tensor,
+        descriptor: torch.Tensor,
+        level: str,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply the already hash-bound global asset to one selected anchor."""
+        if self.joint_calibrator is None or self._joint_calibrator_contract is None:
+            return merged_mean, merged_covariance, merged_harmonics, merged_opacity
+        coefficient_count = int(merged_harmonics.shape[-1])
+        square_root = math.isqrt(coefficient_count)
+        if square_root * square_root != coefficient_count or square_root < 1:
+            raise ValueError("joint calibrator harmonics have an invalid degree")
+        sh_degree = square_root - 1
+        with torch.no_grad():
+            calibrated = self.joint_calibrator(
+                descriptor,
+                merged_mean.reshape(1, 3),
+                merged_covariance.reshape(1, 3, 3),
+                merged_harmonics.reshape(1, 3, coefficient_count),
+                merged_opacity.reshape(1, -1),
+                sh_degree=sh_degree,
+            )
+        contract = self.stats["joint_calibrator"]
+        contract["calls"] += 1
+        contract["selected_descriptor_reads"] += 1
+        if level == "L0":
+            contract["l0_calls"] += 1
+        elif level == "L1":
+            contract["l1_calls"] += 1
+        else:
+            raise ValueError("joint calibrator received a non-SAEs level")
+        return (
+            calibrated.means[0],
+            calibrated.covariances[0],
+            calibrated.harmonics[0],
+            calibrated.opacities[0].reshape_as(merged_opacity),
+        )
+
+    def _capture_offline_joint_calibration_sample(
+        self,
+        *,
+        descriptor: torch.Tensor,
+        merged_mean: torch.Tensor,
+        merged_covariance: torch.Tensor,
+        merged_harmonics: torch.Tensor,
+        merged_opacity: torch.Tensor,
+        level: str,
+        anchor_index: int,
+        teacher_nonprobe_indices: tuple[int, ...],
+        teacher_assignment_weights: torch.Tensor,
+    ) -> None:
+        """Emit one immutable selected-only sample for author-side training.
+
+        The callback cannot return a replacement value. It has no source for
+        skipped S3 descriptors, target data, or model/dataset identifiers and
+        is intentionally absent from normal runtime construction. The emitted
+        assignment metadata is not a descriptor input and never reaches the
+        runtime asset. It lets the author-side teacher compiler apply the
+        already-frozen weights to its separately allowed dense-adaptor output.
+        """
+        capture = self._offline_joint_calibration_capture
+        if capture is None:
+            return
+        if level not in {"L0", "L1"}:
+            raise ValueError("offline joint-calibration capture received a non-SAEs level")
+        if not isinstance(anchor_index, int) or anchor_index < 0:
+            raise ValueError("offline joint-calibration capture received an invalid anchor index")
+        if (
+            not isinstance(teacher_nonprobe_indices, tuple)
+            or not teacher_nonprobe_indices
+            or any(not isinstance(index, int) or index < 0 for index in teacher_nonprobe_indices)
+            or len(set(teacher_nonprobe_indices)) != len(teacher_nonprobe_indices)
+        ):
+            raise ValueError("offline joint-calibration capture received invalid assignment indices")
+        if (
+            not torch.is_tensor(teacher_assignment_weights)
+            or teacher_assignment_weights.shape != (len(teacher_nonprobe_indices),)
+            or not bool(torch.isfinite(teacher_assignment_weights).all())
+            or bool((teacher_assignment_weights < 0.0).any())
+        ):
+            raise ValueError("offline joint-calibration capture received invalid assignment weights")
+        sample = {
+            "descriptor": descriptor.detach().clone(),
+            "means": merged_mean.detach().clone(),
+            "covariances": merged_covariance.detach().clone(),
+            "harmonics": merged_harmonics.detach().clone(),
+            "opacities": merged_opacity.detach().clone(),
+            "level": level,
+            "anchor_index": anchor_index,
+            "teacher_nonprobe_indices": teacher_nonprobe_indices,
+            "teacher_assignment_weights": teacher_assignment_weights.detach().clone(),
+        }
+        if capture(sample) is not None:
+            raise RuntimeError("offline joint-calibration capture must not return a value")
+        self.stats["offline_joint_calibration_capture_calls"] += 1
 
     def _weighted_moment_match(
         self,
@@ -2271,8 +3039,11 @@ class ProgressiveSAES:
             output_style == "assignment-consensus-adapter-pseudo-descriptor"
         )
         is_same_budget_dense_oracle = output_style == "same-budget-dense-oracle"
-        selected_only_s3 = is_assignment_consensus or merge_semantics == (
-            "conditional-adapter-offset-attribute-transport"
+        selected_only_s3 = (
+            is_assignment_consensus
+            or merge_semantics == "conditional-adapter-offset-attribute-transport"
+            or self.joint_calibrator is not None
+            or self._offline_joint_calibration_capture is not None
         )
         if defer_assignment_consensus_plan and not is_assignment_consensus:
             raise ValueError(
@@ -2798,6 +3569,56 @@ class ProgressiveSAES:
             if bool((torch.linalg.eigvalsh(merged_covariance) < -1e-7).any().item()):
                 self.stats["covariance_psd_violations"] += 1
 
+            if self.joint_calibrator is not None or self._offline_joint_calibration_capture is not None:
+                descriptor = self._joint_calibrator_descriptor(
+                    probe_offset=probe_offset,
+                    source_means=source_means,
+                    source_covariances=source_covs,
+                    source_harmonics=source_harmonics,
+                    source_opacities=source_opacities,
+                    merged_mean=merged_mean,
+                    merged_covariance=merged_covariance,
+                    merged_harmonics=merged_harmonics,
+                    merged_opacity=merged_opacity,
+                    assignment_matrix=assignment_matrix,
+                    probe_depths=probe_depth_tensor,
+                    depth_reference=depth_reference_tensor,
+                    probe_rows=probe_gy,
+                    probe_columns=probe_gx,
+                    view_index=view_index,
+                    feature_variance=feature_variance,
+                    level=level,
+                )
+                if self.joint_calibrator is not None:
+                    (
+                        merged_mean,
+                        merged_covariance,
+                        merged_harmonics,
+                        merged_opacity,
+                    ) = self._apply_joint_calibrator(
+                        merged_mean=merged_mean,
+                        merged_covariance=merged_covariance,
+                        merged_harmonics=merged_harmonics,
+                        merged_opacity=merged_opacity,
+                        descriptor=descriptor,
+                        level=level,
+                    )
+                else:
+                    teacher_nonprobe_indices = tuple(
+                        int(output_index) for _, output_index in non_probe_items
+                    )
+                    self._capture_offline_joint_calibration_sample(
+                        descriptor=descriptor,
+                        merged_mean=merged_mean,
+                        merged_covariance=merged_covariance,
+                        merged_harmonics=merged_harmonics,
+                        merged_opacity=merged_opacity,
+                        level=level,
+                        anchor_index=probe_index,
+                        teacher_nonprobe_indices=teacher_nonprobe_indices,
+                        teacher_assignment_weights=assignment_matrix[:, probe_offset],
+                    )
+
             if selected_only_s3:
                 gaussians_full.means[0, probe_index] = merged_mean
                 gaussians_full.covariances[0, probe_index] = merged_covariance
@@ -3211,6 +4032,8 @@ class ProgressiveSAES:
         depths=None,
         routing_depths=None,
         feat_norm=None,
+        source_opacities: torch.Tensor | None = None,
+        source_opacity_certificate_kind: str | None = None,
         tile_trace: List[Dict] | None = None,
     ) -> Tuple["torch.Tensor", Dict]:
         """
@@ -3256,16 +4079,44 @@ class ProgressiveSAES:
             )
 
         routing_depths = depths if routing_depths is None else routing_depths
+        (
+            certificate_source_opacities,
+            certificate_source_status,
+        ) = self._prepare_source_opacities_for_deletion_certificate(
+            source_opacities,
+            source_kind=source_opacity_certificate_kind,
+            view_count=self.view_count,
+            height=self.H,
+            width=self.W,
+            primitives_per_pixel=self.primitives_per_pixel,
+            device=device,
+            dtype=gaussians_full.opacities.dtype,
+        )
         modified_mask = torch.zeros(gaussian_count, dtype=torch.bool, device=device)
         for key in self.stats:
+            if key == "joint_calibrator":
+                if self._joint_calibrator_contract is None:
+                    raise RuntimeError("joint calibrator stats have no cost contract")
+                self.stats[key] = {
+                    **self._joint_calibrator_contract,
+                    "selected_head": dict(
+                        self._joint_calibrator_contract["selected_head"]
+                    ),
+                }
+                continue
             if key not in {
                 "decision_semantics",
+                "cross_check_threshold",
                 "feature_statistic",
                 "depth_statistic",
                 "camera_aware_moment_matching",
                 "l1_depth_reference",
                 "merge_semantics",
                 "materialization_guard_enabled",
+                "probe_cross_check_enabled",
+                "context_safety_guard_enabled",
+                "deletion_certificate_required",
+                "deletion_certificate_policy",
                 "same_budget_dense_oracle_runtime_eligible",
                 "multicontext_tangent_enabled",
                 "multicontext_tangent_runtime_eligible",
@@ -3274,11 +4125,42 @@ class ProgressiveSAES:
         self.stats["same_budget_dense_oracle_required_footprint_expansion_max"] = 1.0
         self.stats["same_budget_dense_oracle_failure_reasons"] = {}
         self.stats["multicontext_tangent_fallback_reasons"] = {}
+        self.stats["deletion_certificate_source_kind"] = source_opacity_certificate_kind
+        self.stats["deletion_certificate_source_status"] = certificate_source_status
+        self.stats["deletion_certificate_rejection_reasons"] = {}
 
         tiles_h = self.H // self.initial_tile_size
         tiles_w = self.W // self.initial_tile_size
         tile_size = self.initial_tile_size
         total_zeroed = 0
+
+        def record_sparse_route(
+            level: str,
+            retained_positions: List[Tuple[int, int]],
+            *,
+            same_budget_dense_oracle: bool = False,
+        ) -> None:
+            """Account for a committed L0/L1 tile without touching descriptors."""
+            pixel_count = tile_size * tile_size - len(retained_positions)
+            if level == "L0":
+                self.stats["level0_tiles"] += 1
+                self.stats["level0_pixels"] += pixel_count
+                self.stats["l0_representatives"] += (
+                    len(retained_positions) * self.primitives_per_pixel
+                )
+                if same_budget_dense_oracle:
+                    self.stats["same_budget_dense_oracle_l0_tiles"] += 1
+            elif level == "L1":
+                self.stats["level1_tiles"] += 1
+                self.stats["level1_pixels"] += pixel_count
+                self.stats["l1_lightweight_anchors"] += (
+                    len(retained_positions) * self.primitives_per_pixel
+                )
+                if same_budget_dense_oracle:
+                    self.stats["same_budget_dense_oracle_l1_tiles"] += 1
+            else:
+                raise ValueError("sparse route accounting requires L0 or L1")
+            self.stats["pixels_original"] += len(retained_positions)
 
         def flat_index(view: int, pixel: int, primitive_slot: int) -> int:
             return (
@@ -3355,10 +4237,12 @@ class ProgressiveSAES:
 
                     def materialization_guard_passes(
                         positions: List[Tuple[int, int]], level: str
-                    ) -> bool:
+                    ) -> tuple[bool, bool]:
                         if not self.materialization_guard:
-                            return True
+                            return True, False
                         records = []
+                        cross_check_records = []
+                        context_records = []
                         for slot in range(self.primitives_per_pixel):
                             anchor_indices = indices_for_positions(slot, positions)
                             record = self.probe_materialization_validity(
@@ -3371,33 +4255,186 @@ class ProgressiveSAES:
                             self.stats["guard_nonprobe_s3_attribute_reads"] += record[
                                 "nonprobe_s3_attribute_reads"
                             ]
-                        passed = all(record["passed"] for record in records)
+                            # The leave-one-out test reuses covariance and SH
+                            # values already fetched by the attribute guard.
+                            # It is always over the fixed primary prefix, even
+                            # for a 12-anchor L1 candidate.
+                            cross_check_record = {
+                                "checked": False,
+                                "passed": True,
+                                "error": None,
+                                "threshold": self.cross_check_threshold,
+                                "anchor_count": len(self.probe_positions),
+                                "nonprobe_s3_attribute_reads": 0,
+                            }
+                            if record["passed"] and self.probe_cross_check_enabled:
+                                primary_indices = indices_for_positions(
+                                    slot, self.probe_positions
+                                )
+                                validity = self.probe_cross_check_validity(
+                                    gaussians_full,
+                                    primary_indices,
+                                    level=level,
+                                )
+                                cross_check_record = {"checked": True, **validity}
+                                self.stats[f"probe_cross_check_{level.lower()}_checks"] += 1
+                                if not validity["passed"]:
+                                    self.stats[
+                                        f"probe_cross_check_{level.lower()}_rejections"
+                                    ] += 1
+                            cross_check_records.append(cross_check_record)
+                            if self.context_safety_guard:
+                                context_records.append(
+                                    self.context_coverage_occlusion_safety(
+                                        gaussians_full,
+                                        anchor_indices,
+                                        self._primary_probe_depth_values(
+                                            routing_depths,
+                                            tile_row=th,
+                                            tile_column=tw,
+                                            view_index=view,
+                                            primitive_slot=slot,
+                                        ),
+                                        view_index=view,
+                                        level=level,
+                                    )
+                                )
+                        cross_check_passed = all(
+                            record["passed"] for record in cross_check_records
+                        )
+                        cross_check_force_full = any(
+                            record["checked"] and not record["passed"]
+                            for record in cross_check_records
+                        )
+                        context_passed = all(
+                            record["passed"] for record in context_records
+                        )
+                        context_force_full = any(
+                            record["reason"]
+                            in {
+                                "missing_geometry",
+                                "invalid_probe_depth",
+                                "invalid_footprint",
+                                "center_separation",
+                            }
+                            for record in context_records
+                        )
+                        if self.context_safety_guard:
+                            self.stats["context_guard_checks"] += 1
+                            if not context_passed:
+                                self.stats["context_guard_rejections"] += 1
+                                reasons = {
+                                    record["reason"] for record in context_records
+                                }
+                                if "missing_geometry" in reasons:
+                                    self.stats["context_guard_missing_geometry"] += 1
+                                if "invalid_footprint" in reasons:
+                                    self.stats["context_guard_invalid_footprint"] += 1
+                                if "coverage_spread" in reasons:
+                                    self.stats[
+                                        "context_guard_coverage_rejections"
+                                    ] += 1
+                                if "occlusion_span" in reasons:
+                                    self.stats[
+                                        "context_guard_occlusion_rejections"
+                                    ] += 1
+                                if "center_separation" in reasons:
+                                    self.stats[
+                                        "context_guard_center_separation_rejections"
+                                    ] += 1
+                        passed = (
+                            all(record["passed"] for record in records)
+                            and cross_check_passed
+                            and context_passed
+                        )
                         if tile_trace is not None:
-                            tile_guard_checks.append(
-                                {
-                                    "level": level,
-                                    "anchor_count": len(positions)
+                            checked_cross_checks = [
+                                record
+                                for record in cross_check_records
+                                if record["checked"]
+                            ]
+                            trace_record = {
+                                "level": level,
+                                "anchor_count": len(positions)
+                                * self.primitives_per_pixel,
+                                "passed": passed,
+                                "covariance_cosine_minimum": min(
+                                    record["covariance_cosine_minimum"]
+                                    for record in records
+                                ),
+                                "harmonic_cosine_minimum": min(
+                                    record["harmonic_cosine_minimum"]
+                                    for record in records
+                                ),
+                                "opacity_distance_maximum": max(
+                                    record["opacity_distance_maximum"]
+                                    for record in records
+                                ),
+                                "nonprobe_s3_attribute_reads": sum(
+                                    record["nonprobe_s3_attribute_reads"]
+                                    for record in records
+                                ),
+                                "probe_cross_check": {
+                                    "checked": bool(checked_cross_checks),
+                                    "passed": (
+                                        all(
+                                            record["passed"]
+                                            for record in cross_check_records
+                                        )
+                                        if len(checked_cross_checks)
+                                        == len(cross_check_records)
+                                        else None
+                                    ),
+                                    "error_max": (
+                                        max(
+                                            float(record["error"])
+                                            for record in checked_cross_checks
+                                            if record["error"] is not None
+                                        )
+                                        if any(
+                                            record["error"] is not None
+                                            for record in checked_cross_checks
+                                        )
+                                        else None
+                                    ),
+                                    "threshold": self.cross_check_threshold,
+                                    "primary_anchor_count": len(
+                                        self.probe_positions
+                                    )
                                     * self.primitives_per_pixel,
-                                    "passed": passed,
-                                    "covariance_cosine_minimum": min(
-                                        record["covariance_cosine_minimum"]
-                                        for record in records
+                                    "nonprobe_s3_attribute_reads": 0,
+                                },
+                            }
+                            if self.context_safety_guard:
+                                trace_record["context_safety"] = {
+                                    "passed": context_passed,
+                                    "coverage_footprint_ratio": max(
+                                        record["coverage_footprint_ratio"]
+                                        for record in context_records
                                     ),
-                                    "harmonic_cosine_minimum": min(
-                                        record["harmonic_cosine_minimum"]
-                                        for record in records
+                                    "relative_depth_span": max(
+                                        record["relative_depth_span"]
+                                        for record in context_records
                                     ),
-                                    "opacity_distance_maximum": max(
-                                        record["opacity_distance_maximum"]
-                                        for record in records
+                                    "projected_center_mahalanobis_max": max(
+                                        record["projected_center_mahalanobis_max"]
+                                        for record in context_records
                                     ),
-                                    "nonprobe_s3_attribute_reads": sum(
-                                        record["nonprobe_s3_attribute_reads"]
-                                        for record in records
+                                    "center_overlap_passed": all(
+                                        record["center_overlap_passed"]
+                                        for record in context_records
+                                    ),
+                                    "reason": next(
+                                        (
+                                            record["reason"]
+                                            for record in context_records
+                                            if not record["passed"]
+                                        ),
+                                        "accepted",
                                     ),
                                 }
-                            )
-                        return passed
+                            tile_guard_checks.append(trace_record)
+                        return passed, context_force_full or cross_check_force_full
 
                     selected_level = None
                     tile_guard_checks: List[Dict] = []
@@ -3406,19 +4443,24 @@ class ProgressiveSAES:
                             selected_level = "L0"
                         else:
                             self.stats["l0_guard_checks"] += 1
-                            if materialization_guard_passes(self.probe_positions, "L0"):
+                            l0_passed, l0_force_full = materialization_guard_passes(
+                                self.probe_positions, "L0"
+                            )
+                            if l0_passed:
                                 selected_level = "L0"
                             else:
                                 self.stats["l0_guard_rejections"] += 1
                                 # A rejected L0 materialization still follows the
                                 # paper's second probe test. It is not silently
                                 # conflated with Full until the L1 guard rejects.
-                                self.stats["l1_guard_attempts_after_l0_rejection"] += 1
-                                if depth_route_passes():
+                                if not l0_force_full:
+                                    self.stats["l1_guard_attempts_after_l0_rejection"] += 1
+                                if not l0_force_full and depth_route_passes():
                                     self.stats["l1_guard_checks"] += 1
-                                    if materialization_guard_passes(
+                                    l1_passed, _ = materialization_guard_passes(
                                         self.lightweight_positions, "L1"
-                                    ):
+                                    )
+                                    if l1_passed:
                                         selected_level = "L1"
                                     else:
                                         self.stats["l1_guard_rejections"] += 1
@@ -3427,9 +4469,10 @@ class ProgressiveSAES:
                             selected_level = "L1"
                         else:
                             self.stats["l1_guard_checks"] += 1
-                            if materialization_guard_passes(
+                            l1_passed, _ = materialization_guard_passes(
                                 self.lightweight_positions, "L1"
-                            ):
+                            )
+                            if l1_passed:
                                 selected_level = "L1"
                             else:
                                 self.stats["l1_guard_rejections"] += 1
@@ -3455,6 +4498,126 @@ class ProgressiveSAES:
                         )
 
                     if selected_level is not None:
+                        retained_positions = (
+                            self.probe_positions
+                            if selected_level == "L0"
+                            else self.lightweight_positions
+                        )
+                        if (
+                            self.require_deletion_certificate
+                            and self.materialization == "representative"
+                        ):
+                            certificate_records = []
+                            for slot in range(self.primitives_per_pixel):
+                                anchors = indices_for_positions(
+                                    slot, retained_positions
+                                )
+                                nonprobes = list(
+                                    non_anchor_map(slot, retained_positions).values()
+                                )
+                                certificate_records.append(
+                                    self.exact_source_opacity_zero_deletion_certificate(
+                                        gaussians_full,
+                                        certificate_source_opacities,
+                                        source_status=certificate_source_status,
+                                        anchor_indices=anchors,
+                                        nonprobe_indices=nonprobes,
+                                        level=selected_level,
+                                    )
+                                )
+                            self.stats["deletion_certificate_checks"] += 1
+                            self.stats[
+                                "deletion_certificate_anchor_s3_opacity_reads"
+                            ] += sum(
+                                record["anchor_s3_opacity_reads"]
+                                for record in certificate_records
+                            )
+                            self.stats[
+                                "deletion_certificate_nonprobe_s3_attribute_reads"
+                            ] += sum(
+                                record["nonprobe_s3_attribute_reads"]
+                                for record in certificate_records
+                            )
+                            certificate_passed = all(
+                                record["passed"] for record in certificate_records
+                            )
+                            certificate_reason = next(
+                                (
+                                    record["reason"]
+                                    for record in certificate_records
+                                    if not record["passed"]
+                                ),
+                                "exact_zero_alpha",
+                            )
+                            certificate_trace = {
+                                "policy": DELETION_CERTIFICATE_POLICY,
+                                "source_status": certificate_source_status,
+                                "passed": certificate_passed,
+                                "reason": certificate_reason,
+                                "anchor_count": sum(
+                                    record["anchor_count"]
+                                    for record in certificate_records
+                                ),
+                                "nonprobe_count": sum(
+                                    record["nonprobe_count"]
+                                    for record in certificate_records
+                                ),
+                                "anchor_s3_opacity_reads": sum(
+                                    record["anchor_s3_opacity_reads"]
+                                    for record in certificate_records
+                                ),
+                                "nonprobe_s3_attribute_reads": sum(
+                                    record["nonprobe_s3_attribute_reads"]
+                                    for record in certificate_records
+                                ),
+                            }
+                            if tile_trace is not None:
+                                tile_trace[-1]["deletion_certificate"] = certificate_trace
+                            if certificate_passed:
+                                # A source-certified zero-alpha output is
+                                # already absent from the rasterizer. Retained
+                                # anchors stay bit-identical, so no moment
+                                # matching or non-probe Stage-3 read occurs.
+                                certified_zeroed = 0
+                                for slot in range(self.primitives_per_pixel):
+                                    for index in non_anchor_map(
+                                        slot, retained_positions
+                                    ).values():
+                                        modified_mask[index] = True
+                                        certified_zeroed += 1
+                                total_zeroed += certified_zeroed
+                                self.stats[
+                                    "deletion_certificate_accepted_tiles"
+                                ] += 1
+                                self.stats[
+                                    "deletion_certificate_zero_opacity_gaussians"
+                                ] += certified_zeroed
+                                record_sparse_route(
+                                    selected_level, retained_positions
+                                )
+                                if tile_trace is not None:
+                                    tile_trace[-1]["final_route"] = selected_level
+                                continue
+
+                            # The only sound certificate declined. Do not use
+                            # anchor similarity as a substitute for skipped
+                            # coverage, occlusion, or optical contribution.
+                            self.stats["deletion_certificate_rejected_tiles"] += 1
+                            reasons = self.stats[
+                                "deletion_certificate_rejection_reasons"
+                            ]
+                            reasons[certificate_reason] = (
+                                reasons.get(certificate_reason, 0) + 1
+                            )
+                            self.stats["uncertified_deletion_fallback_tiles"] += 1
+                            self.stats["full_tiles"] += 1
+                            self.stats["full_stage3_gaussians"] += (
+                                tile_size * tile_size * self.primitives_per_pixel
+                            )
+                            self.stats["pixels_original"] += tile_size * tile_size
+                            if tile_trace is not None:
+                                tile_trace[-1]["final_route"] = "Full"
+                            continue
                         if (
                             self.materialization
                             in (
@@ -3472,12 +4635,9 @@ class ProgressiveSAES:
                                 tile_size * tile_size * self.primitives_per_pixel
                             )
                             self.stats["pixels_original"] += tile_size * tile_size
+                            if tile_trace is not None:
+                                tile_trace[-1]["final_route"] = "Full"
                             continue
-                        retained_positions = (
-                            self.probe_positions
-                            if selected_level == "L0"
-                            else self.lightweight_positions
-                        )
                         fallback_to_full = False
                         is_assignment_consensus = self.materialization == (
                             "assignment-consensus-adapter-pseudo-descriptor-diagnostic"
@@ -3487,6 +4647,11 @@ class ProgressiveSAES:
                         )
                         consensus_plans = []
                         dense_oracle_plans = []
+                        joint_calls_before_tile = (
+                            self.stats["joint_calibrator"]["calls"]
+                            if self.joint_calibrator is not None
+                            else 0
+                        )
                         if is_same_budget_dense_oracle:
                             # This diagnostic reads each dense Stage-3 slot
                             # after a route candidate is fixed, including a
@@ -3636,6 +4801,14 @@ class ProgressiveSAES:
                             if tile_trace is not None:
                                 tile_trace[-1]["oracle_materialization"] = "compressed"
                         if fallback_to_full:
+                            if (
+                                self.joint_calibrator is not None
+                                and self.stats["joint_calibrator"]["calls"]
+                                != joint_calls_before_tile
+                            ):
+                                raise RuntimeError(
+                                    "joint calibrator cannot fall back after retained updates"
+                                )
                             if self.merge_semantics in (
                                 "conditional-optical-mass",
                                 "conditional-projected-optical-mass",
@@ -3688,24 +4861,13 @@ class ProgressiveSAES:
                             self.stats["pixels_original"] += tile_size * tile_size
                             continue
 
-                        pixel_count = tile_size * tile_size - len(retained_positions)
-                        if selected_level == "L0":
-                            self.stats["level0_tiles"] += 1
-                            self.stats["level0_pixels"] += pixel_count
-                            self.stats["l0_representatives"] += (
-                                len(retained_positions) * self.primitives_per_pixel
-                            )
-                            if is_same_budget_dense_oracle:
-                                self.stats["same_budget_dense_oracle_l0_tiles"] += 1
-                        else:
-                            self.stats["level1_tiles"] += 1
-                            self.stats["level1_pixels"] += pixel_count
-                            self.stats["l1_lightweight_anchors"] += (
-                                len(retained_positions) * self.primitives_per_pixel
-                            )
-                            if is_same_budget_dense_oracle:
-                                self.stats["same_budget_dense_oracle_l1_tiles"] += 1
-                        self.stats["pixels_original"] += len(retained_positions)
+                        record_sparse_route(
+                            selected_level,
+                            retained_positions,
+                            same_budget_dense_oracle=is_same_budget_dense_oracle,
+                        )
+                        if tile_trace is not None:
+                            tile_trace[-1]["final_route"] = selected_level
                         continue
 
                     self.stats["full_tiles"] += 1
@@ -3713,6 +4875,8 @@ class ProgressiveSAES:
                         tile_size * tile_size * self.primitives_per_pixel
                     )
                     self.stats["pixels_original"] += tile_size * tile_size
+                    if tile_trace is not None:
+                        tile_trace[-1]["final_route"] = "Full"
 
         total_tiles = max(1, self.stats["total_tiles_processed"])
         self.stats["total_modified_pixels"] = (
@@ -3788,6 +4952,14 @@ def apply_progressive_saes(
     depth_near: torch.Tensor | None = None,
     depth_far: torch.Tensor | None = None,
     materialization_guard: bool = True,
+    context_safety_guard: bool = False,
+    require_deletion_certificate: bool = False,
+    source_opacities: torch.Tensor | None = None,
+    source_opacity_certificate_kind: str | None = None,
+    joint_calibrator: Any | None = None,
+    joint_calibrator_model: str | None = None,
+    joint_calibrator_selected_head: Mapping[str, Any] | None = None,
+    offline_joint_calibration_capture: Any | None = None,
     tile_trace: List[Dict] | None = None,
 ) -> Tuple["torch.Tensor", Dict, List]:
     """
@@ -3862,9 +5034,17 @@ def apply_progressive_saes(
                 "raw-probe-vector-variance"
                 if decision_semantics == "probe-vector-first-hit"
                 else "raw-probe-mean-channel-variance"
-                if decision_semantics == "probe-channel-variance-first-hit"
+                if decision_semantics
+                in {
+                    "probe-channel-variance-first-hit",
+                    "paper-probe-feature-variance-first-hit",
+                }
                 else "normalized-probe-vector-standard-deviation"
-                if decision_semantics == "probe-normalized-std-first-hit"
+                if decision_semantics
+                in {
+                    "probe-normalized-std-first-hit",
+                    PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS,
+                }
                 else "normalized-probe-total-variance"
             ),
         )
@@ -3891,6 +5071,12 @@ def apply_progressive_saes(
         context_intrinsics=context_intrinsics,
         ray_depth_mode=ray_depth_mode,
         materialization_guard=materialization_guard,
+        context_safety_guard=context_safety_guard,
+        require_deletion_certificate=require_deletion_certificate,
+        joint_calibrator=joint_calibrator,
+        joint_calibrator_model=joint_calibrator_model,
+        joint_calibrator_selected_head=joint_calibrator_selected_head,
+        offline_joint_calibration_capture=offline_joint_calibration_capture,
     )
     routing_depths = (
         ProgressiveSAES.inverse_depth_candidate_coordinate(
@@ -3909,6 +5095,8 @@ def apply_progressive_saes(
         depths=depths,
         routing_depths=routing_depths,
         feat_norm=_feat_norm,
+        source_opacities=source_opacities,
+        source_opacity_certificate_kind=source_opacity_certificate_kind,
         tile_trace=tile_trace,
     )
 

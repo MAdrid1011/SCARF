@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,11 @@ def test_paper_sensitivity_grids_and_defaults():
 
 
 def test_sensitivity_dry_run_covers_every_grid_point_and_pair(tmp_path):
+    environment = {
+        **os.environ,
+        "SCARF_PYTHON_CLASSIC": sys.executable,
+        "SCARF_PYTHON_DEPTHSPLAT": sys.executable,
+    }
     result = subprocess.run(
         [
             sys.executable,
@@ -38,6 +44,7 @@ def test_sensitivity_dry_run_covers_every_grid_point_and_pair(tmp_path):
         cwd=ROOT,
         capture_output=True,
         text=True,
+        env=environment,
     )
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
@@ -56,9 +63,11 @@ def test_sensitivity_dry_run_covers_every_grid_point_and_pair(tmp_path):
     assert all("command" not in run for run in plan["runs"])
 
 
-def test_reviewer_sensitivity_uses_the_frozen_reviewer_profile(tmp_path):
+def test_reviewer_sensitivity_uses_the_frozen_reviewer_profile(tmp_path, monkeypatch):
     from scripts.sensitivity_sweep import build_plan
 
+    monkeypatch.setenv("SCARF_PYTHON_CLASSIC", sys.executable)
+    monkeypatch.setenv("SCARF_PYTHON_DEPTHSPLAT", sys.executable)
     plan = build_plan(tmp_path, evidence_profile="reviewer")
 
     assert plan["evidence_profile"] == "reviewer"

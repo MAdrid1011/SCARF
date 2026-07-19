@@ -363,9 +363,9 @@ def test_probe_vector_first_hit_routes_l1_without_unpublished_gaussian_gate():
     assert stats["level1_tiles"] == 1
     assert stats["full_tiles"] == 0
     assert stats["decision_semantics"] == "probe-vector-first-hit"
-    assert stats["zeroed_gaussians"] == 8
-    assert stats["effective_gaussians"] == 8
-    assert torch.count_nonzero(mask) == 8
+    assert stats["zeroed_gaussians"] == 4
+    assert stats["effective_gaussians"] == 12
+    assert torch.count_nonzero(mask) == 4
 
 
 def test_normalized_probe_standard_deviation_is_a_first_hit_diagnostic():
@@ -411,6 +411,44 @@ def test_standard_deviation_decision_squares_back_to_kernel_variance():
     assert standard_deviation._assignment_feature_variance(0.2) == pytest.approx(0.04)
     assert variance._assignment_feature_variance(0.2) == pytest.approx(0.2)
     assert standard_deviation._assignment_feature_variance(float("inf")) == float("inf")
+
+
+def test_paper_normalized_feature_mode_uses_normalized_std_with_tau_f():
+    from saes.progressive_saes import ProgressiveSAES, apply_progressive_saes
+
+    features = torch.zeros(1, 1, 2, 4, 4)
+    for position, vector in {
+        (0, 0): (1.0, 0.0),
+        (0, 3): (3.0, 0.0),
+        (3, 0): (1.0, 0.0),
+        (3, 3): (3.0, 0.0),
+    }.items():
+        features[0, 0, :, position[0], position[1]] = torch.tensor(vector)
+    depths = torch.ones(1, 1, 16, 1, 1)
+
+    _, stats, _ = apply_progressive_saes(
+        _gaussians(),
+        4,
+        4,
+        feature_var_threshold=0.2,
+        depth_std_threshold=0.1,
+        features=features,
+        depths=depths,
+        decision_semantics="paper-probe-normalized-feature-first-hit",
+        materialization_guard=False,
+    )
+    normalized = ProgressiveSAES(
+        4, 4, decision_semantics="paper-probe-normalized-feature-first-hit"
+    )
+    literal = ProgressiveSAES(
+        4, 4, decision_semantics="paper-probe-feature-variance-first-hit"
+    )
+
+    assert stats["feature_statistic"] == "normalized-probe-vector-standard-deviation"
+    assert stats["level0_tiles"] == 1
+    assert stats["level1_tiles"] == 0
+    assert normalized._assignment_feature_variance(0.2) == pytest.approx(0.04)
+    assert literal._assignment_feature_variance(0.2) == pytest.approx(0.2)
 
 
 def test_inverse_depth_candidate_routing_uses_s2_coordinate_without_changing_merge_depths():
@@ -544,14 +582,14 @@ def test_retained_anchor_attribute_diagnostic_excludes_skipped_descriptors():
     assert report["opacity_ratio"]["p50"] == pytest.approx(0.5)
 
 
-def test_l1_lightweight_positions_double_the_representative_anchors():
+def test_l1_lightweight_positions_widen_the_representative_anchors():
     from saes.progressive_saes import ProgressiveSAES
 
     representative = ProgressiveSAES.compute_probe_positions(4)
     lightweight = ProgressiveSAES.compute_lightweight_positions(4)
 
     assert len(representative) == 4
-    assert len(lightweight) == 8
+    assert len(lightweight) == 12
     assert lightweight[:4] == representative
     assert len(set(lightweight)) == len(lightweight)
 
@@ -1459,7 +1497,7 @@ def test_l1_selected_native_anchors_do_not_read_unselected_stage3_attributes():
         )
         assert stats["level0_tiles"] == 0
         assert stats["level1_tiles"] == 1
-        assert stats["l1_lightweight_anchors"] == 8
+        assert stats["l1_lightweight_anchors"] == 12
 
     assert torch.equal(baseline.means[0, retained], perturbed.means[0, retained])
     assert torch.equal(
@@ -1512,7 +1550,7 @@ def test_transmittance_diagnostic_conserves_constant_l1_optical_depth_without_un
         )
         assert stats["level0_tiles"] == 0
         assert stats["level1_tiles"] == 1
-        assert stats["l1_lightweight_anchors"] == 8
+        assert stats["l1_lightweight_anchors"] == 12
         assert stats["optical_depth_assignment_error_max"] <= 1e-6
         assert mask[unselected].all()
         assert torch.count_nonzero(gaussians.opacities[0, unselected]) == 0
@@ -1576,8 +1614,8 @@ def test_virtual_reconstruction_l1_uses_only_native_selected_anchors(materializa
         )
         assert stats["level0_tiles"] == 0
         assert stats["level1_tiles"] == 1
-        assert stats["l1_lightweight_anchors"] == 8
-        assert stats["virtual_reconstructed_gaussians"] == 8
+        assert stats["l1_lightweight_anchors"] == 12
+        assert stats["virtual_reconstructed_gaussians"] == 4
         assert stats["effective_gaussians"] == 16
         assert stats["zeroed_gaussians"] == 0
         assert mask[unselected].all()
@@ -1636,7 +1674,7 @@ def test_virtual_reconstruction_l1_consumes_the_extra_native_anchor_outputs(
         )
         assert stats["level0_tiles"] == 0
         assert stats["level1_tiles"] == 1
-        assert stats["l1_lightweight_anchors"] == 8
+        assert stats["l1_lightweight_anchors"] == 12
 
     assert not torch.allclose(baseline.means[0, unselected], perturbed.means[0, unselected])
     assert not torch.allclose(
@@ -1687,7 +1725,7 @@ def test_l1_selected_lightweight_anchors_are_native_stage3_outputs():
         )
         assert stats["level0_tiles"] == 0
         assert stats["level1_tiles"] == 1
-        assert stats["l1_lightweight_anchors"] == 8
+        assert stats["l1_lightweight_anchors"] == 12
 
     assert not torch.allclose(baseline.means[0, retained], perturbed.means[0, retained])
     assert not torch.allclose(
@@ -2152,9 +2190,9 @@ def test_adapter_offset_attribute_transport_preserves_l1_route_and_charges_recon
         assert attribute_stats[key] == adapter_stats[key]
     assert attribute_stats["level0_tiles"] == 0
     assert attribute_stats["level1_tiles"] == 1
-    assert attribute_stats["l1_lightweight_anchors"] == 8
+    assert attribute_stats["l1_lightweight_anchors"] == 12
     assert attribute_stats["l1_depth_reference"] == "primary-probes"
-    assert attribute_stats["adapter_offset_attribute_transport_uses"] == 8 * 8
+    assert attribute_stats["adapter_offset_attribute_transport_uses"] == 4 * 12
     retained = (~attribute_mask).nonzero(as_tuple=False).flatten()
     torch.testing.assert_close(
         attribute_path.means[0, retained], adapter_path.means[0, retained]
@@ -2171,7 +2209,7 @@ def test_adapter_offset_attribute_transport_preserves_l1_route_and_charges_recon
     )
     for key in ("l0_tiles", "l1_tiles", "full_tiles", "total_nonanchors"):
         assert attribute_ledger["events"][key] == adapter_ledger["events"][key]
-    assert attribute_ledger["events"]["adapter_offset_attribute_transport_pairs"] == 64
+    assert attribute_ledger["events"]["adapter_offset_attribute_transport_pairs"] == 48
     assert adapter_ledger["cycles"]["adapter_offset_attribute_reconstruction"] == 0
     assert attribute_ledger["cycles"]["adapter_offset_attribute_reconstruction"] > 0
     assert (

@@ -106,7 +106,18 @@ def _build_attribution_variants(
         raise RuntimeError("attribution representative mask disagrees with K/2K count")
     if full_count != int(stats["full_stage3_gaussians"]):
         raise RuntimeError("attribution Full mask disagrees with oracle count")
-    expected_removed = int(stats["level0_tiles"]) * 12 + int(stats["level1_tiles"]) * 8
+    from saes.probe_layout import (
+        compute_lightweight_positions,
+        compute_probe_positions,
+    )
+
+    tile_positions = 4 * 4
+    expected_removed = (
+        int(stats["level0_tiles"])
+        * (tile_positions - len(compute_probe_positions(4)))
+        + int(stats["level1_tiles"])
+        * (tile_positions - len(compute_lightweight_positions(4)))
+    )
     if removed_count != expected_removed:
         raise RuntimeError("attribution mask does not satisfy the fixed L0/L1 budgets")
     changed_representatives = _representative_update_mask(

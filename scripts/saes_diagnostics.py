@@ -8,7 +8,11 @@ from typing import Any, Mapping
 import torch
 import torch.nn.functional as F
 
-from saes.progressive_saes import ProgressiveSAES, paper_assignment_weights
+from saes.progressive_saes import (
+    PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS,
+    ProgressiveSAES,
+    paper_assignment_weights,
+)
 
 
 def representative_indices(
@@ -563,6 +567,8 @@ def guard_partition_full_s3_attribute_audit(
     materialization: str,
     effective_mask: torch.Tensor,
     partition_by_tile: Mapping[tuple[int, int, int], str],
+    source_scalars_by_tile: Mapping[tuple[int, int, int], Mapping[str, Any]] | None = None,
+    emit_per_tile_records: bool = False,
 ) -> dict[str, Any]:
     """Summarize fixed guard partitions with posthoc full-S3 attributes only.
 
@@ -614,7 +620,9 @@ def guard_partition_full_s3_attribute_audit(
     statistic = {
         "probe-vector-first-hit": "raw-probe-vector-variance",
         "probe-channel-variance-first-hit": "raw-probe-mean-channel-variance",
+        "paper-probe-feature-variance-first-hit": "raw-probe-mean-channel-variance",
         "probe-normalized-std-first-hit": "normalized-probe-vector-standard-deviation",
+        PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS: "normalized-probe-vector-standard-deviation",
         "current": "normalized-probe-total-variance",
     }.get(decision_semantics)
     if statistic is None:
@@ -648,6 +656,16 @@ def guard_partition_full_s3_attribute_audit(
         raise ValueError("guard partition labels must cover exactly the tile grid")
     if any(not isinstance(label, str) or not label for label in partition_by_tile.values()):
         raise ValueError("guard partition labels must be nonempty strings")
+    if emit_per_tile_records and source_scalars_by_tile is None:
+        raise ValueError("per-tile oracle records require source-only scalar records")
+    if source_scalars_by_tile is not None:
+        if set(source_scalars_by_tile) != expected_tiles:
+            raise ValueError("source scalar records must cover exactly the tile grid")
+        if any(
+            not isinstance(record, Mapping)
+            for record in source_scalars_by_tile.values()
+        ):
+            raise ValueError("source scalar records must be mappings")
 
     def flat_index(view: int, row: int, column: int, slot: int) -> int:
         return ((view * height * width + row * width + column) * primitives_per_pixel) + slot
@@ -717,13 +735,26 @@ def guard_partition_full_s3_attribute_audit(
         for label in sorted(set(partition_by_tile.values()))
     }
 
-    def append_metric(values: list[float], value: torch.Tensor | float) -> None:
+    def append_metric(
+        values: list[float],
+        value: torch.Tensor | float,
+        *,
+        tile_values: dict[str, list[float]] | None = None,
+        key: str | None = None,
+    ) -> None:
         scalar = float(value.detach().item()) if torch.is_tensor(value) else float(value)
         if not math.isfinite(scalar):
             raise ValueError("guard partition audit produced a non-finite metric")
         values.append(scalar)
+        if tile_values is not None:
+            if key not in tile_values:
+                raise ValueError("per-tile oracle received an unknown metric key")
+            tile_values[key].append(scalar)
 
     coordinate_scale = max(tile_size - 1, 1)
+    per_tile_records: list[dict[str, Any]] | None = (
+        [] if emit_per_tile_records else None
+    )
     for view, tile_row, tile_column in sorted(expected_tiles):
         label = partition_by_tile[(view, tile_row, tile_column)]
         tile_y = tile_row * tile_size
@@ -731,6 +762,8 @@ def guard_partition_full_s3_attribute_audit(
         level = level_from_mask(view, tile_y, tile_x)
         record = accumulators[label][level]
         record["tiles"] += 1
+        tile_values = {key: [] for key in metric_keys} if emit_per_tile_records else None
+        tile_retained_descriptor_count = 0
         feature_variance = variances[(view, tile_row, tile_column)]
         assignment_feature_variance = scorer._assignment_feature_variance(feature_variance)
 
@@ -778,6 +811,7 @@ def guard_partition_full_s3_attribute_audit(
                 dtype=torch.long,
             )
             record["retained_descriptor_count"] += int(output_indices.numel())
+            tile_retained_descriptor_count += int(output_indices.numel())
 
             # A Full tile is an unmodified Stage-3 passthrough, not a
             # zero-error sparse materialization sample. Keep its tile/count
@@ -865,19 +899,27 @@ def guard_partition_full_s3_attribute_audit(
                     record["native_covariance_scale_ratio"],
                     output_covariances[index].norm()
                     / source_covariances[index].norm().clamp_min(1.0e-8),
+                    tile_values=tile_values,
+                    key="native_covariance_scale_ratio",
                 )
                 append_metric(
                     record["native_transported_mean_update_l2"],
                     (output_means[index] - source_means[index]).norm(),
+                    tile_values=tile_values,
+                    key="native_transported_mean_update_l2",
                 )
                 append_metric(
                     record["native_harmonic_relative_update"],
                     (output_harmonics[index] - source_harmonics[index]).norm()
                     / source_harmonics[index].norm().clamp_min(1.0e-8),
+                    tile_values=tile_values,
+                    key="native_harmonic_relative_update",
                 )
                 append_metric(
                     record["native_opacity_absolute_update"],
                     (output_opacities[index] - source_opacities[index]).abs(),
+                    tile_values=tile_values,
+                    key="native_opacity_absolute_update",
                 )
 
             full_opacities = original.opacities[0, full_indices].float().reshape(-1)
@@ -891,6 +933,8 @@ def guard_partition_full_s3_attribute_audit(
                 record["full_s3_optical_depth_relative_error"],
                 (output_optical_depth - full_optical_depth).abs()
                 / full_optical_depth.abs().clamp_min(1.0e-8),
+                tile_values=tile_values,
+                key="full_s3_optical_depth_relative_error",
             )
 
             non_probe_indices = torch.tensor(
@@ -936,26 +980,56 @@ def guard_partition_full_s3_attribute_audit(
                     record["full_s3_oracle_covariance_scale_ratio"],
                     output_covariances[output_index].norm()
                     / oracle_covariance.norm().clamp_min(1.0e-8),
+                    tile_values=tile_values,
+                    key="full_s3_oracle_covariance_scale_ratio",
                 )
                 append_metric(
                     record["full_s3_oracle_covariance_relative_error"],
                     (output_covariances[output_index] - oracle_covariance).norm()
                     / oracle_covariance.norm().clamp_min(1.0e-8),
+                    tile_values=tile_values,
+                    key="full_s3_oracle_covariance_relative_error",
                 )
                 append_metric(
                     record["full_s3_oracle_mean_relative_error"],
                     (output_means[output_index] - oracle_mean).norm()
                     / oracle_mean.norm().clamp_min(1.0e-8),
+                    tile_values=tile_values,
+                    key="full_s3_oracle_mean_relative_error",
                 )
                 append_metric(
                     record["full_s3_oracle_harmonic_relative_error"],
                     (output_harmonics[output_index] - oracle_harmonic).norm()
                     / oracle_harmonic.norm().clamp_min(1.0e-8),
+                    tile_values=tile_values,
+                    key="full_s3_oracle_harmonic_relative_error",
                 )
                 append_metric(
                     record["full_s3_oracle_opacity_absolute_error"],
                     (output_opacities[output_index] - oracle_opacity).abs(),
+                    tile_values=tile_values,
+                    key="full_s3_oracle_opacity_absolute_error",
                 )
+
+        if per_tile_records is not None:
+            key = (view, tile_row, tile_column)
+            per_tile_records.append(
+                {
+                    "view_index": view,
+                    "tile_row": tile_row,
+                    "tile_column": tile_column,
+                    "partition": label,
+                    "route": level,
+                    "retained_descriptor_count": tile_retained_descriptor_count,
+                    "oracle_applicable": level != "Full",
+                    "source_scalars": dict(source_scalars_by_tile[key]),
+                    "dense_s3_posthoc_only": True,
+                    "oracle": {
+                        metric: _audit_summary(values)
+                        for metric, values in tile_values.items()
+                    },
+                }
+            )
 
     return {
         "schema_version": "1.0",
@@ -968,6 +1042,7 @@ def guard_partition_full_s3_attribute_audit(
         "nonprobe_stage2_depth_accessed": False,
         "assignment_depths": "selected-anchor-S2-only",
         "materialization": materialization,
+        "per_tile_records": per_tile_records,
         "partitions": {
             label: {
                 route: {
@@ -1103,7 +1178,9 @@ def materialization_attribute_audit(
     statistic = {
         "probe-vector-first-hit": "raw-probe-vector-variance",
         "probe-channel-variance-first-hit": "raw-probe-mean-channel-variance",
+        "paper-probe-feature-variance-first-hit": "raw-probe-mean-channel-variance",
         "probe-normalized-std-first-hit": "normalized-probe-vector-standard-deviation",
+        PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS: "normalized-probe-vector-standard-deviation",
         "current": "normalized-probe-total-variance",
     }.get(decision_semantics)
     if statistic is None:
@@ -1974,7 +2051,9 @@ def raw_s3_probe_interpolation_audit(
     statistic = {
         "probe-vector-first-hit": "raw-probe-vector-variance",
         "probe-channel-variance-first-hit": "raw-probe-mean-channel-variance",
+        "paper-probe-feature-variance-first-hit": "raw-probe-mean-channel-variance",
         "probe-normalized-std-first-hit": "normalized-probe-vector-standard-deviation",
+        PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS: "normalized-probe-vector-standard-deviation",
         "current": "normalized-probe-total-variance",
     }.get(decision_semantics)
     if statistic is None:

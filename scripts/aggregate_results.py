@@ -18,9 +18,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.result_record import build_quality_record, portable_command, write_result
+from scripts.result_record import (
+    EXECUTION_TRACE_SET_SCHEMA_VERSION,
+    build_quality_record,
+    execution_trace_performance_evidence_from_record,
+    execution_trace_set_sha256,
+    portable_command,
+    write_result,
+)
 from scripts.execution_contract import execution_contract
-from scripts.validate_result import validate
+from scripts.validate_result import reject_reference_only_record, validate
 
 
 QUALITY_METRICS = ("psnr_db", "ssim", "lpips")
@@ -56,6 +63,16 @@ SAES_EVENT_MAXIMA = (
     "assignment_weight_sum_error_max",
     "opacity_transmittance_error_max",
 )
+SAES_SPARSE_COUNTER_MAPS = (
+    "deletion_certificate_rejection_reasons",
+    "same_budget_dense_oracle_failure_reasons",
+    "multicontext_tangent_fallback_reasons",
+)
+SAES_INVARIANT_FIELDS = (
+    "saes_execution_identity",
+    "route_sha256",
+    "execution_dependency",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -83,6 +100,66 @@ def _mean_tree(values: list[Any]) -> Any:
     if all(value == values[0] for value in values[1:]):
         return copy.deepcopy(values[0])
     return copy.deepcopy(values)
+
+
+def _normalize_sparse_saes_counter_maps(
+    values: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Zero-fill per-sample SAES reason counters before mean aggregation."""
+
+    normalized = copy.deepcopy(values)
+    for field in SAES_SPARSE_COUNTER_MAPS:
+        reason_maps: list[dict[str, Any]] = []
+        for value in normalized:
+            saes = value.get("saes")
+            if not isinstance(saes, dict) or field not in saes:
+                reason_maps = []
+                break
+            reasons = saes[field]
+            if not isinstance(reasons, dict):
+                raise ValueError(f"fsdr_saes.saes.{field} must be an object")
+            reason_maps.append(reasons)
+        if not reason_maps:
+            continue
+
+        keys = set().union(*(reasons.keys() for reasons in reason_maps))
+        for reasons in reason_maps:
+            for key, count in reasons.items():
+                if (
+                    not isinstance(key, str)
+                    or not isinstance(count, (int, float))
+                    or isinstance(count, bool)
+                    or not math.isfinite(float(count))
+                    or count < 0
+                ):
+                    raise ValueError(
+                        f"fsdr_saes.saes.{field} must contain nonnegative counters"
+                    )
+            for key in keys:
+                reasons.setdefault(key, 0)
+    return normalized
+
+
+def _aggregate_fsdr_saes(values: list[dict[str, Any]]) -> dict[str, Any]:
+    """Mean measurements while preserving hash-bound SAES route provenance."""
+
+    normalized = _normalize_sparse_saes_counter_maps(values)
+    aggregate = _mean_tree(normalized)
+    saes_values = [value.get("saes") for value in normalized]
+    if not all(isinstance(value, dict) for value in saes_values):
+        return aggregate
+
+    for field in SAES_INVARIANT_FIELDS:
+        field_values = [value.get(field) for value in saes_values]
+        present = [value is not None for value in field_values]
+        if not any(present):
+            continue
+        if not all(present) or any(
+            value != field_values[0] for value in field_values[1:]
+        ):
+            raise ValueError(f"sample evidence mismatch: fsdr_saes.saes.{field}")
+        aggregate["saes"][field] = copy.deepcopy(field_values[0])
+    return aggregate
 
 
 def _mean(records: list[dict[str, Any]], path: tuple[str, ...]) -> float:
@@ -252,6 +329,7 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
     execution_indices = []
     for path in sorted(path.resolve() for path in paths):
         record = json.loads(path.read_text(encoding="utf-8"))
+        reject_reference_only_record(record)
         validate(record)
         evaluation = record["provenance"]["evaluation"]
         if evaluation.get("kind") != "sample":
@@ -275,6 +353,9 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
             "sha256": sha256_file(path),
             "sample_index": index,
         }
+        trace_digest = record["provenance"].get("execution_trace_sha256")
+        if trace_digest is not None:
+            sample_evidence["execution_trace_sha256"] = trace_digest
         orin_measurement = path.parent / "orin-evidence" / "measurement.json"
         if orin_measurement.is_file():
             sample_evidence["orin_measurement"] = {
@@ -287,6 +368,12 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
         raise ValueError("sample source indices must be unique")
     if sorted(execution_indices) != list(range(expected_count)):
         raise ValueError("sample execution indices must be unique and contiguous from zero")
+
+    trace_bound = [
+        "execution_trace_sha256" in record["provenance"] for record in records
+    ]
+    if any(trace_bound) and not all(trace_bound):
+        raise ValueError("sample provenance mismatch: execution trace binding")
 
     execution_contracts = [execution_contract(record) for record in records]
     if any(contract is not None for contract in execution_contracts):
@@ -309,6 +396,31 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
         selections, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     selection_sha256 = hashlib.sha256(selection_bytes).hexdigest()
+    trace_set: list[dict[str, Any]] | None = None
+    trace_set_sha256: str | None = None
+    if all(trace_bound):
+        evidence_by_index = {
+            item["sample_index"]: item for item in evidence
+        }
+        trace_set = [
+            {
+                "sample_index": record["provenance"]["evaluation"]["sample_index"],
+                "execution_index": record["provenance"]["evaluation"][
+                    "execution_index"
+                ],
+                "execution_trace_sha256": record["provenance"][
+                    "execution_trace_sha256"
+                ],
+            }
+            for record in records
+        ]
+        for entry in trace_set:
+            orin_measurement = evidence_by_index[entry["sample_index"]].get(
+                "orin_measurement"
+            )
+            if isinstance(orin_measurement, dict):
+                entry["orin_measurement_sha256"] = orin_measurement["sha256"]
+        trace_set.sort(key=lambda item: item["sample_index"])
 
     first = records[0]
     schema_version = first["schema_version"]
@@ -366,6 +478,8 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
     }
 
     provenance = copy.deepcopy(first["provenance"])
+    provenance.pop("execution_trace", None)
+    provenance.pop("execution_trace_sha256", None)
     provenance["command"] = portable_command([sys.executable, *sys.argv])
     provenance["evaluation"] = {
         "kind": "dataset_aggregate",
@@ -377,6 +491,13 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
         "aggregation": "arithmetic mean over deterministic sample indices",
         "sample_results": sorted(evidence, key=lambda item: item["sample_index"]),
     }
+    if trace_set is not None:
+        provenance["evaluation"].update(
+            {
+                "execution_trace_set_schema_version": EXECUTION_TRACE_SET_SCHEMA_VERSION,
+                "execution_trace_set": trace_set,
+            }
+        )
     record = {
         "schema_version": schema_version,
         "provenance": provenance,
@@ -390,7 +511,9 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
             "components": components,
         },
         "ablation": _mean_tree([item["ablation"] for item in records]),
-        "fsdr_saes": _mean_tree([item["fsdr_saes"] for item in records]),
+        "fsdr_saes": _aggregate_fsdr_saes(
+            [item["fsdr_saes"] for item in records]
+        ),
         "hardware": copy.deepcopy(first["hardware"]),
         "validation": {
             "reproducible": True,
@@ -410,6 +533,21 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
         record["performance"]["stages"] = evidence["stages"]
         record["events"] = evidence["events"]
         record["energy"] = _mean_tree([item["energy"] for item in records])
+    if trace_set is not None:
+        aggregate_performance_evidence = (
+            execution_trace_performance_evidence_from_record(record)
+        )
+        trace_set_sha256 = execution_trace_set_sha256(
+            trace_set, aggregate_performance_evidence
+        )
+        record["provenance"]["evaluation"].update(
+            {
+                "execution_trace_performance_evidence": aggregate_performance_evidence,
+                "execution_trace_set_sha256": trace_set_sha256,
+            }
+        )
+        record["quality"]["execution_trace_set_sha256"] = trace_set_sha256
+        record["performance"]["execution_trace_set_sha256"] = trace_set_sha256
     validate(record)
     return record
 

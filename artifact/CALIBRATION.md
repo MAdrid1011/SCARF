@@ -147,6 +147,34 @@ sidecar/provenance hashes, trace sets, and candidate records. It is frozen
 before the first evaluation run; changing it changes source identity and
 invalidates resume/evidence reuse.
 
+## ACID Materialization Epoch Boundary
+
+All earlier ACID joint-materialization contracts, caches, smoke runs,
+runtime evidence, and result records are superseded. They must not be run,
+resumed, promoted, or included in a reviewer-facing release.
+
+ACID v5 is the only active frozen author-side epoch. Its local provenance was
+generated and live-validated, but it is not execution proof. No registered
+deterministic verifier or external authority exists, so its candidate runtime,
+promotion, and result paths remain fail-closed; no cache, train, runtime, or
+result evidence exists. It remains `paper_result_eligible=false`: it cannot
+authorize a DL3DV target-RGB quality gate, replace the required DL3DV
+train/holdout calibration, establish a global S2/S3 saving, or support any
+Results Reproduced claim.
+
+## Fixed Sample-0 SAES Diagnostic
+
+The public 4-by-4, 12-anchor, guard-on selector
+`bash scripts/run_ae.sh saes-quality --profile dl3dv-gate` is
+calibration-gated. Until an evaluation-disjoint configuration is frozen, it
+fails closed; when available, it produces only a non-claim DL3DV sample-0
+diagnostic. It neither selects a configuration nor supplies a table or figure
+aggregate.
+
+The current v5 sample-0 record preserves quality by taking the Full path for
+every tile. It demonstrates fallback fidelity only and supplies no SAES
+reduction evidence for Table 3 or Figure 11.
+
 ## Faithfulness Boundary
 
 FSDR remains random-hyperplane LSH plus associative cache lookup and a cached
@@ -156,11 +184,14 @@ the cached anchor; it does not introduce another reuse method.
 
 SAES routing remains the published probe feature-variance then probe
 depth-standard-deviation first-hit hierarchy. L0 uses probe-anchored bilateral
-aggregation. L1 uses a less-compressive `2K(T)` lightweight probe-constrained
-path. Its depth-reliability mean and standard deviation are computed from the
-primary `K(T)` routing probes; the extra L1 anchors are an execution and
-aggregation expansion, not a new depth reference. Neither path may inspect
-target images or full non-probe Stage-3 outputs.
+aggregation. At `T=4`, L1 uses the four primary corner probes plus the fixed
+eight edge anchors, for twelve retained anchors total. Its depth-reliability
+mean and standard deviation are computed from the primary four routing probes;
+the extra L1 anchors are an execution and aggregation expansion, not a new
+depth reference. Neither path may inspect target images or full non-probe
+Stage-3 outputs. The context-only safety guard may use only selected probes,
+their depths, and context camera projection data; missing or invalid geometry
+must leave the tile on the Full path.
 For moment matching, the released implementation uses the already available
 C2W camera transform, normalized intrinsics, assignment-weighted probe depth,
 and the non-probe pixel coordinate to lift a pseudo 3D mean on that pixel's

@@ -60,10 +60,10 @@ class SAESRetainedOutputSchedulerTest extends AnyFlatSpec with ChiselScalatestTe
     }
   }
 
-  it should "retain the L0 prefix and request four additional native L1 descriptors" in {
+  it should "retain the L0 prefix and request eight boundary L1 descriptors" in {
     test(new SAESRetainedOutputScheduler) { dut =>
       idle(dut)
-      runRoute(dut, SAESLevel.sL1, Seq(0, 3, 12, 15, 5, 10, 1, 2))
+      runRoute(dut, SAESLevel.sL1, Seq(0, 3, 12, 15, 1, 2, 4, 7, 8, 11, 13, 14))
     }
   }
 

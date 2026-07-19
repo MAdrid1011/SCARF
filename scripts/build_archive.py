@@ -70,7 +70,6 @@ SOURCE_RELEASE_DIRECTORIES = frozenset(
 SOURCE_RELEASE_ARTIFACT_FILES = frozenset(
     {
         "artifact/CALIBRATION.md",
-        "artifact/CHECKLIST.md",
         "artifact/CLAIMS.md",
         "artifact/EVALUATION_PROTOCOL.md",
         "artifact/HARDWARE_SCOPE.md",
@@ -98,6 +97,51 @@ SOURCE_RELEASE_ARTIFACT_FILES = frozenset(
     }
 )
 SOURCE_RELEASE_QUICK_DATASET_PREFIX = "datasets/quick-re10k/"
+# These paths are author-side diagnostic entrypoints, failed-candidate material,
+# or joint-calibration work in progress.  They are intentionally explicit so
+# that the reviewer source bundle retains ordinary scripts, documentation, and
+# tests rather than excluding a whole top-level directory.
+SOURCE_RELEASE_INTERNAL_PATH_PREFIXES = frozenset(
+    {
+        "data/acid_joint_",
+        "data/context_only_audit_input.py",
+        "data/frozen_audit_contract.py",
+        "data/plan_acid_joint_",
+        "data/prepare_dl3dv_multicontext_tangent_audit_inputs.py",
+        "data/prepare_dl3dv_target_free_audit_inputs.py",
+        "docs/saes-execution-dependency-audit.md",
+        "integration/acid_joint_",
+        "saes/frozen_audit_preflight.py",
+        "saes/joint_materialization_",
+        "saes/projected_optical_moment_audit.py",
+        "scripts/acid_joint_",
+        "scripts/saes_adapter_offset_attribute_transport_quality_gate.py",
+        "scripts/saes_dependency_audit",
+        "scripts/saes_dependency_locality_audit.py",
+        "scripts/saes_l1_primary_reference_",
+        "scripts/saes_multicontext_directional_audit.py",
+        "scripts/saes_same_budget_",
+        "scripts/saes_selected_output_quality_gate.py",
+        "scripts/saes_selected_output_replay_audit.py",
+        "tests/test_acid_joint_",
+        "tests/test_context_only_audit_input.py",
+        "tests/test_frozen_audit_",
+        "tests/test_joint_materialization_",
+        "tests/test_prepare_dl3dv_target_free_audit_inputs.py",
+        "tests/test_saes_adapter_offset_attribute_transport_quality_gate.py",
+        "tests/test_saes_dependency_audit.py",
+        "tests/test_saes_dependency_locality_audit.py",
+        "tests/test_saes_guard_partition_audit.py",
+        "tests/test_saes_l1_primary_reference_attribute_audit.py",
+        "tests/test_saes_materialization_audit.py",
+        "tests/test_saes_multicontext_directional_audit.py",
+        "tests/test_saes_multicontext_tangent_materialization.py",
+        "tests/test_saes_projected_optical_moment_audit.py",
+        "tests/test_saes_same_budget_",
+        "tests/test_saes_selected_output_quality_gate.py",
+        "tests/test_saes_selected_output_replay.py",
+    }
+)
 EVIDENCE_RELEASE_ROOT_FILES = frozenset({"reference-manifest.json"})
 EVIDENCE_RELEASE_CONTRACT_FILES = frozenset(
     {
@@ -146,6 +190,11 @@ def _require_regular_file(path: Path, *, label: str) -> None:
 
 def _is_source_release_path(normalized: str) -> bool:
     parts = PurePosixPath(normalized).parts
+    if any(
+        normalized.startswith(prefix)
+        for prefix in SOURCE_RELEASE_INTERNAL_PATH_PREFIXES
+    ):
+        return False
     if "checkpoints" in parts:
         return False
     if len(parts) == 1:

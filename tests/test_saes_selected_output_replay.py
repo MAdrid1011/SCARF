@@ -7,12 +7,18 @@ torch = pytest.importorskip("torch")
 nn = pytest.importorskip("torch.nn")
 
 
-def _head(in_channels=3, hidden_channels=5, out_channels=2):
+def _head(
+    in_channels=3,
+    hidden_channels=5,
+    out_channels=2,
+    *,
+    padding_mode="zeros",
+):
     torch.manual_seed(17)
     return nn.Sequential(
-        nn.Conv2d(in_channels, hidden_channels, 3, 1, 1),
+        nn.Conv2d(in_channels, hidden_channels, 3, 1, 1, padding_mode=padding_mode),
         nn.GELU(),
-        nn.Conv2d(hidden_channels, out_channels, 3, 1, 1),
+        nn.Conv2d(hidden_channels, out_channels, 3, 1, 1, padding_mode=padding_mode),
     )
 
 
@@ -39,6 +45,37 @@ def test_replay_matches_dense_head_at_selected_outputs_including_edges():
     assert comparison["equivalent"] is True
     assert comparison["maximum_absolute_delta"] < 1.0e-6
     assert replay.values.shape == (2, 2, int(mask.sum()))
+
+
+def test_replay_matches_dense_replicate_padded_head_at_selected_outputs_including_edges():
+    """Match the padding semantics used by DepthSplat's gaussian_head."""
+    from saes.selected_output_replay import (
+        compare_selected_outputs,
+        replay_two_conv_selected_outputs,
+    )
+
+    head = _head(in_channels=11, hidden_channels=7, out_channels=13, padding_mode="replicate")
+    torch.manual_seed(31)
+    inputs = torch.randn(2, 11, 8, 12)
+    mask = _four_corner_mask(8, 12)
+    dense = head(inputs)
+    replay = replay_two_conv_selected_outputs(head, inputs, mask)
+    comparison = compare_selected_outputs(dense, replay)
+
+    assert comparison["equivalent"] is True
+    assert comparison["maximum_absolute_delta"] < 1.0e-6
+    assert replay.events["padding_mode"] == "replicate"
+
+
+def test_replay_rejects_mixed_padding_modes():
+    from saes.selected_output_replay import replay_two_conv_selected_outputs
+
+    head = _head()
+    head[2].padding_mode = "replicate"
+    with pytest.raises(ValueError, match="shared padding mode"):
+        replay_two_conv_selected_outputs(
+            head, torch.ones(1, 3, 4, 4), _four_corner_mask(4, 4)
+        )
 
 
 def test_replay_event_ledger_charges_dense_first_conv_closure_and_selected_second_conv():
@@ -106,6 +143,29 @@ def test_batched_replay_uses_per_view_masks_and_zero_fills_unexecuted_outputs():
     assert replay.events["selected_output_batch_items"] == 1
     assert replay.events["omitted_final_output_positions"] == 14
     assert replay.events["actual_head_macs"] < replay.events["dense_head_macs"]
+
+
+def test_batched_replicate_replay_preserves_edge_values_and_zero_fills_omissions():
+    from saes.selected_output_replay import replay_two_conv_selected_output_maps
+
+    head = _head(padding_mode="replicate")
+    torch.manual_seed(37)
+    inputs = torch.randn(2, 3, 4, 4)
+    masks = torch.zeros(2, 4, 4, dtype=torch.bool)
+    masks[0, 0, 0] = True
+    masks[0, 3, 3] = True
+    masks[1, 0, 3] = True
+    masks[1, 3, 0] = True
+
+    replay = replay_two_conv_selected_output_maps(head, inputs, masks)
+    dense = head(inputs)
+    for item in range(2):
+        selected = masks[item]
+        torch.testing.assert_close(
+            replay.values[item, :, selected], dense[item, :, selected], rtol=1.0e-5, atol=1.0e-5
+        )
+        assert torch.count_nonzero(replay.values[item, :, ~selected]) == 0
+    assert replay.events["padding_mode"] == "replicate"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

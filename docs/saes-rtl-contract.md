@@ -11,8 +11,8 @@ classification, conservatively executes the ordinary S2/S3 path.  This is
 intentional until the following three components are connected and reconciled
 to the software event trace:
 
-1. probe and selected-L1-anchor execution;
-2. bilateral assignment plus first/second-moment matching; and
+1. probe and selected-L1-anchor execution,
+2. bilateral assignment plus first/second-moment matching, and
 3. retained-descriptor storage and S4 hand-off.
 
 The first implementation increment, `SAESDescriptorBuffer`, is complete as a
@@ -24,8 +24,8 @@ implemented.
 
 SAES preserves its published decision order: probe feature variance, then
 probe depth standard deviation, then Full.  Descriptor storage and numeric
-stability checks do not feed a fourth routing condition.  The buffer receives
-only descriptors selected by that route; it never restores or reads a skipped
+stability checks do not feed a fourth routing condition. The buffer receives
+only descriptors selected by that route. It never restores or reads a skipped
 non-probe descriptor.
 
 The software path represents a retained descriptor as world-space mean,
@@ -41,7 +41,7 @@ the externally visible compact layout:
 
 The descriptor buffer stores this packed representation as 128-bit words.  It
 uses 6 words at SH degree 2 and 12 words at degree 4.  These counts are derived
-from the layout above and the existing 128-bit public memory width; they are
+from the layout above and the existing 128-bit public memory width. They are
 not fitted to a quality result.
 
 ## Buffer interface contract
@@ -53,18 +53,18 @@ beat at a time, and an invalid index, beat, or incomplete descriptor returns
 `readValid=false`.  A new first beat invalidates a prior completed descriptor
 at that slot, preventing stale output reuse.
 
-The buffer must be driven by selected L0/L1 anchors only.  The intended path
-counts are four L0 descriptors and eight L1 descriptors for a 4x4 tile with
-one primitive per pixel.  These are interface bounds, not a claim that the
+The buffer must be driven by selected L0/L1 anchors only. The intended path
+counts are four L0 descriptors and twelve L1 descriptors for a 4x4 tile with
+one primitive per pixel. These are interface bounds, not a claim that the
 surrounding pipeline already executes the sparse paths.
 
 ## Verification and claim boundary
 
 Tests must prove:
 
-- degree-dependent packed beat counts and invalid-range rejection;
-- write/read ordering and completion visibility;
-- overwrite invalidation; and
+- degree-dependent packed beat counts and invalid-range rejection,
+- write/read ordering and completion visibility,
+- overwrite invalidation, and
 - agreement between buffer beat counts and `saes.hardware_accounting` traffic.
 
 `SAESDescriptorBufferTest` currently proves the degree-2 and degree-4 beat
@@ -73,15 +73,23 @@ rejection. SystemVerilog emission is covered by `VerilogEmitTest`. A later
 Python/RTL replay will bind dynamic retained-anchor counts and buffer traffic to
 the same per-tile event trace before the final bullet can pass.
 
+The separate stage-event simulator is not that replay. It accepts caller-defined
+event counts, resource lanes, cycle costs, and dependencies, and it has no demo
+call site. Current runtime statistics also omit direct primary-probe,
+secondary-probe, and Full replay counts. Its schedule length cannot be reported
+as RTL-cycle-equivalent timing.
+
 ## Retained-output scheduler contract
 
 `SAESRetainedOutputScheduler` is the next control increment for the submitted
 T=4 configuration. After an already-completed L0 route it requests native
 S2/S3 descriptors in the exact software order `[0, 3, 12, 15]`. After L1 it
-preserves that prefix and requests `[5, 10, 1, 2]`, for eight descriptors in
-total. The scheduler advances only after an upstream producer asserts
-`upstreamDescriptorValid`; it has no descriptor-data input, no interpolation,
-and no route decision input beyond the accepted L0/L1 result.
+preserves that prefix and requests the eight boundary descriptors
+`[1, 2, 4, 7, 8, 11, 13, 14]`, for twelve descriptors in total. The complete L1
+order is `[0, 3, 12, 15, 1, 2, 4, 7, 8, 11, 13, 14]`. The scheduler advances
+only after an upstream producer asserts `upstreamDescriptorValid`. It has no
+descriptor-data input, no interpolation, and no route decision input beyond the
+accepted L0/L1 result.
 
 The scheduler is deliberately not wired into `ScarfTop`: the current dense
 models have not supplied a sparse S2/S3 producer, and connecting a constant or
@@ -111,15 +119,19 @@ M_2=\sum_jw_j(\Sigma_j+\mu_j^2).
 \]
 
 On a separate `finish` cycle it emits
-\(\mu=\operatorname{trunc}(M_1/M_0)\) and
-\(\Sigma=\max(0,\operatorname{trunc}(M_2/M_0)-\mu^2)\).  Division truncates
-toward zero, and the nonnegative clamp protects a covariance diagonal against
-finite-precision cancellation.  The Python reference uses the identical
-integer rule.  A vector/descriptor wrapper may replicate these lanes for the
-three means, six covariance terms, SH averages, and opacity average only after
-the scalar replay passes.
 
-Each update consumes one core cycle; `finish` produces a one-cycle `done`
+\[
+\mu=\operatorname{trunc}(M_1/M_0),\qquad
+\Sigma=\max(0,\operatorname{trunc}(M_2/M_0)-\mu^2).
+\]
+
+Division truncates toward zero, and the nonnegative clamp protects a covariance
+diagonal against finite-precision cancellation. The Python reference uses the
+identical integer rule. A vector/descriptor wrapper may replicate these lanes
+for the three means, six covariance terms, SH averages, and opacity average only
+after the scalar replay passes.
+
+Each update consumes one core cycle. `finish` produces a one-cycle `done`
 record. Chisel and Python tests share an exact synthetic merge vector and a
 constant-descriptor case. These local core cycles are not yet the analytic-ledger
 cycle count: assignment generation, descriptor packing, and top-level

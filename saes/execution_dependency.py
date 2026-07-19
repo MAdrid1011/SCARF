@@ -27,7 +27,14 @@ def _dense_stage(reason: str, *, evidence: dict[str, Any] | None = None) -> dict
 
 
 def _classic_contract(
-    model: str, *, results_path: str, results_sha256: str
+    model: str,
+    *,
+    results_path: str,
+    results_sha256: str,
+    candidate_search_reason: str = (
+        "no probe-only candidate-search implementation has yet completed "
+        "a target-free equivalence and quality-pipeline audit"
+    ),
 ) -> dict[str, Any]:
     dense_evidence = {
         "kind": "saes_s2s3_dense_dependency_audit",
@@ -48,8 +55,7 @@ def _classic_contract(
                 evidence=dense_evidence,
             ),
             "s2_candidate_search": _dense_stage(
-                "no probe-only candidate-search implementation has yet completed "
-                "a target-free equivalence and quality-pipeline audit"
+                candidate_search_reason
             ),
             "selected_output_head": {
                 "execution": "same_weight_replay_available_audit_required",
@@ -96,6 +102,10 @@ _MODEL_CONTRACTS: dict[str, dict[str, Any]] = {
             "mvsplat_sample0_s2s3_dependency_audit_v1/results.json"
         ),
         results_sha256="ac5610772240887f7f5004c050fbc0ad08261337dd18b02f3430c7cf00174ea5",
+        candidate_search_reason=(
+            "the selected raw-correlation diagnostic stops before corr_refine_net; "
+            "no probe-only final-depth route-equivalence or quality-pipeline audit exists"
+        ),
     ),
     "depthsplat": {
         "model": "depthsplat",
@@ -122,13 +132,18 @@ _MODEL_CONTRACTS: dict[str, dict[str, Any]] = {
                 "no probe-only candidate-search implementation has passed an audit"
             ),
             "selected_output_head": {
-                "execution": "last_conv_replay_not_implemented",
+                "execution": "same_weight_replicate_replay_available_audit_required",
                 "savings_permitted": False,
-                "first_three_conv_closure": "dense_for_repeated_T4_selection",
-                "footprint_reference": "saes.depthsplat_s3_footprint",
+                "head_structure": "Conv3x3->GELU->Conv3x3",
+                "padding_mode": "replicate",
+                "first_conv_closure": "dense_for_repeated_T4_corner_selection",
+                "second_conv": "selected_outputs_only",
+                "implementation": "saes.selected_output_replay",
+                "audit_entrypoint": "scripts/acid_joint_runtime_control_evidence.py",
                 "reason": (
-                    "the four-convolution adaptor needs an explicit same-weight "
-                    "final-convolution replay before selected head work can be counted"
+                    "the standalone final Gaussian-head replay is not yet bound "
+                    "into a source-bound runtime evidence record with its actual "
+                    "selected-output event trace"
                 ),
             },
             "s3_retained_descriptor": _dense_stage(

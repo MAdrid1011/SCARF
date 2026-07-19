@@ -52,8 +52,15 @@ Fallback Options (for debugging):
     --baseline-only   Only run baseline, skip SCARF pipeline
 """
 
+from __future__ import annotations
+
 import sys
 import os
+import time
+import json
+from dataclasses import dataclass
+from typing import Dict, Optional, List
+import argparse
 from pathlib import Path
 
 # SCARF root directory
@@ -65,39 +72,71 @@ os.environ.setdefault('TORCH_HOME', str(SCARF_ROOT / 'assets' / 'torch'))
 # Add SCARF to path for imports
 sys.path.insert(0, str(SCARF_ROOT))
 
-from scripts.demo_cli import parse_args as parse_demo_args
-
-# Keep the public CLI inspectable before heavyweight model dependencies exist.
-if any(option in sys.argv[1:] for option in ("-h", "--help")):
-    parse_demo_args()
-
-import torch
-import torch.nn.functional as F
-from einops import rearrange
-import time
-import json
-from dataclasses import dataclass
-from typing import Dict, Tuple, Optional, List
-import argparse
-
-# SCARF imports
-from adapters import create_adapter, BaseAdapter
-from integration import (
-    create_model_loader,
-    load_target_free_calibration_data,
-    ModelBundle,
-    DataBundle,
+from scripts.demo_cli import (
+    parse_args as parse_demo_args,
+    resolve_frozen_saes_execution,
 )
-from ggu import GGUProcessor, GGUConfig
-from fsdr import FSDRSimulator
-from saes import ProgressiveSAES, apply_progressive_saes
 from saes.execution_dependency import (
     resolve_s2_s3_execution_contract,
     s2_s3_saving_ratio,
 )
 from saes.hardware_accounting import build_saes_event_ledger
-from scripts.reproducibility import capture_torch_rng_state, restore_torch_rng_state
-from scripts.result_record import strict_stage_error
+
+# Keep the public CLI inspectable before heavyweight model dependencies exist.
+if any(option in sys.argv[1:] for option in ("-h", "--help")):
+    parse_demo_args()
+
+# Keep non-executing contract helpers importable in the CPU-only environment
+# used by release and CLI checks.  Model and torch imports remain mandatory for
+# an actual demo invocation and are checked before any execution work begins.
+_RUNTIME_IMPORT_ERROR: ModuleNotFoundError | None = None
+try:
+    import torch
+    import torch.nn.functional as F
+    from einops import rearrange
+
+    from adapters import create_adapter, BaseAdapter
+    from integration import (
+        create_model_loader,
+        load_target_free_calibration_data,
+        ModelBundle,
+        DataBundle,
+    )
+    from ggu import GGUProcessor, GGUConfig
+    from fsdr import FSDRSimulator
+    from saes import ProgressiveSAES, apply_progressive_saes
+    from saes.progressive_saes import DELETION_CERTIFICATE_SOURCE_KIND
+    from scripts.reproducibility import capture_torch_rng_state, restore_torch_rng_state
+    from scripts.result_record import strict_stage_error
+except ModuleNotFoundError as exc:
+    _RUNTIME_IMPORT_ERROR = exc
+    torch = None
+    F = None
+    rearrange = None
+    create_adapter = None
+    BaseAdapter = None
+    create_model_loader = None
+    load_target_free_calibration_data = None
+    ModelBundle = None
+    DataBundle = None
+    GGUProcessor = None
+    GGUConfig = None
+    FSDRSimulator = None
+    ProgressiveSAES = None
+    apply_progressive_saes = None
+    DELETION_CERTIFICATE_SOURCE_KIND = None
+    capture_torch_rng_state = None
+    restore_torch_rng_state = None
+    strict_stage_error = None
+
+
+def _require_runtime_dependencies() -> None:
+    """Reject execution clearly when the locked model environment is absent."""
+
+    if _RUNTIME_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            "scripts/demo.py requires the locked model environment for execution"
+        ) from _RUNTIME_IMPORT_ERROR
 
 # SCARF hardware clock frequency (MHz) — default 1 GHz, overridable via --freq
 SCARF_FREQ_MHZ = 1000
@@ -1269,12 +1308,59 @@ def compute_saes_low_var_agreement(
 # ============================================================
 # Main Pipeline
 # ============================================================
+def require_claim_timing_backend() -> None:
+    """Fail closed until an RTL- or gate-trace claim backend is integrated."""
+    raise RuntimeError(
+        "--claim-run requires source-bound RTL or gate-level timing evidence; "
+        "the shipped component simulators and stage-event scheduler are "
+        "diagnostic-only"
+    )
+
+
+def validate_frozen_saes_execution_stats(
+    saes_stats: Dict,
+    route: Dict,
+) -> None:
+    """Verify that strict execution exposed the frozen SAES route."""
+    identity = route["execution_identity"]
+    if identity is None:
+        return
+    for field, expected in (
+        ("decision_semantics", route["decision_semantics"]),
+        ("depth_statistic", route["depth_routing_semantics"]),
+        ("cross_check_threshold", route["cross_check_threshold"]),
+        ("materialization_guard_enabled", route["materialization_guard"]),
+        ("context_safety_guard_enabled", route["context_safety_guard"]),
+        ("deletion_certificate_required", route["require_deletion_certificate"]),
+    ):
+        if saes_stats.get(field) != expected:
+            raise RuntimeError(
+                f"frozen SAES execution did not expose {field}: "
+                f"expected {expected!r}, got {saes_stats.get(field)!r}"
+            )
+    if (
+        identity.get("moment_geometry") == "c2w-probe-depth-ray-v1"
+        and saes_stats.get("camera_aware_moment_matching") is not True
+    ):
+        raise RuntimeError(
+            "frozen SAES execution requires camera-aware moment matching"
+        )
+
+
 def main(argv=None):
     global CONFIG
     
     args = parse_demo_args(argv)
+    _require_runtime_dependencies()
     _reject_assignment_consensus_rendering(args.saes_materialization)
-    strict_run = args.claim_run or args.functional_run or args.diagnostic_run
+    if args.claim_run:
+        require_claim_timing_backend()
+    strict_run = (
+        args.claim_run
+        or args.functional_run
+        or args.diagnostic_run
+        or args.frozen_saes_route
+    )
     from scripts.mechanism_config import (
         load_mechanism_config,
         require_calibrated_mechanism,
@@ -1398,6 +1484,15 @@ def main(argv=None):
     if args.fsdr_hamming is not None:
         CONFIG.fsdr_hamming_threshold = args.fsdr_hamming
         CONFIG.fsdr_reuse_hamming = args.fsdr_hamming
+
+    saes_execution_route = resolve_frozen_saes_execution(
+        args,
+        tile_size=CONFIG.tile_size,
+        feature_threshold=CONFIG.feature_var_threshold,
+        depth_threshold=CONFIG.depth_std_threshold,
+        cross_check_threshold=CONFIG.saes_cross_check,
+        execution_identity=mechanism_config.get("saes_execution_identity"),
+    )
     
     # All models use the same universal SAES/FSDR configuration.
     # DINOv2 (DepthSplat) vs CNN (TranSplat/MVSplat) features naturally have different
@@ -2718,6 +2813,11 @@ def main(argv=None):
     actual_sh_degree = CONFIG.sh_degree
     actual_scale_min = CONFIG.scale_min
     actual_scale_max = CONFIG.scale_max
+    # A representative deletion may use only the direct S2 alpha source for
+    # TranSplat/MVSplat.  DepthSplat alpha originates in its raw S3 head and
+    # therefore remains ineligible for this source-only certificate.
+    deletion_certificate_source_opacities = None
+    deletion_certificate_source_kind = None
     
     # Special case: if ALL hardware simulators are disabled, use baseline directly
     # This avoids error accumulation from running components separately
@@ -2865,6 +2965,9 @@ def main(argv=None):
                 harmonics=ggu_harmonics,
                 opacities=ggu_opacities,
             )
+            if args.model in {"transplat", "mvsplat"}:
+                deletion_certificate_source_opacities = opacities
+                deletion_certificate_source_kind = DELETION_CERTIFICATE_SOURCE_KIND
             
             # The hardware-only diagnostic intentionally has no baseline
             # encoder or target-image path.  Its event ledger remains valid
@@ -3000,6 +3103,11 @@ def main(argv=None):
                     harmonics=ga_harmonics,
                     opacities=ga_opacities,
                 )
+                if args.model in {"transplat", "mvsplat"}:
+                    deletion_certificate_source_opacities = opacities
+                    deletion_certificate_source_kind = (
+                        DELETION_CERTIFICATE_SOURCE_KIND
+                    )
                 
                 # Verify against baseline
                 mse_means = F.mse_loss(scarf_gaussians_full.means, baseline_gaussians.means)
@@ -3074,6 +3182,14 @@ def main(argv=None):
         )
         # Reset savings tracker
         savings = SavingsTracker(model_type=args.model)
+        saes_execution_route = resolve_frozen_saes_execution(
+            args,
+            tile_size=CONFIG.tile_size,
+            feature_threshold=CONFIG.feature_var_threshold,
+            depth_threshold=CONFIG.depth_std_threshold,
+            cross_check_threshold=CONFIG.saes_cross_check,
+            execution_identity=mechanism_config.get("saes_execution_identity"),
+        )
         print("=" * 70)
     
     # --------------------------------------------------------
@@ -3304,15 +3420,15 @@ def main(argv=None):
         )
 
         modified_mask, saes_stats, continue_pixels = apply_progressive_saes(
-            saes_gaussians, h, w, CONFIG.tile_size, gpp=1,
-            feature_var_threshold=CONFIG.feature_var_threshold,
-            depth_std_threshold=CONFIG.depth_std_threshold,
+            saes_gaussians, h, w, saes_execution_route['tile_size'], gpp=1,
+            feature_var_threshold=saes_execution_route['feature_threshold'],
+            depth_std_threshold=saes_execution_route['depth_threshold'],
             features=saes_features,
             depths=depths,
-            cross_check_threshold=CONFIG.saes_cross_check,
+            cross_check_threshold=saes_execution_route['cross_check_threshold'],
             view_count=V_ctx,
-            materialization=args.saes_materialization,
-            decision_semantics=args.saes_decision_semantics,
+            materialization=saes_execution_route['materialization'],
+            decision_semantics=saes_execution_route['decision_semantics'],
             beta_x=CONFIG.beta_x,
             beta_f=CONFIG.beta_f,
             beta_d=CONFIG.beta_d,
@@ -3320,8 +3436,22 @@ def main(argv=None):
             context_extrinsics=context['extrinsics'],
             context_intrinsics=context['intrinsics'],
             ray_depth_mode=('z' if args.model == 'depthsplat' else 'euclidean'),
+            depth_routing_semantics=saes_execution_route['depth_routing_semantics'],
+            materialization_guard=saes_execution_route['materialization_guard'],
+            context_safety_guard=saes_execution_route['context_safety_guard'],
+            require_deletion_certificate=saes_execution_route[
+                'require_deletion_certificate'
+            ],
+            source_opacities=deletion_certificate_source_opacities,
+            source_opacity_certificate_kind=deletion_certificate_source_kind,
         )
-        saes_stats['feature_source'] = args.saes_feature_source
+        validate_frozen_saes_execution_stats(saes_stats, saes_execution_route)
+        if saes_execution_route['execution_identity'] is not None:
+            saes_stats['saes_execution_identity'] = saes_execution_route[
+                'execution_identity'
+            ]
+            saes_stats['route_sha256'] = saes_execution_route['route_sha256']
+        saes_stats['feature_source'] = saes_execution_route['feature_source']
 
         # Print feature variance distribution for threshold calibration
         if saes_features is not None:
@@ -4458,6 +4588,9 @@ def main(argv=None):
                 or args.saes_feature_source != 'pipeline'
                 or args.fsdr_guidance_policy != 'paper-hamming-local-validity'
                 or saes_stats.get('camera_aware_moment_matching') is not True
+                or saes_stats.get('execution_dependency', {}).get(
+                    's2_s3_sparse_execution_verified'
+                ) is not True
             )
         ),
     )

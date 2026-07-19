@@ -426,11 +426,29 @@ def test_guard_partition_full_s3_oracle_uses_only_selected_l1_s2_anchors():
         materialization="conditional-adapter-offset-attribute-transport-diagnostic",
         effective_mask=effective_mask,
         partition_by_tile={(0, 0, 0): "guard_accepted"},
+        source_scalars_by_tile={
+            (0, 0, 0): {
+                "feature_variance": 0.01,
+                "guard_accepted": True,
+                "routing_level": "L1",
+            }
+        },
+        emit_per_tile_records=True,
     )
 
     assert record["full_stage3_reference_use"] == "posthoc-diagnostic-only"
     assert record["routing_signal_used"] is False
     assert "posthoc_nonprobe_s2_depth_reconstruction" not in record
+    per_tile = record["per_tile_records"]
+    assert len(per_tile) == 1
+    assert per_tile[0]["source_scalars"] == {
+        "feature_variance": 0.01,
+        "guard_accepted": True,
+        "routing_level": "L1",
+    }
+    assert per_tile[0]["dense_s3_posthoc_only"] is True
+    assert per_tile[0]["oracle_applicable"] is True
+    assert per_tile[0]["oracle"]["full_s3_oracle_mean_relative_error"]["count"] > 0
     level = record["partitions"]["guard_accepted"]["L1"]
     assert level["tiles"] == 1
     for metric in (
@@ -593,7 +611,7 @@ def test_materialization_attribute_audit_builds_selected_l1_anchor_oracle():
     assert record["levels"]["L1"]["tiles"] == 1
     assert record["full_oracle_l1_anchor_semantics"].startswith("posthoc full Stage-3")
     for key in ("mean_relative", "covariance_relative", "harmonic_relative", "opacity_absolute"):
-        assert record["full_oracle_representative_error_l1"][key]["count"] == 8
+        assert record["full_oracle_representative_error_l1"][key]["count"] == 12
         assert record["full_oracle_representative_error_l1"][key]["maximum"] == pytest.approx(
             0.0, abs=1e-6
         )
@@ -601,7 +619,7 @@ def test_materialization_attribute_audit_builds_selected_l1_anchor_oracle():
             assert (
                 record["full_oracle_representative_error_l1_by_anchor_kind"]
                 [anchor_kind][key]["count"]
-                == 4
+                == {"primary_probe": 4, "selected_lightweight_anchor": 8}[anchor_kind]
             )
     mixture = record["full_oracle_tile_mixture_error"]["L1"]
     for key in (
@@ -612,7 +630,7 @@ def test_materialization_attribute_audit_builds_selected_l1_anchor_oracle():
     ):
         assert mixture[key]["count"] == 1
         assert mixture[key]["maximum"] == pytest.approx(0.0, abs=1e-6)
-    assert mixture["optical_depth_relative"]["p50"] == pytest.approx(0.5)
+    assert mixture["optical_depth_relative"]["p50"] == pytest.approx(0.25)
 
 
 @pytest.mark.parametrize(

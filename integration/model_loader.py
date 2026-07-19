@@ -10,6 +10,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional
 from dataclasses import dataclass
+import sys
 import torch
 
 
@@ -22,6 +23,8 @@ DINOV2_SOURCE = (
 
 
 def load_checkpoint_state(model: torch.nn.Module, checkpoint: Any) -> dict[str, Any]:
+    import torch as runtime_torch
+
     state_dict = checkpoint.get("state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
     if not isinstance(state_dict, dict) or not state_dict:
         raise ValueError("checkpoint has no non-empty state dictionary")
@@ -30,7 +33,7 @@ def load_checkpoint_state(model: torch.nn.Module, checkpoint: Any) -> dict[str, 
         key
         for key, value in state_dict.items()
         if key in model_state
-        and torch.is_tensor(value)
+        and runtime_torch.is_tensor(value)
         and value.shape != model_state[key].shape
     ]
     if shape_mismatches:
@@ -38,7 +41,7 @@ def load_checkpoint_state(model: torch.nn.Module, checkpoint: Any) -> dict[str, 
             "checkpoint tensor shape mismatch: " + ", ".join(shape_mismatches[:3])
         )
     tensor_state = {
-        key: value for key, value in state_dict.items() if torch.is_tensor(value)
+        key: value for key, value in state_dict.items() if runtime_torch.is_tensor(value)
     }
     matched = {key: value for key, value in tensor_state.items() if key in model_state}
     if not matched:
@@ -59,7 +62,43 @@ def load_checkpoint_state(model: torch.nn.Module, checkpoint: Any) -> dict[str, 
     return report
 
 
+def _validate_pinned_dinov2_module_origins(*, require_loaded: bool = False) -> None:
+    """Reject a cached DINOv2 package that did not come from our pinned tree."""
+
+    expected_root = DINOV2_SOURCE.resolve()
+    loaded = False
+    for module_name, module in tuple(sys.modules.items()):
+        if module_name != "dinov2" and not module_name.startswith("dinov2."):
+            continue
+        origin = getattr(module, "__file__", None)
+        if isinstance(origin, str) and origin:
+            origins = (Path(origin).resolve(),)
+        else:
+            namespace_paths = getattr(module, "__path__", None)
+            if isinstance(namespace_paths, (str, bytes)):
+                namespace_paths = None
+            try:
+                origins = tuple(Path(path).resolve() for path in namespace_paths)
+            except TypeError as error:
+                raise RuntimeError(
+                    f"pinned DINOv2 module has no file or namespace origin: {module_name}"
+                ) from error
+            if not origins:
+                raise RuntimeError(
+                    f"pinned DINOv2 module has no file or namespace origin: {module_name}"
+                )
+        for resolved in origins:
+            if resolved != expected_root and expected_root not in resolved.parents:
+                raise RuntimeError(
+                    f"foreign preloaded DINOv2 module is not permitted: {module_name}"
+                )
+        loaded = True
+    if require_loaded and not loaded:
+        raise RuntimeError("DepthSplat did not load the pinned DINOv2 source tree")
+
+
 def get_depthsplat_encoder(get_encoder, encoder_cfg):
+    _validate_pinned_dinov2_module_origins()
     original_hub_load = torch.hub.load
 
     def pinned_hub_load(repo_or_dir, model, *args, **kwargs):
@@ -74,7 +113,9 @@ def get_depthsplat_encoder(get_encoder, encoder_cfg):
 
     torch.hub.load = pinned_hub_load
     try:
-        return get_encoder(encoder_cfg)
+        result = get_encoder(encoder_cfg)
+        _validate_pinned_dinov2_module_origins()
+        return result
     finally:
         torch.hub.load = original_hub_load
 
@@ -94,6 +135,43 @@ class DataBundle:
     """Container for loaded data."""
     batch: Dict[str, torch.Tensor]
     data_shim: Any
+
+
+def _resolve_typed_root_config(
+    config_root: Path,
+    *,
+    experiment_name: str,
+    dataset_root: Optional[Path] = None,
+    evaluation_index: Optional[Path] = None,
+    hydra_overrides: Tuple[str, ...] = (),
+) -> Any:
+    """Compose the same typed Hydra config used by every encoder loader."""
+
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
+    from src.config import load_typed_root_config
+    from src.global_cfg import set_cfg
+
+    config_root = Path(config_root).resolve()
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(config_root), version_base=None):
+        overrides = [f"+experiment={experiment_name}", *hydra_overrides]
+        if evaluation_index is not None:
+            overrides.append("dataset/view_sampler=evaluation")
+        cfg_dict = compose(config_name="main", overrides=overrides)
+    if dataset_root is not None:
+        cfg_dict.dataset.roots = [str(Path(dataset_root).resolve())]
+    if evaluation_index is not None:
+        index_path = Path(evaluation_index).resolve()
+        if not index_path.is_file():
+            raise FileNotFoundError(f"evaluation index not found: {index_path}")
+        cfg_dict.dataset.view_sampler.index_path = str(index_path)
+    cfg_dict.data_loader.test.num_workers = 0
+    cfg_dict.data_loader.test.persistent_workers = False
+    cfg_dict.data_loader.test.batch_size = 1
+    cfg_dict.mode = "test"
+    set_cfg(cfg_dict)
+    return load_typed_root_config(cfg_dict)
 
 
 class EncoderOnlyModel:
@@ -134,13 +212,14 @@ class EncoderOnlyModel:
 
 def _decode_calibration_context_images(images: list[Any]) -> torch.Tensor:
     """Decode only declared context images from a target-free sidecar."""
+    import torch as runtime_torch
     from PIL import Image
     import torchvision.transforms as transforms
 
     decoded = []
     for image in images:
-        if torch.is_tensor(image):
-            if image.dtype != torch.uint8:
+        if runtime_torch.is_tensor(image):
+            if image.dtype != runtime_torch.uint8:
                 raise ValueError("calibration context image must be uint8 bytes")
             payload = image.detach().cpu().contiguous().numpy().tobytes()
         elif isinstance(image, (bytes, bytearray)):
@@ -150,22 +229,24 @@ def _decode_calibration_context_images(images: list[Any]) -> torch.Tensor:
         decoded.append(transforms.ToTensor()(Image.open(BytesIO(payload))))
     if not decoded:
         raise ValueError("calibration input has no context images")
-    return torch.stack(decoded)
+    return runtime_torch.stack(decoded)
 
 
 def _calibration_camera_geometry(cameras: Any) -> tuple[torch.Tensor, torch.Tensor]:
-    cameras = torch.as_tensor(cameras, dtype=torch.float32).clone()
+    import torch as runtime_torch
+
+    cameras = runtime_torch.as_tensor(cameras, dtype=runtime_torch.float32).clone()
     if cameras.dim() != 2 or cameras.shape[1] != 18:
         raise ValueError("calibration camera geometry must have shape [views, 18]")
     views = cameras.shape[0]
-    intrinsics = torch.eye(3, dtype=torch.float32).repeat(views, 1, 1)
+    intrinsics = runtime_torch.eye(3, dtype=runtime_torch.float32).repeat(views, 1, 1)
     intrinsics[:, 0, 0] = cameras[:, 0]
     intrinsics[:, 1, 1] = cameras[:, 1]
     intrinsics[:, 0, 2] = cameras[:, 2]
     intrinsics[:, 1, 2] = cameras[:, 3]
-    w2c = torch.eye(4, dtype=torch.float32).repeat(views, 1, 1)
+    w2c = runtime_torch.eye(4, dtype=runtime_torch.float32).repeat(views, 1, 1)
     w2c[:, :3] = cameras[:, 6:].reshape(views, 3, 4)
-    return torch.linalg.inv(w2c), intrinsics
+    return runtime_torch.linalg.inv(w2c), intrinsics
 
 
 def load_target_free_calibration_data(
@@ -178,6 +259,8 @@ def load_target_free_calibration_data(
     sample_index: int,
 ) -> DataBundle:
     """Construct one model-ready batch without loading target RGB pixels."""
+    import torch as runtime_torch
+
     from scripts.calibration_inputs import (
         calibration_scene_order,
         load_target_free_record,
@@ -261,17 +344,25 @@ def load_target_free_calibration_data(
                 "extrinsics": extrinsics[context_indices].unsqueeze(0),
                 "intrinsics": intrinsics[context_indices].unsqueeze(0),
                 "image": context_images.unsqueeze(0),
-                "near": torch.full((1, len(context_indices)), near_value) / nf_scale,
-                "far": torch.full((1, len(context_indices)), far_value) / nf_scale,
-                "index": torch.tensor(context_indices, dtype=torch.long).unsqueeze(0),
+                "near": runtime_torch.full((1, len(context_indices)), near_value)
+                / nf_scale,
+                "far": runtime_torch.full((1, len(context_indices)), far_value)
+                / nf_scale,
+                "index": runtime_torch.tensor(
+                    context_indices, dtype=runtime_torch.long
+                ).unsqueeze(0),
             },
             "target": {
                 "extrinsics": extrinsics[target_indices].unsqueeze(0),
                 "intrinsics": intrinsics[target_indices].unsqueeze(0),
                 "image": target_placeholder.unsqueeze(0),
-                "near": torch.full((1, len(target_indices)), near_value) / nf_scale,
-                "far": torch.full((1, len(target_indices)), far_value) / nf_scale,
-                "index": torch.tensor(target_indices, dtype=torch.long).unsqueeze(0),
+                "near": runtime_torch.full((1, len(target_indices)), near_value)
+                / nf_scale,
+                "far": runtime_torch.full((1, len(target_indices)), far_value)
+                / nf_scale,
+                "index": runtime_torch.tensor(
+                    target_indices, dtype=runtime_torch.long
+                ).unsqueeze(0),
             },
             "scene": [selection["scene"]],
         }
@@ -302,6 +393,8 @@ def load_context_only_audit_data(
     context crop and patch shims directly because their batch wrappers require
     a target mapping that this audit contract intentionally forbids.
     """
+    import torch as runtime_torch
+
     from data.context_only_audit_input import load_context_only_audit_record
 
     record = load_context_only_audit_record(input_root)
@@ -334,9 +427,13 @@ def load_context_only_audit_data(
             "extrinsics": extrinsics.unsqueeze(0),
             "intrinsics": intrinsics.unsqueeze(0),
             "image": context_images.unsqueeze(0),
-            "near": torch.full((1, len(context_indices)), near_value) / nf_scale,
-            "far": torch.full((1, len(context_indices)), far_value) / nf_scale,
-            "index": torch.tensor(context_indices, dtype=torch.long).unsqueeze(0),
+            "near": runtime_torch.full((1, len(context_indices)), near_value)
+            / nf_scale,
+            "far": runtime_torch.full((1, len(context_indices)), far_value)
+            / nf_scale,
+            "index": runtime_torch.tensor(
+                context_indices, dtype=runtime_torch.long
+            ).unsqueeze(0),
         }
 
         from src.dataset.shims.crop_shim import apply_crop_shim_to_views
@@ -451,6 +548,24 @@ class BaseModelLoader(ABC):
             ModelBundle with encoder, decoder, model, config, device
         """
         pass
+
+    def resolve_model_config(
+        self,
+        *,
+        experiment_name: str,
+        hydra_overrides: Tuple[str, ...] = (),
+    ) -> Any:
+        """Resolve an encoder config without loading weights or constructing a model."""
+
+        self._setup_imports()
+        try:
+            return _resolve_typed_root_config(
+                Path.cwd() / "config",
+                experiment_name=experiment_name,
+                hydra_overrides=hydra_overrides,
+            )
+        finally:
+            self._restore_cwd()
     
     @abstractmethod
     def load_data(
@@ -537,11 +652,7 @@ class TransplatLoader(BaseModelLoader):
         self._setup_imports()
         
         try:
-            from src.config import load_typed_root_config
             from src.model.encoder import get_encoder
-            from src.global_cfg import set_cfg
-            from hydra import compose, initialize_config_dir
-            from hydra.core.global_hydra import GlobalHydra
             
             if device is None:
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -549,32 +660,13 @@ class TransplatLoader(BaseModelLoader):
             # Load checkpoint
             ckpt = torch.load(checkpoint_path, map_location='cpu')
             
-            # Setup hydra config
-            if config_path is None:
-                config_path = str(self.transplat_root / 'config')
-            
-            GlobalHydra.instance().clear()
-            
-            with initialize_config_dir(config_dir=config_path, version_base=None):
-                overrides = [f"+experiment={experiment_name}", *hydra_overrides]
-                if evaluation_index is not None:
-                    overrides.append("dataset/view_sampler=evaluation")
-                cfg_dict = compose(config_name="main", overrides=overrides)
-
-            if dataset_root is not None:
-                cfg_dict.dataset.roots = [str(Path(dataset_root).resolve())]
-            if evaluation_index is not None:
-                index_path = Path(evaluation_index).resolve()
-                if not index_path.is_file():
-                    raise FileNotFoundError(f"evaluation index not found: {index_path}")
-                cfg_dict.dataset.view_sampler.index_path = str(index_path)
-            cfg_dict.data_loader.test.num_workers = 0
-            cfg_dict.data_loader.test.persistent_workers = False
-            cfg_dict.data_loader.test.batch_size = 1
-            
-            cfg_dict.mode = 'test'
-            set_cfg(cfg_dict)
-            cfg = load_typed_root_config(cfg_dict)
+            cfg = _resolve_typed_root_config(
+                Path(config_path) if config_path is not None else self.transplat_root / 'config',
+                experiment_name=experiment_name,
+                dataset_root=dataset_root,
+                evaluation_index=evaluation_index,
+                hydra_overrides=hydra_overrides,
+            )
             
             # Target-free SAES audits only need the encoder's S1/S2/S3 output.
             # Avoid constructing the decoder, loss collection, and evaluator,
@@ -673,8 +765,9 @@ class MVSplatLoader(BaseModelLoader):
         dataset_root: Optional[Path] = None,
         evaluation_index: Optional[Path] = None,
         hydra_overrides: Tuple[str, ...] = (),
+        encoder_only: bool = False,
     ) -> ModelBundle:
-        """Load MVSplat model."""
+        """Load MVSplat, optionally without decoder/loss construction."""
         checkpoint_path = str(Path(checkpoint_path).resolve())
         config_path = str(Path(config_path).resolve()) if config_path is not None else None
         dataset_root = Path(dataset_root).resolve() if dataset_root is not None else None
@@ -684,15 +777,7 @@ class MVSplatLoader(BaseModelLoader):
         self._setup_imports()
         
         try:
-            from src.config import load_typed_root_config
-            from src.model.model_wrapper import ModelWrapper
             from src.model.encoder import get_encoder
-            from src.model.decoder import get_decoder
-            from src.loss import get_losses
-            from src.misc.step_tracker import StepTracker
-            from src.global_cfg import set_cfg
-            from hydra import compose, initialize_config_dir
-            from hydra.core.global_hydra import GlobalHydra
             
             if device is None:
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -700,43 +785,34 @@ class MVSplatLoader(BaseModelLoader):
             # Load checkpoint
             ckpt = torch.load(checkpoint_path, map_location='cpu')
             
-            # Setup hydra config
-            if config_path is None:
-                config_path = str(self.mvsplat_root / 'config')
-            
-            GlobalHydra.instance().clear()
-            
-            with initialize_config_dir(config_dir=config_path, version_base=None):
-                overrides = [f"+experiment={experiment_name}", *hydra_overrides]
-                if evaluation_index is not None:
-                    overrides.append("dataset/view_sampler=evaluation")
-                cfg_dict = compose(config_name="main", overrides=overrides)
-
-            if dataset_root is not None:
-                cfg_dict.dataset.roots = [str(Path(dataset_root).resolve())]
-            if evaluation_index is not None:
-                index_path = Path(evaluation_index).resolve()
-                if not index_path.is_file():
-                    raise FileNotFoundError(f"evaluation index not found: {index_path}")
-                cfg_dict.dataset.view_sampler.index_path = str(index_path)
-            cfg_dict.data_loader.test.num_workers = 0
-            cfg_dict.data_loader.test.persistent_workers = False
-            cfg_dict.data_loader.test.batch_size = 1
-            
-            cfg_dict.mode = 'test'
-            set_cfg(cfg_dict)
-            cfg = load_typed_root_config(cfg_dict)
-            
-            # Build model
-            encoder, encoder_visualizer = get_encoder(cfg.model.encoder)
-            decoder = get_decoder(cfg.model.decoder, cfg.dataset)
-            losses = get_losses(cfg.loss)
-            step_tracker = StepTracker()
-            
-            model = ModelWrapper(
-                cfg.optimizer, cfg.test, cfg.train,
-                encoder, encoder_visualizer, decoder, losses, step_tracker
+            cfg = _resolve_typed_root_config(
+                Path(config_path) if config_path is not None else self.mvsplat_root / 'config',
+                experiment_name=experiment_name,
+                dataset_root=dataset_root,
+                evaluation_index=evaluation_index,
+                hydra_overrides=hydra_overrides,
             )
+            
+            # Target-free calibration extraction needs only S1/S2/S3.  Do not
+            # construct a decoder or losses that could initialize target-side
+            # evaluation dependencies.
+            encoder, encoder_visualizer = get_encoder(cfg.model.encoder)
+            if encoder_only:
+                model = EncoderOnlyModel(encoder)
+                decoder = None
+            else:
+                from src.loss import get_losses
+                from src.misc.step_tracker import StepTracker
+                from src.model.decoder import get_decoder
+                from src.model.model_wrapper import ModelWrapper
+
+                decoder = get_decoder(cfg.model.decoder, cfg.dataset)
+                losses = get_losses(cfg.loss)
+                step_tracker = StepTracker()
+                model = ModelWrapper(
+                    cfg.optimizer, cfg.test, cfg.train,
+                    encoder, encoder_visualizer, decoder, losses, step_tracker
+                )
             
             # Load weights
             load_checkpoint_state(model, ckpt)
@@ -746,7 +822,7 @@ class MVSplatLoader(BaseModelLoader):
             
             return ModelBundle(
                 encoder=model.encoder,
-                decoder=model.decoder,
+                decoder=decoder,
                 model=model,
                 config=cfg,
                 device=device,
@@ -814,8 +890,9 @@ class DepthSplatLoader(BaseModelLoader):
         dataset_root: Optional[Path] = None,
         evaluation_index: Optional[Path] = None,
         hydra_overrides: Tuple[str, ...] = (),
+        encoder_only: bool = False,
     ) -> ModelBundle:
-        """Load DepthSplat model."""
+        """Load DepthSplat, optionally without decoder/loss construction."""
         checkpoint_path = str(Path(checkpoint_path).resolve())
         config_path = str(Path(config_path).resolve()) if config_path is not None else None
         dataset_root = Path(dataset_root).resolve() if dataset_root is not None else None
@@ -825,15 +902,7 @@ class DepthSplatLoader(BaseModelLoader):
         self._setup_imports()
         
         try:
-            from src.config import load_typed_root_config
-            from src.model.model_wrapper import ModelWrapper
             from src.model.encoder import get_encoder
-            from src.model.decoder import get_decoder
-            from src.loss import get_losses
-            from src.misc.step_tracker import StepTracker
-            from src.global_cfg import set_cfg
-            from hydra import compose, initialize_config_dir
-            from hydra.core.global_hydra import GlobalHydra
             
             if device is None:
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -841,45 +910,35 @@ class DepthSplatLoader(BaseModelLoader):
             # Load checkpoint
             ckpt = torch.load(checkpoint_path, map_location='cpu')
             
-            # Setup hydra config
-            if config_path is None:
-                config_path = str(self.depthsplat_root / 'config')
+            cfg = _resolve_typed_root_config(
+                Path(config_path) if config_path is not None else self.depthsplat_root / 'config',
+                experiment_name=experiment_name,
+                dataset_root=dataset_root,
+                evaluation_index=evaluation_index,
+                hydra_overrides=hydra_overrides,
+            )
             
-            GlobalHydra.instance().clear()
-            
-            with initialize_config_dir(config_dir=config_path, version_base=None):
-                overrides = [f"+experiment={experiment_name}", *hydra_overrides]
-                if evaluation_index is not None:
-                    overrides.append("dataset/view_sampler=evaluation")
-                cfg_dict = compose(config_name="main", overrides=overrides)
-
-            if dataset_root is not None:
-                cfg_dict.dataset.roots = [str(Path(dataset_root).resolve())]
-            if evaluation_index is not None:
-                index_path = Path(evaluation_index).resolve()
-                if not index_path.is_file():
-                    raise FileNotFoundError(f"evaluation index not found: {index_path}")
-                cfg_dict.dataset.view_sampler.index_path = str(index_path)
-            cfg_dict.data_loader.test.num_workers = 0
-            cfg_dict.data_loader.test.persistent_workers = False
-            cfg_dict.data_loader.test.batch_size = 1
-            
-            cfg_dict.mode = 'test'
-            set_cfg(cfg_dict)
-            cfg = load_typed_root_config(cfg_dict)
-            
-            # Build model
+            # The context-only calibration worker stops at the encoder and
+            # must not instantiate renderer/loss components.
             encoder, encoder_visualizer = get_depthsplat_encoder(
                 get_encoder, cfg.model.encoder
             )
-            decoder = get_decoder(cfg.model.decoder, cfg.dataset)
-            losses = get_losses(cfg.loss)
-            step_tracker = StepTracker()
-            
-            model = ModelWrapper(
-                cfg.optimizer, cfg.test, cfg.train,
-                encoder, encoder_visualizer, decoder, losses, step_tracker
-            )
+            if encoder_only:
+                model = EncoderOnlyModel(encoder)
+                decoder = None
+            else:
+                from src.loss import get_losses
+                from src.misc.step_tracker import StepTracker
+                from src.model.decoder import get_decoder
+                from src.model.model_wrapper import ModelWrapper
+
+                decoder = get_decoder(cfg.model.decoder, cfg.dataset)
+                losses = get_losses(cfg.loss)
+                step_tracker = StepTracker()
+                model = ModelWrapper(
+                    cfg.optimizer, cfg.test, cfg.train,
+                    encoder, encoder_visualizer, decoder, losses, step_tracker
+                )
             
             # Load weights
             load_checkpoint_state(model, ckpt)
@@ -889,7 +948,7 @@ class DepthSplatLoader(BaseModelLoader):
             
             return ModelBundle(
                 encoder=model.encoder,
-                decoder=model.decoder,
+                decoder=decoder,
                 model=model,
                 config=cfg,
                 device=device,

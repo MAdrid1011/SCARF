@@ -24,18 +24,12 @@ metadata.
    the reported 2.94x geometric-mean ASIC speedup and S1-S4 breakdown.
 2. **Table 1, quality.** Reproduce the nine model/dataset quality rows from all
    canonical target views.
-3. **Figure 11 and Tables 2-3, mechanisms.** Reproduce no-optimization,
-   FSDR-only, SAES-only, and combined cycles plus discrete FSDR and SAES event
-   counters for all nine model/dataset pairs.
-4. **Supporting results.** Deterministically regenerate Figure 10's global
-   worst FSDR/SAES views, Figure 12's S1-S3 utilization, and Figures 13-16's
-   complete five-point cache, Hamming, feature/depth-threshold, and tile-size
-   grids from the same raw records. These remain required evidence outputs but
-   do not replace any missing key result.
-5. **Public hardware proxy.** Regenerate routed ASAP7 PPA, the deterministic
-   DeepScale 7-to-28 nm normalization, and the public counterparts to Figure 9
-   and Table 4. These are not described as the paper's commercial TSMC28
-   post-layout measurements.
+3. **Figure 11, mechanisms.** Reproduce no-optimization, FSDR-only,
+   SAES-only, and combined cycles for all nine model/dataset pairs. Tables 2-3
+   remain same-trace supporting counters and must be complete for Figure 11.
+4. **Paused supporting results.** Figure 10, Figures 12-16, and the public
+   Figure 9/Table 4 proxy are excluded from the current default evaluation
+   scope. Their manual workflows remain non-claiming until explicitly resumed.
 
 All commands emit structured records with git, submodule, environment, data,
 checkpoint, selection, raw-artifact, and command hashes. Paper constants are

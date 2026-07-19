@@ -67,18 +67,51 @@ def test_catalog_separates_claimable_results_from_public_proxies():
         result_id
         for result_id, record in records.items()
         if record["claim_role"] == "mandatory_key_result"
-    } == {"figure8", "table1", "figure11", "table2", "table3"}
+    } == {"figure8", "table1", "figure11"}
+    assert records["figure11"]["supporting_results"] == ["table2", "table3"]
+    assert all(
+        records[result_id]["claim_role"] == "supporting_result"
+        and records[result_id]["supports"] == ["figure11"]
+        for result_id in ("table2", "table3")
+    )
     assert all(
         records[result_id]["claim_role"] == "supporting_result"
         for result_id in ("figure10", "figure12", "figure13", "figure14", "figure15", "figure16")
     )
+    assert catalog["active_result_ids"] == ["figure8", "table1", "figure11"]
+    assert set(catalog["paused_result_ids"]) == {
+        "figure9",
+        "figure10",
+        "figure12",
+        "figure13",
+        "figure14",
+        "figure15",
+        "figure16",
+        "table4",
+    }
+
+
+def test_catalog_uses_the_documented_execution_state_vocabulary():
+    catalog = load_catalog()
+    allowed = {
+        "PASS",
+        "FAIL",
+        "NOT_RUN",
+        "BLOCKED",
+        "NOT_CLAIMED",
+        "PAUSED_BY_SCOPE",
+        "CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION",
+    }
+
+    assert {
+        record["current_state"] for record in catalog["results"]
+    } <= allowed
 
 
 def test_runtime_modules_do_not_read_paper_expected_results():
     allowed = {
         ROOT / "scripts/build_archive.py",
         ROOT / "scripts/check_release.py",
-        ROOT / "scripts/generate_report.py",
         ROOT / "scripts/validate_ae.py",
     }
     offenders = []
@@ -116,6 +149,8 @@ def run_dry(tmp_path: Path, mode: str, *extra: str) -> subprocess.CompletedProce
             str(RUNNER),
             mode,
             "--dry-run",
+            "--python",
+            sys.executable,
             "--output-root",
             str(tmp_path),
             *extra,
@@ -168,6 +203,12 @@ def test_report_catalog_must_bind_all_results_to_evidence_classes(tmp_path):
             for record in catalog["results"]
         ],
     }
+    validate_figure_catalog(generated, catalog, require_key_results=True)
+
+    for row in generated["results"]:
+        if row["id"] in {"table2", "table3"}:
+            row["status"] = "NOT_RUN"
+            row["source_data"] = []
     validate_figure_catalog(generated, catalog, require_key_results=True)
 
     generated["results"][0]["evidence_class"] = "paper_comparison_target"

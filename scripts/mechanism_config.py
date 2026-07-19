@@ -105,6 +105,11 @@ def load_mechanism_config(
         raise ValueError("pair-specific mechanism parameters are forbidden")
     if config.get("fixed") != FIXED:
         raise ValueError("mechanism config changes paper-fixed parameters")
+    from scripts.saes_execution_identity import validate_saes_execution_identity
+
+    saes_execution_identity = validate_saes_execution_identity(
+        config.get("saes_execution_identity")
+    )
 
     projection = config.get("projection")
     if not isinstance(projection, dict) or projection.get("seed") != 42:
@@ -149,6 +154,7 @@ def load_mechanism_config(
             "evaluation_disjoint": False,
             "expected_results_accessed": False,
             "global_configuration": True,
+            "saes_execution_route_sha256": saes_execution_identity["route_sha256"],
         }
     elif status == "calibrated":
         selected = config.get("selected")
@@ -176,6 +182,7 @@ def load_mechanism_config(
             "train_holdout_scene_disjoint": True,
             "train": split_provenance["train"],
             "holdout": split_provenance["holdout"],
+            "saes_execution_route_sha256": saes_execution_identity["route_sha256"],
         }
     else:
         raise ValueError("mechanism config status must be preregistered or calibrated")

@@ -84,6 +84,15 @@ def test_demo_source_contains_no_orin_or_tsmc_heuristics():
     assert "depth_predictor_sim.set_strict_mode(strict_run)" in source
 
 
+def test_claim_run_fails_before_model_or_dataset_work_without_a_timing_backend():
+    source = DEMO.read_text(encoding="utf-8")
+
+    gate = source.index("if args.claim_run:\n        require_claim_timing_backend()")
+    calibration = source.index("require_calibrated_mechanism()")
+    assert gate < calibration
+    assert "source-bound RTL or gate-level timing evidence" in source
+
+
 def test_claim_pipeline_preserves_reference_numerics_while_counting_cycles():
     source = DEMO.read_text(encoding="utf-8")
 
@@ -192,6 +201,266 @@ def test_diagnostic_run_is_strict_but_never_a_claim_run():
                 "--no-depth",
             ]
         )
+
+
+def test_context_safety_guard_is_diagnostic_only():
+    from scripts.demo_cli import parse_args
+
+    diagnostic = parse_args(
+        [
+            "--diagnostic-run",
+            "--evaluation-index",
+            "index.json",
+            "--context-safety-guard",
+        ]
+    )
+
+    assert diagnostic.context_safety_guard is True
+    for mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    mode,
+                    "--evaluation-index",
+                    "index.json",
+                    "--context-safety-guard",
+                ]
+            )
+    with pytest.raises(SystemExit):
+        parse_args(["--context-safety-guard"])
+
+
+def test_context_safety_guard_reaches_step4b_saes_path():
+    source = DEMO.read_text(encoding="utf-8")
+    step4b = source.split("# ---- Step 4b: SAES v4", maxsplit=1)[1]
+    step4b = step4b.split("# ---- Step 4c: FSDR", maxsplit=1)[0]
+
+    assert "context_safety_guard=saes_execution_route['context_safety_guard']" in step4b
+
+
+def test_context_safety_guard_rejects_pre_step4b_sensitivity_trace():
+    from scripts.demo_cli import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--diagnostic-run",
+                "--evaluation-index",
+                "index.json",
+                "--sensitivity-trace",
+                "--context-safety-guard",
+            ]
+        )
+
+
+def test_strict_saes_route_uses_the_frozen_execution_identity():
+    from scripts.demo_cli import resolve_frozen_saes_execution
+    from scripts.saes_execution_identity import build_saes_execution_identity
+
+    identity = build_saes_execution_identity()
+    args = SimpleNamespace(
+        claim_run=False,
+        functional_run=True,
+        tune_thresholds=False,
+        saes_fv=None,
+        saes_ds=None,
+        saes_cc=None,
+        tile_size=None,
+        saes_materialization="representative",
+        saes_feature_source="pipeline",
+        saes_decision_semantics="current",
+        context_safety_guard=False,
+    )
+    route = resolve_frozen_saes_execution(
+        args,
+        tile_size=identity["tile_size"],
+        feature_threshold=identity["feature_threshold"],
+        depth_threshold=identity["depth_threshold"],
+        cross_check_threshold=identity["cross_check_threshold"],
+        execution_identity=identity,
+    )
+
+    assert route["decision_semantics"] == "probe-normalized-std-first-hit"
+    assert route["depth_routing_semantics"] == identity["depth_routing_semantics"]
+    assert route["materialization_guard"] is True
+    assert route["context_safety_guard"] is True
+    assert route["require_deletion_certificate"] is True
+    assert route["cross_check_threshold"] == identity["cross_check_threshold"]
+    assert route["execution_identity"] == identity
+    assert route["route_sha256"] == identity["route_sha256"]
+
+    effective_values = {
+        "tile_size": identity["tile_size"],
+        "feature_threshold": identity["feature_threshold"],
+        "depth_threshold": identity["depth_threshold"],
+        "cross_check_threshold": identity["cross_check_threshold"],
+    }
+    for field, drifted_value in (
+        ("tile_size", identity["tile_size"] + 1),
+        ("feature_threshold", identity["feature_threshold"] + 0.1),
+        ("depth_threshold", identity["depth_threshold"] + 0.1),
+        ("cross_check_threshold", identity["cross_check_threshold"] + 0.01),
+    ):
+        with pytest.raises(ValueError, match=field):
+            resolve_frozen_saes_execution(
+                args,
+                **{**effective_values, field: drifted_value},
+                execution_identity=identity,
+            )
+
+
+def test_frozen_saes_route_binds_identity_and_permits_only_no_fsdr():
+    from scripts.demo_cli import parse_args, resolve_frozen_saes_execution
+    from scripts.saes_execution_identity import build_saes_execution_identity
+
+    identity = build_saes_execution_identity()
+    args = parse_args(
+        [
+            "--frozen-saes-route",
+            "--evaluation-index",
+            "index.json",
+            "--no-fsdr",
+        ]
+    )
+    assert args.frozen_saes_route is True
+    assert args.no_fsdr is True
+    route = resolve_frozen_saes_execution(
+        args,
+        tile_size=identity["tile_size"],
+        feature_threshold=identity["feature_threshold"],
+        depth_threshold=identity["depth_threshold"],
+        cross_check_threshold=identity["cross_check_threshold"],
+        execution_identity=identity,
+    )
+    assert route["execution_identity"] == identity
+    assert route["context_safety_guard"] is True
+    assert route["decision_semantics"] == "probe-normalized-std-first-hit"
+
+    for extra in (
+        ("--no-feature",),
+        ("--no-depth",),
+        ("--no-gaussian",),
+        ("--no-saes",),
+        ("--baseline-only",),
+        ("--saes-materialization", "dense-diagnostic"),
+        ("--saes-decision-semantics", "probe-vector-first-hit"),
+        ("--context-safety-guard",),
+        ("--diagnostic-run",),
+    ):
+        with pytest.raises(SystemExit):
+            parse_args(
+                [
+                    "--frozen-saes-route",
+                    "--evaluation-index",
+                    "index.json",
+                    *extra,
+                ]
+            )
+
+
+def test_diagnostic_saes_route_preserves_cli_runtime_values():
+    from scripts.demo_cli import resolve_frozen_saes_execution
+
+    args = SimpleNamespace(
+        claim_run=False,
+        functional_run=False,
+        saes_materialization="dense-diagnostic",
+        saes_feature_source="gaussian-head-input",
+        saes_decision_semantics="probe-vector-first-hit",
+        context_safety_guard=True,
+    )
+    route = resolve_frozen_saes_execution(
+        args,
+        tile_size=8,
+        feature_threshold=0.3,
+        depth_threshold=0.05,
+        cross_check_threshold=0.4,
+        execution_identity=None,
+    )
+
+    assert route["tile_size"] == 8
+    assert route["feature_threshold"] == 0.3
+    assert route["depth_threshold"] == 0.05
+    assert route["cross_check_threshold"] == 0.4
+    assert route["materialization"] == "dense-diagnostic"
+    assert route["decision_semantics"] == "probe-vector-first-hit"
+    assert route["context_safety_guard"] is True
+    assert route["require_deletion_certificate"] is True
+    assert route["execution_identity"] is None
+    assert route["route_sha256"] is None
+
+
+@pytest.mark.parametrize(
+    "override",
+    (
+        ("--tune-thresholds",),
+        ("--saes-fv", "0.2"),
+        ("--saes-ds", "0.1"),
+        ("--saes-cc", "0.015"),
+        ("--tile-size", "4"),
+    ),
+)
+def test_strict_runs_reject_explicit_frozen_saes_route_overrides(override):
+    from scripts.demo_cli import parse_args
+
+    for mode in ("--claim-run", "--functional-run"):
+        with pytest.raises(SystemExit):
+            parse_args([mode, "--evaluation-index", "index.json", *override])
+
+
+@pytest.mark.parametrize(
+    "audit_args",
+    (
+        ("--saes-s3-raw-audit",),
+        (
+            "--saes-routing-audit",
+            "--saes-decision-semantics",
+            "probe-normalized-std-first-hit",
+        ),
+        ("--saes-hardware-audit",),
+    ),
+)
+def test_protocol_locked_saes_audits_reject_context_safety_guard(audit_args):
+    from scripts.demo_cli import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--diagnostic-run",
+                "--evaluation-index",
+                "index.json",
+                "--image-output-policy",
+                "none",
+                *audit_args,
+                "--context-safety-guard",
+            ]
+        )
+
+
+def test_demo_step4b_uses_the_resolved_frozen_saes_route():
+    source = DEMO.read_text(encoding="utf-8")
+    step4b = source.split("# ---- Step 4b: SAES v4", maxsplit=1)[1]
+    step4b = step4b.split("# ---- Step 4c: FSDR", maxsplit=1)[0]
+
+    for field in (
+        "tile_size",
+        "feature_threshold",
+        "depth_threshold",
+        "cross_check_threshold",
+        "materialization",
+        "decision_semantics",
+        "depth_routing_semantics",
+        "materialization_guard",
+        "context_safety_guard",
+        "require_deletion_certificate",
+    ):
+        if field == "require_deletion_certificate":
+            assert "require_deletion_certificate=saes_execution_route[" in step4b
+        else:
+            assert f"saes_execution_route['{field}']" in step4b
+    assert "validate_frozen_saes_execution_stats(saes_stats, saes_execution_route)" in step4b
+    assert "saes_stats['saes_execution_identity']" in step4b
+    assert "saes_stats['route_sha256']" in step4b
 
 
 @pytest.mark.parametrize(

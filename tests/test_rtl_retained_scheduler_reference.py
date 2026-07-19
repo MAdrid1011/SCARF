@@ -14,12 +14,29 @@ def test_retained_scheduler_reference_matches_declared_t4_probe_layout():
         (0, 3),
         (3, 0),
         (3, 3),
-        (1, 1),
-        (2, 2),
         (0, 1),
         (0, 2),
+        (1, 0),
+        (1, 3),
+        (2, 0),
+        (2, 3),
+        (3, 1),
+        (3, 2),
     )
-    assert retained_output_indices("L1") == (0, 3, 12, 15, 5, 10, 1, 2)
+    assert retained_output_indices("L1") == (
+        0,
+        3,
+        12,
+        15,
+        1,
+        2,
+        4,
+        7,
+        8,
+        11,
+        13,
+        14,
+    )
 
 
 @pytest.mark.parametrize("level", ("Full", "L2", "unknown"))

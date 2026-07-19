@@ -16,11 +16,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.validate_result import validate
+from scripts.validate_result import (
+    aggregate_execution_binding_mismatches,
+    aggregate_execution_binding_values,
+    validate,
+)
 from scripts.execution_contract import require_paper_execution_contract
+from scripts.result_record import claim_ablation_speedups
 
 
 METRICS = ("psnr_db", "ssim", "lpips")
+MECHANISM_RESULT_MODES = ("mechanisms", "ablation", "all", "quality")
+VALIDATION_PROFILES = ("author-preflight", "evaluator-final")
 HEX64 = set("0123456789abcdef")
 DATASET_REPRESENTATIONS = {
     "depthsplat/acid": "acid-native",
@@ -98,6 +105,19 @@ def find_pair_result(output: Path, pair: str, modes: tuple[str, ...]) -> Path:
     return matches[0]
 
 
+def find_functional_reference(
+    output: Path,
+) -> tuple[str, str, Path] | None:
+    quick = output / "quick/mvsplat_re10k/results.json"
+    if quick.is_file():
+        return "quick", "mvsplat/re10k", quick
+    for pair in sorted(DATASET_REPRESENTATIONS):
+        path = output / "quality" / pair.replace("/", "_") / "results.json"
+        if path.is_file():
+            return "quality", pair, path
+    return None
+
+
 def relative_check(claim: str, actual: float, target: float, tolerance: float) -> dict[str, Any]:
     relative_error = abs(actual - target) / target
     return {
@@ -140,9 +160,12 @@ def clean_source_check(
 
 
 def source_binding_check(
-    result: dict[str, Any], reference: dict[str, Any], component: str
+    result: dict[str, Any],
+    reference: dict[str, Any],
+    component: str,
+    reference_name: str = "quick",
 ) -> dict[str, Any]:
-    """Require functional evidence to share the quick run's clean source identity."""
+    """Require functional evidence to share a verified source identity."""
     provenance = result.get("provenance", {})
     actual = {
         "git_commit": provenance.get("git_commit"),
@@ -157,10 +180,42 @@ def source_binding_check(
         "submodules": reference.get("submodules"),
     }
     return {
-        "claim": f"provenance:{component}:matches_quick_source",
+        "claim": f"provenance:{component}:matches_{reference_name}_source",
         "actual": actual,
         "target": target,
         "pass": actual == target,
+    }
+
+
+def quality_mechanism_binding_check(
+    quality: dict[str, Any], mechanism: dict[str, Any], pair: str
+) -> dict[str, Any]:
+    """Require Table 1 and mechanism aggregates to share one execution set."""
+    mismatches = aggregate_execution_binding_mismatches(quality, mechanism)
+    return {
+        "claim": f"binding:{pair}:quality_mechanism_execution",
+        "actual": {
+            "quality": aggregate_execution_binding_values(quality),
+            "mechanism": aggregate_execution_binding_values(mechanism),
+        },
+        "target": "identical mechanism config, checkpoint, selection, and trace set",
+        "mismatches": mismatches,
+        "pass": not mismatches,
+    }
+
+
+def quality_mechanism_presence_check(
+    pair: str, *, quality_claimed: bool, mechanism_claimed: bool
+) -> dict[str, Any]:
+    """Require both claim surfaces before validating their aggregate bindings."""
+    return {
+        "claim": f"binding:{pair}:quality_mechanism_presence",
+        "actual": {
+            "quality_claimed": quality_claimed,
+            "mechanism_claimed": mechanism_claimed,
+        },
+        "target": "matching claim-quality and mechanism aggregate records",
+        "pass": quality_claimed and mechanism_claimed,
     }
 
 
@@ -249,41 +304,179 @@ def hardware_claim_checks(
     return checks
 
 
-def orin_evidence_complete(
+def physical_proxy_active(catalog: dict[str, Any]) -> bool:
+    """Require DRAM proxy evidence unless the catalog explicitly pauses it."""
+    records = {
+        record.get("id"): record
+        for record in catalog.get("results", [])
+        if isinstance(record, dict)
+    }
+    return any(
+        records.get(result_id, {}).get("current_state") != "PAUSED_BY_SCOPE"
+        for result_id in ("figure9", "table4")
+    )
+
+
+def orin_evidence_reason(
     result: dict[str, Any], expected_selection_sha256: str, base_dir: Path | None = None
-) -> bool:
+) -> str | None:
+    """Return why an aggregate cannot support an independent Orin result."""
     from hardware.orin.run import sha256_file, validate_measurement_record
 
+    if result.get("schema_version") != "2.1":
+        return "result does not use the trace-bound schema"
+    if result.get("evidence_class") != "independent_measurement":
+        return "result is not independent measurement evidence"
     if result.get("performance", {}).get("baseline_source") != "orin_nx_cuda_events":
-        return False
-    sample_results = result.get("provenance", {}).get("evaluation", {}).get(
-        "sample_results", []
-    )
-    if not sample_results:
-        return False
+        return "result baseline is not sourced from Orin CUDA events"
+    try:
+        validate(result)
+    except (KeyError, TypeError, ValueError) as exc:
+        return f"result fails validation: {exc}"
+
+    provenance = result.get("provenance")
+    if not isinstance(provenance, dict):
+        return "result provenance is missing"
+    if provenance.get("execution_contract") != {
+        "run_class": "claim",
+        "saes_materialization": "representative",
+    }:
+        return "result was not executed through the representative claim path"
+    evaluation = provenance.get("evaluation")
+    if not isinstance(evaluation, dict) or evaluation.get("kind") != "dataset_aggregate":
+        return "result is not a dataset aggregate"
+    if evaluation.get("sample_selection_sha256") != expected_selection_sha256:
+        return "result sample selection does not match the frozen Orin protocol"
+    trace_set = evaluation.get("execution_trace_set")
+    if not isinstance(trace_set, list) or not trace_set:
+        return "result has no aggregate execution trace set"
+    trace_by_index = {
+        entry.get("sample_index"): entry
+        for entry in trace_set
+        if isinstance(entry, dict)
+    }
+    sample_results = evaluation.get("sample_results")
+    if (
+        not isinstance(sample_results, list)
+        or not sample_results
+        or len(sample_results) != len(trace_by_index)
+    ):
+        return "result has no complete sample measurement evidence"
+    dataset = provenance.get("dataset")
+    checkpoint = provenance.get("checkpoint")
+    if not isinstance(dataset, dict) or not isinstance(checkpoint, dict):
+        return "result dataset or checkpoint provenance is missing"
+    if base_dir is None:
+        return "Orin measurement base directory is unavailable"
+    base_dir = base_dir.resolve()
     for item in sample_results:
+        if not isinstance(item, dict):
+            return "result has an invalid sample measurement entry"
+        sample_index = item.get("sample_index")
+        trace = trace_by_index.get(sample_index)
+        if not isinstance(sample_index, int) or isinstance(sample_index, bool) or not isinstance(
+            trace, dict
+        ):
+            return "result sample measurement does not match its execution trace"
         evidence = item.get("orin_measurement")
         if not isinstance(evidence, dict):
-            return False
-        path = Path(str(evidence.get("path", "")))
-        if not path.is_absolute() and base_dir is not None:
-            path = base_dir / path
+            return "result sample is missing an Orin measurement"
+        relative_path = Path(str(evidence.get("path", "")))
+        if relative_path.is_absolute():
+            return "Orin measurement path is not portable"
+        path = (base_dir / relative_path).resolve()
+        try:
+            path.relative_to(base_dir)
+        except ValueError:
+            return "Orin measurement path escapes its pair evidence directory"
         try:
             if not path.is_file() or sha256_file(path) != evidence.get("sha256"):
-                return False
+                return "Orin measurement hash does not match aggregate evidence"
             measurement = load(path)
             validate_measurement_record(
                 measurement,
                 expected_selection_sha256=expected_selection_sha256,
                 measurement_path=path,
             )
-        except (OSError, ValueError, json.JSONDecodeError):
-            return False
-        if measurement.get("selection", {}).get("sample_index") != item.get(
-            "sample_index"
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return f"Orin measurement is invalid: {exc}"
+        selection = measurement.get("selection", {})
+        if (
+            selection.get("sample_index") != sample_index
+            or selection.get("execution_index") != trace.get("execution_index")
+            or selection.get("dataset_tree_sha256") != dataset.get("tree_sha256")
+            or selection.get("checkpoint_sha256") != checkpoint.get("sha256")
+            or trace.get("orin_measurement_sha256") != evidence.get("sha256")
         ):
-            return False
-    return True
+            return "Orin measurement provenance does not match its aggregate trace"
+    return None
+
+
+def orin_evidence_complete(
+    result: dict[str, Any], expected_selection_sha256: str, base_dir: Path | None = None
+) -> bool:
+    return orin_evidence_reason(result, expected_selection_sha256, base_dir) is None
+
+
+def figure8_catalog_evidence_check(
+    output: Path,
+    catalog: dict[str, Any],
+    protocol: dict[str, Any],
+    claim_state: Any,
+) -> dict[str, Any]:
+    """Prevent a catalog row from upgrading a pending Orin claim to PASS."""
+    rows = catalog.get("results")
+    figure8 = next(
+        (
+            row
+            for row in rows
+            if isinstance(row, dict) and row.get("id") == "figure8"
+        ),
+        None,
+    ) if isinstance(rows, list) else None
+    status = figure8.get("status") if isinstance(figure8, dict) else None
+    target = "CLAIMED plus complete independent Orin measurement evidence"
+    if status != "PASS":
+        return {
+            "claim": "figure8:catalog_independent_orin_evidence",
+            "actual": status,
+            "target": target,
+            "pass": claim_state != "CLAIMED",
+        }
+    if claim_state != "CLAIMED":
+        return {
+            "claim": "figure8:catalog_independent_orin_evidence",
+            "actual": claim_state,
+            "target": target,
+            "pass": False,
+        }
+
+    pairs = protocol.get("pairs")
+    failures: list[str] = []
+    if not isinstance(pairs, dict) or set(pairs) != set(DATASET_REPRESENTATIONS):
+        failures.append("frozen evaluation protocol does not define the nine pairs")
+    else:
+        for pair in sorted(pairs):
+            try:
+                path = find_pair_result(output, pair, ("speedup", "orin"))
+                result = load(path)
+                validate(result)
+                require_aggregate(result, pair)
+                reason = orin_evidence_reason(
+                    result,
+                    pairs[pair]["sample_selection_sha256"],
+                    path.parent,
+                )
+                if reason is not None:
+                    failures.append(f"{pair}: {reason}")
+            except (FileNotFoundError, KeyError, TypeError, ValueError) as exc:
+                failures.append(f"{pair}: {exc}")
+    return {
+        "claim": "figure8:catalog_independent_orin_evidence",
+        "actual": failures or "complete",
+        "target": target,
+        "pass": not failures,
+    }
 
 
 def figure8_pending_state_check(state: Any) -> dict[str, Any]:
@@ -450,10 +643,18 @@ def validate_complete(
     expected_path: Path,
     *,
     require_key_results: bool = False,
+    allow_missing_quick: bool = False,
+    validation_profile: str = "author-preflight",
 ) -> dict[str, Any]:
+    if validation_profile not in VALIDATION_PROFILES:
+        raise ValueError(f"unknown validation profile: {validation_profile}")
+    require_key_results = bool(
+        require_key_results or validation_profile == "evaluator-final"
+    )
     expected = load(expected_path)
     tolerances = expected["tolerances"]
     protocol = load(ROOT / "artifact/evaluation_protocol.json")
+    evaluation_catalog = load(ROOT / "artifact/evaluation_catalog.json")
     claim_status = load(ROOT / "artifact/claim_status.json")
     quality_pairs = {
         pair
@@ -466,23 +667,59 @@ def validate_complete(
         if state == "CLAIMED"
     }
     checks = [protocol_check(protocol, quality_pairs)]
+    for pair in sorted(quality_pairs | mechanism_pairs):
+        checks.append(
+            quality_mechanism_presence_check(
+                pair,
+                quality_claimed=pair in quality_pairs,
+                mechanism_claimed=pair in mechanism_pairs,
+            )
+        )
+    reference = find_functional_reference(output)
     quick_path = output / "quick/mvsplat_re10k/results.json"
-    quick = load(quick_path)
-    validate(quick)
-    require_aggregate(quick, "quick/mvsplat/re10k")
+    if reference is None:
+        if not allow_missing_quick:
+            load(quick_path)
+        raise FileNotFoundError("missing quick or quality functional reference")
+    reference_workflow, reference_pair, reference_path = reference
+    functional_reference = load(reference_path)
+    validate(functional_reference)
+    require_aggregate(functional_reference, reference_pair)
     checks.extend(
         (
-            clean_source_check(quick, "mvsplat/re10k", "quick"),
-            environment_provenance_check(quick, "mvsplat/re10k", output),
-            {
-                "claim": "functional:quick_fixture_not_paper_evidence",
-                "pass": quick["provenance"]["dataset"].get("functional_fixture")
-                is True
-                and quick["provenance"]["dataset"].get("paper_result_eligible")
-                is False,
-            },
+            clean_source_check(
+                functional_reference, reference_pair, reference_workflow
+            ),
+            environment_provenance_check(
+                functional_reference, reference_pair, output
+            ),
         )
     )
+    if reference_workflow == "quick":
+        checks.append(
+            {
+                "claim": "functional:quick_fixture_not_paper_evidence",
+                "pass": functional_reference["provenance"]["dataset"].get(
+                    "functional_fixture"
+                )
+                is True
+                and functional_reference["provenance"]["dataset"].get(
+                    "paper_result_eligible"
+                )
+                is False,
+            }
+        )
+    elif not allow_missing_quick:
+        load(quick_path)
+    else:
+        checks.append(
+            {
+                "claim": "functional:quick_fixture_not_run",
+                "status": "SKIPPED",
+                "target": "quick is not part of this workflow",
+                "pass": True,
+            }
+        )
     if not quality_pairs:
         software_states = {
             pair: state
@@ -625,7 +862,7 @@ def validate_complete(
         )
 
     ablation_speedups = {"fsdr": [], "saes": [], "combined": []}
-    configs = {"fsdr": "asic_fsdr", "saes": "asic_saes", "combined": "asic_fsdr_saes"}
+    mechanism_results = {}
     mechanism_paths = {
         "guided_rate": ("fsdr_saes", "fsdr", "guided_rate"),
         "top1_coverage": ("fsdr_saes", "fsdr", "in_window_rate"),
@@ -636,7 +873,7 @@ def validate_complete(
     }
     for pair in (item for item in expected["mechanisms"] if item in mechanism_pairs):
         targets = expected["mechanisms"][pair]
-        result = load(find_pair_result(output, pair, ("ablation", "all", "quality")))
+        result = load(find_pair_result(output, pair, MECHANISM_RESULT_MODES))
         validate(result)
         require_aggregate(result, pair)
         checks.append(clean_source_check(result, pair, "ablation"))
@@ -660,12 +897,8 @@ def validate_complete(
                 == protocol["pairs"][pair].get("sample_selection_sha256"),
             }
         )
-        baseline_cycles = float(result["ablation"]["asic"]["eff_total"])
-        for label, config in configs.items():
-            cycles = float(result["ablation"][config]["eff_total"])
-            if baseline_cycles <= 0 or cycles <= 0:
-                raise ValueError(f"{pair} ablation cycles must be positive")
-            ablation_speedups[label].append(baseline_cycles / cycles)
+        for label, speedup in claim_ablation_speedups(result).items():
+            ablation_speedups[label].append(speedup)
         for metric, target in targets.items():
             actual: Any = result
             for key in mechanism_paths[metric]:
@@ -674,13 +907,20 @@ def validate_complete(
             tolerance = expected["mechanism_tolerance_absolute"]
             checks.append(
                 {
-                    "claim": f"tables2-3:{pair}:{metric}",
+                    "claim": f"figure11:supporting:{pair}:{metric}",
                     "actual": actual,
                     "target": target,
                     "tolerance": tolerance,
                     "pass": abs(actual - target) <= tolerance,
                 }
             )
+        mechanism_results[pair] = result
+    for pair in sorted(set(quality_results) & set(mechanism_results)):
+        checks.append(
+            quality_mechanism_binding_check(
+                quality_results[pair], mechanism_results[pair], pair
+            )
+        )
     if claim_status["figure11"] == "CLAIMED":
         for label, values in ablation_speedups.items():
             geometric = math.exp(sum(math.log(value) for value in values) / len(values))
@@ -701,7 +941,14 @@ def validate_complete(
 
     rtl = load(output / "rtl/results.json")
     checks.append({"claim": "rtl:functional", "pass": rtl.get("status") == "PASS"})
-    checks.append(source_binding_check(rtl, quick["provenance"], "rtl"))
+    checks.append(
+        source_binding_check(
+            rtl,
+            functional_reference["provenance"],
+            "rtl",
+            reference_workflow,
+        )
+    )
 
     if claim_status["sensitivity"] == "CLAIMED":
         sensitivity = load(output / "sensitivity/results.json")
@@ -743,23 +990,47 @@ def validate_complete(
             }
         )
 
-    dram = load(output / "dram/results.json")
-    checks.append(
-        {
-            "claim": "dram:public_proxy_functional",
-            "pass": dram.get("status") == "PASS"
-            and dram.get("paper_lpddr4x_reproduced") is False
-            and float(dram.get("metrics", {}).get("trace_requests", 0)) > 0
-            and float(dram.get("metrics", {}).get("ramulator_memory_cycles", 0)) > 0
-            and float(dram.get("metrics", {}).get("drampower_offchip_energy_j", 0)) > 0,
-        }
-    )
-    checks.append(source_binding_check(dram, quick["provenance"], "dram"))
+    if physical_proxy_active(evaluation_catalog):
+        dram = load(output / "dram/results.json")
+        checks.append(
+            {
+                "claim": "dram:public_proxy_functional",
+                "pass": dram.get("status") == "PASS"
+                and dram.get("paper_lpddr4x_reproduced") is False
+                and float(dram.get("metrics", {}).get("trace_requests", 0)) > 0
+                and float(dram.get("metrics", {}).get("ramulator_memory_cycles", 0)) > 0
+                and float(dram.get("metrics", {}).get("drampower_offchip_energy_j", 0)) > 0,
+            }
+        )
+        checks.append(
+            source_binding_check(
+                dram,
+                functional_reference["provenance"],
+                "dram",
+                reference_workflow,
+            )
+        )
+    else:
+        checks.append(
+            {
+                "claim": "dram:paused_physical_proxy",
+                "status": "SKIPPED",
+                "pass": True,
+            }
+        )
 
     checks.extend(hardware_claim_checks(output, claim_status))
     report = output / "reports/reproduction_report.md"
     catalog = output / "reports/figure_catalog.json"
     catalog_record = load(catalog)
+    checks.append(
+        figure8_catalog_evidence_check(
+            output,
+            catalog_record,
+            protocol,
+            claim_status["figure8"],
+        )
+    )
     validate_result_catalog(
         catalog_record, require_key_results=require_key_results
     )
@@ -776,6 +1047,7 @@ def validate_complete(
     return {
         "schema_version": "1.0",
         "status": "PASS" if passed else "FAIL",
+        "validation_profile": validation_profile,
         "require_key_results": bool(require_key_results),
         "checks": checks,
         "summary": {
@@ -798,12 +1070,27 @@ def main() -> int:
         action="store_true",
         help="Reject any mandatory Evaluation result that is not PASS",
     )
+    parser.add_argument(
+        "--profile",
+        choices=VALIDATION_PROFILES,
+        default="author-preflight",
+        help="Select author preflight or evaluator-final validation strictness",
+    )
+    parser.add_argument(
+        "--allow-missing-quick",
+        action="store_true",
+        help="Use quality evidence as the functional source reference when quick was not run",
+    )
     args = parser.parse_args()
     try:
         record = validate_complete(
             args.input.resolve(),
             args.expected.resolve(),
-            require_key_results=args.require_key_results,
+            require_key_results=(
+                args.require_key_results or args.profile == "evaluator-final"
+            ),
+            allow_missing_quick=args.allow_missing_quick,
+            validation_profile=args.profile,
         )
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -476,10 +476,10 @@ def test_assignment_consensus_l1_keeps_route_and_charges_virtual_outputs():
         assert baseline_stats[key] == frozen_stats[key]
     assert baseline_stats == poisoned_stats
     assert baseline_stats["level1_tiles"] == 1
-    assert baseline_stats["assignment_consensus_pseudo_outputs"] == 8
-    assert baseline_stats["assignment_consensus_anchor_pairs"] == 64
-    assert baseline_stats["assignment_consensus_offset_recoveries"] == 8
-    assert baseline_stats["assignment_consensus_target_lifts"] == 72
+    assert baseline_stats["assignment_consensus_pseudo_outputs"] == 4
+    assert baseline_stats["assignment_consensus_anchor_pairs"] == 48
+    assert baseline_stats["assignment_consensus_offset_recoveries"] == 12
+    assert baseline_stats["assignment_consensus_target_lifts"] == 52
     for name, source in selected_snapshot.items():
         torch.testing.assert_close(getattr(baseline, name)[0, selected], source)
     for name in ("means", "covariances", "harmonics", "opacities"):
@@ -488,12 +488,12 @@ def test_assignment_consensus_l1_keeps_route_and_charges_virtual_outputs():
     ledger = build_saes_event_ledger(
         baseline_stats, feature_dim=2, tile_size=4, sh_degree=0
     )
-    assert ledger["events"]["assignment_consensus_pseudo_outputs"] == 8
-    assert ledger["events"]["assignment_consensus_anchor_pairs"] == 64
+    assert ledger["events"]["assignment_consensus_pseudo_outputs"] == 4
+    assert ledger["events"]["assignment_consensus_anchor_pairs"] == 48
     assert ledger["cycles"]["moment_matching_total"] == 0
     assert ledger["cycles"]["assignment_consensus_total"] > 0
     assert ledger["traffic_bytes"]["assignment_consensus_virtual_output_write"] == (
-        8 * ledger["inputs"]["descriptor_bytes"]
+        4 * ledger["inputs"]["descriptor_bytes"]
     )
     assert ledger["traffic_bytes"]["assignment_consensus_virtual_output_write"] > 0
 

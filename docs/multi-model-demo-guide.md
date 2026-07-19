@@ -1,6 +1,8 @@
 # Multi-Model Demo Guide
 
-This guide explains how to run SCARF demos with different 3D Gaussian Splatting models.
+This guide explains how to run functional SCARF demos with different 3D Gaussian
+Splatting models. The commands support integration and diagnostic inspection.
+They are not a performance benchmark or paper-evidence path.
 
 ## Supported Models
 
@@ -86,45 +88,30 @@ ln -s /path/to/re10k SCARF/depthsplat/datasets/re10k
 ln -s /path/to/dl3dv SCARF/depthsplat/datasets/dl3dv
 ```
 
-## Expected Performance
+## Demo Output Boundary
 
-### Quality Metrics (PSNR)
+The current demo completes dense model S2/S3 work and materializes full Gaussian
+descriptors before it applies SAES. SAES then classifies tiles and constructs
+route and materialization diagnostics from cloned dense descriptors. It does not
+verify sparse S2/S3 execution or measure an SAES speedup.
 
-| Model | Baseline | With SCARF | Quality Loss |
-|-------|----------|------------|--------------|
-| TranSplat | ~29 dB | ~27 dB | < 3 dB |
-| MVSplat | ~27 dB | ~25 dB | < 3 dB |
-| DepthSplat | ~28 dB | ~26 dB | < 3 dB |
+The output may include image metrics, route counts, retained descriptor counts,
+and analytic accounting. These are diagnostic values. Gaussian reduction,
+derived S2-evaluation counts, analytic cycles, and abstract stage-event
+schedules do not establish physical sparse work, RTL timing, or performance.
 
-### Performance Improvements
+## Configuration Boundary
 
-| Metric | TranSplat | MVSplat | DepthSplat |
-|--------|-----------|---------|------------|
-| Gaussian Reduction | ~25% | ~20-30% | ~20-30% |
-| Cycle Reduction | ~40% | ~35-45% | ~35-45% |
-| Speedup | ~1.7x | ~1.5-2x | ~1.5-2x |
+The demo supplies checked-in defaults automatically. They are not optimized
+per-model SAES thresholds and they cannot be tuned per model, dataset, scene, or
+sample for a claim. The current global mechanism configuration is preregistered
+and has no selected tuple.
 
-*Note: Results vary based on scene complexity and SAES threshold tuning.*
-
-## Model-Specific Configurations
-
-### SAES Thresholds
-
-Each model has optimized SAES thresholds via adapters:
-
-| Model | Early-Stop Threshold | Cov Enlarge Factor |
-|-------|---------------------|-------------------|
-| TranSplat | 0.85 | 6.0 |
-| MVSplat | 0.85 | 6.0 |
-| DepthSplat | 0.92 | 6.0 |
-
-### FSDR Configurations
-
-| Model | Hamming Threshold | High Confidence |
-|-------|------------------|-----------------|
-| TranSplat | 4 | 0.80 |
-| MVSplat | 4 | 0.80 |
-| DepthSplat | 3 | 0.85 |
+The author-side calibration contract reserves 24 DL3DV training scenes and eight
+disjoint DL3DV holdout scenes. It must select one global tuple on the training
+split and validate that frozen tuple on the holdout split before any quality,
+work-reduction, timing, or speed claim. Re10K and ACID calibration flows remain
+Functional regression only and cannot replace that DL3DV contract.
 
 ## Troubleshooting
 
@@ -175,37 +162,28 @@ git submodule update --init --recursive
 2. Review adapter configurations in `SCARF/adapters/`
 3. Open an issue on GitHub with error logs
 
-## Architecture Overview
+## Current Execution Order
 
 ```
-SCARF Demo Pipeline:
+Current demo execution:
 
-[Input Images]
-      │
-      ▼
-[Model Backbone]  ← TranSplat/MVSplat/DepthSplat encoder
-      │
-      ▼
-[SCARF SAES]      ← Progressive early sparsification
-      │
-  ┌───┴───┐
-  ▼       ▼
-Early   Continue
-Stop    Tiles
-  │       │
-  │       ▼
-  │   [FSDR]     ← Depth reuse optimization
-  │       │
-  └───┬───┘
-      ▼
-[SCARF GGU]      ← Gaussian generation
-      │
-      ▼
-[Model Decoder]  ← Original renderer
-      │
-      ▼
-[Output Image + Metrics]
+[Input images]
+      |
+      v
+[Model forward with dense S2/S3]
+      |
+      v
+[Full Gaussian descriptors]
+      |
+      v
+[SAES route and materialization diagnostic]
+      |
+      v
+[Output image and diagnostic metrics]
 ```
+
+FSDR accounting is reported separately and does not make SAES a pre-S2/S3
+execution path.
 
 ## See Also
 

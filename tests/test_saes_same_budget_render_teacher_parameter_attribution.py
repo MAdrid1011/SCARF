@@ -123,7 +123,7 @@ def test_l0_l1_masks_and_grouped_changes_cover_each_representative_once():
     # One L0 tile, one L1 tile, and no Full representatives in this 4x8 grid.
     modified = torch.ones(32, dtype=torch.bool)
     l0_reps = torch.tensor((0, 3, 24, 27))
-    l1_reps = torch.tensor((4, 5, 6, 7, 28, 29, 30, 31))
+    l1_reps = torch.tensor((4, 5, 6, 7, 12, 15, 20, 23, 28, 29, 30, 31))
     modified[l0_reps] = False
     modified[l1_reps] = False
     representatives = ~modified
@@ -131,7 +131,7 @@ def test_l0_l1_masks_and_grouped_changes_cover_each_representative_once():
         modified, representatives, views=1, height=4, width=8
     )
     assert int(groups["L0"].sum()) == 4
-    assert int(groups["L1"].sum()) == 8
+    assert int(groups["L1"].sum()) == 12
     global_representatives = torch.nonzero(representatives, as_tuple=False).flatten()
     representative_local = torch.arange(global_representatives.numel(), dtype=torch.long)
     initial = _gaussians(global_representatives.numel())
@@ -144,7 +144,7 @@ def test_l0_l1_masks_and_grouped_changes_cover_each_representative_once():
         groups,
     )
     assert report["L0"]["representative_count"] == 4
-    assert report["L1"]["representative_count"] == 8
+    assert report["L1"]["representative_count"] == 12
     assert report["L0"]["families"]["means"]["relative_change"]["maximum"] > 0.0
 
 

@@ -38,11 +38,11 @@ def test_l1_footprint_also_requires_every_preceding_s3_position():
 
     footprint = depthsplat_s3_required_footprint(height=256, width=448, level="L1")
 
-    assert footprint["retained_final_head_positions"] == 57_344
+    assert footprint["retained_final_head_positions"] == 86_016
     assert footprint["all_preceding_s3_positions_required"] is True
     assert footprint["reverse_conv3_requirements"][0] == {
         "layer": "gaussian_head.2",
-        "required_output_positions": 57_344,
+        "required_output_positions": 86_016,
         "required_input_positions": 114_688,
     }
 

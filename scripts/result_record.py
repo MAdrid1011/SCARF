@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -29,6 +30,667 @@ STAGE_COMPONENTS = {
     "s3": "gaussian",
     "s4": "ggu",
 }
+EXECUTION_TRACE_SCHEMA_VERSION = "execution-trace-inputs-v2"
+EXECUTION_TRACE_SET_SCHEMA_VERSION = "execution-trace-set-v2"
+CLAIM_TIMING_SCHEMA_VERSION = "source-bound-claim-timing-v1"
+CLAIM_TIMING_CLASS = "rtl_cycle_equivalent_source_bound"
+CLAIM_TIMING_CYCLE_SOURCE = "source_bound_verified_timing_trace_v1"
+CLAIM_TIMING_VARIANTS = (
+    "asic",
+    "asic_fsdr",
+    "asic_saes",
+    "asic_fsdr_saes",
+)
+
+# The execution trace deliberately signs only target-free, non-transient
+# evidence.  These names are removed even when they occur inside an otherwise
+# useful runtime ledger, such as an ablation record that also carries renders.
+_TRACE_QUALITY_KEYS = frozenset(
+    {
+        "quality",
+        "quality_views",
+        "psnr",
+        "psnr_db",
+        "ssim",
+        "lpips",
+        "loss_db",
+        "loss_pct",
+        "ground_truth",
+        "ground_truth_rgb",
+        "target_rgb",
+        "gt",
+        "gt_rgb",
+    }
+)
+_TRACE_PATH_OR_TRANSIENT_KEYS = frozenset(
+    {
+        "path",
+        "paths",
+        "command",
+        "commands",
+        "output",
+        "outputs",
+        "output_dir",
+        "output_path",
+        "results_path",
+        "audit_entrypoint",
+        "entrypoint",
+        "device",
+        "device_name",
+        "measured_encoder_time_ms",
+        "encoder_timing_samples_ms",
+        "encoder_timing_repetitions",
+        "elapsed_seconds",
+        "started_at",
+    }
+)
+_TRACE_OMIT = object()
+
+
+def _canonical_json_sha256(value: Any, *, label: str) -> str:
+    """Hash JSON with a fixed encoding instead of a display serialization."""
+    try:
+        payload = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be finite canonical JSON") from exc
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _trace_mapping(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object for execution trace binding")
+    return value
+
+
+def _trace_required(mapping: Mapping[str, Any], key: str, label: str) -> Any:
+    if key not in mapping:
+        raise ValueError(f"{label}.{key} is required for execution trace binding")
+    return mapping[key]
+
+
+def canonical_execution_selection(evaluation: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the non-quality sample selection used in an execution trace."""
+    if evaluation.get("kind") != "sample":
+        raise ValueError("execution trace binding requires a sample evaluation")
+    sample_index = evaluation.get("sample_index")
+    execution_index = evaluation.get("execution_index")
+    candidate_count = evaluation.get("candidate_count")
+    scene = evaluation.get("scene")
+    context_indices = evaluation.get("context_indices")
+    target_indices = evaluation.get("target_indices")
+    if (
+        isinstance(sample_index, bool)
+        or not isinstance(sample_index, int)
+        or sample_index < 0
+        or isinstance(execution_index, bool)
+        or not isinstance(execution_index, int)
+        or execution_index < 0
+        or isinstance(candidate_count, bool)
+        or not isinstance(candidate_count, int)
+        or candidate_count <= 0
+        or execution_index >= candidate_count
+        or not isinstance(scene, str)
+        or not scene
+        or not isinstance(context_indices, list)
+        or not context_indices
+        or not isinstance(target_indices, list)
+        or not target_indices
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in context_indices)
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in target_indices)
+    ):
+        raise ValueError("execution trace binding has an invalid canonical selection")
+    return {
+        "sample_index": sample_index,
+        "execution_index": execution_index,
+        "candidate_count": candidate_count,
+        "scene": scene,
+        "context_indices": list(context_indices),
+        "target_indices": list(target_indices),
+    }
+
+
+def _canonical_runtime_asset_identities(
+    runtime_assets: Any,
+) -> dict[str, dict[str, Any]]:
+    """Keep content identities while excluding installation-specific asset paths."""
+    if not isinstance(runtime_assets, Mapping) or not runtime_assets:
+        raise ValueError("runtime assets must be non-empty for execution trace binding")
+    identities: dict[str, dict[str, Any]] = {}
+    fields = ("sha256", "archive_sha256", "commit", "license_sha256")
+    for name, metadata in runtime_assets.items():
+        if not isinstance(name, str) or not name or not isinstance(metadata, Mapping):
+            raise ValueError("runtime asset identity is invalid for execution trace binding")
+        identity = {
+            field: copy.deepcopy(metadata[field]) for field in fields if field in metadata
+        }
+        if not any(field in identity for field in ("sha256", "archive_sha256")):
+            raise ValueError("runtime asset has no content hash for execution trace binding")
+        identities[name] = identity
+    return identities
+
+
+def _sha256_digest(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _positive_integer(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{label} must be a positive integer")
+    return value
+
+
+def claim_timing_binding_inputs(
+    record: Mapping[str, Any], *, aggregate: bool
+) -> dict[str, Any]:
+    """Return the source and workload identity a claim timing trace must bind."""
+    root = _trace_mapping(record, "result record")
+    provenance = _trace_mapping(
+        _trace_required(root, "provenance", "result record"), "provenance"
+    )
+    dataset = _trace_mapping(
+        _trace_required(provenance, "dataset", "provenance"), "provenance.dataset"
+    )
+    checkpoint = _trace_mapping(
+        _trace_required(provenance, "checkpoint", "provenance"),
+        "provenance.checkpoint",
+    )
+    evaluation = _trace_mapping(
+        _trace_required(provenance, "evaluation", "provenance"),
+        "provenance.evaluation",
+    )
+    execution = _trace_safe_nonquality_value(
+        _trace_required(provenance, "execution_contract", "provenance"),
+        label="provenance.execution_contract",
+    )
+    if aggregate:
+        if evaluation.get("kind") != "dataset_aggregate":
+            raise ValueError("claim timing aggregate requires a dataset aggregate")
+        selection = {
+            "sample_count": evaluation.get("sample_count"),
+            "sample_indices": evaluation.get("sample_indices"),
+            "execution_indices": evaluation.get("execution_indices"),
+            "sample_selection_sha256": evaluation.get("sample_selection_sha256"),
+        }
+    else:
+        selection = canonical_execution_selection(evaluation)
+    return {
+        "source": {
+            "source_tree_sha256": _trace_required(
+                provenance, "source_tree_sha256", "provenance"
+            ),
+            "submodules": _trace_required(provenance, "submodules", "provenance"),
+        },
+        "mechanism_config_sha256": provenance.get("mechanism_config_sha256"),
+        "saes_execution_identity": _trace_required(
+            provenance, "saes_execution_identity", "provenance"
+        ),
+        "saes_execution_route_sha256": _trace_required(
+            provenance, "saes_execution_route_sha256", "provenance"
+        ),
+        "model": _trace_required(provenance, "model", "provenance"),
+        "dataset": {
+            "name": _trace_required(dataset, "name", "provenance.dataset"),
+            "representation": _trace_required(
+                dataset, "representation", "provenance.dataset"
+            ),
+            "manifest_sha256": _trace_required(dataset, "sha256", "provenance.dataset"),
+            "tree_sha256": _trace_required(
+                dataset, "tree_sha256", "provenance.dataset"
+            ),
+        },
+        "checkpoint_sha256": _trace_required(
+            checkpoint, "sha256", "provenance.checkpoint"
+        ),
+        "runtime_assets": _canonical_runtime_asset_identities(
+            _trace_required(provenance, "runtime_assets", "provenance")
+        ),
+        "seed": _trace_required(provenance, "seed", "provenance"),
+        "environment_digest_sha256": _trace_required(
+            _trace_mapping(
+                _trace_required(provenance, "environment", "provenance"),
+                "provenance.environment",
+            ),
+            "digest_sha256",
+            "provenance.environment",
+        ),
+        "execution_contract": execution,
+        "selection": selection,
+    }
+
+
+def claim_timing_binding_sha256(
+    record: Mapping[str, Any], *, aggregate: bool
+) -> str:
+    """Hash the non-quality source and workload inputs for a claim timing trace."""
+    return _canonical_json_sha256(
+        {
+            "schema_version": CLAIM_TIMING_SCHEMA_VERSION,
+            "inputs": claim_timing_binding_inputs(record, aggregate=aggregate),
+        },
+        label="claim timing input binding",
+    )
+
+
+def claim_timing_from_record(
+    record: Mapping[str, Any], *, aggregate: bool
+) -> dict[str, Any]:
+    """Validate the only timing evidence allowed to support a strict claim."""
+    root = _trace_mapping(record, "result record")
+    performance = _trace_mapping(
+        _trace_required(root, "performance", "result record"), "performance"
+    )
+    timing = performance.get("claim_timing")
+    if not isinstance(timing, Mapping):
+        raise ValueError("claim result has no source-bound timing evidence")
+    required = {
+        "schema_version",
+        "timing_class",
+        "rtl_cycle_equivalent",
+        "clock_mhz",
+        "trace",
+        "input_binding_sha256",
+        "variants",
+        "combined_stage_cycles",
+    }
+    if set(timing) != required:
+        raise ValueError("claim timing evidence has an invalid field set")
+    if timing["schema_version"] != CLAIM_TIMING_SCHEMA_VERSION:
+        raise ValueError("claim timing evidence has an invalid schema version")
+    if timing["timing_class"] != CLAIM_TIMING_CLASS or timing[
+        "rtl_cycle_equivalent"
+    ] is not True:
+        raise ValueError("claim timing evidence is not RTL-cycle-equivalent")
+    _positive_integer(timing["clock_mhz"], "claim timing clock_mhz")
+    trace = timing["trace"]
+    if not isinstance(trace, Mapping) or set(trace) != {"path", "sha256"}:
+        raise ValueError("claim timing evidence has no raw trace descriptor")
+    trace_path = trace["path"]
+    pure_trace_path = PurePosixPath(trace_path) if isinstance(trace_path, str) else None
+    if (
+        pure_trace_path is None
+        or pure_trace_path.is_absolute()
+        or ".." in pure_trace_path.parts
+        or not pure_trace_path.parts
+        or pure_trace_path.parts[0] != "timing-trace"
+        or not _sha256_digest(trace["sha256"])
+    ):
+        raise ValueError("claim timing evidence has an invalid raw trace descriptor")
+    expected_binding = claim_timing_binding_sha256(record, aggregate=aggregate)
+    if timing["input_binding_sha256"] != expected_binding:
+        raise ValueError("claim timing input binding does not match the result")
+    variants = timing["variants"]
+    if not isinstance(variants, Mapping) or set(variants) != set(CLAIM_TIMING_VARIANTS):
+        raise ValueError("claim timing evidence does not cover every ablation variant")
+    variant_cycles: dict[str, int] = {}
+    for name in CLAIM_TIMING_VARIANTS:
+        variant = variants[name]
+        if not isinstance(variant, Mapping) or set(variant) != {"total_cycles"}:
+            raise ValueError(f"claim timing variant {name} is invalid")
+        variant_cycles[name] = _positive_integer(
+            variant["total_cycles"], f"claim timing variant {name}.total_cycles"
+        )
+    if performance.get("cycle_source") != CLAIM_TIMING_CYCLE_SOURCE:
+        raise ValueError("claim result does not use the source-bound timing source")
+    if performance.get("scarf_cycles") != variant_cycles["asic_fsdr_saes"]:
+        raise ValueError("claim timing combined cycles do not match performance.scarf_cycles")
+    stages = performance.get("stages")
+    combined_stages = timing["combined_stage_cycles"]
+    if not isinstance(stages, Mapping) or not isinstance(combined_stages, Mapping):
+        raise ValueError("claim timing has no complete stage evidence")
+    if set(combined_stages) != {"s1", "s2", "s3", "s4"}:
+        raise ValueError("claim timing combined stage cycles are incomplete")
+    for stage in ("s1", "s2", "s3", "s4"):
+        cycles = _positive_integer(
+            combined_stages[stage], f"claim timing {stage} cycles"
+        )
+        if not isinstance(stages.get(stage), Mapping) or stages[stage].get("cycles") != cycles:
+            raise ValueError("claim timing stage cycles do not match performance stages")
+    ablation = root.get("ablation")
+    if not isinstance(ablation, Mapping):
+        raise ValueError("claim result has no ablation record")
+    if any(
+        isinstance(variant, Mapping) and "eff_total" in variant
+        for variant in ablation.values()
+    ):
+        raise ValueError("claim result contains analytic eff_total timing")
+    return {
+        "clock_mhz": timing["clock_mhz"],
+        "trace": dict(trace),
+        "input_binding_sha256": timing["input_binding_sha256"],
+        "variants": variant_cycles,
+        "combined_stage_cycles": dict(combined_stages),
+    }
+
+
+def claim_ablation_cycles(record: Mapping[str, Any]) -> dict[str, int]:
+    """Return strict ablation cycles without consulting analytic estimates."""
+    provenance = _trace_mapping(
+        _trace_required(record, "provenance", "result record"), "provenance"
+    )
+    evaluation = _trace_mapping(
+        _trace_required(provenance, "evaluation", "provenance"), "provenance.evaluation"
+    )
+    timing = claim_timing_from_record(
+        record, aggregate=evaluation.get("kind") == "dataset_aggregate"
+    )
+    return dict(timing["variants"])
+
+
+def claim_ablation_speedups(record: Mapping[str, Any]) -> dict[str, float]:
+    """Compute strict Figure 11 ratios from verified timing trace variants."""
+    cycles = claim_ablation_cycles(record)
+    baseline = cycles["asic"]
+    return {
+        "fsdr": baseline / cycles["asic_fsdr"],
+        "saes": baseline / cycles["asic_saes"],
+        "combined": baseline / cycles["asic_fsdr_saes"],
+    }
+
+
+def _trace_key_is_excluded(key: str) -> bool:
+    """Return whether a nested ledger key is disallowed in a trace payload."""
+    lowered = key.lower()
+    if lowered in _TRACE_QUALITY_KEYS or lowered in _TRACE_PATH_OR_TRANSIENT_KEYS:
+        return True
+    if "quality" in lowered:
+        return True
+    if "ground_truth" in lowered:
+        return True
+    if lowered.startswith("gt_") or lowered.endswith("_gt"):
+        return True
+    if lowered.startswith("target_") or lowered.startswith("reference_"):
+        return True
+    if lowered.endswith("_path") or lowered.endswith("_paths"):
+        return True
+    if "command" in lowered or "output" in lowered:
+        return True
+    return lowered.startswith("device_") or lowered.endswith("_device")
+
+
+def _trace_safe_nonquality_value(value: Any, *, label: str) -> Any:
+    """Copy a target-free ledger while dropping quality, paths, and timing."""
+    if isinstance(value, Mapping):
+        copied: dict[str, Any] = {}
+        for key, child in value.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError(f"{label} has an invalid trace key")
+            if _trace_key_is_excluded(key):
+                continue
+            sanitized = _trace_safe_nonquality_value(
+                child, label=f"{label}.{key}"
+            )
+            if sanitized is not _TRACE_OMIT:
+                copied[key] = sanitized
+        return copied
+    if isinstance(value, list):
+        copied_items = []
+        for index, child in enumerate(value):
+            sanitized = _trace_safe_nonquality_value(
+                child, label=f"{label}[{index}]"
+            )
+            if sanitized is not _TRACE_OMIT:
+                copied_items.append(sanitized)
+        return copied_items
+    if isinstance(value, str):
+        # Keys cover repository-relative paths.  Keep ordinary technical prose
+        # such as ``S2/S3`` in ledger assumptions, but omit unmistakable local
+        # paths if one is smuggled through an unfamiliar field name.
+        if value.startswith(("/", "./", "../", "~")) or "\\" in value:
+            return _TRACE_OMIT
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return copy.deepcopy(value)
+    raise ValueError(f"{label} has a non-JSON trace value")
+
+
+def _claimable_mechanism_metrics(record: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Keep the target-free mechanism metrics consumed by claim validation."""
+    fsdr_saes = record.get("fsdr_saes", {})
+    if not isinstance(fsdr_saes, Mapping):
+        raise ValueError("fsdr_saes must be an object for execution trace binding")
+
+    fields = {
+        "fsdr": ("guided_rate", "in_window_rate", "top1_coverage"),
+        "saes": ("level0_ratio", "level1_ratio", "modification_ratio"),
+        "preservation": (
+            "saes_low_var_agree",
+            "saes_low_var_tiles",
+            "saes_early_tiles",
+            "saes_low_var_mean_similarity",
+            "saes_low_var_threshold",
+        ),
+    }
+    evidence: dict[str, dict[str, Any]] = {}
+    for namespace, names in fields.items():
+        values = fsdr_saes.get(namespace, {})
+        if not isinstance(values, Mapping):
+            if values not in ({}, None):
+                raise ValueError(
+                    f"fsdr_saes.{namespace} must be an object for execution trace binding"
+                )
+            values = {}
+        evidence[namespace] = {
+            name: _trace_safe_nonquality_value(
+                values[name], label=f"fsdr_saes.{namespace}.{name}"
+            )
+            for name in names
+            if name in values
+        }
+    return evidence
+
+
+def execution_trace_performance_evidence_from_record(
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Extract every claimable target-free performance ledger from a record.
+
+    Baseline CUDA timing and its derived speedup stay outside this payload:
+    those transient measurements are verified by the separately hashed Orin
+    evidence.  SCARF's static cycle ledger and all mechanism evidence remain
+    bound here.
+    """
+    root = _trace_mapping(record, "result record")
+    performance = _trace_mapping(
+        _trace_required(root, "performance", "result record"), "performance"
+    )
+    evidence = {
+        "cycle_source": _trace_safe_nonquality_value(
+            _trace_required(performance, "cycle_source", "performance"),
+            label="performance.cycle_source",
+        ),
+        "scarf_cycles": _trace_safe_nonquality_value(
+            _trace_required(performance, "scarf_cycles", "performance"),
+            label="performance.scarf_cycles",
+        ),
+        "components": _trace_safe_nonquality_value(
+            _trace_required(performance, "components", "performance"),
+            label="performance.components",
+        ),
+        "stages": _trace_safe_nonquality_value(
+            _trace_required(performance, "stages", "performance"),
+            label="performance.stages",
+        ),
+        "ablation": _trace_safe_nonquality_value(
+            _trace_required(root, "ablation", "result record"),
+            label="ablation",
+        ),
+        "events": _trace_safe_nonquality_value(
+            _trace_required(root, "events", "result record"), label="events"
+        ),
+        "mechanism_metrics": _claimable_mechanism_metrics(root),
+        "energy": _trace_safe_nonquality_value(
+            _trace_required(root, "energy", "result record"), label="energy"
+        ),
+    }
+    if "claim_timing" in performance:
+        evidence["claim_timing"] = _trace_safe_nonquality_value(
+            performance["claim_timing"], label="performance.claim_timing"
+        )
+    return evidence
+
+
+def execution_trace_inputs_from_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Extract only actual, non-quality execution inputs for a sample trace.
+
+    The payload intentionally has an explicit allowlist.  In particular it does
+    not read rendered quality, target RGB, or paper-reference values.
+    """
+    root = _trace_mapping(record, "result record")
+    provenance = _trace_mapping(
+        _trace_required(root, "provenance", "result record"), "provenance"
+    )
+    dataset = _trace_mapping(
+        _trace_required(provenance, "dataset", "provenance"), "provenance.dataset"
+    )
+    checkpoint = _trace_mapping(
+        _trace_required(provenance, "checkpoint", "provenance"),
+        "provenance.checkpoint",
+    )
+    evaluation = _trace_mapping(
+        _trace_required(provenance, "evaluation", "provenance"),
+        "provenance.evaluation",
+    )
+    return {
+        "execution_contract": copy.deepcopy(
+            _trace_safe_nonquality_value(
+                _trace_required(provenance, "execution_contract", "provenance"),
+                label="provenance.execution_contract",
+            )
+        ),
+        "source": {
+            "git_commit": copy.deepcopy(
+                _trace_required(provenance, "git_commit", "provenance")
+            ),
+            "git_dirty": copy.deepcopy(
+                _trace_required(provenance, "git_dirty", "provenance")
+            ),
+            "source_identity": copy.deepcopy(
+                _trace_required(provenance, "source_identity", "provenance")
+            ),
+            "source_tree_sha256": copy.deepcopy(
+                _trace_required(provenance, "source_tree_sha256", "provenance")
+            ),
+            "submodules": copy.deepcopy(
+                _trace_required(provenance, "submodules", "provenance")
+            ),
+        },
+        "mechanism": {
+            "config_sha256": copy.deepcopy(provenance.get("mechanism_config_sha256")),
+            "calibration_provenance": _trace_safe_nonquality_value(
+                provenance.get("calibration_provenance"),
+                label="provenance.calibration_provenance",
+            ),
+            "saes_execution_identity": _trace_safe_nonquality_value(
+                provenance.get("saes_execution_identity"),
+                label="provenance.saes_execution_identity",
+            ),
+            "saes_execution_route_sha256": _trace_safe_nonquality_value(
+                provenance.get("saes_execution_route_sha256"),
+                label="provenance.saes_execution_route_sha256",
+            ),
+        },
+        "model": copy.deepcopy(_trace_required(provenance, "model", "provenance")),
+        "dataset": {
+            "name": copy.deepcopy(_trace_required(dataset, "name", "provenance.dataset")),
+            "representation": copy.deepcopy(
+                _trace_required(dataset, "representation", "provenance.dataset")
+            ),
+            "manifest_sha256": copy.deepcopy(
+                _trace_required(dataset, "sha256", "provenance.dataset")
+            ),
+            "tree_sha256": copy.deepcopy(
+                _trace_required(dataset, "tree_sha256", "provenance.dataset")
+            ),
+        },
+        "checkpoint": {
+            "sha256": copy.deepcopy(
+                _trace_required(checkpoint, "sha256", "provenance.checkpoint")
+            ),
+            "load": copy.deepcopy(
+                _trace_required(checkpoint, "load", "provenance.checkpoint")
+            ),
+        },
+        "execution": {
+            "seed": copy.deepcopy(_trace_required(provenance, "seed", "provenance")),
+            "environment_digest_sha256": copy.deepcopy(
+                _trace_required(
+                    _trace_mapping(
+                        _trace_required(provenance, "environment", "provenance"),
+                        "provenance.environment",
+                    ),
+                    "digest_sha256",
+                    "provenance.environment",
+                )
+            ),
+            "runtime_assets": _canonical_runtime_asset_identities(
+                _trace_required(provenance, "runtime_assets", "provenance")
+            ),
+        },
+        "selection": canonical_execution_selection(evaluation),
+        "route_evidence": execution_trace_performance_evidence_from_record(root),
+    }
+
+
+def execution_trace_sha256(inputs: Mapping[str, Any]) -> str:
+    """Return the digest for an explicit non-quality execution-input payload."""
+    if not isinstance(inputs, Mapping):
+        raise ValueError("execution trace inputs must be an object")
+    return _canonical_json_sha256(
+        {
+            "schema_version": EXECUTION_TRACE_SCHEMA_VERSION,
+            "inputs": inputs,
+        },
+        label="execution trace inputs",
+    )
+
+
+def execution_trace_set_sha256(
+    trace_set: list[Mapping[str, Any]],
+    performance_evidence: Mapping[str, Any],
+) -> str:
+    """Return the digest for sample traces and their aggregate performance evidence."""
+    if not isinstance(trace_set, list):
+        raise ValueError("execution trace set must be a list")
+    if not isinstance(performance_evidence, Mapping):
+        raise ValueError("execution trace set performance evidence must be an object")
+    return _canonical_json_sha256(
+        {
+            "schema_version": EXECUTION_TRACE_SET_SCHEMA_VERSION,
+            "traces": trace_set,
+            "performance_evidence": performance_evidence,
+        },
+        label="execution trace set",
+    )
+
+
+def bind_execution_trace(record: dict[str, Any]) -> str:
+    """Attach one verified execution trace to a completed sample result record."""
+    provenance = record.get("provenance")
+    quality = record.get("quality")
+    performance = record.get("performance")
+    if not isinstance(provenance, dict):
+        raise ValueError("result record provenance must be an object")
+    if not isinstance(quality, dict) or not isinstance(performance, dict):
+        raise ValueError("result record needs quality and performance trace bindings")
+    inputs = execution_trace_inputs_from_record(record)
+    digest = execution_trace_sha256(inputs)
+    provenance["execution_trace"] = {
+        "schema_version": EXECUTION_TRACE_SCHEMA_VERSION,
+        "inputs": inputs,
+    }
+    provenance["execution_trace_sha256"] = digest
+    quality["execution_trace_sha256"] = digest
+    performance["execution_trace_sha256"] = digest
+    return digest
 
 
 @lru_cache(maxsize=2)
@@ -297,7 +959,7 @@ def _default_event_records(fsdr_saes: Mapping[str, Any]) -> dict[str, dict[str, 
                 "SAES L0 representatives",
             ),
             "l1_lightweight_anchors": _nonnegative_count(
-                saes.get("l1_lightweight_anchors", level1_tiles * 8),
+                saes.get("l1_lightweight_anchors", level1_tiles * 12),
                 "SAES L1 lightweight anchors",
             ),
             "full_stage3_gaussians": _nonnegative_count(
@@ -386,7 +1048,7 @@ def _upgrade_v21_events(records: dict[str, dict[str, Any]]) -> dict[str, dict[st
                 "SAES L0 representatives",
             ),
             "l1_lightweight_anchors": _nonnegative_count(
-                saes.get("l1_lightweight_anchors", level1_tiles * 8),
+                saes.get("l1_lightweight_anchors", level1_tiles * 12),
                 "SAES L1 lightweight anchors",
             ),
             "full_stage3_gaussians": _nonnegative_count(
@@ -649,6 +1311,33 @@ def portable_command(command: list[str]) -> list[str]:
     return normalized
 
 
+def _strict_saes_runtime_binding(
+    fsdr_saes: Mapping[str, Any],
+    *,
+    run_class: str,
+    expected_identity: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return the exact runtime route binding required by strict records."""
+    if run_class not in {"claim", "functional"}:
+        return None
+    saes = fsdr_saes.get("saes")
+    if not isinstance(saes, Mapping):
+        raise ValueError("strict result records require runtime SAES route evidence")
+    runtime_identity = saes.get("saes_execution_identity")
+    runtime_route_sha256 = saes.get("route_sha256")
+    from scripts.saes_execution_identity import validate_saes_execution_identity
+
+    expected = validate_saes_execution_identity(expected_identity)
+    if runtime_identity != expected:
+        raise ValueError("strict result records require runtime SAES execution identity")
+    if runtime_route_sha256 != expected["route_sha256"]:
+        raise ValueError("strict result records require runtime SAES route SHA256")
+    return {
+        "identity": copy.deepcopy(expected),
+        "route_sha256": expected["route_sha256"],
+    }
+
+
 def build_result_record(
     *,
     model: str,
@@ -684,6 +1373,7 @@ def build_result_record(
     stage_records: Mapping[str, Any] | None = None,
     event_records: Mapping[str, Any] | None = None,
     energy_record: Mapping[str, Any] | None = None,
+    claim_timing: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not dataset_representation:
         raise ValueError("dataset representation must be recorded")
@@ -708,6 +1398,10 @@ def build_result_record(
             "claim and functional result records require representative SAES "
             "materialization"
         )
+    if execution["run_class"] == "claim" and not isinstance(claim_timing, Mapping):
+        raise ValueError("claim result records require source-bound timing evidence")
+    if execution["run_class"] != "claim" and claim_timing is not None:
+        raise ValueError("only claim result records may include claim_timing")
     environment_digest = environment.get("digest_sha256")
     if (
         not isinstance(environment_digest, str)
@@ -825,7 +1519,23 @@ def build_result_record(
             "paper-result-eligible records require claim run class and "
             "representative SAES materialization"
         )
-    _, mechanism = load_mechanism_config()
+    if (
+        paper_result_eligible
+        and checked_events["saes"]["execution_dependency"].get(
+            "s2_s3_sparse_execution_verified"
+        )
+        is not True
+    ):
+        raise ValueError(
+            "paper-result-eligible records require verified whole-pipeline "
+            "SAES S2/S3 sparse execution"
+        )
+    mechanism_config, mechanism = load_mechanism_config()
+    strict_saes_binding = _strict_saes_runtime_binding(
+        fsdr_saes,
+        run_class=execution["run_class"],
+        expected_identity=mechanism_config["saes_execution_identity"],
+    )
     if mechanism["status"] != "calibrated":
         paper_result_eligible = False
     elif (
@@ -842,7 +1552,7 @@ def build_result_record(
         for key, value in mechanism.items()
         if key != "mechanism_config_sha256"
     }
-    return {
+    record = {
         "schema_version": "2.1",
         "evidence_class": evidence_class,
         "provenance": {
@@ -852,6 +1562,16 @@ def build_result_record(
             "source_tree_sha256": source["source_tree_sha256"],
             "mechanism_config_sha256": mechanism["mechanism_config_sha256"],
             "calibration_provenance": calibration_provenance,
+            **(
+                {
+                    "saes_execution_identity": strict_saes_binding["identity"],
+                    "saes_execution_route_sha256": strict_saes_binding[
+                        "route_sha256"
+                    ],
+                }
+                if strict_saes_binding is not None
+                else {}
+            ),
             "submodules": source["submodules"],
             "command": portable_command(command),
             "runtime_assets": dict(runtime_assets),
@@ -914,6 +1634,19 @@ def build_result_record(
             "fallback_stages": fallback_stages,
         },
     }
+    if claim_timing is not None:
+        record["performance"]["claim_timing"] = copy.deepcopy(dict(claim_timing))
+    if execution["run_class"] == "claim":
+        timing = record["performance"]["claim_timing"]
+        supplied_binding = timing.get("input_binding_sha256")
+        expected_binding = claim_timing_binding_sha256(record, aggregate=False)
+        if supplied_binding not in (None, expected_binding):
+            raise ValueError("claim timing input binding does not match the result")
+        timing["input_binding_sha256"] = expected_binding
+    bind_execution_trace(record)
+    if execution["run_class"] == "claim":
+        claim_timing_from_record(record, aggregate=False)
+    return record
 
 
 def write_result(record: Mapping[str, Any], output: Path) -> None:

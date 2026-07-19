@@ -64,8 +64,26 @@ def compute_probe_positions(tile_size: int) -> List[Position]:
 
 
 def compute_lightweight_positions(tile_size: int) -> List[Position]:
-    """Return the declared 2K(T) L1 anchors, preserving primary probes first."""
+    """Return deterministic L1 anchors, preserving primary probes first.
+
+    The frozen T=4 claim-path layout retains the four primary corner probes
+    followed by all eight non-corner boundary pixels.  This 12-anchor layout
+    widens only L1; L0 routing continues to use the first four probes.  Larger
+    sensitivity-only tiles retain the historical 2K(T) farthest-point layout.
+    """
     primary = compute_probe_positions(tile_size)
+    if tile_size == 4:
+        return [
+            *primary,
+            (0, 1),
+            (0, 2),
+            (1, 0),
+            (1, 3),
+            (2, 0),
+            (2, 3),
+            (3, 1),
+            (3, 2),
+        ]
     target = min(tile_size * tile_size, 2 * len(primary))
     positions = list(primary)
     selected = set(positions)
@@ -92,6 +110,31 @@ def compute_lightweight_positions(tile_size: int) -> List[Position]:
         selected.add(best)
         candidates.remove(best)
     return positions
+
+
+def compute_balanced_lightweight_positions(tile_size: int) -> List[Position]:
+    """Return a 12-anchor T=4 layout that covers the interior and boundary.
+
+    The four paper primary probes remain the prefix. For T=4, the engineering
+    expansion retains the four interior pixels and four rotationally symmetric
+    edge pixels, so the omitted four positions are distributed around the
+    boundary rather than clustered in the rendering-critical tile center.
+    Larger tiles retain the existing deterministic lightweight layout.
+    """
+    primary = compute_probe_positions(tile_size)
+    if tile_size == 4:
+        return [
+            *primary,
+            (1, 1),
+            (1, 2),
+            (2, 1),
+            (2, 2),
+            (0, 1),
+            (1, 3),
+            (3, 2),
+            (2, 0),
+        ]
+    return compute_lightweight_positions(tile_size)
 
 
 def compute_nonprobe_positions(tile_size: int) -> List[Position]:

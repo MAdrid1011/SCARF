@@ -18,6 +18,28 @@ def _guard_check(level: str, *, passed: bool, anchor_count: int) -> dict:
     }
 
 
+def _probe_cross_check(*, passed: bool) -> dict:
+    return {
+        "checked": True,
+        "passed": passed,
+        "error_max": 0.02 if not passed else 0.01,
+        "threshold": 0.015,
+        "primary_anchor_count": 4,
+        "nonprobe_s3_attribute_reads": 0,
+    }
+
+
+def _context_safety(*, reason: str) -> dict:
+    return {
+        "passed": reason == "accepted",
+        "coverage_footprint_ratio": 1.0,
+        "relative_depth_span": 0.0,
+        "projected_center_mahalanobis_max": 3.0 if reason == "center_separation" else 0.0,
+        "center_overlap_passed": reason != "center_separation",
+        "reason": reason,
+    }
+
+
 def _trace_record(*, route: str, checks: list[dict], feature_candidate: bool = True) -> dict:
     return {
         "view_index": 0,
@@ -53,9 +75,96 @@ def _guarded_stats(
         "l0_guard_rejections": l0_rejections,
         "l1_guard_rejections": l1_rejections,
         "l1_guard_attempts_after_l0_rejection": l0_rejections,
-        "guard_anchor_attribute_reads": 3 * (l0_checks * 4 + l1_checks * 8),
+        "guard_anchor_attribute_reads": 3 * (l0_checks * 4 + l1_checks * 12),
         "guard_nonprobe_s3_attribute_reads": 0,
     }
+
+
+def test_trace_validator_allows_cross_check_force_full_without_l1_attempt():
+    from scripts.saes_l1_primary_reference_guard_partition_audit import _validate_trace
+
+    trace = [
+        _trace_record(
+            route="Full",
+            checks=[
+                {
+                    **_guard_check("L0", passed=False, anchor_count=4),
+                    "probe_cross_check": _probe_cross_check(passed=False),
+                }
+            ],
+        )
+    ]
+    stats = _guarded_stats(
+        l0_checks=1,
+        l1_checks=0,
+        l0_rejections=1,
+        l1_rejections=0,
+    )
+    stats.update(
+        {
+            "l1_guard_attempts_after_l0_rejection": 0,
+            "probe_cross_check_l0_checks": 1,
+            "probe_cross_check_l1_checks": 0,
+            "probe_cross_check_l0_rejections": 1,
+            "probe_cross_check_l1_rejections": 0,
+        }
+    )
+    trace[0]["depth_candidate"] = None
+
+    summary = _validate_trace(trace, stats, guard_enabled=True)
+
+    assert summary["l0_force_full_rejections"] == 1
+    assert summary["probe_cross_check_rejections"] == {"L0": 1, "L1": 0}
+
+
+def test_trace_validator_allows_context_force_full_without_l1_attempt():
+    from scripts.saes_l1_primary_reference_guard_partition_audit import _validate_trace
+
+    trace = [
+        _trace_record(
+            route="Full",
+            checks=[
+                {
+                    **_guard_check("L0", passed=False, anchor_count=4),
+                    "context_safety": _context_safety(reason="center_separation"),
+                }
+            ],
+        )
+    ]
+    stats = _guarded_stats(
+        l0_checks=1,
+        l1_checks=0,
+        l0_rejections=1,
+        l1_rejections=0,
+    )
+    stats["l1_guard_attempts_after_l0_rejection"] = 0
+    trace[0]["depth_candidate"] = None
+
+    summary = _validate_trace(trace, stats, guard_enabled=True)
+
+    assert summary["l0_force_full_rejections"] == 1
+
+
+def test_trace_validator_rejects_ordinary_l0_rejection_that_skips_l1_attempt():
+    from scripts.saes_l1_primary_reference_guard_partition_audit import _validate_trace
+
+    trace = [
+        _trace_record(
+            route="Full",
+            checks=[_guard_check("L0", passed=False, anchor_count=4)],
+        )
+    ]
+    trace[0]["depth_candidate"] = None
+    stats = _guarded_stats(
+        l0_checks=1,
+        l1_checks=0,
+        l0_rejections=1,
+        l1_rejections=0,
+    )
+    stats["l1_guard_attempts_after_l0_rejection"] = 0
+
+    with pytest.raises(RuntimeError, match="omitted L1 routing"):
+        _validate_trace(trace, stats, guard_enabled=True)
 
 
 def test_scalar_trace_validator_matches_runtime_guard_counters():
@@ -66,7 +175,7 @@ def test_scalar_trace_validator_matches_runtime_guard_counters():
             route="Full",
             checks=[
                 _guard_check("L0", passed=False, anchor_count=4),
-                _guard_check("L1", passed=False, anchor_count=8),
+                _guard_check("L1", passed=False, anchor_count=12),
             ],
         )
     ]
@@ -80,7 +189,7 @@ def test_scalar_trace_validator_matches_runtime_guard_counters():
 
     assert summary["tile_count"] == 1
     assert summary["pre_materialization_routes"] == {"L0": 0, "L1": 0, "Full": 1}
-    assert summary["guard_anchor_descriptors"] == 12
+    assert summary["guard_anchor_descriptors"] == 16
     assert summary["guard_nonprobe_s3_attribute_reads"] == 0
 
 
@@ -115,7 +224,7 @@ def test_partition_classifier_separates_fixed_guard_outcomes():
             "routing_level_before_materialization": "L1",
             "guard_checks": [
                 _guard_check("L0", passed=False, anchor_count=4),
-                _guard_check("L1", passed=True, anchor_count=8),
+                _guard_check("L1", passed=True, anchor_count=12),
             ],
         }
     )
@@ -126,7 +235,7 @@ def test_partition_classifier_separates_fixed_guard_outcomes():
             "routing_level_before_materialization": "Full",
             "guard_checks": [
                 _guard_check("L0", passed=False, anchor_count=4),
-                _guard_check("L1", passed=False, anchor_count=8),
+                _guard_check("L1", passed=False, anchor_count=12),
             ],
         }
     )
@@ -167,7 +276,7 @@ def test_shadow_trace_allows_only_first_hit_depth_short_circuit():
             route="L1",
             checks=[
                 _guard_check("L0", passed=False, anchor_count=4),
-                _guard_check("L1", passed=True, anchor_count=8),
+                _guard_check("L1", passed=True, anchor_count=12),
             ],
         )
     ]

@@ -24,9 +24,25 @@ from saes.probe_layout import (
 )
 
 
-LEDGER_VERSION = "saes-event-ledger-v2"
+LEDGER_VERSION = "saes-event-ledger-v3"
 DEFAULT_VECTOR_WIDTH = 64
 DEFAULT_STORAGE_BEAT_BYTES = 16
+JOINT_CALIBRATOR_SCHEMA_VERSION = "saes-joint-materialization-calibrator-v1"
+JOINT_CALIBRATOR_INPUT_DIM = 32
+JOINT_CALIBRATOR_BOTTLENECK_DIM = 8
+JOINT_CALIBRATOR_OUTPUT_DIM = 40
+JOINT_CALIBRATOR_PARAMETER_COUNT = (
+    JOINT_CALIBRATOR_INPUT_DIM * JOINT_CALIBRATOR_BOTTLENECK_DIM
+    + JOINT_CALIBRATOR_BOTTLENECK_DIM
+    + JOINT_CALIBRATOR_BOTTLENECK_DIM * JOINT_CALIBRATOR_OUTPUT_DIM
+    + JOINT_CALIBRATOR_OUTPUT_DIM
+)
+JOINT_CALIBRATOR_WEIGHT_BYTES = JOINT_CALIBRATOR_PARAMETER_COUNT * 2
+JOINT_CALIBRATOR_NETWORK_MACS_PER_CALL = (
+    JOINT_CALIBRATOR_INPUT_DIM * JOINT_CALIBRATOR_BOTTLENECK_DIM
+    + JOINT_CALIBRATOR_BOTTLENECK_DIM * JOINT_CALIBRATOR_OUTPUT_DIM
+)
+JOINT_CALIBRATOR_MAX_HEAD_MAC_FRACTION = 0.05
 
 
 def _count(stats: Mapping[str, Any], field: str, default: int = 0) -> int:
@@ -109,6 +125,98 @@ def _validated_anchor_count(
     if not active_tiles and value != 0:
         raise ValueError(f"{field} is nonzero without matching tiles")
     return value
+
+
+def _sha256(value: Any, label: str) -> str:
+    """Validate one hash-bound runtime asset identifier."""
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{label} must be a lowercase SHA256 digest")
+    return value
+
+
+def _joint_calibrator_events(
+    saes_stats: Mapping[str, Any],
+    *,
+    l0_anchors: int,
+    l1_anchors: int,
+    retained_anchors: int,
+    sh_degree: int,
+) -> dict[str, Any] | None:
+    """Validate a nonzero, model-bound joint-calibrator cost contract.
+
+    The normal SAES ledger deliberately accepts no joint-calibrator fields. If
+    one is enabled, however, it must bind every retained invocation to a real
+    selected-output-head event trace. This prevents a learned materialization
+    block from being reported as a zero-cost representative update.
+    """
+    contract = saes_stats.get("joint_calibrator")
+    if contract is None:
+        return None
+    if not isinstance(contract, Mapping):
+        raise ValueError("joint_calibrator must be an object")
+    if contract.get("schema_version") != JOINT_CALIBRATOR_SCHEMA_VERSION:
+        raise ValueError("joint_calibrator schema version is invalid")
+    _sha256(contract.get("asset_sha256"), "joint_calibrator.asset_sha256")
+    model = contract.get("model")
+    if model not in {"transplat", "mvsplat", "depthsplat"}:
+        raise ValueError(
+            "joint calibrator requires a model-specific selected-head replay contract"
+        )
+    calls = _count(contract, "calls")
+    l0_calls = _count(contract, "l0_calls")
+    l1_calls = _count(contract, "l1_calls")
+    full_calls = _count(contract, "full_calls")
+    selected_descriptor_reads = _count(contract, "selected_descriptor_reads")
+    if calls != retained_anchors or l0_calls != l0_anchors or l1_calls != l1_anchors:
+        raise ValueError("joint_calibrator calls do not match retained anchor counts")
+    if full_calls != 0:
+        raise ValueError("joint_calibrator must not run on Full slots")
+    if selected_descriptor_reads != calls:
+        raise ValueError("joint_calibrator selected descriptor reads must match calls")
+    if contract.get("network_macs_per_call") != JOINT_CALIBRATOR_NETWORK_MACS_PER_CALL:
+        raise ValueError("joint_calibrator network MAC contract is invalid")
+    if contract.get("weight_bytes") != JOINT_CALIBRATOR_WEIGHT_BYTES:
+        raise ValueError("joint_calibrator FP16 weight-byte contract is invalid")
+    head = contract.get("selected_head")
+    if not isinstance(head, Mapping):
+        raise ValueError("joint_calibrator has no selected-head event contract")
+    if head.get("model") != model:
+        raise ValueError("joint_calibrator selected-head model does not match")
+    if head.get("contract_version") != "saes-selected-output-replay-v1":
+        raise ValueError("joint_calibrator selected-head contract version is invalid")
+    dense_head_macs = _count(head, "dense_head_macs")
+    replayed_head_macs = _count(head, "replayed_head_macs")
+    if dense_head_macs <= replayed_head_macs:
+        raise ValueError("joint_calibrator selected-head trace has no skipped MACs")
+    skipped_head_macs = dense_head_macs - replayed_head_macs
+    sh_coefficients = 3 * (sh_degree + 1) ** 2
+    transform_macs_per_call = 3 + 54 + 1 + 2 * sh_coefficients
+    network_macs = calls * JOINT_CALIBRATOR_NETWORK_MACS_PER_CALL
+    transform_macs = calls * transform_macs_per_call
+    total_macs = network_macs + transform_macs
+    if total_macs > skipped_head_macs * JOINT_CALIBRATOR_MAX_HEAD_MAC_FRACTION:
+        raise ValueError("joint_calibrator exceeds the 5% skipped-head MAC budget")
+    return {
+        "model": model,
+        "calls": calls,
+        "l0_calls": l0_calls,
+        "l1_calls": l1_calls,
+        "full_calls": full_calls,
+        "selected_descriptor_reads": selected_descriptor_reads,
+        "network_macs": network_macs,
+        "transform_macs": transform_macs,
+        "total_macs": total_macs,
+        "skipped_head_macs": skipped_head_macs,
+        "input_activation_bytes": calls * JOINT_CALIBRATOR_INPUT_DIM * 2,
+        "output_activation_bytes": calls * JOINT_CALIBRATOR_OUTPUT_DIM * 2,
+        "weight_bytes": JOINT_CALIBRATOR_WEIGHT_BYTES,
+        "network_macs_per_call": JOINT_CALIBRATOR_NETWORK_MACS_PER_CALL,
+        "transform_macs_per_call": transform_macs_per_call,
+    }
 
 
 def build_saes_event_ledger(
@@ -294,6 +402,47 @@ def build_saes_event_ledger(
     ):
         raise ValueError("disabled SAES materialization guard has event activity")
 
+    cross_check_enabled = saes_stats.get("probe_cross_check_enabled", False)
+    if not isinstance(cross_check_enabled, bool):
+        raise ValueError("probe_cross_check_enabled must be boolean")
+    cross_check_l0_checks = _count(saes_stats, "probe_cross_check_l0_checks")
+    cross_check_l1_checks = _count(saes_stats, "probe_cross_check_l1_checks")
+    cross_check_l0_rejections = _count(
+        saes_stats, "probe_cross_check_l0_rejections"
+    )
+    cross_check_l1_rejections = _count(
+        saes_stats, "probe_cross_check_l1_rejections"
+    )
+    if cross_check_enabled:
+        if not guard_enabled:
+            raise ValueError("probe cross-check requires the materialization guard")
+        if cross_check_l0_checks > l0_guard_checks * primitives_per_pixel:
+            raise ValueError("L0 probe cross-checks exceed materialization checks")
+        if cross_check_l1_checks > l1_guard_checks * primitives_per_pixel:
+            raise ValueError("L1 probe cross-checks exceed materialization checks")
+        if (
+            cross_check_l0_rejections > cross_check_l0_checks
+            or cross_check_l1_rejections > cross_check_l1_checks
+        ):
+            raise ValueError("probe cross-check rejections exceed checks")
+    elif any(
+        (
+            cross_check_l0_checks,
+            cross_check_l1_checks,
+            cross_check_l0_rejections,
+            cross_check_l1_rejections,
+        )
+    ):
+        raise ValueError("disabled probe cross-check has event activity")
+
+    joint_calibrator = _joint_calibrator_events(
+        saes_stats,
+        l0_anchors=l0_anchors,
+        l1_anchors=l1_anchors,
+        retained_anchors=retained_anchors,
+        sh_degree=sh_degree,
+    )
+
     # S3 path selection: two sufficient-statistic reductions (sum and square)
     # over K probe feature vectors.  A reduction tree contributes one cycle per
     # level for every 64-channel vector chunk.  L1's depth standard deviation
@@ -339,6 +488,19 @@ def build_saes_event_ledger(
     # selected native descriptors. Charge the descriptor fetch and one vector
     # comparison chunk per anchor rather than treating the check as free.
     guard_control_cycles = guard_anchor_descriptors * descriptor_chunks
+    # Each leave-one-out primary check reduces the other three selected
+    # covariance/SH vectors and compares the prediction with the held-out
+    # anchor.  Descriptor reads are reused from the materialization guard;
+    # this is VectorALU work only, not a new S3 access or saving claim.
+    cross_check_elements = 6 + 3 * (sh_degree + 1) ** 2
+    cross_check_chunks = _ceil_div(cross_check_elements, vector_width)
+    cross_check_total_checks = cross_check_l0_checks + cross_check_l1_checks
+    probe_cross_check_control_cycles = (
+        2
+        * cross_check_total_checks
+        * primary_probe_count
+        * cross_check_chunks
+    )
 
     def _assignment_cycles(nonanchors: int, anchors_per_tile: int) -> int:
         # Feature distance: subtract/square plus reduce for every anchor.
@@ -464,6 +626,20 @@ def build_saes_event_ledger(
     consensus_virtual_output_write_bytes = (
         charged_consensus_pseudo_outputs * descriptor_bytes
     )
+    joint_calibrator_selected_read_bytes = (
+        0
+        if joint_calibrator is None
+        else joint_calibrator["selected_descriptor_reads"] * descriptor_bytes
+    )
+    joint_calibrator_activation_bytes = (
+        0
+        if joint_calibrator is None
+        else joint_calibrator["input_activation_bytes"]
+        + joint_calibrator["output_activation_bytes"]
+    )
+    joint_calibrator_weight_bytes = (
+        0 if joint_calibrator is None else joint_calibrator["weight_bytes"]
+    )
     route_record_write_bytes = total_tiles
     charged_storage_bytes = (
         retained_descriptor_read_bytes
@@ -473,12 +649,24 @@ def build_saes_event_ledger(
         + consensus_fallback_selected_descriptor_read_bytes
         + consensus_depth_read_bytes
         + consensus_virtual_output_write_bytes
+        + joint_calibrator_selected_read_bytes
+        + joint_calibrator_activation_bytes
+        + joint_calibrator_weight_bytes
         + route_record_write_bytes
     )
     storage_transfer_cycles = _ceil_div(charged_storage_bytes, storage_beat_bytes)
+    joint_calibrator_cycles = (
+        0
+        if joint_calibrator is None
+        else _ceil_div(joint_calibrator["total_macs"], vector_width)
+    )
 
     decision_cycles = (
-        feature_stat_cycles + depth_stat_cycles + controller_cycles + guard_control_cycles
+        feature_stat_cycles
+        + depth_stat_cycles
+        + controller_cycles
+        + guard_control_cycles
+        + probe_cross_check_control_cycles
     )
     serialized_accounting_cycles = (
         decision_cycles
@@ -487,6 +675,7 @@ def build_saes_event_ledger(
         + moment_cycles
         + attribute_transport_cycles
         + consensus_cycles
+        + joint_calibrator_cycles
         + storage_transfer_cycles
     )
 
@@ -558,8 +747,32 @@ def build_saes_event_ledger(
                     "l1_guard_rejections": l1_guard_rejections,
                     "guard_anchor_descriptors": guard_anchor_descriptors,
                     "guard_nonprobe_s3_attribute_reads": guard_nonprobe_reads,
+                    "probe_cross_check_l0_checks": cross_check_l0_checks,
+                    "probe_cross_check_l1_checks": cross_check_l1_checks,
+                    "probe_cross_check_l0_rejections": (
+                        cross_check_l0_rejections
+                    ),
+                    "probe_cross_check_l1_rejections": (
+                        cross_check_l1_rejections
+                    ),
                 }
                 if guard_enabled
+                else {}
+            ),
+            **(
+                {
+                    "joint_calibrator_calls": joint_calibrator["calls"],
+                    "joint_calibrator_l0_calls": joint_calibrator["l0_calls"],
+                    "joint_calibrator_l1_calls": joint_calibrator["l1_calls"],
+                    "joint_calibrator_full_calls": joint_calibrator["full_calls"],
+                    "joint_calibrator_selected_descriptor_reads": (
+                        joint_calibrator["selected_descriptor_reads"]
+                    ),
+                    "joint_calibrator_skipped_head_macs": (
+                        joint_calibrator["skipped_head_macs"]
+                    ),
+                }
+                if joint_calibrator is not None
                 else {}
             ),
             "l0_nonanchors": l0_nonanchors,
@@ -577,6 +790,7 @@ def build_saes_event_ledger(
             "controller_l1_full": controller_l1_full_cycles,
             "controller_total": controller_cycles,
             "materialization_guard": guard_control_cycles,
+            "probe_cross_check": probe_cross_check_control_cycles,
             "decision_total": decision_cycles,
             "l0_assignment": l0_assignment_cycles,
             "l1_assignment": l1_assignment_cycles,
@@ -591,6 +805,7 @@ def build_saes_event_ledger(
             "assignment_consensus_geometry": consensus_geometry_cycles,
             "assignment_consensus_attribute_reduction": consensus_attribute_cycles,
             "assignment_consensus_total": consensus_cycles,
+            "joint_calibrator": joint_calibrator_cycles,
             "storage_transfer": storage_transfer_cycles,
             "serialized_accounting_cycles": serialized_accounting_cycles,
         },
@@ -612,6 +827,11 @@ def build_saes_event_ledger(
             "assignment_consensus_virtual_output_write": (
                 consensus_virtual_output_write_bytes
             ),
+            "joint_calibrator_selected_descriptor_read": (
+                joint_calibrator_selected_read_bytes
+            ),
+            "joint_calibrator_activation": joint_calibrator_activation_bytes,
+            "joint_calibrator_weight": joint_calibrator_weight_bytes,
             "route_record_write": route_record_write_bytes,
             "charged_storage_total": charged_storage_bytes,
             "observed_total": (
@@ -628,6 +848,11 @@ def build_saes_event_ledger(
             "storage_cycle_model": "one logical 128-bit accounting beat per cycle without overlap",
             "controller_cycles": "matches submitted SAESController.decisionCycles traces",
             "materialization_guard": "probe-only Control comparison and descriptor reads are charged without adding an S2/S3 saving claim",
+            "probe_cross_check": (
+                "leave-one-out primary-anchor covariance/SH reductions are "
+                "charged as VectorALU control work using attributes already "
+                "fetched by the materialization guard"
+            ),
             "adapter_offset_attribute_transport": (
                 "selected-anchor SH/opacity reconstruction is charged as "
                 "conservative FP16 descriptor reads plus VectorALU reduction; "
@@ -640,6 +865,20 @@ def build_saes_event_ledger(
                 "as one full virtual attempt before its dense fallback; this "
                 "diagnostic has zero compression and does not create an S2/S3 "
                 "saving claim"
+            ),
+            **(
+                {
+                    "joint_calibrator": (
+                        "one shared 32-to-8-to-40 retained-representative "
+                        "asset is charged for its selected descriptor read, "
+                        "FP16 weights/activations, network MACs, and attribute "
+                        "transforms; its 5% cap is checked against the bound "
+                        "same-weight selected-head replay trace and creates no "
+                        "S2/S3 saving claim"
+                    )
+                }
+                if joint_calibrator is not None
+                else {}
             ),
             "rtl_cycle_equivalent": False,
         },

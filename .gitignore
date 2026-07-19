@@ -249,7 +249,7 @@ g3dgs/
 .codex-openai-docs-cache/
 micro59-submit/
 skills/
-memory/
+/memory/
 obj_dir/
 challenge-metrics/
 openai-node-test.sh

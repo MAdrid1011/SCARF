@@ -7,15 +7,15 @@ import scarf.SAESLevel
 /** Schedules the native retained S2/S3 outputs after an accepted SAES route.
   *
   * The submitted hardware configuration fixes tiles at 4x4. L0 requests the
-  * four primary probes and L1 requests the same prefix followed by four
-  * deterministic lightweight anchors. Each request advances only after the
+  * four primary probes and L1 requests the same prefix followed by eight
+  * deterministic boundary anchors. Each request advances only after the
   * upstream S2/S3 producer confirms a real descriptor is available. This
   * scheduler does not classify tiles, create descriptors, or authorize a
   * bypass; it is intentionally left outside ScarfTop until the producer,
   * moment path, descriptor packing, and S4 hand-off are connected.
   */
 class SAESRetainedOutputScheduler extends Module {
-  private val maxRetained = 8
+  private val maxRetained = 12
   private val ordinalWidth = log2Ceil(maxRetained)
 
   val io = IO(new Bundle {
@@ -42,11 +42,15 @@ class SAESRetainedOutputScheduler extends Module {
 
   val primaryPositions = VecInit(Seq(0.U(4.W), 3.U(4.W), 12.U(4.W), 15.U(4.W)))
   val lightweightPositions = VecInit(
-    Seq(0.U(4.W), 3.U(4.W), 12.U(4.W), 15.U(4.W), 5.U(4.W), 10.U(4.W), 1.U(4.W), 2.U(4.W)),
+    Seq(
+      0.U(4.W), 3.U(4.W), 12.U(4.W), 15.U(4.W),
+      1.U(4.W), 2.U(4.W), 4.U(4.W), 7.U(4.W),
+      8.U(4.W), 11.U(4.W), 13.U(4.W), 14.U(4.W),
+    ),
   )
   val activeIsSparse = activeLevel === SAESLevel.sL0 || activeLevel === SAESLevel.sL1
   val levelIsSparse = io.level === SAESLevel.sL0 || io.level === SAESLevel.sL1
-  val activeCount = Mux(activeLevel === SAESLevel.sL1, 8.U(4.W), 4.U(4.W))
+  val activeCount = Mux(activeLevel === SAESLevel.sL1, 12.U(4.W), 4.U(4.W))
 
   io.startAccepted := state === sIdle && io.start && levelIsSparse
   io.inputError := (state === sIdle && io.start && !levelIsSparse) ||

@@ -14,9 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.calibration_contract import PARAMETER_GRID, canonical_parameters
-from scripts.calibration_sweep import validate_split_candidate_records
-from scripts.mechanism_config import sha256_file as mechanism_sha256_file
+from scripts.calibration_contract import PARAMETER_GRID, canonical_parameters  # noqa: E402
+from scripts.calibration_sweep import validate_split_candidate_records  # noqa: E402
+from scripts.mechanism_config import FIXED, sha256_file as mechanism_sha256_file  # noqa: E402
+from scripts.saes_execution_identity import build_saes_execution_identity  # noqa: E402
 
 
 def sha256_file(path: Path) -> str:
@@ -47,17 +48,8 @@ def build_config(candidate_records: Path) -> dict:
             "rom": "artifact/lsh_projection.json",
             "rom_sha256": mechanism_sha256_file(ROOT / "artifact/lsh_projection.json"),
         },
-        "fixed": {
-            "fsdr_cache_size": 32,
-            "fsdr_hamming_threshold": 3,
-            "fsdr_guidance_policy": "paper-hamming-local-validity",
-            "fsdr_contraction_ratio": 4,
-            "saes_feature_threshold": 0.2,
-            "saes_depth_threshold": 0.1,
-            "saes_l1_depth_reference": "primary-routing-probes-v1",
-            "saes_moment_geometry": "c2w-probe-depth-ray-v1",
-            "saes_tile_size": 4,
-        },
+        "fixed": dict(FIXED),
+        "saes_execution_identity": build_saes_execution_identity(),
         "search_space": {key: list(values) for key, values in PARAMETER_GRID.items()},
         "selected": selected_parameters,
         "calibration": {

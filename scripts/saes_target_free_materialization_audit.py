@@ -16,18 +16,73 @@ import hashlib
 import random
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from saes.progressive_saes import ProgressiveSAES, apply_progressive_saes
-from scripts.saes_dependency_audit import _context_on_device, remove_target_rgb
+if TYPE_CHECKING:
+    import torch
+
+
+# This module is also imported by command-surface checks in an environment
+# without Torch.  Keep its parser and fixed audit contract available there, and
+# load the tensor/model stack only when a runtime helper is actually used.
+torch: Any | None = None
+ProgressiveSAES: Any | None = None
+apply_progressive_saes: Any | None = None
+_context_on_device: Any | None = None
+remove_target_rgb: Any | None = None
+_runtime_dependencies_loaded = False
+
+
+def _load_torch() -> Any:
+    """Load Torch only for a tensor-backed audit operation."""
+
+    global torch
+
+    if torch is not None:
+        return torch
+    try:
+        import torch as torch_module
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "SAES target-free materialization audit requires a Torch installation"
+        ) from exc
+    torch = torch_module
+    return torch_module
+
+
+def _load_runtime_dependencies() -> None:
+    """Load SAES and context helpers required by a real materialization audit."""
+
+    global ProgressiveSAES
+    global _context_on_device
+    global _runtime_dependencies_loaded
+    global apply_progressive_saes
+    global remove_target_rgb
+
+    if _runtime_dependencies_loaded:
+        return
+    _load_torch()
+    from saes.progressive_saes import (
+        ProgressiveSAES as progressive_saes,
+        apply_progressive_saes as progressive_saes_apply,
+    )
+    from scripts.saes_dependency_audit import (
+        _context_on_device as context_on_device,
+        remove_target_rgb as remove_target,
+    )
+
+    ProgressiveSAES = progressive_saes
+    apply_progressive_saes = progressive_saes_apply
+    _context_on_device = context_on_device
+    remove_target_rgb = remove_target
+    _runtime_dependencies_loaded = True
 
 
 MATERIALIZATION_CHOICES = (
@@ -61,20 +116,29 @@ def _capture_encoder_execution(
     model: Any, context: dict[str, Any]
 ) -> tuple[Any, torch.Tensor, torch.Tensor]:
     """Return the native adapter output plus the actual S1/S2 tensors it consumed."""
+    torch_module = _load_torch()
     predictor = model.encoder.depth_predictor
-    captured: dict[str, torch.Tensor] = {}
+    captured: dict[str, Any] = {}
 
     def capture(_module: Any, inputs: tuple[Any, ...], output: Any) -> None:
-        if not inputs or not torch.is_tensor(inputs[0]) or inputs[0].ndim != 5:
+        if (
+            not inputs
+            or not torch_module.is_tensor(inputs[0])
+            or inputs[0].ndim != 5
+        ):
             raise RuntimeError("depth predictor did not receive [B,V,C,H,W] features")
-        if not isinstance(output, tuple) or len(output) < 1 or not torch.is_tensor(output[0]):
+        if (
+            not isinstance(output, tuple)
+            or len(output) < 1
+            or not torch_module.is_tensor(output[0])
+        ):
             raise RuntimeError("depth predictor did not emit a depth tensor")
         captured["features"] = inputs[0].detach().clone()
         captured["depths"] = output[0].detach().clone()
 
     handle = predictor.register_forward_hook(capture)
     try:
-        with torch.no_grad():
+        with torch_module.no_grad():
             gaussians = model.encoder(context, False, deterministic=True)
     finally:
         handle.remove()
@@ -106,8 +170,9 @@ def _max_attribute_delta(reference: Any, candidate: Any, indices: torch.Tensor) 
 
 
 def _mask_sha256(mask: torch.Tensor) -> str:
+    torch_module = _load_torch()
     return hashlib.sha256(
-        mask.detach().to(device="cpu", dtype=torch.uint8).numpy().tobytes()
+        mask.detach().to(device="cpu", dtype=torch_module.uint8).numpy().tobytes()
     ).hexdigest()
 
 
@@ -115,6 +180,10 @@ def _routing_statistic_summary(
     features: torch.Tensor, *, height: int, width: int
 ) -> dict[str, dict[str, float | int]]:
     """Record fixed paper/current probe-statistic distributions without routing by them."""
+    _load_runtime_dependencies()
+    torch_module = _load_torch()
+    if ProgressiveSAES is None:
+        raise RuntimeError("SAES runtime dependency failed to load")
     summary: dict[str, dict[str, float | int]] = {}
     for statistic in (
         "raw-probe-vector-variance",
@@ -125,13 +194,13 @@ def _routing_statistic_summary(
         values, _ = ProgressiveSAES.classify_tiles_by_features(
             features, height, width, 4, per_view=True, statistic=statistic
         )
-        series = torch.tensor(list(values.values()), dtype=torch.float64)
+        series = torch_module.tensor(list(values.values()), dtype=torch_module.float64)
         summary[statistic] = {
             "count": int(series.numel()),
             "rate_below_tau_f_0_2": float((series < 0.2).double().mean().item()),
             "minimum": float(series.min().item()),
-            "p50": float(torch.quantile(series, 0.50).item()),
-            "p95": float(torch.quantile(series, 0.95).item()),
+            "p50": float(torch_module.quantile(series, 0.50).item()),
+            "p95": float(torch_module.quantile(series, 0.95).item()),
             "maximum": float(series.max().item()),
         }
     return summary
@@ -153,6 +222,9 @@ def _pre_fallback_routing_summary(
     probe-vector L0 statistic. It does not inspect raw skipped descriptors or
     run a renderer.
     """
+    _load_runtime_dependencies()
+    if ProgressiveSAES is None:
+        raise RuntimeError("SAES runtime dependency failed to load")
     feature_scores, _ = ProgressiveSAES.classify_tiles_by_features(
         features,
         height,
@@ -221,14 +293,15 @@ def _pre_fallback_routing_summary(
 
 def _finite_summary(values: torch.Tensor) -> dict[str, float | int]:
     """Summarize a nonempty finite tensor without exposing individual values."""
+    torch_module = _load_torch()
     flattened = values.detach().reshape(-1).double()
-    if flattened.numel() == 0 or not bool(torch.isfinite(flattened).all()):
+    if flattened.numel() == 0 or not bool(torch_module.isfinite(flattened).all()):
         raise ValueError("attribute diagnostic requires nonempty finite values")
     return {
         "count": int(flattened.numel()),
         "minimum": float(flattened.min().item()),
-        "p50": float(torch.quantile(flattened, 0.50).item()),
-        "p95": float(torch.quantile(flattened, 0.95).item()),
+        "p50": float(torch_module.quantile(flattened, 0.50).item()),
+        "p95": float(torch_module.quantile(flattened, 0.95).item()),
         "maximum": float(flattened.max().item()),
         "mean": float(flattened.mean().item()),
     }
@@ -238,9 +311,12 @@ def _retained_anchor_attribute_diagnostic(
     source: Any, materialized: Any, retained: torch.Tensor
 ) -> dict[str, Any]:
     """Profile only changed retained anchors after target-free materialization."""
+    torch_module = _load_torch()
     attributes = ("means", "covariances", "harmonics", "opacities")
     retained = retained.to(source.means.device)
-    changed = torch.zeros(retained.numel(), dtype=torch.bool, device=retained.device)
+    changed = torch_module.zeros(
+        retained.numel(), dtype=torch_module.bool, device=retained.device
+    )
     for name in attributes:
         delta = (
             getattr(materialized, name)[0, retained]
@@ -262,16 +338,16 @@ def _retained_anchor_attribute_diagnostic(
     output_alpha = materialized.opacities[0, changed_indices].reshape(-1)
     source_harmonics = source.harmonics[0, changed_indices]
     output_harmonics = materialized.harmonics[0, changed_indices]
-    eps = torch.finfo(source_means.dtype).eps
-    determinant_floor = torch.finfo(source_means.dtype).tiny
+    eps = torch_module.finfo(source_means.dtype).eps
+    determinant_floor = torch_module.finfo(source_means.dtype).tiny
     source_covariances_symmetric = (
         source_covariances + source_covariances.mT
     ) * 0.5
     output_covariances_symmetric = (
         output_covariances + output_covariances.mT
     ) * 0.5
-    source_det = torch.linalg.det(source_covariances_symmetric)
-    output_det = torch.linalg.det(output_covariances_symmetric)
+    source_det = torch_module.linalg.det(source_covariances_symmetric)
+    output_det = torch_module.linalg.det(output_covariances_symmetric)
     return {
         "changed_retained_anchor_count": int(changed_indices.numel()),
         "source_or_skipped_descriptor_access": False,
@@ -282,13 +358,13 @@ def _retained_anchor_attribute_diagnostic(
             output_det / source_det.clamp_min(determinant_floor)
         ),
         "source_covariance_min_eigenvalue": _finite_summary(
-            torch.linalg.eigvalsh(source_covariances_symmetric)[:, 0]
+            torch_module.linalg.eigvalsh(source_covariances_symmetric)[:, 0]
         ),
         "output_covariance_min_eigenvalue": _finite_summary(
-            torch.linalg.eigvalsh(output_covariances_symmetric)[:, 0]
+            torch_module.linalg.eigvalsh(output_covariances_symmetric)[:, 0]
         ),
         "covariance_increment_min_eigenvalue": _finite_summary(
-            torch.linalg.eigvalsh(
+            torch_module.linalg.eigvalsh(
                 output_covariances_symmetric - source_covariances_symmetric
             )[:, 0]
         ),
@@ -322,10 +398,11 @@ def _l0_range_envelope_summary(
     stats: dict[str, Any],
 ) -> dict[str, Any]:
     """Measure, but do not enforce, source-envelope excursions for all-L0 output."""
+    torch_module = _load_torch()
     if stats["level1_tiles"] or stats["full_tiles"]:
         return {"applicable": False, "reason": "audit route is not all-L0"}
-    source_determinants = torch.linalg.det(source.covariances[0])
-    output_determinants = torch.linalg.det(materialized.covariances[0])
+    source_determinants = torch_module.linalg.det(source.covariances[0])
+    output_determinants = torch_module.linalg.det(materialized.covariances[0])
     source_opacities = source.opacities[0]
     output_opacities = materialized.opacities[0]
     determinant_violations = 0
@@ -333,12 +410,12 @@ def _l0_range_envelope_summary(
     for view in range(views):
         for tile_y in range(0, height, 4):
             for tile_x in range(0, width, 4):
-                anchors = torch.tensor(
+                anchors = torch_module.tensor(
                     [
                         view * height * width + (tile_y + row) * width + tile_x + column
                         for row, column in ((0, 0), (0, 3), (3, 0), (3, 3))
                     ],
-                    dtype=torch.long,
+                    dtype=torch_module.long,
                 )
                 if bool(mask[anchors].any()):
                     raise RuntimeError("all-L0 range audit found a skipped primary probe")
@@ -374,6 +451,14 @@ def collect_materialization_audit(
     """Run the predeclared target-free DL3DV sample-0 materialization gate."""
     if model_name not in {"transplat", "mvsplat"}:
         raise ValueError("the focused materialization audit currently supports transplat/mvsplat")
+    _load_runtime_dependencies()
+    torch_module = _load_torch()
+    if (
+        apply_progressive_saes is None
+        or _context_on_device is None
+        or remove_target_rgb is None
+    ):
+        raise RuntimeError("SAES materialization audit runtime dependency failed to load")
     from scripts.ae_config import resolve_claim_selection, resolve_experiment
     from scripts.demo import load_model_and_data
     from scripts.result_record import cached_sha256_file, source_identity
@@ -410,8 +495,8 @@ def collect_materialization_audit(
     audit_near = context["near"].detach().cpu()
     audit_far = context["far"].detach().cpu()
     del model, context
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    if torch_module.cuda.is_available():
+        torch_module.cuda.empty_cache()
 
     materialized = _clone_gaussians(source_gaussians)
     mask, stats, _ = apply_progressive_saes(
@@ -477,7 +562,7 @@ def collect_materialization_audit(
         depth_near=audit_near,
         depth_far=audit_far,
     )
-    if not torch.equal(mask, poisoned_mask):
+    if not torch_module.equal(mask, poisoned_mask):
         raise RuntimeError("poisoned descriptor audit changed the target-free route")
     retained_delta = _max_attribute_delta(materialized, poisoned, retained)
     if any(value != 0.0 for value in retained_delta.values()):
@@ -582,14 +667,19 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("the materialization audit is predeclared for DL3DV sample index 0")
     if args.output_dir.exists():
         parser.error("--output-dir must be a new directory")
-    device = torch.device(args.device)
-    if device.type == "cuda" and not torch.cuda.is_available():
+    try:
+        _load_runtime_dependencies()
+    except RuntimeError as exc:
+        parser.error(str(exc))
+    torch_module = _load_torch()
+    device = torch_module.device(args.device)
+    if device.type == "cuda" and not torch_module.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
     random.seed(args.seed)
     np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    torch_module.manual_seed(args.seed)
+    if torch_module.cuda.is_available():
+        torch_module.cuda.manual_seed_all(args.seed)
 
     record = collect_materialization_audit(
         model_name=args.model,

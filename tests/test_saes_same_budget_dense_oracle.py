@@ -64,7 +64,7 @@ def _run(gaussians, *, level):
 
 
 @pytest.mark.parametrize(
-    ("level", "retained_count"), (("L0", 4), ("L1", 8))
+    ("level", "retained_count"), (("L0", 4), ("L1", 12))
 )
 def test_same_budget_dense_oracle_keeps_only_l0_or_l1_output_budget(
     level, retained_count

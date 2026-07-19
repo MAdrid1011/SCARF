@@ -136,6 +136,7 @@ def valid_v21_result() -> dict:
 
     record = valid_result()
     record["schema_version"] = "2.1"
+    record["provenance"]["dataset"]["paper_result_eligible"] = False
     record["provenance"].update(
         {
             "mechanism_config_sha256": "3" * 64,
@@ -211,6 +212,62 @@ def test_v21_result_requires_calibration_and_faithful_event_evidence(tmp_path):
         payload = valid_v21_result()
         mutation(payload)
         assert run_validator(tmp_path, payload).returncode != 0
+
+
+def test_v21_functional_result_requires_frozen_saes_route_binding(tmp_path):
+    from scripts.saes_execution_identity import build_saes_execution_identity
+
+    identity = build_saes_execution_identity()
+    payload = valid_v21_result()
+    payload["provenance"]["execution_contract"] = {
+        "run_class": "functional",
+        "saes_materialization": "representative",
+    }
+    payload["provenance"]["saes_execution_identity"] = identity
+    payload["provenance"]["saes_execution_route_sha256"] = identity["route_sha256"]
+    payload["fsdr_saes"] = {
+        "saes": {
+            "saes_execution_identity": identity,
+            "route_sha256": identity["route_sha256"],
+        }
+    }
+
+    assert run_validator(tmp_path, payload).returncode == 0
+
+    for mutation in (
+        lambda value: value["provenance"].pop("saes_execution_identity"),
+        lambda value: value["provenance"].update(
+            saes_execution_route_sha256="0" * 64
+        ),
+        lambda value: value["fsdr_saes"]["saes"].update(route_sha256="0" * 64),
+    ):
+        drifted = valid_v21_result()
+        drifted["provenance"]["execution_contract"] = {
+            "run_class": "functional",
+            "saes_materialization": "representative",
+        }
+        drifted["provenance"]["saes_execution_identity"] = identity
+        drifted["provenance"]["saes_execution_route_sha256"] = identity[
+            "route_sha256"
+        ]
+        drifted["fsdr_saes"] = {
+            "saes": {
+                "saes_execution_identity": identity,
+                "route_sha256": identity["route_sha256"],
+            }
+        }
+        mutation(drifted)
+        assert run_validator(tmp_path, drifted).returncode != 0
+
+
+def test_v21_result_rejects_paper_eligibility_without_sparse_execution(tmp_path):
+    payload = valid_v21_result()
+    payload["provenance"]["dataset"]["paper_result_eligible"] = True
+
+    result = run_validator(tmp_path, payload)
+
+    assert result.returncode != 0
+    assert "verified whole-pipeline SAES S2/S3 sparse execution" in result.stderr
 
 
 def run_validator(tmp_path: Path, payload: dict):

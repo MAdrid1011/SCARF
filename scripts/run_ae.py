@@ -34,6 +34,19 @@ from scripts.evidence_profiles import resolve_evidence_selection
 
 
 PAPER_SOFTWARE_MODES = {"quality", "performance", "mechanisms", "utilization"}
+CORE_RESULT_SELECTION = "figure8,table1,figure11,table2,table3"
+ORIN_WORKFLOWS = {"orin", "speedup", "performance"}
+PENDING_EVALUATOR = "PENDING_EVALUATOR"
+ORIN_PENDING_REASON = "requires a Jetson Orin NX host"
+SAES_QUALITY_MODE = "saes-quality"
+DL3DV_GATE_PROFILE = "dl3dv-gate"
+SAES_QUALITY_GATE_STATUS_BLOCKED = "BLOCKED_CALIBRATION_NOT_FROZEN"
+SAES_QUALITY_GATE_STATUS_INPUTS_UNAVAILABLE = (
+    "BLOCKED_CALIBRATION_INPUTS_UNAVAILABLE"
+)
+SAES_QUALITY_GATE_STATUS_NO_COMPATIBLE_EXECUTION = (
+    "BLOCKED_NO_COMPATIBLE_QUALITY_EXECUTION"
+)
 SOFTWARE_MODES = {
     "quick",
     "quality",
@@ -73,6 +86,7 @@ MODES = tuple(
             "validate",
             "calibrate",
             "pilot",
+            SAES_QUALITY_MODE,
         }
     )
 )
@@ -101,9 +115,29 @@ def _python_for(profile: str, override: str | None) -> str:
     variable = f"SCARF_PYTHON_{profile.upper()}"
     configured = os.environ.get(variable)
     if configured:
-        return configured
+        configured_path = Path(configured).expanduser()
+        if not configured_path.is_file() or not os.access(configured_path, os.X_OK):
+            raise ValueError(
+                f"{variable} must name an executable Python interpreter: {configured}"
+            )
+        return str(configured_path)
     local_profile = ROOT / ".venv" / profile / "bin" / "python"
-    return str(local_profile) if local_profile.is_file() else sys.executable
+    if local_profile.is_file() and os.access(local_profile, os.X_OK):
+        return str(local_profile)
+    raise ValueError(
+        f"no Python interpreter configured for {profile}; pass --python, set "
+        f"{variable}, or create {local_profile}"
+    )
+
+
+def _is_orin_host() -> bool:
+    try:
+        model = Path("/proc/device-tree/model").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return False
+    return "Jetson Orin NX" in model.rstrip("\x00")
 
 
 def _pairs_for_mode(mode: str) -> tuple[tuple[str, str], ...]:
@@ -173,6 +207,122 @@ def _quick_selection() -> ClaimSelection:
     )
 
 
+def saes_quality_gate_preflight() -> dict[str, Any]:
+    """Check whether the current candidate has a safe sample-0 quality path."""
+    from scripts.mechanism_config import require_calibrated_mechanism
+
+    preflight: dict[str, Any] = {
+        "model": "transplat",
+        "dataset": "dl3dv",
+        "sample_index": 0,
+        "candidate": {
+            "materialization": "representative",
+            "l1_anchor_count": 12,
+            "context_safety_guard": True,
+        },
+        "target_rgb_quality_execution_scheduled": False,
+        "paper_result_eligible": False,
+        "requires_calibrated_evaluation_disjoint_configuration": True,
+        "quality_execution_status": "UNAVAILABLE",
+        "quality_execution_reason": (
+            "the fixed representative quality wrapper is unavailable until the "
+            "global evaluation-disjoint mechanism configuration is calibrated"
+        ),
+    }
+    try:
+        _config, provenance = require_calibrated_mechanism()
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        if not DEFAULT_DL3DV_CALIBRATION_MANIFEST.is_file():
+            return {
+                **preflight,
+                "status": SAES_QUALITY_GATE_STATUS_INPUTS_UNAVAILABLE,
+                "ready": False,
+                "reason": (
+                    "missing official DL3DV calibration manifest "
+                    "outputs/calibration/dl3dv-protocol/manifest.json; prepare "
+                    "the evaluation-disjoint inputs described in artifact/CALIBRATION.md "
+                    "before running calibrate"
+                ),
+                "mechanism_config_reason": str(exc),
+            }
+        return {
+            **preflight,
+            "status": SAES_QUALITY_GATE_STATUS_BLOCKED,
+            "ready": False,
+            "reason": str(exc),
+        }
+    wrapper = SCRIPT_DIR / "saes_representative_quality_gate.py"
+    if not wrapper.is_file():
+        return {
+            **preflight,
+            "status": SAES_QUALITY_GATE_STATUS_NO_COMPATIBLE_EXECUTION,
+            "ready": False,
+            "reason": "fixed representative quality wrapper is missing",
+            "mechanism_config_sha256": provenance["mechanism_config_sha256"],
+            "calibration_status": provenance["status"],
+            "evaluation_disjoint": provenance["evaluation_disjoint"],
+            "saes_execution_route_sha256": provenance[
+                "saes_execution_route_sha256"
+            ],
+        }
+    return {
+        **preflight,
+        "status": "READY_FIXED_NONCLAIM_DIAGNOSTIC",
+        "ready": True,
+        "target_rgb_quality_execution_scheduled": True,
+        "quality_execution_status": "FIXED_NONCLAIM_DIAGNOSTIC",
+        "quality_execution_reason": (
+            "fixed TranSplat/DL3DV sample-0 representative diagnostic; "
+            "its result remains non-claim evidence"
+        ),
+        "reason": "evaluation-disjoint mechanism configuration is calibrated",
+        "mechanism_config_sha256": provenance["mechanism_config_sha256"],
+        "calibration_status": provenance["status"],
+        "evaluation_disjoint": provenance["evaluation_disjoint"],
+        "saes_execution_route_sha256": provenance[
+            "saes_execution_route_sha256"
+        ],
+    }
+
+
+def build_saes_quality_plan(
+    output_root: Path, python_override: str | None = None
+) -> dict[str, Any]:
+    """Build the one fixed non-claim sample-0 quality diagnostic."""
+
+    preflight = saes_quality_gate_preflight()
+    if not preflight["ready"]:
+        return {"preflight": preflight, "commands": []}
+    try:
+        classic_python = _python_for("classic", python_override)
+    except ValueError as exc:
+        return {
+            "preflight": {
+                **preflight,
+                "status": SAES_QUALITY_GATE_STATUS_NO_COMPATIBLE_EXECUTION,
+                "ready": False,
+                "target_rgb_quality_execution_scheduled": False,
+                "quality_execution_status": "UNAVAILABLE",
+                "quality_execution_reason": str(exc),
+                "reason": str(exc),
+            },
+            "commands": [],
+        }
+    return {
+        "preflight": preflight,
+        "commands": [
+            [
+                classic_python,
+                str(SCRIPT_DIR / "saes_representative_quality_gate.py"),
+                "--output-dir",
+                str(output_root / SAES_QUALITY_MODE / "transplat_dl3dv_sample0"),
+                "--device",
+                "cuda",
+            ]
+        ],
+    }
+
+
 def build_software_plan(
     mode: str,
     output_root: Path,
@@ -182,6 +332,7 @@ def build_software_plan(
     allow_partial_filter: bool = False,
     evidence_profile: str = "full",
     claim_execution: bool = True,
+    orin_available: bool | None = None,
 ) -> list[dict[str, Any]]:
     if num_samples is not None and num_samples <= 0:
         raise ValueError("num_samples must be positive")
@@ -307,26 +458,33 @@ def build_software_plan(
                 "result": str(output_dir / "results.json"),
             }
         )
-    if mode in {"orin", "speedup", "performance"}:
-        for item in experiments:
-            original = item["commands"][0]
-            pair_dir = Path(original[original.index("--output-dir") + 1])
-            wrapped = [[
-                original[0],
-                str(ROOT / "hardware/orin/run.py"),
-                "--pair-dir",
-                str(pair_dir),
-                "--evidence-dir",
-                str(pair_dir / "orin-profile"),
-                "--sample-selection-sha256",
-                item["sample_selection_sha256"],
-                "--expected-count",
-                str(item["sample_count"]),
-                "--",
-                *original,
-            ]]
-            item["commands"] = wrapped
-            item["command"] = wrapped[0]
+    if mode in ORIN_WORKFLOWS:
+        if orin_available is None:
+            orin_available = _is_orin_host()
+        if not orin_available:
+            for item in experiments:
+                item["execution_status"] = PENDING_EVALUATOR
+                item["skip_reason"] = ORIN_PENDING_REASON
+        else:
+            for item in experiments:
+                original = item["commands"][0]
+                pair_dir = Path(original[original.index("--output-dir") + 1])
+                wrapped = [[
+                    original[0],
+                    str(ROOT / "hardware/orin/run.py"),
+                    "--pair-dir",
+                    str(pair_dir),
+                    "--evidence-dir",
+                    str(pair_dir / "orin-profile"),
+                    "--sample-selection-sha256",
+                    item["sample_selection_sha256"],
+                    "--expected-count",
+                    str(item["sample_count"]),
+                    "--",
+                    *original,
+                ]]
+                item["commands"] = wrapped
+                item["command"] = wrapped[0]
     return experiments
 
 
@@ -336,6 +494,8 @@ def build_dataset_validation_commands(
     commands = []
     seen: set[tuple[str, str, str, str]] = set()
     for item in experiments:
+        if item.get("execution_status") == PENDING_EVALUATOR:
+            continue
         key = (
             item["dataset_root"],
             item["dataset_representation"],
@@ -375,7 +535,9 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     pair_filter = parse_pair_filter(getattr(args, "pairs", None))
     if pair_filter is not None and args.mode not in SOFTWARE_MODES | {"all", "all-eval", "pilot"}:
         raise ValueError(f"--pairs is not supported by {args.mode}")
-    if args.mode == "calibrate":
+    if args.mode == SAES_QUALITY_MODE:
+        experiments = []
+    elif args.mode == "calibrate":
         experiments = []
     elif args.mode == "pilot":
         experiments = build_software_plan(
@@ -395,7 +557,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             claimed_pair_filter = tuple(
                 pair for pair in pair_filter if pair in claimed_pair_filter
             )
-        for workflow in ("quality", "speedup", "fsdr"):
+        for workflow in ("quality", "speedup", "mechanisms"):
             experiments.extend(
                 build_software_plan(
                     workflow,
@@ -409,7 +571,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             )
     elif args.mode == "all-eval":
         experiments = []
-        for workflow in ("quality", "performance", "mechanisms", "utilization"):
+        for workflow in ("quality", "performance", "mechanisms"):
             experiments.extend(
                 build_software_plan(
                     workflow,
@@ -434,7 +596,11 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     effective_profile = (
         "calibration"
         if args.mode == "calibrate"
-        else "pilot" if args.mode == "pilot" else evidence_profile
+        else "pilot"
+        if args.mode == "pilot"
+        else "not-applicable"
+        if args.mode == SAES_QUALITY_MODE
+        else evidence_profile
     )
     allow_low_memory_attempt = bool(
         getattr(args, "allow_low_memory_attempt", False)
@@ -471,6 +637,9 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     }
     plan["software_claim_scope"] = {
         "status": (
+            "DIAGNOSTIC_PREFLIGHT"
+            if args.mode == SAES_QUALITY_MODE
+            else
             "NO_CLAIMED_PAIRS"
             if args.mode in CLAIM_ONLY_SOFTWARE_MODES | {"all", "all-eval"}
             and not experiments
@@ -479,6 +648,18 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "pair_count": len(experiments),
         "diagnostic_results_are_claim_evidence": False,
     }
+    pending_evaluators: list[dict[str, str]] = []
+    for item in experiments:
+        if item.get("execution_status") != PENDING_EVALUATOR:
+            continue
+        pending = {
+            "workflow": item["workflow"],
+            "status": PENDING_EVALUATOR,
+            "reason": item["skip_reason"],
+        }
+        if pending not in pending_evaluators:
+            pending_evaluators.append(pending)
+    plan["pending_evaluators"] = pending_evaluators
     plan["dataset_commands"] = build_dataset_validation_commands(
         experiments, args.output_root
     )
@@ -492,7 +673,6 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     ]
     if num_samples is not None:
         sensitivity_command.extend(("--num-samples", str(num_samples)))
-    sensitivity_claimed = plan["claim_status"].get("sensitivity") == "CLAIMED"
     if args.mode == "calibrate":
         sweep_dir = args.output_root / "sweep"
         calibration_python = _python_for("classic", args.python)
@@ -515,6 +695,11 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
                 str(args.output_root),
             ],
         ]
+    elif args.mode == SAES_QUALITY_MODE:
+        gate = build_saes_quality_plan(args.output_root, args.python)
+        plan["profile_selector"] = DL3DV_GATE_PROFILE
+        plan["saes_quality_gate"] = gate["preflight"]
+        plan["commands"] = gate["commands"]
     elif args.mode == "sensitivity":
         plan["commands"] = [sensitivity_command]
     elif args.mode == "rtl":
@@ -578,35 +763,8 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             command.append("--require-key-results")
         plan["commands"] = [command]
     elif args.mode == "all":
-        physical_commands = []
-        if plan["claim_status"].get("physical_asap7") == "CLAIMED":
-            physical_commands.append(
-                ["bash", str(ROOT / "hardware/iflow/run.sh"), "--platform", "asap7", "--stage", "all", "--output-dir", str(args.output_root / "physical/asap7")]
-            )
-        if plan["claim_status"].get("deepscale") == "CLAIMED":
-            physical_commands.append(
-                [sys.executable, str(ROOT / "hardware/scaling/deepscale.py"), "--source-node", "7", "--target-node", "28", "--input", str(args.output_root / "physical/asap7/ppa.json"), "--output", str(args.output_root / "physical/asap7/ppa_28nm_estimated.json")]
-            )
         plan["commands"] = [
-            *([sensitivity_command] if sensitivity_claimed else []),
             ["bash", str(SCRIPT_DIR / "run_rtl.sh"), "--output-dir", str(args.output_root / "rtl")],
-            ["bash", str(ROOT / "hardware/dram/run.sh"), "--events", str(ROOT / "hardware/dram/test_vectors/scarf_smoke_events.jsonl"), "--output-dir", str(args.output_root / "dram")],
-            *physical_commands,
-            [sys.executable, str(SCRIPT_DIR / "generate_report.py"), "--input", str(args.output_root), "--output-dir", str(args.output_root / "reports")],
-            [sys.executable, str(SCRIPT_DIR / "validate_ae.py"), "--input", str(args.output_root)],
-        ]
-    elif args.mode == "all-eval":
-        plan["commands"] = [
-            sensitivity_command,
-            ["bash", str(SCRIPT_DIR / "run_rtl.sh"), "--output-dir", str(args.output_root / "rtl")],
-            [
-                "bash",
-                str(ROOT / "hardware/dram/run.sh"),
-                "--events",
-                str(ROOT / "hardware/dram/test_vectors/scarf_smoke_events.jsonl"),
-                "--output-dir",
-                str(args.output_root / "dram"),
-            ],
             [
                 sys.executable,
                 str(SCRIPT_DIR / "generate_report.py"),
@@ -615,20 +773,47 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
                 "--output-dir",
                 str(args.output_root / "reports"),
                 "--figures",
-                "all",
+                CORE_RESULT_SELECTION,
+            ],
+            [sys.executable, str(SCRIPT_DIR / "validate_ae.py"), "--input", str(args.output_root)],
+        ]
+    elif args.mode == "all-eval":
+        plan["commands"] = [
+            ["bash", str(SCRIPT_DIR / "run_rtl.sh"), "--output-dir", str(args.output_root / "rtl")],
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "generate_report.py"),
+                "--input",
+                str(args.output_root),
+                "--output-dir",
+                str(args.output_root / "reports"),
+                "--figures",
+                CORE_RESULT_SELECTION,
             ],
             [
                 sys.executable,
                 str(SCRIPT_DIR / "validate_ae.py"),
                 "--input",
                 str(args.output_root),
+                "--profile",
+                "evaluator-final",
                 "--require-key-results",
+                "--allow-missing-quick",
             ],
         ]
     return plan
 
 
 def execute_plan(plan: dict[str, Any], output_root: Path) -> int:
+    if plan.get("mode") == SAES_QUALITY_MODE:
+        preflight = saes_quality_gate_preflight()
+        if not preflight["ready"]:
+            print(
+                "error: saes-quality is blocked before target-RGB quality execution: "
+                f"{preflight['reason']}",
+                file=sys.stderr,
+            )
+            return 2
     output_root.mkdir(parents=True, exist_ok=True)
     manifest = dict(plan)
     manifest["started_at"] = datetime.now(timezone.utc).isoformat()
@@ -642,7 +827,19 @@ def execute_plan(plan: dict[str, Any], output_root: Path) -> int:
             flush=True,
         )
     profile_pythons: dict[str, str] = {}
+    for item in plan.get("environment_checks", []):
+        profile = item["profile"]
+        profile_python = item["python"]
+        previous = profile_pythons.setdefault(profile, profile_python)
+        if previous != profile_python:
+            print(
+                f"error: {profile} experiments use multiple Python interpreters",
+                file=sys.stderr,
+            )
+            return 2
     for item in plan["experiments"]:
+        if item.get("execution_status") == PENDING_EVALUATOR:
+            continue
         profile = item["environment_profile"]
         profile_python = item["command"][0]
         previous = profile_pythons.setdefault(profile, profile_python)
@@ -676,6 +873,14 @@ def execute_plan(plan: dict[str, Any], output_root: Path) -> int:
             return result.returncode
     commands = list(plan.get("dataset_commands", []))
     for item in plan["experiments"]:
+        if item.get("execution_status") == PENDING_EVALUATOR:
+            print(
+                "notice: skipping "
+                f"{item['workflow']} {item['model']}/{item['dataset']}: "
+                f"{item['skip_reason']}",
+                flush=True,
+            )
+            continue
         commands.extend(item["commands"])
         commands.append(item["aggregate_command"])
     commands.extend(plan.get("commands", []))
@@ -694,9 +899,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--python", help="Override Python for every model profile")
     parser.add_argument(
         "--profile",
-        choices=("full", "reviewer"),
+        choices=("full", "reviewer", DL3DV_GATE_PROFILE),
         default="full",
-        help="Select the complete or frozen reviewer evidence protocol",
+        help=(
+            "Select the complete or reviewer evidence protocol; dl3dv-gate is "
+            "the fixed non-claim saes-quality selector"
+        ),
     )
     parser.add_argument(
         "--num-samples",
@@ -749,6 +957,17 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.num_samples is not None and args.num_samples <= 0:
         parser.error("--num-samples must be positive")
+    if args.mode == SAES_QUALITY_MODE:
+        if args.profile != DL3DV_GATE_PROFILE:
+            parser.error("saes-quality requires --profile dl3dv-gate")
+        if args.num_samples is not None:
+            parser.error("saes-quality is fixed to DL3DV sample index 0")
+        if args.pairs is not None:
+            parser.error("saes-quality does not accept --pairs")
+        if args.device != "auto":
+            parser.error("saes-quality uses the fixed CUDA diagnostic device")
+    elif args.profile == DL3DV_GATE_PROFILE:
+        parser.error("--profile dl3dv-gate is only valid with saes-quality")
     if args.allow_low_memory_attempt and args.mode != "physical":
         parser.error("--allow-low-memory-attempt is only valid with physical")
     if args.calibration_root != DEFAULT_CALIBRATION_ROOT and args.mode != "calibrate":

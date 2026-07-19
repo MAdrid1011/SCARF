@@ -20,10 +20,14 @@ def test_t4_layout_is_fixed_and_l1_preserves_primary_prefix():
         (0, 3),
         (3, 0),
         (3, 3),
-        (1, 1),
-        (2, 2),
         (0, 1),
         (0, 2),
+        (1, 0),
+        (1, 3),
+        (2, 0),
+        (2, 3),
+        (3, 1),
+        (3, 2),
     ]
     assert compute_nonprobe_positions(4) == [
         (0, 1),
@@ -41,6 +45,32 @@ def test_t4_layout_is_fixed_and_l1_preserves_primary_prefix():
     ]
 
 
+def test_balanced_t4_layout_keeps_primary_probes_and_covers_the_interior():
+    from saes.probe_layout import (
+        compute_balanced_lightweight_positions,
+        compute_probe_positions,
+    )
+
+    balanced = compute_balanced_lightweight_positions(4)
+    assert balanced == [
+        (0, 0),
+        (0, 3),
+        (3, 0),
+        (3, 3),
+        (1, 1),
+        (1, 2),
+        (2, 1),
+        (2, 2),
+        (0, 1),
+        (1, 3),
+        (3, 2),
+        (2, 0),
+    ]
+    assert balanced[:4] == compute_probe_positions(4)
+    assert len(set(balanced)) == 12
+    assert {(1, 1), (1, 2), (2, 1), (2, 2)} <= set(balanced)
+
+
 def test_layout_capacity_and_l1_prefix_are_preserved_for_declared_tiles():
     from saes.probe_layout import (
         compute_lightweight_positions,
@@ -56,7 +86,10 @@ def test_layout_capacity_and_l1_prefix_are_preserved_for_declared_tiles():
         primary = compute_probe_positions(tile_size)
         lightweight = compute_lightweight_positions(tile_size)
         assert lightweight[: len(primary)] == primary
-        assert len(lightweight) == min(tile_size * tile_size, 2 * len(primary))
+        expected_count = 12 if tile_size == 4 else min(
+            tile_size * tile_size, 2 * len(primary)
+        )
+        assert len(lightweight) == expected_count
         assert len(set(primary)) == len(primary)
         assert len(set(lightweight)) == len(lightweight)
 
@@ -96,7 +129,7 @@ from saes.probe_layout import compute_lightweight_positions, compute_probe_posit
 from saes.hardware_accounting import build_saes_event_ledger
 
 assert len(compute_probe_positions(4)) == 4
-assert len(compute_lightweight_positions(4)) == 8
+assert len(compute_lightweight_positions(4)) == 12
 ledger = build_saes_event_ledger(
     {
         'total_tiles_processed': 1,

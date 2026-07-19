@@ -1,0 +1,172 @@
+{
+  "author_side_prerequisite": true,
+  "checkpoint_binding": {
+    "models": [
+      "transplat",
+      "mvsplat",
+      "depthsplat"
+    ],
+    "required_before_optimization": true,
+    "required_fields_per_model": [
+      "checkpoint_path",
+      "checkpoint_sha256"
+    ],
+    "shared_asset_model_independent": true,
+    "status": "UNBOUND"
+  },
+  "context_only_sidecars": {
+    "allowed_record_fields": [
+      "context_cameras",
+      "context_images",
+      "context_indices",
+      "key",
+      "kind",
+      "schema_version",
+      "source_view_count"
+    ],
+    "context_view_rule": "deterministic first-last context views via scripts.compile_calibration.deterministic_views",
+    "expected_results_included": false,
+    "input_kind": "scarf_acid_joint_context_input_v1",
+    "materialization_status": "REQUIRED",
+    "opened_file_allowlist_required": true,
+    "record_kind": "scarf_acid_joint_context_record_v1",
+    "required": true,
+    "target_camera_metadata_included": false,
+    "target_index_included": false,
+    "target_rgb_included": false,
+    "teacher_artifact_included": false
+  },
+  "dataset": "acid",
+  "dl3dv_quality_gate_authorized": false,
+  "evaluation": {
+    "evaluation_scene_set_sha256": "d11e0e76635753df3fdc3607f06ae8faf36774378944c35e49a6853e160f0b71",
+    "index_path": "transplat/assets/evaluation_index_acid.json",
+    "model_pairs": [
+      "transplat/acid",
+      "mvsplat/acid",
+      "depthsplat/acid"
+    ],
+    "null_entry_count": 253,
+    "sample_count": 1595,
+    "sample_selection_sha256": "03c61c18c3ca6d1fb16f8c92432ebfac3eaa668707fcaf15f9de7f4a018030ac",
+    "source_entry_count": 1848,
+    "source_index_sha256": "7a08cf5c612b60b407c4cd395ff945180d852e1f7f4c0442102ad85e0e3a2fd1"
+  },
+  "holdout_policy": {
+    "asset_update_allowed": false,
+    "frozen_train_asset_required": true,
+    "optimizer_allowed": false,
+    "partition_reshuffle_allowed": false,
+    "rerank_allowed": false,
+    "threshold_or_budget_change_allowed": false
+  },
+  "kind": "acid_joint_calibration_protocol",
+  "mechanism_config_write_allowed": false,
+  "model_scope": [
+    "transplat",
+    "mvsplat",
+    "depthsplat"
+  ],
+  "paper_result_eligible": false,
+  "partition": {
+    "calibration_holdout": {
+      "scene_count": 8,
+      "scene_set_sha256": "befafeb4ca67f2b24297320c0a32dfa6aaa9b6b5ed9d4c40d71d7f4e37161e9a",
+      "scenes": [
+        "4fa73a829dde9435",
+        "95cc1d116282a37e",
+        "29ad94db151c52ab",
+        "e125207a957f7b91",
+        "1cd91d973dbd0bf0",
+        "78c55ad37a9312e2",
+        "72ae02902624e2e2",
+        "c22e6e5bf9c4a99d"
+      ],
+      "selection_sha256": "06f5682cd105402bbe0b34ec7534032e38f0b09f8c65869b1a52868a3820b4cc"
+    },
+    "calibration_train": {
+      "scene_count": 24,
+      "scene_set_sha256": "d6833c6311553ab03ec3a9d9ba88921c5b4142642a546bf2602a59f6f7bf81b5",
+      "scenes": [
+        "244c8d81c004cb58",
+        "283c21d5936adf88",
+        "3811bc23c3399829",
+        "1116599b1d707713",
+        "e651e5b0f38836bc",
+        "35395e6f3273f7f6",
+        "f6711d14470ecc74",
+        "7e760ad4dd951fbf",
+        "3f9bba98f7231aec",
+        "7a58851d1434bb66",
+        "e609c59d28e8a1e1",
+        "38e01e5b91d482d3",
+        "5e8300f35eedb477",
+        "6b33485c53666f45",
+        "f92098af35e33aff",
+        "fa698b3bb0d3e0f8",
+        "60463bf328aa7387",
+        "245ca999df658fff",
+        "ea70119aac22f36b",
+        "72069c5de6f1273a",
+        "fc2195742d5e12c6",
+        "7d49f40e61cd9ad1",
+        "46bc1d7e5cbad424",
+        "5ebffc349c62444c"
+      ],
+      "selection_sha256": "79ef1f53fd8870ba94ad27a8907c99f1c62ff0c25ee9a793df58a0a1e55c0e28"
+    },
+    "domain": "SCARF-AE-acid-joint-calibration-v1",
+    "evaluation_disjoint": true,
+    "selected_scene_count": 32,
+    "selected_scene_set_sha256": "187ccaa822c5f9f35bc5b55bef1de3c66805b0042b75b86282473912d3908036",
+    "train_holdout_scene_disjoint": true
+  },
+  "plan_sha256": "ad8f551652429a11512f80d516a36cac2ebc6537b461def81148af9a4584eeb5",
+  "protocol_id": "saes-joint-materialization-calibration-acid-v1",
+  "schema_version": "1.0",
+  "source": {
+    "archive_sha256": "ddecee0c6cbb3a5e4fa5cd0182b6b7e31dc7dc23e586437ad8489199f16a18d0",
+    "full_train_index_sha256": "dd37d85e802aac9848febbd6b7227fb7129d4af429240ccdefcf15b61172a541",
+    "prepared_manifest_sha256": "624616c7e82c9f902748884f81a0fd3f4ff283d0e1836b09156f6bf15848fe8a",
+    "prepared_tree_revalidation_required": true,
+    "prepared_tree_sha256": "9ba8600d156e90a17c98f6599bedb4a0c17ec370835978f5cc02961c83e6726d",
+    "selected_index_sha256": "43e2efb595609dcd722012277addb1a95c5c4f43acb99f7ba25866a938cfc8a5",
+    "source_provenance_sha256": "799e7796691f0f5c0bfea16db3ee95a2db923df0242fd802e63090cefec9481f"
+  },
+  "status": "PLANNED_AUTHOR_SIDE_PREREQUISITE",
+  "teacher_runtime_isolation": {
+    "descriptor_allowed_inputs": [
+      "probe_attributes",
+      "context_feature_statistics",
+      "context_depth_statistics",
+      "assignment_statistics",
+      "context_camera_geometry"
+    ],
+    "descriptor_forbidden_inputs": [
+      "model_id",
+      "dataset_id",
+      "target_rgb",
+      "target_camera_metadata",
+      "target_indices",
+      "skipped_s3_descriptors",
+      "teacher_files",
+      "expected_results.json",
+      "evaluation_scenes"
+    ],
+    "offline_teacher_only": true,
+    "runtime_teacher_path": null,
+    "teacher_files_runtime_accessible": false,
+    "teacher_forbidden_inputs": [
+      "target_rgb",
+      "target_camera_metadata",
+      "target_indices",
+      "expected_results.json",
+      "evaluation_scenes"
+    ],
+    "teacher_sources": [
+      "dense_adaptor_output",
+      "dense_context_render"
+    ],
+    "teacher_storage_scope": "author_training_only"
+  }
+}

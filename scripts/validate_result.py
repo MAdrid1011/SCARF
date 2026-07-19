@@ -8,14 +8,95 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.execution_contract import require_paper_execution_contract
+from scripts.execution_contract import (  # noqa: E402
+    execution_contract,
+    require_paper_execution_contract,
+)
+from scripts.result_record import (  # noqa: E402
+    EXECUTION_TRACE_SCHEMA_VERSION,
+    EXECUTION_TRACE_SET_SCHEMA_VERSION,
+    execution_trace_inputs_from_record,
+    execution_trace_performance_evidence_from_record,
+    execution_trace_set_sha256,
+    execution_trace_sha256,
+)
+
+
+AGGREGATE_EXECUTION_BINDING_FIELDS = (
+    "mechanism_config_sha256",
+    "checkpoint_sha256",
+    "sample_selection_sha256",
+    "execution_trace_set_sha256",
+)
+REFERENCE_ONLY_MARKER = "PAPER_REFERENCE_ONLY"
+
+
+def _reference_only_marker_path(value: Any, path: str = "result") -> str | None:
+    """Return the first JSON location carrying the reference-only sentinel."""
+    if value == REFERENCE_ONLY_MARKER:
+        return path
+    if isinstance(value, dict):
+        for key, child in value.items():
+            marker_path = _reference_only_marker_path(child, f"{path}.{key}")
+            if marker_path is not None:
+                return marker_path
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            marker_path = _reference_only_marker_path(child, f"{path}[{index}]")
+            if marker_path is not None:
+                return marker_path
+    return None
+
+
+def reject_reference_only_record(record: Mapping[str, Any]) -> None:
+    """Keep paper-reference artifacts out of every generated-evidence path."""
+    marker_path = _reference_only_marker_path(record)
+    if marker_path is not None:
+        raise ValueError(
+            "PAPER_REFERENCE_ONLY marker cannot be used as generated evidence: "
+            f"{marker_path}"
+        )
+
+
+def aggregate_execution_binding_values(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the four bindings required to combine claim-tier aggregates."""
+    provenance = record.get("provenance")
+    if not isinstance(provenance, Mapping):
+        provenance = {}
+    checkpoint = provenance.get("checkpoint")
+    if not isinstance(checkpoint, Mapping):
+        checkpoint = {}
+    evaluation = provenance.get("evaluation")
+    if not isinstance(evaluation, Mapping):
+        evaluation = {}
+    return {
+        "mechanism_config_sha256": provenance.get("mechanism_config_sha256"),
+        "checkpoint_sha256": checkpoint.get("sha256"),
+        "sample_selection_sha256": evaluation.get("sample_selection_sha256"),
+        "execution_trace_set_sha256": evaluation.get("execution_trace_set_sha256"),
+    }
+
+
+def aggregate_execution_binding_mismatches(
+    first: Mapping[str, Any], second: Mapping[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Return missing or unequal claim-combination bindings for two aggregates."""
+    first_values = aggregate_execution_binding_values(first)
+    second_values = aggregate_execution_binding_values(second)
+    return {
+        field: {"first": first_values[field], "second": second_values[field]}
+        for field in AGGREGATE_EXECUTION_BINDING_FIELDS
+        if first_values[field] is None
+        or second_values[field] is None
+        or first_values[field] != second_values[field]
+    }
 
 
 def _get(record: dict[str, Any], path: str) -> Any:
@@ -307,7 +388,6 @@ def _validate_v21_evidence(record: dict[str, Any]) -> None:
     if calibration.get("global_configuration") is not True:
         raise ValueError("calibration provenance is not one global configuration")
 
-    fsdr = _get(record, "events.fsdr")
     hamming_hits = _finite_count(record, "events.fsdr.hamming_hits")
     local_valid = _finite_count(record, "events.fsdr.local_valid_hits")
     local_fallbacks = _finite_count(record, "events.fsdr.local_invalid_fallbacks")
@@ -348,6 +428,14 @@ def _validate_v21_evidence(record: dict[str, Any]) -> None:
     execution_dependency = _get(record, "events.saes.execution_dependency")
     if execution_dependency != expected_dependency:
         raise ValueError("SAES execution dependency does not match the model contract")
+    if (
+        _get(record, "provenance.dataset.paper_result_eligible") is True
+        and expected_dependency["s2_s3_sparse_execution_verified"] is not True
+    ):
+        raise ValueError(
+            "paper-result-eligible records require verified whole-pipeline "
+            "SAES S2/S3 sparse execution"
+        )
     saving = _get(record, "events.saes.s2_s3_saving")
     if not isinstance(saving, dict) or set(saving) != {"s2", "s3"}:
         raise ValueError("events.saes.s2_s3_saving must contain S2 and S3")
@@ -402,7 +490,219 @@ def _validate_v21_evidence(record: dict[str, Any]) -> None:
             )
 
 
+def _validate_execution_trace_binding(record: dict[str, Any]) -> None:
+    """Verify optional-by-presence non-quality trace bindings."""
+    provenance = _get(record, "provenance")
+    quality = _get(record, "quality")
+    performance = _get(record, "performance")
+    evaluation = _get(record, "provenance.evaluation")
+    if (
+        not isinstance(provenance, dict)
+        or not isinstance(quality, dict)
+        or not isinstance(performance, dict)
+        or not isinstance(evaluation, dict)
+    ):
+        raise ValueError("execution trace binding requires object result sections")
+
+    kind = evaluation.get("kind")
+    if kind == "sample":
+        fields_present = any(
+            field in provenance
+            for field in ("execution_trace", "execution_trace_sha256")
+        ) or any(
+            field in quality for field in ("execution_trace_sha256",)
+        ) or any(field in performance for field in ("execution_trace_sha256",))
+        if not fields_present:
+            return
+        trace = provenance.get("execution_trace")
+        digest = provenance.get("execution_trace_sha256")
+        if (
+            not isinstance(trace, dict)
+            or set(trace) != {"schema_version", "inputs"}
+            or trace.get("schema_version") != EXECUTION_TRACE_SCHEMA_VERSION
+            or not isinstance(trace.get("inputs"), dict)
+            or not _sha256_digest(digest)
+        ):
+            raise ValueError("sample execution trace binding is invalid")
+        expected_inputs = execution_trace_inputs_from_record(record)
+        if trace["inputs"] != expected_inputs:
+            raise ValueError("sample execution trace inputs do not match the record")
+        if digest != execution_trace_sha256(trace["inputs"]):
+            raise ValueError("sample execution trace hash mismatch")
+        if quality.get("execution_trace_sha256") != digest:
+            raise ValueError("quality execution trace binding does not match provenance")
+        if performance.get("execution_trace_sha256") != digest:
+            raise ValueError(
+                "performance execution trace binding does not match provenance"
+            )
+        return
+
+    if kind != "dataset_aggregate":
+        return
+    fields_present = any(
+        field in provenance
+        for field in ("execution_trace", "execution_trace_sha256")
+    ) or any(
+        field in evaluation
+        for field in (
+            "execution_trace_set_schema_version",
+            "execution_trace_set",
+            "execution_trace_performance_evidence",
+            "execution_trace_set_sha256",
+        )
+    ) or any(
+        field in quality for field in ("execution_trace_set_sha256",)
+    ) or any(field in performance for field in ("execution_trace_set_sha256",))
+    if not fields_present:
+        return
+    if "execution_trace" in provenance or "execution_trace_sha256" in provenance:
+        raise ValueError("dataset aggregate must not retain a sample execution trace")
+    trace_set = evaluation.get("execution_trace_set")
+    trace_performance_evidence = evaluation.get(
+        "execution_trace_performance_evidence"
+    )
+    digest = evaluation.get("execution_trace_set_sha256")
+    if (
+        evaluation.get("execution_trace_set_schema_version")
+        != EXECUTION_TRACE_SET_SCHEMA_VERSION
+        or not isinstance(trace_set, list)
+        or not isinstance(trace_performance_evidence, dict)
+        or not _sha256_digest(digest)
+    ):
+        raise ValueError("dataset execution trace set binding is invalid")
+    count = evaluation.get("sample_count")
+    indices = evaluation.get("sample_indices")
+    execution_indices = evaluation.get("execution_indices")
+    if (
+        not isinstance(count, int)
+        or isinstance(count, bool)
+        or count <= 0
+        or not isinstance(indices, list)
+        or not isinstance(execution_indices, list)
+        or len(trace_set) != count
+    ):
+        raise ValueError("dataset execution trace set is incomplete")
+    trace_indices: list[int] = []
+    trace_execution_indices: list[int] = []
+    trace_by_index: dict[int, str] = {}
+    trace_measurements_by_index: dict[int, str] = {}
+    for entry in trace_set:
+        required_entry_fields = {
+            "sample_index",
+            "execution_index",
+            "execution_trace_sha256",
+        }
+        optional_measurement_field = "orin_measurement_sha256"
+        if (
+            not isinstance(entry, dict)
+            or set(entry) not in (
+                required_entry_fields,
+                required_entry_fields | {optional_measurement_field},
+            )
+        ):
+            raise ValueError("dataset execution trace set entry is invalid")
+        sample_index = entry["sample_index"]
+        execution_index = entry["execution_index"]
+        trace_digest = entry["execution_trace_sha256"]
+        if (
+            isinstance(sample_index, bool)
+            or not isinstance(sample_index, int)
+            or sample_index < 0
+            or isinstance(execution_index, bool)
+            or not isinstance(execution_index, int)
+            or execution_index < 0
+            or not _sha256_digest(trace_digest)
+        ):
+            raise ValueError("dataset execution trace set entry has invalid values")
+        trace_indices.append(sample_index)
+        trace_execution_indices.append(execution_index)
+        trace_by_index[sample_index] = trace_digest
+        if optional_measurement_field in entry:
+            measurement_digest = entry[optional_measurement_field]
+            if not _sha256_digest(measurement_digest):
+                raise ValueError("dataset Orin measurement trace hash is invalid")
+            trace_measurements_by_index[sample_index] = measurement_digest
+    if (
+        len(trace_by_index) != count
+        or trace_indices != sorted(trace_indices)
+        or sorted(trace_indices) != indices
+        or sorted(trace_execution_indices) != execution_indices
+    ):
+        raise ValueError("dataset execution trace set does not match sample selection")
+    expected_performance_evidence = execution_trace_performance_evidence_from_record(
+        record
+    )
+    if trace_performance_evidence != expected_performance_evidence:
+        raise ValueError(
+            "dataset execution trace performance evidence does not match the record"
+        )
+    if digest != execution_trace_set_sha256(trace_set, trace_performance_evidence):
+        raise ValueError("dataset execution trace set hash mismatch")
+    sample_results = evaluation.get("sample_results")
+    if not isinstance(sample_results, list) or len(sample_results) != count:
+        raise ValueError("dataset execution trace set has no complete sample evidence")
+    evidence_by_index: dict[int, str] = {}
+    evidence_measurements_by_index: dict[int, str] = {}
+    for evidence in sample_results:
+        if not isinstance(evidence, dict):
+            raise ValueError("dataset sample evidence is invalid")
+        sample_index = evidence.get("sample_index")
+        trace_digest = evidence.get("execution_trace_sha256")
+        if (
+            isinstance(sample_index, bool)
+            or not isinstance(sample_index, int)
+            or not _sha256_digest(trace_digest)
+        ):
+            raise ValueError("dataset sample trace evidence is invalid")
+        evidence_by_index[sample_index] = trace_digest
+        measurement = evidence.get("orin_measurement")
+        if measurement is not None:
+            if not isinstance(measurement, dict) or not _sha256_digest(
+                measurement.get("sha256")
+            ):
+                raise ValueError("dataset Orin sample evidence is invalid")
+            evidence_measurements_by_index[sample_index] = measurement["sha256"]
+    if evidence_by_index != trace_by_index:
+        raise ValueError("dataset sample trace evidence does not match trace set")
+    if evidence_measurements_by_index != trace_measurements_by_index:
+        raise ValueError("dataset Orin sample evidence does not match trace set")
+    if quality.get("execution_trace_set_sha256") != digest:
+        raise ValueError("quality execution trace set binding does not match provenance")
+    if performance.get("execution_trace_set_sha256") != digest:
+        raise ValueError(
+            "performance execution trace set binding does not match provenance"
+        )
+
+
+def _validate_strict_saes_route_binding(record: dict[str, Any]) -> None:
+    """Require strict records to carry the runtime route that produced them."""
+    contract = execution_contract(record)
+    if contract is None or contract["run_class"] not in {"claim", "functional"}:
+        return
+    provenance = _get(record, "provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("strict SAES route binding requires provenance")
+    identity = provenance.get("saes_execution_identity")
+    route_sha256 = provenance.get("saes_execution_route_sha256")
+    from scripts.saes_execution_identity import validate_saes_execution_identity
+
+    expected = validate_saes_execution_identity(identity)
+    if route_sha256 != expected["route_sha256"]:
+        raise ValueError("strict SAES route SHA256 does not match its identity")
+    fsdr_saes = record.get("fsdr_saes")
+    if not isinstance(fsdr_saes, Mapping) or not isinstance(
+        fsdr_saes.get("saes"), Mapping
+    ):
+        raise ValueError("strict SAES route binding requires runtime SAES evidence")
+    runtime = fsdr_saes["saes"]
+    if runtime.get("saes_execution_identity") != expected:
+        raise ValueError("runtime SAES execution identity does not match provenance")
+    if runtime.get("route_sha256") != route_sha256:
+        raise ValueError("runtime SAES route SHA256 does not match provenance")
+
+
 def validate(record: dict[str, Any]) -> None:
+    reject_reference_only_record(record)
     require_paper_execution_contract(record, surface="result validation")
     schema_version = _get(record, "schema_version")
     if schema_version not in {"1.0", "2.0", "2.1"}:
@@ -411,6 +711,7 @@ def validate(record: dict[str, Any]) -> None:
         _validate_v2_evidence(record)
     if schema_version == "2.1":
         _validate_v21_evidence(record)
+        _validate_strict_saes_route_binding(record)
 
     for path in (
         "provenance.git_commit",
@@ -574,6 +875,15 @@ def validate(record: dict[str, Any]) -> None:
             raise ValueError("dataset aggregate sample selection hash mismatch")
     else:
         raise ValueError("provenance.evaluation.kind must be sample or dataset_aggregate")
+
+    _validate_execution_trace_binding(record)
+    contract = execution_contract(record)
+    if contract is not None and contract["run_class"] == "claim":
+        from scripts.result_record import claim_timing_from_record
+
+        claim_timing_from_record(
+            record, aggregate=evaluation["kind"] == "dataset_aggregate"
+        )
 
     baseline = _positive(record, "performance.baseline_cycles")
     scarf = _positive(record, "performance.scarf_cycles")

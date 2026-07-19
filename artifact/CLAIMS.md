@@ -12,10 +12,11 @@ Claim intent and completed evidence are separate. Figure 8 is a mandatory key
 result with submission state `CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION`:
 SCARF requests reproduction of the result, but it is neither scheduled on this
 host nor marked `PASS` until a non-author runs the documented real Jetson Orin
-NX workflow. Table 1, Figure 11, and Tables 2-3 are the remaining mandatory
-deterministic results. Figure 10 and Figures 12-16 remain required supporting
-outputs and must be generated from the same raw evidence, but they are not
-substitutes for a missing key result. The machine-readable state must never be
+NX workflow. Table 1 and Figure 11 are the remaining mandatory deterministic
+results. Tables 2-3 are Figure 11 supporting evidence from the same bound
+mechanism trace; they remain required for Figure 11 to pass, but are not
+separate mandatory results. Figure 10, Figures 12-16, and the public physical
+proxy are paused by the current scope. The machine-readable state must never be
 promoted merely because a result is listed here.
 
 Figure 9 and Table 4 have two explicitly separate layers: the paper's
@@ -45,8 +46,7 @@ requires.
 |---|---|---|---|
 | Figure 8 | `run_ae.sh performance --device orin` | Real Orin CUDA events, Nsight stage records, and positive ASIC cycles | Nine pairs and geometric mean within 5% of 2.94x |
 | Table 1 | `run_ae.sh quality` | All selected target views for nine pairs | PSNR 0.15 dB; SSIM/LPIPS 0.005 |
-| Figure 11 | `run_ae.sh mechanisms` | No-opt, FSDR, SAES, and combined event cycles | Three geometric means within 5% |
-| Tables 2-3 | `run_ae.sh mechanisms` | Discrete mechanism and work counters | Rates within 0.02 absolute; counts within 5% relative |
+| Figure 11 | `run_ae.sh mechanisms` | No-opt, FSDR, SAES, combined cycles, and Tables 2-3 counters from one bound trace | Three geometric means within 5%; supporting rates/counts within their fixed tolerances |
 
 The quick synthetic fixture, bounded pilots, dense diagnostics, partial
 matrices, workstation timing, and manuscript CSV files cannot satisfy these
@@ -54,11 +54,11 @@ rows.
 
 ## Supporting Results
 
-Figure 10 is regenerated from every completed target view. Figure 12 is
-regenerated from the same event records as Tables 2-3. Figures 13-16 replay the
-fixed per-sample traces used by the passed execution. These supporting results
-must be present and internally valid in a final evidence bundle; they cannot
-turn an absent key-result execution into `PASS`.
+Tables 2-3 are the active supporting records for Figure 11 and must be complete
+for it to pass. Figure 10, Figures 12-16, Figure 9, and Table 4 are paused by
+scope; their manual entry points remain available but are excluded from default
+execution and validation. No paused result can turn an absent key-result
+execution into `PASS`.
 
 ## Aggregate Rule
 
@@ -101,6 +101,42 @@ independent run is Functional evidence only.
   routing remains feature variance then depth standard deviation; numerical
   safeguards, C2W-ray moment construction, and lightweight materialization do
   not add a routing criterion or read non-probe Stage-3 attributes.
+
+## SAES Candidate Contract
+
+The current unweighted SAES candidate is a fixed 4-by-4, 12-anchor, guard-on
+diagnostic until evaluation-disjoint calibration freezes it in
+`artifact/mechanism_config.json`.
+For a 4 by 4 tile, L0 retains the four primary probes `(0,0)`, `(0,3)`,
+`(3,0)`, and `(3,3)`. L1 retains those four probes plus the eight deterministic
+edge anchors `(0,1)`, `(0,2)`, `(1,0)`, `(1,3)`, `(2,0)`, `(2,3)`, `(3,1)`, and
+`(3,2)`. L1 routing still uses only the four primary probe depths. Full tiles
+must preserve means, covariances, harmonics, and opacities bit-for-bit.
+
+The context safety guard may read only S1 features, primary probe depths,
+selected probe Gaussians, context cameras, and projected footprints. Missing or
+invalid geometry must fall back to Full. The public `saes-quality` selector is
+calibration-gated and any DL3DV sample-0 output from it is non-claim evidence.
+A guard-on route becomes claim-eligible only when the frozen configuration and
+calibration protocol bind that exact setting.
+
+The current v5 sample-0 quality record takes the Full path for every tile. It
+demonstrates fallback fidelity, not SAES reduction, and cannot support Table 3
+or Figure 11.
+
+ACID v5 is the only active frozen author-side materialization epoch. Its
+live-validated local provenance is not execution proof. With no registered
+deterministic verifier or external authority, its candidate runtime, promotion,
+and result paths remain fail-closed and have no cache, train, runtime, or
+result evidence. It remains `paper_result_eligible=false` and cannot authorize
+a DL3DV target-RGB quality gate or any Results Reproduced claim; all earlier
+ACID contracts and their cache, smoke, runtime, and result artifacts are
+superseded and excluded from release.
+
+Table 1, Figure 11, and Table 3 must be generated from records sharing one
+mechanism-config SHA256, checkpoint SHA256, canonical selection SHA256, and
+execution-trace-set SHA256. A quality record and a performance record with any
+different binding are not combinable evidence.
 
 ## Public Hardware Boundary
 

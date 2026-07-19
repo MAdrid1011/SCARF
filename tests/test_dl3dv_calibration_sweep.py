@@ -382,6 +382,7 @@ def test_calibrated_config_requires_verified_train_and_holdout_records(
     import scripts.calibration_sweep as sweep
     from scripts.calibrate_mechanisms import build_config
     from scripts.mechanism_config import load_mechanism_config
+    from scripts.saes_execution_identity import build_saes_execution_identity
 
     monkeypatch.setattr(
         sweep,
@@ -397,6 +398,7 @@ def test_calibrated_config_requires_verified_train_and_holdout_records(
     assert config["status"] == "calibrated"
     assert config["calibration"]["protocol"] == "dl3dv_train_holdout_v1"
     assert config["calibration"]["holdout"]["validated_candidate_sha256"]
+    assert config["saes_execution_identity"] == build_saes_execution_identity()
     assert provenance["holdout"]["validated_candidate_sha256"] == config[
         "calibration"
     ]["holdout"]["validated_candidate_sha256"]
