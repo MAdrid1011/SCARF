@@ -41,6 +41,7 @@ _RUNTIME_IMPORT_ROOTS = (
 _SIMULATOR_SOURCE_FILES = (
     "integration/model_loader.py",
     "saes/depthsplat_backend.py",
+    "saes/depthsplat_l0_l1_materializer.py",
     "saes/depthsplat_selected_output.py",
     "saes/selected_output_replay.py",
     "scripts/saes_depthsplat_selected_output_audit.py",
@@ -316,14 +317,17 @@ def validate_frozen_depthsplat_backend_identity(
 
 
 def _selected_positions(selection_mask: Any) -> tuple[Any, int, int]:
-    import torch
-
     if (
-        not torch.is_tensor(selection_mask)
-        or selection_mask.ndim != 3
-        or selection_mask.dtype != torch.bool
+        selection_mask is None
+        or getattr(selection_mask, "ndim", None) != 3
+        or not hasattr(selection_mask, "shape")
+        or not hasattr(selection_mask, "dtype")
         or any(size < 1 for size in selection_mask.shape)
     ):
+        raise ValueError("DepthSplat coordinates require a nonempty [V,H,W] bool mask")
+    import torch
+
+    if not torch.is_tensor(selection_mask) or selection_mask.dtype != torch.bool:
         raise ValueError("DepthSplat coordinates require a nonempty [V,H,W] bool mask")
     positions = selection_mask.nonzero(as_tuple=False)
     if positions.numel() == 0:
@@ -346,9 +350,8 @@ def source_native_depthsplat_coordinates(
     it with *z-depth* rays rather than a unit-length ray convention.
     """
 
-    import torch
-
     positions, height, width = _selected_positions(selection_mask)
+    import torch
     if (
         not torch.is_tensor(raw_head_descriptors)
         or raw_head_descriptors.ndim != 2

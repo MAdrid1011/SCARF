@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -21,6 +22,7 @@ from saes.probe_layout import (
 
 
 PAPER_KP_ANCHOR_SEMANTICS = "paper-kp-v1"
+LITERAL_PAPER_T4_PLAN_CONTRACT = "saes-literal-paper-t4-probe-first-plan-v1"
 LEGACY_L1_ANCHOR_SEMANTICS = "legacy-lightweight-12-dev"
 BALANCED_L1_ANCHOR_SEMANTICS = "engineering-lightweight-12-balanced-v1"
 ADAPTIVE_L1_15_ANCHOR_SEMANTICS = (
@@ -396,6 +398,7 @@ def build_incremental_probe_first_plan(
     depth_threshold: float,
     decision_semantics: str,
     l1_anchor_semantics: str = LEGACY_L1_ANCHOR_SEMANTICS,
+    formal_paper_kp4: bool = False,
 ) -> IncrementalProbeFirstPlan:
     """Build canonical primary, secondary, and Full raw-head request masks.
 
@@ -404,6 +407,15 @@ def build_incremental_probe_first_plan(
     that needs raw Gaussian attributes; future guard promotions must append a
     new Full request and preserve the prior phase ledger.
     """
+    if not isinstance(formal_paper_kp4, bool):
+        raise TypeError("formal_paper_kp4 must be boolean")
+    if formal_paper_kp4 and (
+        l1_anchor_semantics != PAPER_KP_ANCHOR_SEMANTICS
+        or decision_semantics != "paper-probe-feature-variance-first-hit"
+    ):
+        raise ValueError(
+            "formal paper Kp4 planning requires literal raw-feature Kp=4 semantics"
+        )
     router, tile_scores, normalized_features = _validate_probe_first_inputs(
         features,
         depths,
@@ -458,29 +470,38 @@ def build_incremental_probe_first_plan(
     for view in range(views):
         for tile_y in range(height // tile_size):
             for tile_x in range(width // tile_size):
-                depth_passes = router.check_depth_uniformity(
-                    depths,
-                    tile_y,
-                    tile_x,
-                    tile_size,
-                    height,
-                    width,
-                    depth_threshold,
-                    probe_positions=router.probe_positions,
-                    view_index=view,
-                    relative=False,
-                )
                 feature_score = tile_scores[(view, tile_y, tile_x)]
-                if feature_score < feature_threshold:
+                depth_passes: bool | None
+                if formal_paper_kp4 and feature_score < feature_threshold:
+                    # Section 3's first-hit ordering is literal here: a
+                    # successful L0 feature test neither reads depth probes nor
+                    # stages a secondary request.  Kp=4 also means L1 has no
+                    # undeclared extra anchors to prefetch.
+                    depth_passes = None
                     counts["potential_l0_tiles"] += 1
-                    if depth_passes:
-                        counts["l0_l1_fallback_anchor_tiles"] += 1
-                    else:
-                        counts["l0_full_fallback_anchor_tiles"] += 1
-                elif depth_passes:
-                    counts["potential_l1_tiles"] += 1
                 else:
-                    counts["potential_full_tiles"] += 1
+                    depth_passes = router.check_depth_uniformity(
+                        depths,
+                        tile_y,
+                        tile_x,
+                        tile_size,
+                        height,
+                        width,
+                        depth_threshold,
+                        probe_positions=router.probe_positions,
+                        view_index=view,
+                        relative=False,
+                    )
+                    if feature_score < feature_threshold:
+                        counts["potential_l0_tiles"] += 1
+                        if depth_passes:
+                            counts["l0_l1_fallback_anchor_tiles"] += 1
+                        else:
+                            counts["l0_full_fallback_anchor_tiles"] += 1
+                    elif depth_passes:
+                        counts["potential_l1_tiles"] += 1
+                    else:
+                        counts["potential_full_tiles"] += 1
                 adaptive_omitted_position: tuple[int, int] | None = None
                 adaptive_residual: float | None = None
                 adaptive_residual_ratio: float | None = None
@@ -512,14 +533,32 @@ def build_incremental_probe_first_plan(
                     )
                 else:
                     l1_positions = static_l1_positions
-                pre_guard_route, primary, secondary, full = _phase_positions(
-                    router,
-                    feature_score=feature_score,
-                    feature_threshold=feature_threshold,
-                    depth_passes=depth_passes,
-                    tile_size=tile_size,
-                    l1_positions=l1_positions,
-                )
+                if formal_paper_kp4:
+                    if feature_score < feature_threshold:
+                        pre_guard_route, primary, secondary, full = "L0", list(
+                            router.probe_positions
+                        ), [], []
+                    elif depth_passes:
+                        pre_guard_route, primary, secondary, full = "L1", list(
+                            router.probe_positions
+                        ), [], []
+                    else:
+                        pre_guard_route, primary, secondary, full = "Full", list(
+                            router.probe_positions
+                        ), [], [
+                            (local_y, local_x)
+                            for local_y in range(tile_size)
+                            for local_x in range(tile_size)
+                        ]
+                else:
+                    pre_guard_route, primary, secondary, full = _phase_positions(
+                        router,
+                        feature_score=feature_score,
+                        feature_threshold=feature_threshold,
+                        depth_passes=bool(depth_passes),
+                        tile_size=tile_size,
+                        l1_positions=l1_positions,
+                    )
                 origin_y = tile_y * tile_size
                 origin_x = tile_x * tile_size
                 _mark_positions(
@@ -548,7 +587,8 @@ def build_incremental_probe_first_plan(
                     "tile_y": tile_y,
                     "tile_x": tile_x,
                     "feature_score": feature_score,
-                    "depth_uniform": bool(depth_passes),
+                    "depth_uniform": depth_passes,
+                    "depth_checked_after_l0_miss_only": formal_paper_kp4,
                     "pre_guard_route": pre_guard_route,
                     "primary_local_positions": [list(position) for position in primary],
                     "secondary_local_positions": [list(position) for position in secondary],
@@ -589,6 +629,8 @@ def build_incremental_probe_first_plan(
         "l1_anchor_selection_uses_s1_only": (
             l1_anchor_semantics == ADAPTIVE_L1_15_ANCHOR_SEMANTICS
         ),
+        "formal_paper_kp4": formal_paper_kp4,
+        "depth_checked_after_l0_miss_only": formal_paper_kp4,
         "l0_anchor_count": len(router.probe_positions),
         "l1_anchor_count": l1_anchor_count,
         "total_tiles": total_tiles,
@@ -613,6 +655,105 @@ def build_incremental_probe_first_plan(
         tile_trace=tuple(tile_trace),
         events=events,
     )
+
+
+def build_literal_paper_t4_probe_first_plan(
+    features: torch.Tensor,
+    depths: torch.Tensor,
+    *,
+    height: int,
+    width: int,
+    feature_threshold: float,
+    depth_threshold: float,
+) -> IncrementalProbeFirstPlan:
+    """Build the literal Section-3 T=4/Kp=4 first-hit routing ledger.
+
+    This formal profile is intentionally separate from the engineering
+    incremental planner.  It uses raw probe-feature variance, requests only
+    the four corner probes at either compact level, and reads the S2 depth
+    probes only after the L0 feature decision misses.  It is the only planner
+    accepted by the source-faithful DepthSplat V16 path.
+    """
+
+    plan = build_incremental_probe_first_plan(
+        features,
+        depths,
+        height=height,
+        width=width,
+        tile_size=4,
+        feature_threshold=feature_threshold,
+        depth_threshold=depth_threshold,
+        decision_semantics="paper-probe-feature-variance-first-hit",
+        l1_anchor_semantics=PAPER_KP_ANCHOR_SEMANTICS,
+        formal_paper_kp4=True,
+    )
+    events = dict(plan.events)
+    events["contract_version"] = LITERAL_PAPER_T4_PLAN_CONTRACT
+    if (
+        events.get("feature_statistic") != "raw-probe-mean-channel-variance"
+        or events.get("l0_anchor_count") != 4
+        or events.get("l1_anchor_count") != 4
+        or events.get("secondary_head_final_positions") != 0
+        or events.get("depth_checked_after_l0_miss_only") is not True
+    ):
+        raise RuntimeError("literal paper T=4 planner did not preserve its contract")
+    events["literal_paper_t4_route_config_sha256"] = (
+        literal_paper_t4_route_config_sha256(events)
+    )
+    return IncrementalProbeFirstPlan(
+        primary_mask=plan.primary_mask,
+        secondary_mask=plan.secondary_mask,
+        full_mask=plan.full_mask,
+        selection_mask=plan.selection_mask,
+        tile_trace=plan.tile_trace,
+        events=events,
+    )
+
+
+def literal_paper_t4_route_config_sha256(events: Mapping[str, Any]) -> str:
+    """Hash the immutable route configuration consumed by the formal profile."""
+
+    if not isinstance(events, Mapping):
+        raise TypeError("literal paper T=4 route events must be a mapping")
+    config = {
+        "contract_version": events.get("contract_version"),
+        "tile_size": events.get("tile_size"),
+        "feature_threshold": events.get("feature_threshold"),
+        "depth_threshold": events.get("depth_threshold"),
+        "decision_semantics": events.get("decision_semantics"),
+        "feature_statistic": events.get("feature_statistic"),
+        "l1_anchor_semantics": events.get("l1_anchor_semantics"),
+        "l0_anchor_count": events.get("l0_anchor_count"),
+        "l1_anchor_count": events.get("l1_anchor_count"),
+        "formal_paper_kp4": events.get("formal_paper_kp4"),
+        "depth_checked_after_l0_miss_only": events.get(
+            "depth_checked_after_l0_miss_only"
+        ),
+    }
+    if config != {
+        "contract_version": LITERAL_PAPER_T4_PLAN_CONTRACT,
+        "tile_size": 4,
+        "feature_threshold": config["feature_threshold"],
+        "depth_threshold": config["depth_threshold"],
+        "decision_semantics": "paper-probe-feature-variance-first-hit",
+        "feature_statistic": "raw-probe-mean-channel-variance",
+        "l1_anchor_semantics": PAPER_KP_ANCHOR_SEMANTICS,
+        "l0_anchor_count": 4,
+        "l1_anchor_count": 4,
+        "formal_paper_kp4": True,
+        "depth_checked_after_l0_miss_only": True,
+    }:
+        raise ValueError("literal paper T=4 route configuration changed")
+    for name in ("feature_threshold", "depth_threshold"):
+        value = config[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+        ):
+            raise ValueError("literal paper T=4 route threshold is invalid")
+    return _canonical_sha256(config)
 
 
 def build_conservative_probe_first_schedule(

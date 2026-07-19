@@ -280,6 +280,66 @@ def test_context_only_loader_binds_the_requested_model_identity(
         load_context_only_audit_data(Loader(), bundle, input_root=output)
 
 
+def test_context_only_loader_accepts_depthsplat_and_records_native_preprocessing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from data.context_only_audit_input import prepare_context_only_audit_input
+    from integration.model_loader import load_context_only_audit_data
+
+    source = _source_input(tmp_path, model="depthsplat")
+    output = tmp_path / "depthsplat-context-only"
+    prepare_context_only_audit_input(source, output_root=output, model="depthsplat")
+
+    src = ModuleType("src")
+    dataset = ModuleType("src.dataset")
+    shims = ModuleType("src.dataset.shims")
+    crop = ModuleType("src.dataset.shims.crop_shim")
+    patch = ModuleType("src.dataset.shims.patch_shim")
+    crop.apply_crop_shim_to_views = lambda views, _shape: views
+    patch.apply_patch_shim_to_views = lambda views, _patch_size: views
+    src.dataset = dataset
+    dataset.shims = shims
+    shims.crop_shim = crop
+    shims.patch_shim = patch
+    monkeypatch.setitem(sys.modules, "src", src)
+    monkeypatch.setitem(sys.modules, "src.dataset", dataset)
+    monkeypatch.setitem(sys.modules, "src.dataset.shims", shims)
+    monkeypatch.setitem(sys.modules, "src.dataset.shims.crop_shim", crop)
+    monkeypatch.setitem(sys.modules, "src.dataset.shims.patch_shim", patch)
+
+    class Loader:
+        def _setup_imports(self):
+            return None
+
+        def _restore_cwd(self):
+            return None
+
+    bundle = SimpleNamespace(
+        encoder=SimpleNamespace(
+            cfg=SimpleNamespace(shim_patch_size=16, downscale_factor=4)
+        ),
+        config=SimpleNamespace(
+            dataset=SimpleNamespace(
+                image_shape=(8, 8),
+                make_baseline_1=False,
+                near=0.5,
+                far=200.0,
+                baseline_scale_bounds=False,
+            )
+        ),
+    )
+    batch = load_context_only_audit_data(
+        Loader(), bundle, input_root=output, model_name="depthsplat"
+    ).batch
+
+    assert "target" not in batch
+    assert batch["calibration"]["native_preprocessing"] == {
+        "crop_image_shape": [8, 8],
+        "patch_size": 64,
+        "prepared_image_shape": [8, 8],
+    }
+
+
 def test_context_only_validator_rejects_unexpected_payload_fields(tmp_path: Path):
     from data.build_manifest import build
     from data.context_only_audit_input import (

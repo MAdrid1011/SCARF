@@ -72,6 +72,7 @@ def test_frozen_depthsplat_identity_binds_checkpoint_index_and_live_sources():
     assert [item["path"] for item in identity["simulator_source_files"]] == [
         "integration/model_loader.py",
         "saes/depthsplat_backend.py",
+        "saes/depthsplat_l0_l1_materializer.py",
         "saes/depthsplat_selected_output.py",
         "saes/selected_output_replay.py",
         "scripts/saes_depthsplat_selected_output_audit.py",

@@ -31,6 +31,27 @@
    input, z-depth geometry, checkpoint/source identity, ACID calibration, and
    quality gate may not reuse any classic threshold or coordinate helper.
 
+### DepthSplat Literal T=4 Route (2026-07-20)
+
+- The formal DepthSplat route is a separate `V16T4` line. For `T=4`, both L0
+  and L1 retain only the four corner probes, use raw probe-feature variance,
+  and evaluate L1 depth only after an L0 miss. The legacy 12/15-anchor routes
+  remain development diagnostics and cannot supply a threshold, record, or
+  claim for this line.
+- The formal materializer uses selected-probe-only virtual geometry and
+  literal first/second moments with range-constrained SH/opacity averages.
+  It reads no omitted S3 attributes; failed support, endpoint, or frozen-LOO
+  guard checks promote the whole tile to bitwise-native Full.
+- `V16T4` must be frozen solely from a new ACID 24/8 context-only collection
+  using `train-minimum-per-scene-q25` of maximum selected-anchor LOO risk.
+  The eight holdout scenes only verify the fixed threshold. DL3DV sample 0
+  cannot run until the record, its per-scene trace artifacts, and live source
+  identities revalidate.
+- This is still a dense-source simulator diagnostic: retain
+  `whole_pipeline_s2_s3_sparse_execution_verified=false`, make no timing or
+  global-saving claim, and do not expand to Re10K, Table 1, or eight scenes
+  before the one frozen sample-0 audit and quality gate pass.
+
 ### Current L0/L1 Repair Contract (2026-07-19)
 
 - Source rule: Section 3 of `micro59-submit/build/SCARF.pdf` defines L0/L1 as
@@ -41,13 +62,12 @@
   factor. SH and opacity use range-constrained aggregation. The exact-zero
   source-opacity certificate remains only an optional lossless-delete fast
   path.
-- The paper explicitly fixes `Kp(4)=4` and L0's retained probe path, but does
-  not specify L1's retained-output count. `paper-kp-v1` is therefore a
-  literal probe-set-only diagnostic, not a claim that the paper fixes L1 to
-  four outputs. The existing 12-anchor L1 layout remains
-  `legacy-lightweight-12-dev`. The literal route uses no undocumented
-  post-Adapter attribute/context guard; compact-materializer finite, PSD,
-  opacity, and source-geometry checks remain fail-closed.
+- The paper explicitly fixes `Kp(4)=4`; L1 computes its depth statistic over
+  that probe set and retains L0's probe-constrained aggregation framework.
+  The literal T=4 route therefore retains four corners at both levels. The
+  existing 12/15-anchor layouts are engineering diagnostics only. The formal
+  route may add a frozen selected-anchor LOO Full-promotion guard, but it
+  never changes a compact tile's probe set, assignment, or moment formula.
 - The final compact packet must use `selected_output_mask`; the larger
   `raw_head_request_mask` is producer-only state for a possible single Full
   extension. A failed materialization preflight promotes its whole tile to

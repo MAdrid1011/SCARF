@@ -27,7 +27,7 @@ from scripts.calibration_inputs import materialize_target_free_inputs
 from scripts.compile_protocol import canonicalize_index
 
 
-CLASSIC_MODELS = ("transplat", "mvsplat")
+SUPPORTED_MODELS = ("transplat", "mvsplat", "depthsplat")
 DEFAULT_MODEL = "transplat"
 SAMPLE_INDEX = 0
 CONTEXT_COUNT = 2
@@ -59,10 +59,9 @@ def _sample_index(value: Any) -> int:
 
 
 def _model_name(value: Any) -> str:
-    if value not in CLASSIC_MODELS:
+    if value not in SUPPORTED_MODELS:
         raise AuditInputError(
-            "target-free classic audit requires one of "
-            + ", ".join(CLASSIC_MODELS)
+            "target-free audit requires one of " + ", ".join(SUPPORTED_MODELS)
         )
     return str(value)
 
@@ -287,7 +286,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-root", type=Path, default=DEFAULT_RAW_ROOT)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--model", choices=CLASSIC_MODELS, default=DEFAULT_MODEL)
+    parser.add_argument("--model", choices=SUPPORTED_MODELS, default=DEFAULT_MODEL)
     parser.add_argument("--sample-index", type=int, default=SAMPLE_INDEX)
     args = parser.parse_args()
     try:

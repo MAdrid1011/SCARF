@@ -122,6 +122,56 @@ def test_selected_head_replay_matches_replicate_padded_dense_outputs_and_keeps_o
     assert replay.events["whole_pipeline_s2_s3_sparse_execution_verified"] is False
 
 
+def test_selected_head_replay_preserves_declared_full_outputs_bitwise():
+    from saes.depthsplat_selected_output import replay_depthsplat_selected_head
+
+    torch.manual_seed(109)
+    head = torch.nn.Sequential(
+        torch.nn.Conv2d(4, 6, 3, 1, 1, padding_mode="replicate"),
+        torch.nn.GELU(),
+        torch.nn.Conv2d(6, 7, 3, 1, 1, padding_mode="replicate"),
+    )
+    inputs = torch.randn(1, 4, 5, 6)
+    dense = head(inputs)
+    selection = torch.zeros(1, 5, 6, dtype=torch.bool)
+    selection[0, 0, 0] = True
+    selection[0, 2, 3] = True
+    selection[0, 4, 5] = True
+    native_full = torch.zeros_like(selection)
+    native_full[0, 2, 3] = True
+
+    replay = replay_depthsplat_selected_head(
+        head, inputs, dense, selection, native_full_mask=native_full
+    )
+
+    assert replay.equivalence["equivalent"] is True
+    assert replay.events["native_full_passthrough_positions"] == 1
+    assert replay.events["selected_compact_replay_positions"] == 2
+    assert torch.equal(replay.values[0, :, native_full[0]], dense[0, :, native_full[0]])
+    assert torch.count_nonzero(replay.values[0, :, ~selection[0]]) == 0
+
+
+def test_selected_head_replay_rejects_full_output_outside_selection():
+    from saes.depthsplat_selected_output import replay_depthsplat_selected_head
+
+    head = torch.nn.Sequential(
+        torch.nn.Conv2d(3, 5, 3, 1, 1, padding_mode="replicate"),
+        torch.nn.GELU(),
+        torch.nn.Conv2d(5, 7, 3, 1, 1, padding_mode="replicate"),
+    )
+    inputs = torch.randn(1, 3, 4, 4)
+    dense = head(inputs)
+    selection = torch.zeros(1, 4, 4, dtype=torch.bool)
+    selection[0, 0, 0] = True
+    native_full = torch.zeros_like(selection)
+    native_full[0, 3, 3] = True
+
+    with pytest.raises(ValueError, match="omitted output"):
+        replay_depthsplat_selected_head(
+            head, inputs, dense, selection, native_full_mask=native_full
+        )
+
+
 def test_depthsplat_packed_consumer_preserves_raw_prefix_rgb_and_native_adapter_shapes():
     from saes.depthsplat_selected_output import DepthSplatPackedGaussianConsumer
 
@@ -145,6 +195,136 @@ def test_depthsplat_packed_consumer_preserves_raw_prefix_rgb_and_native_adapter_
     torch.testing.assert_close(packed.dense_slots, torch.tensor([0, 7], dtype=torch.int64))
     torch.testing.assert_close(packed.means[:, 2], torch.tensor([2.0, 3.0]))
     torch.testing.assert_close(packed.harmonics[:, :, 0], _packet().source_rgb)
+
+
+def test_packed_consumer_gathers_full_attributes_and_adapts_only_compact_slots():
+    from saes.depthsplat_selected_output import (
+        DEPTHSPLAT_SELECTED_OUTPUT_CONTRACT,
+        DepthSplatAdapterInputs,
+        DepthSplatNativeExecution,
+        DepthSplatPackedGaussianConsumer,
+        DepthSplatSparseRawPacket,
+        _adapter_inputs_binding_sha256,
+        _dense_gaussian_attribute_binding_sha256,
+        _tensor_sha256,
+    )
+
+    height, width = 2, 2
+    raw = torch.tensor(
+        [[0.2, -0.1, 0.1, 1.0, 2.0, 3.0, 4.0], [0.3, 0.2, -0.2, 5.0, 6.0, 7.0, 8.0]],
+        dtype=torch.float32,
+    )
+    full_mask = torch.zeros(1, height, width, dtype=torch.bool)
+    full_mask[0, 0, 0] = True
+    trace = {
+        **_trace(),
+        "source_view_count": 1,
+        "source_image_shape": [height, width],
+        "native_execution_sha256": "d" * 64,
+        "native_full_passthrough_mask_sha256": _tensor_sha256(
+            full_mask.to(dtype=torch.uint8)
+        ),
+        "native_full_passthrough_positions": 1,
+    }
+    packet = DepthSplatSparseRawPacket(
+        descriptor_keys=torch.tensor([[0, 0, 0, 0], [0, 0, 3, 0]], dtype=torch.int64),
+        raw_head_descriptors=raw,
+        extrinsics=torch.eye(4).reshape(1, 4, 4).repeat(2, 1, 1),
+        intrinsics=torch.eye(3).reshape(1, 3, 3).repeat(2, 1, 1),
+        coordinates=torch.tensor([[0.1, 0.2], [0.8, 0.7]], dtype=torch.float32),
+        depths=torch.tensor([2.0, 3.0], dtype=torch.float32),
+        mapped_opacities=raw[:, 0].sigmoid(),
+        source_rgb=torch.tensor([[0.1, 0.2, 0.3], [0.8, 0.7, 0.6]], dtype=torch.float32),
+        dense_slots=torch.tensor([0, 3], dtype=torch.int64),
+        source_trace=trace,
+    )
+    total_slots = height * width
+    dense = SimpleNamespace(
+        means=torch.arange(total_slots * 3, dtype=torch.float32).reshape(1, total_slots, 3) + 10.0,
+        covariances=(
+            torch.eye(3, dtype=torch.float32).reshape(1, 1, 3, 3).repeat(1, total_slots, 1, 1)
+            * torch.arange(1, total_slots + 1, dtype=torch.float32).reshape(1, total_slots, 1, 1)
+        ),
+        harmonics=torch.arange(total_slots * 3, dtype=torch.float32).reshape(1, total_slots, 3, 1),
+        opacities=torch.linspace(0.1, 0.4, total_slots, dtype=torch.float32).reshape(1, total_slots),
+    )
+    adapter_inputs = DepthSplatAdapterInputs(
+        extrinsics=torch.eye(4).reshape(1, 1, 1, 1, 1, 4, 4),
+        intrinsics=torch.eye(3).reshape(1, 1, 1, 1, 1, 3, 3),
+        coordinates=torch.zeros(1, 1, total_slots, 1, 1, 2),
+        depths=torch.ones(1, 1, total_slots, 1, 1),
+        opacities=torch.full((1, 1, total_slots, 1, 1), 0.5),
+        raw_body=torch.zeros(1, 1, total_slots, 1, 1, 4),
+        image_shape=(height, width),
+        input_images=torch.zeros(1, 1, 3, height, width),
+    )
+    execution = DepthSplatNativeExecution(
+        dense_gaussians=dense,
+        gaussian_head_input=torch.zeros(1, 4, height, width),
+        dense_raw_head=torch.zeros(1, 7, height, width),
+        adapter_inputs=adapter_inputs,
+        sample_image_grid=None,
+        events={
+            "native_execution_sha256": "d" * 64,
+            "adapter": {
+                "dense_inputs_binding_sha256": _adapter_inputs_binding_sha256(adapter_inputs),
+                "dense_attribute_binding_sha256": _dense_gaussian_attribute_binding_sha256(
+                    dense, slots=total_slots
+                ),
+            },
+        },
+    )
+    adapter = _Adapter()
+
+    packed = DepthSplatPackedGaussianConsumer(adapter).convert(
+        packet,
+        image_shape=(height, width),
+        native_execution=execution,
+        native_full_mask=full_mask,
+    )
+
+    assert adapter.calls[0]["raw_body"].shape[2] == 1
+    assert torch.equal(packed.means[0], dense.means[0, 0])
+    assert torch.equal(packed.covariances[0], dense.covariances[0, 0])
+    assert torch.equal(packed.harmonics[0], dense.harmonics[0, 0])
+    assert torch.equal(packed.opacities[0], dense.opacities[0, 0])
+    torch.testing.assert_close(packed.means[1], torch.tensor([0.8, 0.7, 3.0]))
+    assert packed.source_trace["native_full_adapter_attribute_passthrough_count"] == 1
+    assert packed.source_trace["selected_native_rgb_adapter_compact_count"] == 1
+
+    full_only_mask = torch.zeros_like(full_mask)
+    full_only_mask[0, 0, 0] = True
+    full_only_mask[0, 1, 1] = True
+    full_only_packet = DepthSplatSparseRawPacket(
+        **{
+            **packet.__dict__,
+            "source_trace": {
+                **trace,
+                "native_full_passthrough_mask_sha256": _tensor_sha256(
+                    full_only_mask.to(dtype=torch.uint8)
+                ),
+                "native_full_passthrough_positions": 2,
+            },
+        }
+    )
+    full_only_adapter = _Adapter()
+    full_only = DepthSplatPackedGaussianConsumer(full_only_adapter).convert(
+        full_only_packet,
+        image_shape=(height, width),
+        native_execution=execution,
+        native_full_mask=full_only_mask,
+    )
+    assert full_only_adapter.calls == []
+    assert torch.equal(full_only.means, dense.means[0, full_only.dense_slots])
+
+    dense.means[0, 0, 0] += 1.0
+    with pytest.raises(ValueError, match="capture binding drifted"):
+        DepthSplatPackedGaussianConsumer(_Adapter()).convert(
+            packet,
+            image_shape=(height, width),
+            native_execution=execution,
+            native_full_mask=full_mask,
+        )
 
 
 def test_depthsplat_packed_consumer_rejects_classic_two_prefix_descriptor_layout():

@@ -65,6 +65,11 @@ class DepthSplatNativeExecution:
     adapter_inputs: DepthSplatAdapterInputs
     sample_image_grid: Any
     events: dict[str, Any]
+    # The router consumes these source tensors instead of dense raw-head
+    # outputs. They are retained separately to keep the materializer target-
+    # free and selected-output-only.
+    routing_features: torch.Tensor | None = None
+    routing_z_depths: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,10 @@ class DepthSplatSelectedHeadReplay:
     selection_mask: torch.Tensor
     events: dict[str, Any]
     equivalence: dict[str, Any]
+    # Full positions are copied from the captured source head rather than
+    # reconstructed by the compact replay.  Keep the actual mask alongside
+    # its ledger so packet construction can prove that boundary.
+    native_full_mask: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +118,11 @@ class DepthSplatPackedGaussianAttributes:
     opacities: torch.Tensor
     source_trace: dict[str, Any]
     source_trace_sha256: str
+    # Digest of the attributes currently stored in this packet. Native Adapter
+    # packets set this equal to the trace's native-adapter binding; a later
+    # materialized packet records a new current binding while retaining that
+    # source binding in its trace.
+    attribute_binding_sha256: str | None = None
 
     def as_single_batch(self, gaussians_type: type[Any]) -> Any:
         """Build a native decoder Gaussian container without dense padding."""
@@ -128,7 +142,10 @@ def _tensor_sha256(value: torch.Tensor) -> str:
     digest = hashlib.sha256()
     digest.update(str(detached.dtype).encode("ascii"))
     digest.update(json.dumps(list(detached.shape), separators=(",", ":")).encode("ascii"))
-    digest.update(detached.numpy().tobytes())
+    # ``Tensor.numpy`` does not support bfloat16. Hash physical bytes so an
+    # audit reports a deterministic value before its strict-FP32 gate decides
+    # whether the execution is eligible for materialization.
+    digest.update(detached.view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
 
 
@@ -140,6 +157,27 @@ def _module_state_sha256(module: nn.Module) -> str:
         digest.update(name.encode("utf-8"))
         digest.update(_tensor_sha256(value).encode("ascii"))
     return digest.hexdigest()
+
+
+def depthsplat_attribute_binding_sha256(
+    *,
+    dense_slots: torch.Tensor,
+    means: torch.Tensor,
+    covariances: torch.Tensor,
+    harmonics: torch.Tensor,
+    opacities: torch.Tensor,
+) -> str:
+    """Bind slot order and every packed Gaussian attribute to one packet."""
+
+    return canonical_json_sha256(
+        {
+            "dense_slots_sha256": _tensor_sha256(dense_slots),
+            "means_sha256": _tensor_sha256(means),
+            "covariances_sha256": _tensor_sha256(covariances),
+            "harmonics_sha256": _tensor_sha256(harmonics),
+            "opacities_sha256": _tensor_sha256(opacities),
+        }
+    )
 
 
 def _require_context(context: Mapping[str, Any]) -> tuple[int, int, int]:
@@ -274,6 +312,49 @@ def _validate_dense_adapter_inputs(
         raise RuntimeError("DepthSplat native Adapter inputs are non-finite")
 
 
+def _adapter_inputs_binding_sha256(adapter_inputs: DepthSplatAdapterInputs) -> str:
+    """Bind every same-invocation native Adapter side input."""
+
+    if not isinstance(adapter_inputs, DepthSplatAdapterInputs):
+        raise TypeError("DepthSplat Adapter binding requires captured inputs")
+    return canonical_json_sha256(
+        {
+            "extrinsics_sha256": _tensor_sha256(adapter_inputs.extrinsics),
+            "intrinsics_sha256": _tensor_sha256(adapter_inputs.intrinsics),
+            "coordinates_sha256": _tensor_sha256(adapter_inputs.coordinates),
+            "depths_sha256": _tensor_sha256(adapter_inputs.depths),
+            "opacities_sha256": _tensor_sha256(adapter_inputs.opacities),
+            "raw_body_sha256": _tensor_sha256(adapter_inputs.raw_body),
+            "input_images_sha256": _tensor_sha256(adapter_inputs.input_images),
+            "image_shape": list(adapter_inputs.image_shape),
+        }
+    )
+
+
+def _dense_gaussian_attribute_binding_sha256(
+    dense_gaussians: Any, *, slots: int
+) -> str:
+    """Digest the source-native dense Adapter output in decoder slot order."""
+
+    dense = _unwrap_gaussians(dense_gaussians)
+    if (
+        dense.means.shape != (1, slots, 3)
+        or dense.covariances.shape != (1, slots, 3, 3)
+        or dense.harmonics.ndim != 4
+        or dense.harmonics.shape[:3] != (1, slots, 3)
+        or dense.opacities.shape != (1, slots)
+    ):
+        raise ValueError("DepthSplat dense Adapter attributes have an invalid shape")
+    dense_slots = torch.arange(slots, device=dense.means.device, dtype=torch.int64)
+    return depthsplat_attribute_binding_sha256(
+        dense_slots=dense_slots,
+        means=dense.means[0],
+        covariances=dense.covariances[0],
+        harmonics=dense.harmonics[0],
+        opacities=dense.opacities[0],
+    )
+
+
 def capture_depthsplat_native_execution(
     encoder: Any,
     context: Mapping[str, Any],
@@ -286,6 +367,9 @@ def capture_depthsplat_native_execution(
     if bool(getattr(encoder, "training", False)):
         raise ValueError("DepthSplat native capture requires eval mode")
     regressor, head, adapter = _validate_encoder_structure(encoder)
+    feature_upsampler = getattr(encoder, "feature_upsampler", None)
+    if not isinstance(feature_upsampler, nn.Module):
+        raise ValueError("DepthSplat encoder lacks its native feature upsampler")
     sample_image_grid = _loaded_sample_image_grid(encoder, source_root=source_root)
     captured: dict[str, Any] = {}
 
@@ -310,6 +394,15 @@ def capture_depthsplat_native_execution(
             raise RuntimeError("DepthSplat gaussian_head ran more than once")
         captured["head"] = (inputs[0].detach(), output.detach())
 
+    def capture_features(
+        _module: Any, _inputs: tuple[Any, ...], output: Any
+    ) -> None:
+        if not torch.is_tensor(output):
+            raise RuntimeError("DepthSplat feature upsampler boundary changed")
+        if "features" in captured:
+            raise RuntimeError("DepthSplat feature upsampler ran more than once")
+        captured["features"] = output.detach()
+
     def capture_adapter(
         inputs: tuple[Any, ...], kwargs: Mapping[str, Any]
     ) -> None:
@@ -329,6 +422,7 @@ def capture_depthsplat_native_execution(
 
     regressor_handle = regressor.register_forward_hook(capture_regressor)
     head_handle = head.register_forward_hook(capture_head)
+    feature_handle = feature_upsampler.register_forward_hook(capture_features)
     adapter.forward = captured_adapter_forward
     try:
         with torch.no_grad():
@@ -338,11 +432,13 @@ def capture_depthsplat_native_execution(
     finally:
         regressor_handle.remove()
         head_handle.remove()
+        feature_handle.remove()
         adapter.forward = original_adapter_forward
-    if set(captured) != {"regressor", "head", "adapter"}:
+    if set(captured) != {"regressor", "head", "adapter", "features"}:
         raise RuntimeError("DepthSplat native capture did not reach every required boundary")
     head_input, dense_raw_head = captured["head"]
     adapter_inputs = captured["adapter"]
+    routing_features = captured["features"]
     if (
         head_input.ndim != 4
         or dense_raw_head.ndim != 4
@@ -352,8 +448,28 @@ def capture_depthsplat_native_execution(
         or tuple(dense_raw_head.shape[-2:]) != (height, width)
     ):
         raise RuntimeError("DepthSplat raw head layout changed")
+    regressor_channels = int(captured["regressor"]["output_shape"][1])
+    feature_start = regressor_channels + 3
+    feature_end = feature_start + int(routing_features.shape[1])
+    if (
+        routing_features.ndim != 4
+        or routing_features.shape[0] != views
+        or tuple(routing_features.shape[-2:]) != (height, width)
+        or feature_start < 0
+        or feature_end + 1 != head_input.shape[1]
+        or not torch.allclose(
+            head_input[:, feature_start:feature_end],
+            routing_features,
+            rtol=FP32_RTOL,
+            atol=FP32_ATOL,
+        )
+    ):
+        raise RuntimeError("DepthSplat routing features drift from gaussian-head input")
     _validate_dense_adapter_inputs(
         adapter_inputs, views=views, height=height, width=width
+    )
+    routing_z_depths = adapter_inputs.depths[:, :, :, 0, 0].reshape(
+        1, views, height, width
     )
     body_width = getattr(adapter, "d_in", None)
     if not isinstance(body_width, int) or dense_raw_head.shape[1] != body_width + 3:
@@ -367,13 +483,11 @@ def capture_depthsplat_native_execution(
         or dense_gaussians.opacities.shape != (1, slots)
     ):
         raise RuntimeError("DepthSplat final Gaussian layout changed")
-    return DepthSplatNativeExecution(
-        dense_gaussians=dense_gaussians,
-        gaussian_head_input=head_input,
-        dense_raw_head=dense_raw_head,
-        adapter_inputs=adapter_inputs,
-        sample_image_grid=sample_image_grid,
-        events={
+    dense_attribute_binding_sha256 = _dense_gaussian_attribute_binding_sha256(
+        dense_gaussians, slots=slots
+    )
+    adapter_inputs_binding_sha256 = _adapter_inputs_binding_sha256(adapter_inputs)
+    events = {
             "contract_version": DEPTHSPLAT_SELECTED_OUTPUT_CONTRACT,
             "source_bound": True,
             "execution_scope": "depthsplat-dense-regressor-selected-gaussian-head-only",
@@ -396,10 +510,30 @@ def capture_depthsplat_native_execution(
                 "image_shape": list(adapter_inputs.image_shape),
                 "z_depth_geometry": True,
                 "adapter_body_width": body_width,
+                "dense_attribute_binding_sha256": dense_attribute_binding_sha256,
+                "dense_inputs_binding_sha256": adapter_inputs_binding_sha256,
+            },
+            "routing": {
+                "source_module": "feature_upsampler",
+                "head_input_channel_slice": [feature_start, feature_end],
+                "features_shape": list(routing_features.shape),
+                "features_sha256": _tensor_sha256(routing_features),
+                "z_depth_shape": list(routing_z_depths.shape),
+                "z_depth_sha256": _tensor_sha256(routing_z_depths),
             },
             "whole_pipeline_s2_s3_sparse_execution_verified": False,
             "global_s2_s3_savings_claimed": False,
-        },
+    }
+    events["native_execution_sha256"] = canonical_json_sha256(events)
+    return DepthSplatNativeExecution(
+        dense_gaussians=dense_gaussians,
+        gaussian_head_input=head_input,
+        dense_raw_head=dense_raw_head,
+        adapter_inputs=adapter_inputs,
+        sample_image_grid=sample_image_grid,
+        events=events,
+        routing_features=routing_features.unsqueeze(0),
+        routing_z_depths=routing_z_depths,
     )
 
 
@@ -445,8 +579,16 @@ def replay_depthsplat_selected_head(
     head_input: torch.Tensor,
     dense_raw_head: torch.Tensor,
     selection_mask: torch.Tensor,
+    *,
+    native_full_mask: torch.Tensor | None = None,
 ) -> DepthSplatSelectedHeadReplay:
-    """Replay selected native final-head outputs without reading omitted slots."""
+    """Replay compact outputs and pass source-native Full outputs through.
+
+    A Full tile is not an approximation and must retain the same raw head
+    values the source encoder produced.  ``native_full_mask`` makes that
+    exception explicit while compact L0/L1 positions continue through the
+    replicate-padded selected-output replay.
+    """
 
     if (
         head_input.ndim != 4
@@ -464,13 +606,29 @@ def replay_depthsplat_selected_head(
     selection_mask = _validate_selection(
         selection_mask, views=views, height=height, width=width
     ).to(head_input.device)
+    if native_full_mask is None:
+        native_full_mask = torch.zeros_like(selection_mask)
+    elif (
+        not torch.is_tensor(native_full_mask)
+        or native_full_mask.dtype != torch.bool
+        or native_full_mask.shape != selection_mask.shape
+    ):
+        raise ValueError("DepthSplat native Full mask must match selected outputs")
+    else:
+        native_full_mask = native_full_mask.to(head_input.device)
+    if bool((native_full_mask & ~selection_mask).any()):
+        raise ValueError("DepthSplat native Full mask requests an omitted output")
     output = torch.zeros_like(dense_raw_head)
     per_view: list[dict[str, Any]] = []
     selected_reference: list[torch.Tensor] = []
     selected_values: list[torch.Tensor] = []
     for view in range(views):
         mask = selection_mask[view]
+        full = native_full_mask[view]
+        compact = mask & ~full
         selected = int(mask.sum().item())
+        full_count = int(full.sum().item())
+        compact_count = int(compact.sum().item())
         if selected == 0:
             per_view.append(
                 {
@@ -484,21 +642,38 @@ def replay_depthsplat_selected_head(
                 }
             )
             continue
-        if selected == height * width:
+        if full_count:
+            output[view, :, full] = dense_raw_head[view, :, full]
+        if compact_count == 0:
+            event = {
+                "batch_item": view,
+                "source_native_dense_head_capture": bool(full_count),
+                "selected_final_output_positions": selected,
+                "dense_head_macs": 0,
+                "replayed_head_macs": 0,
+                "head_mac_saving": 0.0,
+                "padding_mode": "replicate",
+            }
+        elif compact_count == height * width:
             output[view] = dense_raw_head[view]
-            per_view.append(
-                _head_event_from_dense_source(head, height=height, width=width, batch_item=view)
+            event = _head_event_from_dense_source(
+                head, height=height, width=width, batch_item=view
             )
-            selected_reference.append(dense_raw_head[view].reshape(channels, -1))
-            selected_values.append(dense_raw_head[view].reshape(channels, -1))
-            continue
-        replay = replay_two_conv_selected_outputs(head, head_input[view : view + 1], mask)
-        output[view, :, replay.coordinates[:, 0], replay.coordinates[:, 1]] = replay.values[0]
-        per_view.append({"batch_item": view, **replay.events})
-        selected_reference.append(
-            dense_raw_head[view, :, replay.coordinates[:, 0], replay.coordinates[:, 1]]
+        else:
+            replay = replay_two_conv_selected_outputs(
+                head, head_input[view : view + 1], compact
+            )
+            output[view, :, replay.coordinates[:, 0], replay.coordinates[:, 1]] = replay.values[0]
+            event = {"batch_item": view, **replay.events}
+        event.update(
+            {
+                "source_native_full_passthrough_positions": full_count,
+                "selected_compact_replay_positions": compact_count,
+            }
         )
-        selected_values.append(replay.values[0])
+        per_view.append(event)
+        selected_reference.append(dense_raw_head[view, :, mask])
+        selected_values.append(output[view, :, mask])
     reference = torch.cat(selected_reference, dim=1)
     replayed = torch.cat(selected_values, dim=1)
     delta = (reference - replayed).abs()
@@ -518,6 +693,11 @@ def replay_depthsplat_selected_head(
             "head_mac_saving": 1.0 - actual_macs / dense_macs if dense_macs else 0.0,
             "selected_final_output_positions": int(selection_mask.sum().item()),
             "omitted_final_output_positions": views * height * width - int(selection_mask.sum().item()),
+            "native_full_passthrough_mask_sha256": _tensor_sha256(
+                native_full_mask.to(dtype=torch.uint8)
+            ),
+            "native_full_passthrough_positions": int(native_full_mask.sum().item()),
+            "selected_compact_replay_positions": int((selection_mask & ~native_full_mask).sum().item()),
             "per_view": per_view,
             "whole_pipeline_s2_s3_sparse_execution_verified": False,
             "global_s2_s3_savings_claimed": False,
@@ -529,6 +709,7 @@ def replay_depthsplat_selected_head(
             "mean_absolute_delta": float(delta.mean().item()),
             "equivalent": equivalent,
         },
+        native_full_mask=native_full_mask,
     )
 
 
@@ -583,8 +764,36 @@ def build_depthsplat_sparse_raw_packet(
     selection_mask = _validate_selection(
         replay.selection_mask, views=views, height=height, width=width
     )
+    if replay.native_full_mask is None:
+        native_full_mask = torch.zeros_like(selection_mask)
+    elif (
+        not torch.is_tensor(replay.native_full_mask)
+        or replay.native_full_mask.dtype != torch.bool
+        or replay.native_full_mask.shape != selection_mask.shape
+    ):
+        raise ValueError("DepthSplat packet native Full mask is invalid")
+    else:
+        native_full_mask = replay.native_full_mask.to(selection_mask.device)
+    if bool((native_full_mask & ~selection_mask).any()):
+        raise ValueError("DepthSplat packet native Full mask requests an omitted output")
+    native_full_mask_sha256 = _tensor_sha256(native_full_mask.to(dtype=torch.uint8))
+    native_full_positions = int(native_full_mask.sum().item())
+    if (
+        replay.events.get("native_full_passthrough_mask_sha256") is not None
+        and replay.events.get("native_full_passthrough_mask_sha256")
+        != native_full_mask_sha256
+    ) or (
+        replay.events.get("native_full_passthrough_positions") is not None
+        and replay.events.get("native_full_passthrough_positions") != native_full_positions
+    ):
+        raise ValueError("DepthSplat packet native Full replay ledger drifted")
     if replay.values.shape != execution.dense_raw_head.shape:
         raise ValueError("DepthSplat selected replay output shape changed")
+    if native_full_positions and not torch.equal(
+        replay.values.permute(0, 2, 3, 1)[native_full_mask],
+        execution.dense_raw_head.permute(0, 2, 3, 1)[native_full_mask],
+    ):
+        raise RuntimeError("DepthSplat packet native Full descriptors drifted from source head")
     positions = selection_mask.nonzero(as_tuple=False).to(replay.values.device)
     raw = replay.values.permute(0, 2, 3, 1)[
         positions[:, 0], positions[:, 1], positions[:, 2]
@@ -630,11 +839,34 @@ def build_depthsplat_sparse_raw_packet(
         "head_final_positions_executed": int(selection_mask.sum().item()),
         "head_weight_sha256": execution.events["gaussian_head"]["weight_sha256"],
         "regressor_weight_sha256": execution.events["gaussian_regressor"]["weight_sha256"],
+        "source_view_count": views,
+        "source_image_shape": [height, width],
         "selection_mask_sha256": _tensor_sha256(selection_mask.to(dtype=torch.uint8)),
+        "native_full_passthrough_mask_sha256": native_full_mask_sha256,
+        "native_full_passthrough_positions": native_full_positions,
         "selected_descriptor_sha256": _tensor_sha256(raw),
         "selected_rgb_sha256": _tensor_sha256(source_rgb),
         "adapter_body_width": body_width,
+        "native_execution_sha256": execution.events.get(
+            "native_execution_sha256", canonical_json_sha256(execution.events)
+        ),
     }
+    if execution.routing_features is not None or execution.routing_z_depths is not None:
+        if (
+            not torch.is_tensor(execution.routing_features)
+            or not torch.is_tensor(execution.routing_z_depths)
+            or execution.routing_features.shape[0] != 1
+            or execution.routing_features.shape[1] != views
+            or tuple(execution.routing_features.shape[-2:]) != (height, width)
+            or execution.routing_z_depths.shape != (1, views, height, width)
+        ):
+            raise ValueError("DepthSplat execution routing tensors are invalid")
+        trace.update(
+            {
+                "routing_features_sha256": _tensor_sha256(execution.routing_features),
+                "routing_z_depths_sha256": _tensor_sha256(execution.routing_z_depths),
+            }
+        )
     return DepthSplatSparseRawPacket(
         descriptor_keys=keys,
         raw_head_descriptors=raw,
@@ -645,6 +877,94 @@ def build_depthsplat_sparse_raw_packet(
         mapped_opacities=mapped_opacities,
         source_rgb=source_rgb,
         dense_slots=dense_slots,
+        source_trace=trace,
+    )
+
+
+def subset_depthsplat_sparse_raw_packet(
+    packet: DepthSplatSparseRawPacket,
+    selection_mask: torch.Tensor,
+) -> DepthSplatSparseRawPacket:
+    """Keep a final decoder subset from an already source-selected packet.
+
+    The incremental plan may prefetch L1 anchors for a possible L0 promotion.
+    These producer-only rows cannot escape into an accepted L0 decoder packet.
+    This function selects only already-replayed rows and never inspects a dense
+    omitted raw descriptor or dense Gaussian attribute.
+    """
+
+    if not isinstance(packet, DepthSplatSparseRawPacket):
+        raise TypeError("DepthSplat packet subset requires a selected raw packet")
+    if (
+        not torch.is_tensor(selection_mask)
+        or selection_mask.dtype != torch.bool
+        or selection_mask.ndim != 3
+        or not bool(selection_mask.any())
+    ):
+        raise ValueError("DepthSplat packet subset requires a nonempty [V,H,W] bool mask")
+    views, height, width = selection_mask.shape
+    positions = selection_mask.nonzero(as_tuple=False)
+    requested_slots = (
+        positions[:, 0] * (height * width) + positions[:, 1] * width + positions[:, 2]
+    ).to(device=packet.dense_slots.device, dtype=torch.int64)
+    if (
+        packet.dense_slots.ndim != 1
+        or packet.dense_slots.dtype != torch.int64
+        or packet.dense_slots.numel() == 0
+        or packet.dense_slots.numel() != packet.raw_head_descriptors.shape[0]
+        or packet.source_trace.get("source_bound") is not True
+        or packet.source_trace.get("source_view_count") != views
+        or packet.source_trace.get("source_image_shape") != [height, width]
+    ):
+        raise ValueError("DepthSplat packet subset source packet is invalid")
+    source_slots = packet.dense_slots.detach().to(device="cpu", dtype=torch.int64).tolist()
+    keys = packet.descriptor_keys
+    pixels_per_view = height * width
+    if (
+        keys.shape != (len(source_slots), 4)
+        or keys.dtype != torch.int64
+        or not bool((keys[:, 0] == 0).all())
+        or not bool((keys[:, 3] == 0).all())
+        or not torch.equal(
+            keys[:, 1], packet.dense_slots // pixels_per_view
+        )
+        or not torch.equal(
+            keys[:, 2], packet.dense_slots % pixels_per_view
+        )
+    ):
+        raise ValueError("DepthSplat packet subset descriptor keys drifted from source slots")
+    slot_to_index = {int(slot): index for index, slot in enumerate(source_slots)}
+    requested_list = requested_slots.detach().to(device="cpu", dtype=torch.int64).tolist()
+    if len(slot_to_index) != len(source_slots) or any(
+        int(slot) not in slot_to_index for slot in requested_list
+    ):
+        raise ValueError("DepthSplat packet subset requests an unreplayed descriptor")
+    indices = torch.tensor(
+        [slot_to_index[int(slot)] for slot in requested_list],
+        device=packet.dense_slots.device,
+        dtype=torch.long,
+    )
+    trace = dict(packet.source_trace)
+    trace.update(
+        {
+            "producer_request_mask_sha256": trace.get("selection_mask_sha256"),
+            "selection_mask_sha256": _tensor_sha256(selection_mask.to(dtype=torch.uint8)),
+            "selected_descriptor_sha256": _tensor_sha256(packet.raw_head_descriptors[indices]),
+            "selected_rgb_sha256": _tensor_sha256(packet.source_rgb[indices]),
+            "packet_selection_kind": "depthsplat-final-selected-output-mask-v1",
+            "selection_views": views,
+        }
+    )
+    return DepthSplatSparseRawPacket(
+        descriptor_keys=packet.descriptor_keys[indices].clone(),
+        raw_head_descriptors=packet.raw_head_descriptors[indices].clone(),
+        extrinsics=packet.extrinsics[indices].clone(),
+        intrinsics=packet.intrinsics[indices].clone(),
+        coordinates=packet.coordinates[indices].clone(),
+        depths=packet.depths[indices].clone(),
+        mapped_opacities=packet.mapped_opacities[indices].clone(),
+        source_rgb=packet.source_rgb[indices].clone(),
+        dense_slots=packet.dense_slots[indices].clone(),
         source_trace=trace,
     )
 
@@ -748,8 +1068,21 @@ class DepthSplatPackedGaussianConsumer:
             raise ValueError("DepthSplat packet lacks a source-bound RGB/z-depth trace")
         return tensors
 
-    def convert(self, packet: DepthSplatSparseRawPacket, *, image_shape: tuple[int, int]) -> DepthSplatPackedGaussianAttributes:
-        """Run one rebatched native Adapter call using only selected RGB pixels."""
+    def convert(
+        self,
+        packet: DepthSplatSparseRawPacket,
+        *,
+        image_shape: tuple[int, int],
+        native_execution: DepthSplatNativeExecution | None = None,
+        native_full_mask: torch.Tensor | None = None,
+    ) -> DepthSplatPackedGaussianAttributes:
+        """Run selected Adapter work and retain Full attributes from its capture.
+
+        A compact L0/L1 position is converted through the selected RGB Adapter.
+        A Full position is native fallback, so its final Gaussian attributes
+        are gathered from the same dense encoder invocation rather than being
+        recomputed with a differently shaped Adapter call.
+        """
 
         if (
             not isinstance(image_shape, tuple)
@@ -768,29 +1101,214 @@ class DepthSplatPackedGaussianConsumer:
             source_rgb,
             dense_slots,
         ) = self._validate_packet(packet)
+        trace = packet.source_trace
+        if (native_execution is None) != (native_full_mask is None):
+            raise ValueError(
+                "DepthSplat native Full attributes require both execution and mask"
+            )
+        full_indices: torch.Tensor | None = None
+        full_slots: torch.Tensor | None = None
+        native_dense: Any | None = None
+        native_full_attribute_binding_sha256: str | None = None
+        native_execution_sha256: str | None = None
+        if native_execution is not None:
+            if not isinstance(native_execution, DepthSplatNativeExecution):
+                raise TypeError("DepthSplat native Full execution is invalid")
+            if (
+                not torch.is_tensor(native_full_mask)
+                or native_full_mask.dtype != torch.bool
+                or native_full_mask.ndim != 3
+                or tuple(native_full_mask.shape[-2:]) != image_shape
+            ):
+                raise ValueError("DepthSplat native Full mask has an invalid shape")
+            views, height, width = native_full_mask.shape
+            native_execution_sha256 = native_execution.events.get(
+                "native_execution_sha256", canonical_json_sha256(native_execution.events)
+            )
+            if (
+                trace.get("native_execution_sha256") != native_execution_sha256
+                or trace.get("source_view_count") != views
+                or trace.get("source_image_shape") != [height, width]
+            ):
+                raise ValueError("DepthSplat native Full execution differs from its packet")
+            full_mask = native_full_mask.to(device=dense_slots.device)
+            full_mask_sha256 = _tensor_sha256(full_mask.to(dtype=torch.uint8))
+            full_count = int(full_mask.sum().item())
+            if (
+                trace.get("native_full_passthrough_mask_sha256") != full_mask_sha256
+                or trace.get("native_full_passthrough_positions") != full_count
+            ):
+                raise ValueError("DepthSplat native Full mask differs from its packet ledger")
+            positions = full_mask.nonzero(as_tuple=False)
+            full_slots = (
+                positions[:, 0] * (height * width)
+                + positions[:, 1] * width
+                + positions[:, 2]
+            ).to(dtype=torch.int64)
+            full_indices = torch.searchsorted(dense_slots, full_slots)
+            if bool((full_indices >= dense_slots.numel()).any()) or not torch.equal(
+                dense_slots[full_indices], full_slots
+            ):
+                raise ValueError("DepthSplat native Full mask requests an omitted packet slot")
+            native_dense = _unwrap_gaussians(native_execution.dense_gaussians)
+            total_slots = views * height * width
+            if (
+                native_dense.means.shape != (1, total_slots, 3)
+                or native_dense.covariances.shape != (1, total_slots, 3, 3)
+                or native_dense.harmonics.ndim != 4
+                or native_dense.harmonics.shape[:3] != (1, total_slots, 3)
+                or native_dense.opacities.shape != (1, total_slots)
+            ):
+                raise ValueError("DepthSplat native Full execution attributes changed")
+            adapter_events = native_execution.events.get("adapter")
+            if (
+                not isinstance(adapter_events, Mapping)
+                or adapter_events.get("dense_inputs_binding_sha256")
+                != _adapter_inputs_binding_sha256(native_execution.adapter_inputs)
+                or adapter_events.get("dense_attribute_binding_sha256")
+                != _dense_gaussian_attribute_binding_sha256(
+                    native_dense, slots=total_slots
+                )
+            ):
+                raise ValueError("DepthSplat native Full capture binding drifted")
+            native_full_attribute_binding_sha256 = depthsplat_attribute_binding_sha256(
+                dense_slots=full_slots,
+                means=native_dense.means[0, full_slots],
+                covariances=native_dense.covariances[0, full_slots],
+                harmonics=native_dense.harmonics[0, full_slots],
+                opacities=native_dense.opacities[0, full_slots],
+            )
+        elif trace.get("native_full_passthrough_positions", 0) != 0:
+            raise ValueError(
+                "DepthSplat packet with Full slots requires native dense attributes"
+            )
         count = raw.shape[0]
-        dtype = raw.dtype
-        adapter_result = self._adapter(
-            extrinsics.reshape(1, 1, count, 1, 1, 4, 4),
-            intrinsics.reshape(1, 1, count, 1, 1, 3, 3),
-            coordinates.reshape(1, 1, count, 1, 1, 2),
-            depths.to(dtype=dtype).reshape(1, 1, count, 1, 1),
-            opacities.to(dtype=dtype).reshape(1, 1, count, 1, 1),
-            raw[:, 3:].reshape(1, 1, count, 1, 1, -1),
-            image_shape,
-            input_images=source_rgb.to(dtype=dtype).transpose(0, 1).reshape(1, 1, 3, 1, count),
+        all_indices = torch.arange(count, device=dense_slots.device, dtype=torch.long)
+        if full_indices is None:
+            compact_indices = all_indices
+        else:
+            compact_mask = torch.ones(count, device=dense_slots.device, dtype=torch.bool)
+            compact_mask[full_indices] = False
+            compact_indices = compact_mask.nonzero(as_tuple=False).reshape(-1)
+        compact_count = int(compact_indices.numel())
+        compact_means: torch.Tensor | None = None
+        compact_covariances: torch.Tensor | None = None
+        compact_harmonics: torch.Tensor | None = None
+        compact_opacities: torch.Tensor | None = None
+        if compact_count:
+            compact_raw = raw[compact_indices]
+            compact_dtype = compact_raw.dtype
+            adapter_result = self._adapter(
+                extrinsics[compact_indices].reshape(1, 1, compact_count, 1, 1, 4, 4),
+                intrinsics[compact_indices].reshape(1, 1, compact_count, 1, 1, 3, 3),
+                coordinates[compact_indices].reshape(1, 1, compact_count, 1, 1, 2),
+                depths[compact_indices]
+                .to(dtype=compact_dtype)
+                .reshape(1, 1, compact_count, 1, 1),
+                opacities[compact_indices]
+                .to(dtype=compact_dtype)
+                .reshape(1, 1, compact_count, 1, 1),
+                compact_raw[:, 3:].reshape(1, 1, compact_count, 1, 1, -1),
+                image_shape,
+                input_images=source_rgb[compact_indices]
+                .to(dtype=compact_dtype)
+                .transpose(0, 1)
+                .reshape(1, 1, 3, 1, compact_count),
+            )
+            required = ("means", "covariances", "harmonics", "opacities")
+            if any(
+                not torch.is_tensor(getattr(adapter_result, name, None))
+                for name in required
+            ):
+                raise ValueError("DepthSplat Adapter result lacks Gaussian attributes")
+            compact_means = adapter_result.means.reshape(compact_count, 3)
+            compact_covariances = adapter_result.covariances.reshape(
+                compact_count, 3, 3
+            )
+            compact_harmonics = adapter_result.harmonics.reshape(compact_count, 3, -1)
+            compact_opacities = adapter_result.opacities.reshape(compact_count)
+            for value in (
+                compact_means,
+                compact_covariances,
+                compact_harmonics,
+                compact_opacities,
+            ):
+                if not bool(torch.isfinite(value).all()):
+                    raise ValueError("DepthSplat Adapter produced non-finite selected attributes")
+        if full_indices is None:
+            if (
+                compact_means is None
+                or compact_covariances is None
+                or compact_harmonics is None
+                or compact_opacities is None
+            ):
+                raise RuntimeError("DepthSplat selected Adapter unexpectedly had no rows")
+            means = compact_means
+            covariances = compact_covariances
+            harmonics = compact_harmonics
+            output_opacities = compact_opacities
+        else:
+            if full_slots is None or native_dense is None:
+                raise RuntimeError("DepthSplat native Full attributes were not captured")
+            means = native_dense.means[0, dense_slots].clone()
+            covariances = native_dense.covariances[0, dense_slots].clone()
+            harmonics = native_dense.harmonics[0, dense_slots].clone()
+            output_opacities = native_dense.opacities[0, dense_slots].clone()
+            if compact_count:
+                if (
+                    compact_means is None
+                    or compact_covariances is None
+                    or compact_harmonics is None
+                    or compact_opacities is None
+                ):
+                    raise RuntimeError("DepthSplat compact Adapter attributes are missing")
+                native_values = (
+                    means,
+                    covariances,
+                    harmonics,
+                    output_opacities,
+                )
+                adapter_values = (
+                    compact_means,
+                    compact_covariances,
+                    compact_harmonics,
+                    compact_opacities,
+                )
+                if any(
+                    native.device != value.device or native.dtype != value.dtype
+                    for native, value in zip(native_values, adapter_values)
+                ):
+                    raise ValueError("DepthSplat native Full attributes have mixed precision")
+                means[compact_indices] = compact_means
+                covariances[compact_indices] = compact_covariances
+                harmonics[compact_indices] = compact_harmonics
+                output_opacities[compact_indices] = compact_opacities
+        trace = dict(trace)
+        if native_full_attribute_binding_sha256 is not None:
+            trace.update(
+                {
+                    "native_full_adapter_attribute_execution_sha256": native_execution_sha256,
+                    "native_full_adapter_attribute_passthrough_mask_sha256": trace[
+                        "native_full_passthrough_mask_sha256"
+                    ],
+                    "native_full_adapter_attribute_binding_sha256": (
+                        native_full_attribute_binding_sha256
+                    ),
+                    "native_full_adapter_attribute_passthrough_count": int(
+                        full_slots.numel()
+                    ),
+                    "selected_native_rgb_adapter_compact_count": compact_count,
+                    "selected_native_rgb_adapter_executed": compact_count > 0,
+                }
+            )
+        attribute_binding_sha256 = depthsplat_attribute_binding_sha256(
+            dense_slots=dense_slots,
+            means=means,
+            covariances=covariances,
+            harmonics=harmonics,
+            opacities=output_opacities,
         )
-        required = ("means", "covariances", "harmonics", "opacities")
-        if any(not torch.is_tensor(getattr(adapter_result, name, None)) for name in required):
-            raise ValueError("DepthSplat Adapter result lacks Gaussian attributes")
-        means = adapter_result.means.reshape(count, 3)
-        covariances = adapter_result.covariances.reshape(count, 3, 3)
-        harmonics = adapter_result.harmonics.reshape(count, 3, -1)
-        output_opacities = adapter_result.opacities.reshape(count)
-        for value in (means, covariances, harmonics, output_opacities):
-            if not bool(torch.isfinite(value).all()):
-                raise ValueError("DepthSplat Adapter produced non-finite selected attributes")
-        trace = dict(packet.source_trace)
+        trace["native_adapter_attribute_binding_sha256"] = attribute_binding_sha256
         return DepthSplatPackedGaussianAttributes(
             dense_slots=dense_slots.clone(),
             means=means,
@@ -799,6 +1317,7 @@ class DepthSplatPackedGaussianConsumer:
             opacities=output_opacities,
             source_trace=trace,
             source_trace_sha256=canonical_json_sha256(trace),
+            attribute_binding_sha256=attribute_binding_sha256,
         )
 
 
@@ -834,4 +1353,79 @@ def compare_depthsplat_packed_to_dense(
             "equivalent": field_equivalent,
         }
     report["equivalent"] = equivalent
+    return report
+
+
+def compare_depthsplat_full_passthrough_to_dense_bitwise(
+    packed: DepthSplatPackedGaussianAttributes,
+    dense_gaussians: Any,
+    full_passthrough_mask: torch.Tensor,
+) -> dict[str, Any]:
+    """Require every declared Full slot to retain native Adapter bits exactly.
+
+    Compact selected outputs are allowed the explicit FP32 replay tolerance
+    used by ``compare_depthsplat_packed_to_dense``.  A Full tile is different:
+    it is source-native fallback, so this check intentionally accepts no
+    numerical drift in means, covariances, SH, or opacity.
+    """
+
+    if not isinstance(packed, DepthSplatPackedGaussianAttributes):
+        raise TypeError("DepthSplat Full comparison requires packed attributes")
+    if (
+        not torch.is_tensor(full_passthrough_mask)
+        or full_passthrough_mask.dtype != torch.bool
+        or full_passthrough_mask.ndim != 3
+    ):
+        raise ValueError("DepthSplat Full comparison requires a [V,H,W] bool mask")
+    views, height, width = full_passthrough_mask.shape
+    trace = packed.source_trace
+    if (
+        not isinstance(trace, Mapping)
+        or trace.get("source_view_count") != views
+        or trace.get("source_image_shape") != [height, width]
+        or trace.get("native_full_passthrough_mask_sha256")
+        != _tensor_sha256(full_passthrough_mask.to(dtype=torch.uint8))
+        or trace.get("native_full_passthrough_positions")
+        != int(full_passthrough_mask.sum().item())
+    ):
+        raise ValueError("DepthSplat Full comparison packet trace is not bound to its mask")
+    dense = _unwrap_gaussians(dense_gaussians)
+    slots = packed.dense_slots
+    if (
+        slots.dtype != torch.int64
+        or slots.ndim != 1
+        or slots.numel() == 0
+        or bool((slots[1:] <= slots[:-1]).any())
+    ):
+        raise ValueError("DepthSplat Full comparison packed slots are not strictly ordered")
+    positions = full_passthrough_mask.nonzero(as_tuple=False).to(device=slots.device)
+    if positions.numel() == 0:
+        return {"count": 0, "bitwise_equivalent": True, "fields": {}}
+    requested_slots = (
+        positions[:, 0] * (height * width) + positions[:, 1] * width + positions[:, 2]
+    ).to(dtype=torch.int64)
+    indices = torch.searchsorted(slots, requested_slots)
+    if bool((indices >= slots.numel()).any()) or not torch.equal(slots[indices], requested_slots):
+        raise ValueError("DepthSplat Full comparison requests a missing packed slot")
+    fields = {
+        "means": (packed.means[indices], dense.means[0, requested_slots]),
+        "covariances": (
+            packed.covariances[indices],
+            dense.covariances[0, requested_slots],
+        ),
+        "harmonics": (packed.harmonics[indices], dense.harmonics[0, requested_slots]),
+        "opacities": (packed.opacities[indices], dense.opacities[0, requested_slots]),
+    }
+    report: dict[str, Any] = {"count": int(requested_slots.numel()), "fields": {}}
+    equivalent = True
+    for name, (actual, expected) in fields.items():
+        if actual.shape != expected.shape:
+            raise ValueError(f"DepthSplat Full comparison {name} shape differs from dense source")
+        exact = torch.equal(actual, expected)
+        equivalent &= exact
+        report["fields"][name] = {
+            "bitwise_equivalent": exact,
+            "maximum_absolute_delta": float((actual - expected).abs().max().item()),
+        }
+    report["bitwise_equivalent"] = equivalent
     return report

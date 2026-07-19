@@ -230,6 +230,39 @@ def test_target_free_audit_preparation_binds_the_requested_classic_model(
         validate_context_only_audit_input(context_output)
 
 
+def test_target_free_audit_preparation_binds_depthsplat_protocol_identity(
+    tmp_path: Path,
+):
+    from data.context_only_audit_input import (
+        prepare_context_only_audit_input,
+        validate_context_only_audit_input,
+    )
+    from data.prepare_dl3dv_target_free_audit_inputs import prepare_inputs
+
+    raw_root, protocol = _fixture(tmp_path)
+    payload = json.loads(protocol.read_text(encoding="utf-8"))
+    payload["pairs"]["depthsplat/dl3dv"] = dict(
+        payload["pairs"]["transplat/dl3dv"]
+    )
+    protocol.write_text(json.dumps(payload), encoding="utf-8")
+    source_output = tmp_path / "depthsplat-source-audit-input"
+    source_record = prepare_inputs(
+        raw_root,
+        output_dir=source_output,
+        protocol_path=protocol,
+        model="depthsplat",
+    )
+    context_output = tmp_path / "depthsplat-context-only"
+    context_record = prepare_context_only_audit_input(
+        source_output, output_root=context_output, model="depthsplat"
+    )
+
+    assert source_record["model"] == "depthsplat"
+    assert source_record["canonical_protocol"]["pair"] == "depthsplat/dl3dv"
+    assert context_record["model"] == "depthsplat"
+    validate_context_only_audit_input(context_output, model="depthsplat")
+
+
 def test_target_free_audit_preparation_rejects_negative_sample_index(tmp_path: Path):
     from data.prepare_dl3dv_target_free_audit_inputs import AuditInputError, prepare_inputs
 

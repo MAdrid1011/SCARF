@@ -129,12 +129,16 @@
   transports selected context RGB to `input_images`, and matches dense means,
   covariances, SH, and opacity within the fixed FP32 contract. It is not an
   L0/L1 merge, renderer, quality, timing, or sparse-S2/S3 result.
-- [ ] Add a source-faithful DepthSplat L0/L1 simulator over the native
-  `gaussian_regressor -> gaussian_head` path, selected RGB/SH Adapter input,
-  replicate padding, and z-depth coordinates. It must not reuse classic raw
-  head, Adapter, or coordinate code.
-- [ ] Freeze independent DepthSplat evaluation-disjoint V15/V16 calibration,
-  then run exactly one DL3DV sample-0 target-free audit and quality gate.
+- [x] Implement the CPU-contract literal DepthSplat T=4 L0/L1 route over the
+  native `gaussian_regressor -> gaussian_head` path: four corner probes for
+  L0/L1, raw probe-feature variance, L1 only after an L0 miss, selected-probe
+  moment aggregation, bitwise-native Full fallback, and selected-anchor LOO
+  Full promotion. Focused schedule/materializer/calibration tests pass; this
+  is not yet GPU collection, audit, or quality evidence.
+- [ ] Freeze the independent literal `V16T4` ACID 24/8 calibration with
+  persisted selected-anchor trace artifacts, then run exactly one DL3DV
+  sample-0 target-free audit and quality gate. Do not reuse 12/15-anchor
+  V15/V16 records or thresholds.
 - [ ] Run the DepthSplat fixed eight-scene quality gate before any three-model
   140-scene expansion or Table 1 claim.
 - [x] Preserve `transplat_dl3dv_l1_15_v16_acid_disjoint_8scene_v1` as an

@@ -464,9 +464,9 @@ def load_context_only_audit_data(
     """Construct one encoder batch from a context-camera-only audit sidecar.
 
     Unlike the generic calibration path, this entrypoint never constructs a
-    target placeholder or target-camera tensor. It mirrors the TranSplat
-    context crop and patch shims directly because their batch wrappers require
-    a target mapping that this audit contract intentionally forbids.
+    target placeholder or target-camera tensor. It applies the active native
+    model's context crop and patch shims directly because their batch wrappers
+    require a target mapping that this audit contract intentionally forbids.
     """
     import torch as runtime_torch
 
@@ -533,6 +533,17 @@ def load_context_only_audit_data(
                 "target_camera_metadata_accessed": False,
                 "target_mapping_present": False,
                 "source_image_shape": [int(source_height), int(source_width)],
+                "native_preprocessing": {
+                    "crop_image_shape": [
+                        int(dataset_cfg.image_shape[0]),
+                        int(dataset_cfg.image_shape[1]),
+                    ],
+                    "patch_size": patch_size,
+                    "prepared_image_shape": [
+                        int(context["image"].shape[-2]),
+                        int(context["image"].shape[-1]),
+                    ],
+                },
             },
         }
         return DataBundle(batch=batch, data_shim=lambda value: value)

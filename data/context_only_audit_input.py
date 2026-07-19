@@ -21,7 +21,10 @@ from scripts.calibration_inputs import (
 
 INPUT_KIND = "scarf_context_only_audit_input_v1"
 RECORD_KIND = "scarf_context_only_audit_record_v1"
-CLASSIC_MODELS = frozenset(("transplat", "mvsplat"))
+# These source-bound sidecars contain only common DL3DV camera/context-image
+# records.  Model-specific crop and patch shims are applied only by the live
+# model loader after the target-free record has been validated.
+SUPPORTED_MODELS = frozenset(("transplat", "mvsplat", "depthsplat"))
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _INPUT_FIELDS = frozenset(
     (
@@ -116,8 +119,8 @@ def _copy_context_image(value: Any) -> Any:
 
 
 def _model_name(value: Any) -> str:
-    if value not in CLASSIC_MODELS:
-        raise ValueError("context-only audit requires a supported classic model")
+    if value not in SUPPORTED_MODELS:
+        raise ValueError("context-only audit requires a supported source-bound model")
     return str(value)
 
 

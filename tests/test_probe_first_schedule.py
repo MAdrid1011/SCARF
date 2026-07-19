@@ -113,6 +113,83 @@ def test_paper_normalized_feature_mode_records_tau_f_in_its_normalized_unit():
     assert literal.events["potential_l1_tiles"] == 1
 
 
+def test_literal_t4_l0_does_not_inspect_depth_or_stage_secondary_requests():
+    from saes.probe_first_schedule import build_literal_paper_t4_probe_first_plan
+
+    features = torch.zeros(1, 1, 2, 4, 4)
+    uniform_depths = torch.ones(1, 1, 4, 4)
+    poisoned_depths = torch.full_like(uniform_depths, 97.0)
+
+    uniform = build_literal_paper_t4_probe_first_plan(
+        features,
+        uniform_depths,
+        height=4,
+        width=4,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+    )
+    poisoned = build_literal_paper_t4_probe_first_plan(
+        features,
+        poisoned_depths,
+        height=4,
+        width=4,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+    )
+
+    for plan in (uniform, poisoned):
+        record = plan.tile_trace[0]
+        assert record["pre_guard_route"] == "L0"
+        assert record["depth_uniform"] is None
+        assert record["depth_checked_after_l0_miss_only"] is True
+        assert record["primary_local_positions"] == [[0, 0], [0, 3], [3, 0], [3, 3]]
+        assert record["secondary_local_positions"] == []
+        assert record["full_local_positions"] == []
+        assert int(plan.primary_mask.sum()) == 4
+        assert int(plan.secondary_mask.sum()) == 0
+        assert int(plan.full_mask.sum()) == 0
+        assert plan.events["secondary_head_final_positions"] == 0
+        assert plan.events["l0_anchor_count"] == 4
+        assert plan.events["l1_anchor_count"] == 4
+    assert torch.equal(uniform.selection_mask, poisoned.selection_mask)
+    assert uniform.tile_trace[0]["pre_guard_route"] == poisoned.tile_trace[0]["pre_guard_route"]
+
+
+def test_literal_t4_uses_l1_or_full_only_after_l0_feature_miss_with_four_corners():
+    from saes.probe_first_schedule import build_literal_paper_t4_probe_first_plan
+
+    features = _features({(0, 0)})
+    depths = torch.ones(1, 1, 8, 8)
+    # Tile (1, 0) has a feature miss and a depth miss.  The remaining feature
+    # misses have uniform depth and therefore use L1.
+    depths[0, 0, 7, 3] = 2.0
+    plan = build_literal_paper_t4_probe_first_plan(
+        features,
+        depths,
+        height=8,
+        width=8,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+    )
+    records = {(record["tile_y"], record["tile_x"]): record for record in plan.tile_trace}
+
+    assert records[(0, 0)]["pre_guard_route"] == "L0"
+    assert records[(0, 0)]["depth_uniform"] is None
+    assert records[(0, 1)]["pre_guard_route"] == "L1"
+    assert records[(0, 1)]["depth_uniform"] is True
+    assert records[(1, 0)]["pre_guard_route"] == "Full"
+    assert records[(1, 0)]["depth_uniform"] is False
+    for record in records.values():
+        assert record["primary_local_positions"] == [[0, 0], [0, 3], [3, 0], [3, 3]]
+        assert record["secondary_local_positions"] == []
+    assert records[(1, 0)]["full_local_positions"] == [
+        [row, column] for row in range(4) for column in range(4)
+    ]
+    assert int(plan.secondary_mask.sum()) == 0
+    assert int(plan.full_mask[0, 4:, :4].sum()) == 16
+    assert int(plan.full_mask[0, :4, 4:].sum()) == 0
+
+
 def test_incremental_probe_first_plan_partitions_primary_secondary_and_full_requests():
     from saes.probe_first_schedule import build_incremental_probe_first_plan
 
