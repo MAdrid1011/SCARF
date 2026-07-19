@@ -8,9 +8,12 @@ coordinates for TranSplat and MVSplat.
 
 from __future__ import annotations
 
+import hashlib
+import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 
 ClassicModelName = Literal["transplat", "mvsplat"]
@@ -45,6 +48,29 @@ _CLASSIC_MODULES: dict[ClassicModelName, tuple[str, str, str, str]] = {
         "mvsplat-inline-pixel-center-plus-sigmoid-offset",
     ),
 }
+
+# These files contain the source implementations named by ``_CLASSIC_MODULES``.
+# Keep paths relative to the individual model submodule so frozen identities are
+# portable between worktrees.
+_CLASSIC_SOURCE_FILES: dict[ClassicModelName, dict[str, str]] = {
+    "transplat": {
+        "raw_head": "src/model/encoder/matching/depth_predictor_trans.py",
+        "gaussian_adapter": "src/model/encoder/common/gaussian_adapter.py",
+        "decoder": "src/model/decoder/decoder.py",
+        "coordinates": "src/model/encoder/encoder_trans.py",
+    },
+    "mvsplat": {
+        "raw_head": "src/model/encoder/costvolume/depth_predictor_multiview.py",
+        "gaussian_adapter": "src/model/encoder/common/gaussian_adapter.py",
+        "decoder": "src/model/decoder/decoder.py",
+        "coordinates": "src/model/encoder/encoder_costvolume.py",
+    },
+}
+
+FROZEN_CLASSIC_BACKEND_IDENTITY_SCHEMA_VERSION = (
+    "classic-backend-frozen-identity-v1"
+)
+_GIT_HEAD_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 
 def resolve_classic_backend_contract(
@@ -84,6 +110,140 @@ def resolve_classic_backend_contract(
         decoder_module=decoder,
         coordinate_semantics=coordinate_semantics,
     )
+
+
+def _validated_contract_root(
+    contract: ClassicBackendContract,
+) -> tuple[ClassicModelName, Path]:
+    """Return the model submodule root for one complete classic contract."""
+
+    if not isinstance(contract, ClassicBackendContract):
+        raise TypeError("classic backend identity requires a ClassicBackendContract")
+    if contract.model not in _CLASSIC_MODULES:
+        raise ValueError("classic backend identity has an unsupported model")
+    expected_modules = _CLASSIC_MODULES[contract.model]
+    if (
+        contract.dataset != "dl3dv"
+        or contract.experiment != "re10k"
+        or contract.environment_profile != "classic"
+        or (
+            contract.raw_head_module,
+            contract.gaussian_adapter_module,
+            contract.decoder_module,
+            contract.coordinate_semantics,
+        )
+        != expected_modules
+    ):
+        raise ValueError("classic backend identity contract fields changed")
+
+    checkpoint = Path(contract.checkpoint).resolve()
+    model_root = checkpoint.parent.parent
+    if (
+        checkpoint.name != "re10k.ckpt"
+        or checkpoint.parent.name != "checkpoints"
+        or model_root.name != contract.model
+        or not checkpoint.is_file()
+        or not model_root.is_dir()
+    ):
+        raise ValueError("classic backend identity checkpoint layout is invalid")
+    return contract.model, model_root
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as error:
+        raise ValueError(f"classic backend identity cannot read {path.name}") from error
+    return digest.hexdigest()
+
+
+def _git_output(model_root: Path, *arguments: str) -> str:
+    try:
+        completed = subprocess.run(
+            ("git", "-C", str(model_root), *arguments),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise RuntimeError("classic backend identity cannot execute git") from error
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "classic backend identity cannot resolve submodule git state"
+        )
+    return completed.stdout.strip()
+
+
+def _source_file_identity(
+    model_root: Path, *, relative_path: str, label: str
+) -> dict[str, str]:
+    source_root = model_root.resolve()
+    source_path = (source_root / relative_path).resolve()
+    if source_root not in source_path.parents or not source_path.is_file():
+        raise ValueError(f"classic backend identity source file is invalid: {label}")
+    tracked = _git_output(
+        model_root, "ls-files", "--error-unmatch", "--", relative_path
+    )
+    if tracked != relative_path:
+        raise RuntimeError(
+            f"classic backend identity source file is not tracked: {label}"
+        )
+    return {
+        "path": f"{model_root.name}/{relative_path}",
+        "sha256": _sha256_file(source_path),
+    }
+
+
+def freeze_classic_backend_identity(
+    contract: ClassicBackendContract,
+) -> dict[str, Any]:
+    """Return a portable, JSON-serializable source identity for one backend.
+
+    The function deliberately reads the currently materialized source files and
+    the submodule's resolved Git HEAD. It refuses a missing, untracked, or
+    malformed source boundary rather than emitting an identity that could be
+    reused after source drift.
+    """
+
+    model, model_root = _validated_contract_root(contract)
+    submodule_head = _git_output(model_root, "rev-parse", "--verify", "HEAD")
+    if not _GIT_HEAD_PATTERN.fullmatch(submodule_head):
+        raise RuntimeError("classic backend identity submodule HEAD is invalid")
+    source_files = {
+        label: _source_file_identity(
+            model_root, relative_path=relative_path, label=label
+        )
+        for label, relative_path in _CLASSIC_SOURCE_FILES[model].items()
+    }
+    return {
+        "schema_version": FROZEN_CLASSIC_BACKEND_IDENTITY_SCHEMA_VERSION,
+        "model": contract.model,
+        "dataset": contract.dataset,
+        "experiment": contract.experiment,
+        "environment_profile": contract.environment_profile,
+        "raw_head_module": contract.raw_head_module,
+        "gaussian_adapter_module": contract.gaussian_adapter_module,
+        "decoder_module": contract.decoder_module,
+        "coordinate_semantics": contract.coordinate_semantics,
+        "source_files": source_files,
+        "submodule_git_head": submodule_head,
+    }
+
+
+def validate_frozen_classic_backend_identity(
+    contract: ClassicBackendContract, identity: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Fail closed unless a frozen identity still matches the live backend."""
+
+    if not isinstance(identity, Mapping):
+        raise TypeError("frozen classic backend identity must be a mapping")
+    expected = freeze_classic_backend_identity(contract)
+    if dict(identity) != expected:
+        raise ValueError("frozen classic backend identity changed")
+    return expected
 
 
 def _selected_positions(selection_mask: Any) -> tuple[Any, int, int]:
