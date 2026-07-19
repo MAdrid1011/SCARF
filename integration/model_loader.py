@@ -97,6 +97,43 @@ def _validate_pinned_dinov2_module_origins(*, require_loaded: bool = False) -> N
         raise RuntimeError("DepthSplat did not load the pinned DINOv2 source tree")
 
 
+def _validate_mvsplat_src_module_origins(
+    mvsplat_root: Path, *, require_loaded: bool = False
+) -> None:
+    """Reject a cached top-level ``src`` package from another classic backend."""
+
+    expected_root = Path(mvsplat_root).resolve()
+    loaded = False
+    for module_name, module in tuple(sys.modules.items()):
+        if module_name != "src" and not module_name.startswith("src."):
+            continue
+        origin = getattr(module, "__file__", None)
+        if isinstance(origin, str) and origin:
+            origins = (Path(origin).resolve(),)
+        else:
+            namespace_paths = getattr(module, "__path__", None)
+            if isinstance(namespace_paths, (str, bytes)):
+                namespace_paths = None
+            try:
+                origins = tuple(Path(path).resolve() for path in namespace_paths)
+            except TypeError as error:
+                raise RuntimeError(
+                    f"MVSplat src module has no file or namespace origin: {module_name}"
+                ) from error
+            if not origins:
+                raise RuntimeError(
+                    f"MVSplat src module has no file or namespace origin: {module_name}"
+                )
+        for resolved in origins:
+            if resolved != expected_root and expected_root not in resolved.parents:
+                raise RuntimeError(
+                    f"foreign preloaded MVSplat src module is not permitted: {module_name}"
+                )
+        loaded = True
+    if require_loaded and not loaded:
+        raise RuntimeError("MVSplat did not load its pinned src source tree")
+
+
 def get_depthsplat_encoder(get_encoder, encoder_cfg):
     _validate_pinned_dinov2_module_origins()
     original_hub_load = torch.hub.load
@@ -385,6 +422,7 @@ def load_context_only_audit_data(
     model_bundle: ModelBundle,
     *,
     input_root: Path,
+    model_name: str = "transplat",
 ) -> DataBundle:
     """Construct one encoder batch from a context-camera-only audit sidecar.
 
@@ -397,7 +435,7 @@ def load_context_only_audit_data(
 
     from data.context_only_audit_input import load_context_only_audit_record
 
-    record = load_context_only_audit_record(input_root)
+    record = load_context_only_audit_record(input_root, model=model_name)
     loader._setup_imports()
     try:
         context_images = _decode_calibration_context_images(record["context_images"])
@@ -743,7 +781,8 @@ class MVSplatLoader(BaseModelLoader):
         """Setup sys.path for MVSplat imports."""
         import sys
         import os
-        
+
+        _validate_mvsplat_src_module_origins(self.mvsplat_root)
         self._original_cwd = os.getcwd()
         os.chdir(self.mvsplat_root)
         
@@ -778,6 +817,9 @@ class MVSplatLoader(BaseModelLoader):
         
         try:
             from src.model.encoder import get_encoder
+            _validate_mvsplat_src_module_origins(
+                self.mvsplat_root, require_loaded=True
+            )
             
             if device is None:
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -797,6 +839,9 @@ class MVSplatLoader(BaseModelLoader):
             # construct a decoder or losses that could initialize target-side
             # evaluation dependencies.
             encoder, encoder_visualizer = get_encoder(cfg.model.encoder)
+            _validate_mvsplat_src_module_origins(
+                self.mvsplat_root, require_loaded=True
+            )
             if encoder_only:
                 model = EncoderOnlyModel(encoder)
                 decoder = None

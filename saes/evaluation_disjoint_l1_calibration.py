@@ -34,6 +34,7 @@ ACCESS_KEYS = (
     "skipped_s3_attributes_accessed",
 )
 CLASSIC_APPLICATION_MODELS = frozenset(("transplat", "mvsplat"))
+_CLASSIC_BACKEND_IDENTITY_KEY = "classic_backend_identity"
 
 
 def canonical_sha256(value: Mapping[str, Any]) -> str:
@@ -254,15 +255,58 @@ def _application_model(value: Any) -> str:
 
 
 def _application(
-    checkpoint_sha256: str, *, model: str = "transplat"
+    checkpoint_sha256: str,
+    *,
+    model: str = "transplat",
+    classic_backend_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "model": _application_model(model),
+    """Build the model-specific DL3DV application binding for one freeze."""
+
+    application_model = _application_model(model)
+    application = {
+        "model": application_model,
         "dataset": "dl3dv",
         "checkpoint_sha256": _require_sha256(
             checkpoint_sha256, "DL3DV application checkpoint"
         ),
     }
+    if application_model == "mvsplat":
+        if not isinstance(classic_backend_identity, Mapping):
+            raise ValueError(
+                "MVSplat calibration application requires a frozen classic backend identity"
+            )
+        application[_CLASSIC_BACKEND_IDENTITY_KEY] = dict(classic_backend_identity)
+    elif classic_backend_identity is not None:
+        raise ValueError(
+            "TranSplat calibration application must not carry a classic backend identity"
+        )
+    return application
+
+
+def _validate_live_application_backend_identity(
+    application: Any, *, model: str
+) -> dict[str, Any] | None:
+    """Recompute MVSplat's source identity before consuming a frozen threshold."""
+
+    application_model = _application_model(model)
+    if not isinstance(application, Mapping):
+        raise ValueError("calibration application binding is invalid")
+    if application_model == "transplat":
+        return None
+
+    identity = application.get(_CLASSIC_BACKEND_IDENTITY_KEY)
+    if not isinstance(identity, Mapping):
+        raise ValueError(
+            "MVSplat calibration application has no frozen classic backend identity"
+        )
+    from saes.classic_backend import (
+        resolve_classic_backend_contract,
+        validate_frozen_classic_backend_identity,
+    )
+
+    contract = resolve_classic_backend_contract(application_model, ROOT)
+    validated = validate_frozen_classic_backend_identity(contract, identity)
+    return dict(validated)
 
 
 def _normalize_scene_records(
@@ -342,6 +386,7 @@ def _base_record(
     binding: Mapping[str, Any],
     application_checkpoint_sha256: str,
     application_model: str,
+    application_classic_backend_identity: Mapping[str, Any] | None,
     train_records: Sequence[Mapping[str, Any]],
     holdout_records: Sequence[Mapping[str, Any]],
     value_key: str,
@@ -371,7 +416,9 @@ def _base_record(
         "status": STATUS,
         "paper_result_eligible": False,
         "application": _application(
-            application_checkpoint_sha256, model=application_model
+            application_checkpoint_sha256,
+            model=application_model,
+            classic_backend_identity=application_classic_backend_identity,
         ),
         "acid_binding": validated_binding,
         "split_policy": {
@@ -400,6 +447,7 @@ def build_v15_record(
     binding: Mapping[str, Any],
     application_checkpoint_sha256: str,
     application_model: str = "transplat",
+    application_classic_backend_identity: Mapping[str, Any] | None = None,
     train_scene_records: Sequence[Mapping[str, Any]],
     holdout_scene_records: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -419,6 +467,7 @@ def build_v15_record(
         binding=validated_binding,
         application_checkpoint_sha256=application_checkpoint_sha256,
         application_model=application_model,
+        application_classic_backend_identity=application_classic_backend_identity,
         train_records=train,
         holdout_records=holdout_scene_records,
         value_key="residuals",
@@ -433,6 +482,7 @@ def build_v16_record(
     binding: Mapping[str, Any],
     application_checkpoint_sha256: str,
     application_model: str = "transplat",
+    application_classic_backend_identity: Mapping[str, Any] | None = None,
     v15_record_sha256: str,
     train_scene_records: Sequence[Mapping[str, Any]],
     holdout_scene_records: Sequence[Mapping[str, Any]],
@@ -456,6 +506,7 @@ def build_v16_record(
         binding=validated_binding,
         application_checkpoint_sha256=application_checkpoint_sha256,
         application_model=application_model,
+        application_classic_backend_identity=application_classic_backend_identity,
         train_records=train,
         holdout_records=holdout_scene_records,
         value_key="risks",
@@ -517,8 +568,13 @@ def _validate_loaded_record(
         and record.get("raw_head_execution_contract") != RAW_HEAD_EXECUTION_CONTRACT
     ):
         raise ValueError("V16 record raw-head execution contract changed")
+    live_classic_backend_identity = _validate_live_application_backend_identity(
+        record.get("application"), model=application_model
+    )
     expected_application = _application(
-        sha256_file(Path(checkpoint_path)), model=application_model
+        sha256_file(Path(checkpoint_path)),
+        model=application_model,
+        classic_backend_identity=live_classic_backend_identity,
     )
     if record.get("application") != expected_application:
         raise ValueError(f"{kind} record application checkpoint changed")

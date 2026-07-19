@@ -93,6 +93,120 @@ def _binding() -> dict:
     }
 
 
+def test_collector_freezes_only_the_mvsplat_classic_backend_identity(monkeypatch):
+    contract = SimpleNamespace(model="mvsplat")
+    identity = {"model": "mvsplat", "source_files": {}}
+    calls: list[tuple[str, Path]] = []
+    monkeypatch.setattr(
+        collector,
+        "resolve_classic_backend_contract",
+        lambda model, root: calls.append((model, root)) or contract,
+    )
+    monkeypatch.setattr(
+        collector,
+        "freeze_classic_backend_identity",
+        lambda actual_contract: identity if actual_contract is contract else None,
+    )
+
+    assert collector._freeze_application_classic_backend_identity("transplat") is None
+    assert collector._freeze_application_classic_backend_identity("mvsplat") == identity
+    assert calls == [("mvsplat", collector.ROOT)]
+
+
+def test_collector_binds_one_mvsplat_identity_to_both_frozen_records(
+    tmp_path: Path, monkeypatch
+):
+    binding = _binding()
+    checkpoint = tmp_path / "re10k.ckpt"
+    checkpoint.write_bytes(b"mvsplat-re10k")
+    identity = {"model": "mvsplat", "source_files": {"raw_head": {}}}
+    application_identity_calls: list[str] = []
+    v15_records = []
+    v16_records = []
+    for split in (records.TRAIN_SPLIT, records.HOLDOUT_SPLIT):
+        for index, scene in enumerate(binding["splits"][split]["scenes"]):
+            v15_records.append(
+                {
+                    "split": split,
+                    "scene": scene,
+                    "record": {
+                        "scene": scene,
+                        "residuals": [float(index), float(index) + 0.25],
+                        "access": binding["access"],
+                    },
+                }
+            )
+            v16_records.append(
+                {
+                    "split": split,
+                    "scene": scene,
+                    "record": {
+                        "scene": scene,
+                        "risks": [float(index) + 0.1, float(index) + 0.2],
+                        "access": binding["access"],
+                        "native_dense_head_execution": _native_dense_execution(
+                            finalized=False
+                        ),
+                    },
+                }
+            )
+
+    def split_records(values, split):
+        return [item["record"] for item in values if item["split"] == split]
+
+    def read_frozen(path: Path):
+        record = json.loads(Path(path).read_text(encoding="utf-8"))
+        assert record["application"]["classic_backend_identity"] == identity
+        return {**record, "threshold_value": record["threshold"]["value"]}
+
+    experiment = SimpleNamespace(checkpoint=checkpoint)
+    monkeypatch.setattr(collector, "resolve_acid_binding", lambda **_kwargs: binding)
+    monkeypatch.setattr(records, "resolve_acid_binding", lambda **_kwargs: binding)
+    monkeypatch.setattr(
+        collector,
+        "_load_application_encoder",
+        lambda _device, *, model_name: (
+            object(), object(), experiment, collector.sha256_file(checkpoint)
+        )
+        if model_name == "mvsplat"
+        else None,
+    )
+    monkeypatch.setattr(
+        collector,
+        "_freeze_application_classic_backend_identity",
+        lambda model: application_identity_calls.append(model) or identity,
+    )
+    monkeypatch.setattr(
+        collector,
+        "_collect_v15_split",
+        lambda *, split, **_kwargs: split_records(v15_records, split),
+    )
+    monkeypatch.setattr(
+        collector,
+        "_collect_v16_split",
+        lambda *, split, **_kwargs: split_records(v16_records, split),
+    )
+    monkeypatch.setattr(
+        collector, "load_frozen_v15_threshold", lambda path, **_kwargs: read_frozen(path)
+    )
+    monkeypatch.setattr(
+        collector, "load_frozen_v16_threshold", lambda path, **_kwargs: read_frozen(path)
+    )
+
+    v15, v16 = collector.collect_frozen_calibration_records(
+        device=torch.device("cpu"),
+        v15_output=tmp_path / "v15.json",
+        v16_output=tmp_path / "v16.json",
+        materialization_root=tmp_path / "materialization",
+        plan_path=tmp_path / "plan.json",
+        model_name="mvsplat",
+    )
+
+    assert application_identity_calls == ["mvsplat"]
+    assert v15["application"]["classic_backend_identity"] == identity
+    assert v16["application"]["classic_backend_identity"] == identity
+
+
 def test_collector_uses_acid_context_and_reloads_v15_before_v16(
     tmp_path: Path, monkeypatch
 ):

@@ -398,9 +398,11 @@ def validate_context_only_audit_input(
     }
 
 
-def load_context_only_audit_record(root: Path) -> dict[str, Any]:
+def load_context_only_audit_record(
+    root: Path, *, model: str = "transplat"
+) -> dict[str, Any]:
     """Return the validated, context-only record used by an audit loader."""
-    identity = validate_context_only_audit_input(root)
+    identity = validate_context_only_audit_input(root, model=model)
     root = Path(root).resolve()
     chunk = torch.load(root / "sidecar" / "test" / "000000.torch", map_location="cpu")
     return {**chunk[0], "input_identity": identity}

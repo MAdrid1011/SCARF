@@ -121,3 +121,74 @@ def test_depthsplat_loader_rejects_a_foreign_dinov2_namespace_module(
 
     with pytest.raises(RuntimeError, match="foreign preloaded DINOv2 module"):
         model_loader._validate_pinned_dinov2_module_origins(require_loaded=True)
+
+
+def _clear_classic_src_modules(monkeypatch, modules):
+    for name in tuple(modules):
+        if name == "src" or name.startswith("src."):
+            monkeypatch.delitem(modules, name, raising=False)
+
+
+def test_mvsplat_loader_rejects_a_foreign_cached_src_module(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import integration.model_loader as model_loader
+
+    mvsplat_root = tmp_path / "mvsplat"
+    foreign_origin = tmp_path / "transplat" / "src" / "__init__.py"
+    foreign_origin.parent.mkdir(parents=True)
+    foreign_origin.write_text("fixture = True\n", encoding="utf-8")
+    _clear_classic_src_modules(monkeypatch, model_loader.sys.modules)
+    monkeypatch.setitem(
+        model_loader.sys.modules,
+        "src",
+        SimpleNamespace(__file__=str(foreign_origin)),
+    )
+
+    with pytest.raises(RuntimeError, match="foreign preloaded MVSplat src module"):
+        model_loader._validate_mvsplat_src_module_origins(
+            mvsplat_root, require_loaded=True
+        )
+
+
+def test_mvsplat_loader_accepts_its_cached_src_namespace_module(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import integration.model_loader as model_loader
+
+    mvsplat_root = tmp_path / "mvsplat"
+    namespace_root = mvsplat_root / "src" / "model" / "encoder"
+    namespace_root.mkdir(parents=True)
+    _clear_classic_src_modules(monkeypatch, model_loader.sys.modules)
+    monkeypatch.setitem(
+        model_loader.sys.modules,
+        "src.model.encoder",
+        SimpleNamespace(__path__=[str(namespace_root)]),
+    )
+
+    model_loader._validate_mvsplat_src_module_origins(
+        mvsplat_root, require_loaded=True
+    )
+
+
+def test_mvsplat_loader_rejects_a_mixed_src_namespace_package(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import integration.model_loader as model_loader
+
+    mvsplat_root = tmp_path / "mvsplat"
+    mvsplat_namespace = mvsplat_root / "src"
+    foreign_namespace = tmp_path / "transplat" / "src"
+    mvsplat_namespace.mkdir(parents=True)
+    foreign_namespace.mkdir(parents=True)
+    _clear_classic_src_modules(monkeypatch, model_loader.sys.modules)
+    monkeypatch.setitem(
+        model_loader.sys.modules,
+        "src",
+        SimpleNamespace(__path__=[str(mvsplat_namespace), str(foreign_namespace)]),
+    )
+
+    with pytest.raises(RuntimeError, match="foreign preloaded MVSplat src module"):
+        model_loader._validate_mvsplat_src_module_origins(
+            mvsplat_root, require_loaded=True
+        )

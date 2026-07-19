@@ -117,6 +117,27 @@ def _checkpoint(path: Path) -> str:
     return calibration.sha256_file(path)
 
 
+def _mvsplat_backend_identity() -> dict:
+    return {
+        "schema_version": "classic-backend-frozen-identity-v1",
+        "model": "mvsplat",
+        "dataset": "dl3dv",
+        "experiment": "re10k",
+        "environment_profile": "classic",
+        "raw_head_module": "encoder.depth_predictor.to_gaussians",
+        "gaussian_adapter_module": "encoder.gaussian_adapter",
+        "decoder_module": "decoder",
+        "coordinate_semantics": "mvsplat-inline-pixel-center-plus-sigmoid-offset",
+        "source_files": {
+            "raw_head": {"path": "mvsplat/raw.py", "sha256": _sha("a")},
+            "gaussian_adapter": {"path": "mvsplat/adapter.py", "sha256": _sha("b")},
+            "decoder": {"path": "mvsplat/decoder.py", "sha256": _sha("c")},
+            "coordinates": {"path": "mvsplat/coordinates.py", "sha256": _sha("d")},
+        },
+        "submodule_git_head": "e" * 40,
+    }
+
+
 def test_v15_uses_only_train_values_and_live_binding(tmp_path, monkeypatch):
     binding = _binding()
     train, holdout = _records(binding, value_key="residuals", offset=0.0)
@@ -130,6 +151,12 @@ def test_v15_uses_only_train_values_and_live_binding(tmp_path, monkeypatch):
     )
     assert record["threshold"]["value"] < 30.0
     assert record["holdout_verification"]["threshold_updated"] is False
+    assert record["application"] == {
+        "model": "transplat",
+        "dataset": "dl3dv",
+        "checkpoint_sha256": digest,
+    }
+    assert record["sha256"] == "f52689b0a33f467b638469be6ea5f36d65067ec3fb530df0d588ddd134d31b4c"
     path = tmp_path / "v15.json"
     path.write_text(json.dumps(record), encoding="utf-8")
     monkeypatch.setattr(calibration, "resolve_acid_binding", lambda **_kwargs: binding)
@@ -146,10 +173,20 @@ def test_application_model_is_frozen_and_fail_closed(tmp_path, monkeypatch):
     train, holdout = _records(binding, value_key="residuals", offset=0.0)
     checkpoint = tmp_path / "re10k.ckpt"
     digest = _checkpoint(checkpoint)
+    identity = _mvsplat_backend_identity()
+    with pytest.raises(ValueError, match="requires a frozen classic backend identity"):
+        calibration.build_v15_record(
+            binding=binding,
+            application_checkpoint_sha256=digest,
+            application_model="mvsplat",
+            train_scene_records=train,
+            holdout_scene_records=holdout,
+        )
     record = calibration.build_v15_record(
         binding=binding,
         application_checkpoint_sha256=digest,
         application_model="mvsplat",
+        application_classic_backend_identity=identity,
         train_scene_records=train,
         holdout_scene_records=holdout,
     )
@@ -157,14 +194,48 @@ def test_application_model_is_frozen_and_fail_closed(tmp_path, monkeypatch):
         "model": "mvsplat",
         "dataset": "dl3dv",
         "checkpoint_sha256": digest,
+        "classic_backend_identity": identity,
     }
     path = tmp_path / "mvsplat-v15.json"
     path.write_text(json.dumps(record), encoding="utf-8")
     monkeypatch.setattr(calibration, "resolve_acid_binding", lambda **_kwargs: binding)
 
+    import saes.classic_backend as classic_backend
+
+    contract = object()
+    validated: list[tuple[object, dict]] = []
+    monkeypatch.setattr(
+        classic_backend,
+        "resolve_classic_backend_contract",
+        lambda model, root: contract if model == "mvsplat" else None,
+    )
+
+    def validate_backend(actual_contract, actual_identity):
+        validated.append((actual_contract, dict(actual_identity)))
+        assert actual_contract is contract
+        return identity
+
+    monkeypatch.setattr(
+        classic_backend,
+        "validate_frozen_classic_backend_identity",
+        validate_backend,
+    )
+
     assert calibration.load_frozen_v15_threshold(
         path, checkpoint_path=checkpoint, application_model="mvsplat"
     )["sha256"] == record["sha256"]
+    assert validated == [(contract, identity)]
+    monkeypatch.setattr(
+        classic_backend,
+        "validate_frozen_classic_backend_identity",
+        lambda *_args: (_ for _ in ()).throw(
+            ValueError("frozen classic backend identity changed")
+        ),
+    )
+    with pytest.raises(ValueError, match="classic backend identity changed"):
+        calibration.load_frozen_v15_threshold(
+            path, checkpoint_path=checkpoint, application_model="mvsplat"
+        )
     with pytest.raises(ValueError, match="application checkpoint changed"):
         calibration.load_frozen_v15_threshold(path, checkpoint_path=checkpoint)
     with pytest.raises(ValueError, match="application model"):

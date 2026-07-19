@@ -422,6 +422,86 @@ def test_audit_preserves_frozen_loader_rejections_for_legacy_parent_and_checkpoi
         audit._load_evaluation_disjoint_l1_calibrations(**kwargs)
 
 
+def test_audit_binds_mvsplat_frozen_calibrations_to_the_live_backend_identity(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    import saes.evaluation_disjoint_l1_calibration as calibration
+    import scripts.saes_incremental_selected_output_audit as audit
+
+    checkpoint = tmp_path / "re10k.ckpt"
+    checkpoint.write_bytes(b"checkpoint")
+    checkpoint_sha256 = "d" * 64
+    backend_identity = {
+        "model": "mvsplat",
+        "source_files": {"raw_head": {"sha256": "a" * 64}},
+    }
+    application = {
+        "model": "mvsplat",
+        "dataset": "dl3dv",
+        "checkpoint_sha256": checkpoint_sha256,
+        "classic_backend_identity": backend_identity,
+    }
+    acid_binding = {"dataset": "acid", "binding": "same-24-8"}
+    v15 = {
+        **_frozen_l1_calibration_record(
+            checkpoint_sha256=checkpoint_sha256, acid_binding=acid_binding, threshold=0.1
+        ),
+        "application": application,
+    }
+    v16 = {
+        **_frozen_l1_calibration_record(
+            checkpoint_sha256=checkpoint_sha256, acid_binding=acid_binding, threshold=0.2
+        ),
+        "application": application,
+        "sha256": "b" * 64,
+        "raw_head_execution_contract": "native-dense-head-closure-selected-packet-v2",
+    }
+    calls = []
+    monkeypatch.setattr(
+        audit,
+        "resolve_classic_backend_contract",
+        lambda model, _root: SimpleNamespace(model=model),
+    )
+    monkeypatch.setattr(
+        audit, "freeze_classic_backend_identity", lambda _contract: backend_identity
+    )
+    monkeypatch.setattr(
+        calibration,
+        "load_frozen_v15_threshold",
+        lambda path, **kwargs: calls.append(("v15", Path(path), kwargs)) or v15,
+    )
+    monkeypatch.setattr(
+        calibration,
+        "load_frozen_v16_threshold",
+        lambda path, **kwargs: calls.append(("v16", Path(path), kwargs)) or v16,
+    )
+
+    evidence = audit._load_evaluation_disjoint_l1_calibrations(
+        checkpoint_path=checkpoint,
+        checkpoint_sha256=checkpoint_sha256,
+        model_name="mvsplat",
+        classic_backend_identity=backend_identity,
+        v15_calibration_record=tmp_path / "v15.json",
+        v16_calibration_record=tmp_path / "v16.json",
+    )
+
+    assert evidence["v15_calibration"]["application"] == application
+    assert evidence["v16_calibration"]["application"] == application
+    assert calls[0][2]["application_model"] == "mvsplat"
+    assert calls[1][2]["application_model"] == "mvsplat"
+    with pytest.raises(RuntimeError, match="classic backend identity changed"):
+        audit._load_evaluation_disjoint_l1_calibrations(
+            checkpoint_path=checkpoint,
+            checkpoint_sha256=checkpoint_sha256,
+            model_name="mvsplat",
+            classic_backend_identity={"model": "mvsplat", "source_files": {}},
+            v15_calibration_record=tmp_path / "v15.json",
+            v16_calibration_record=tmp_path / "v16.json",
+        )
+
+
 def test_audit_verifies_frozen_calibrations_before_any_encoder_capture(monkeypatch, tmp_path):
     import scripts.saes_incremental_selected_output_audit as audit
 

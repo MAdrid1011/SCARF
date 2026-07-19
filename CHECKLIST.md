@@ -93,11 +93,17 @@
   `0.000244580`; self-hash `25130728...d9d750`). This authorizes only the
   next development-stage model-specific repair, not Table 1, Figure 11,
   sparse execution, timing, or cross-dataset claims.
-- [ ] Parameterize the native-dense target-free simulator for MVSplat and
-  DepthSplat with distinct model/checkpoint/raw-head/Adapter/decoder bindings.
-  For each model, require a fresh ACID evaluation-disjoint calibration,
-  sample-0 audit, one quality gate, and fixed eight-scene gate before any
-  140-scene or Table 1 claim path.
+- [x] Bind MVSplat calibration to its distinct model/checkpoint/raw-head/
+  Adapter/decoder-coordinate source identity. V15/V16 now require the same
+  frozen `classic_backend_identity`, revalidate it against live source, and
+  reject a foreign or mixed cached `src` namespace. A fresh CUDA encoder-only
+  loading smoke passed; this is infrastructure evidence only.
+- [ ] Run a new MVSplat ACID 24/8 evaluation-disjoint calibration in a new
+  output root, then require its sample-0 target-free audit, one quality gate,
+  and a fixed eight-scene gate before any 140-scene or Table 1 claim path.
+- [ ] Parameterize DepthSplat separately with its own native raw head, Adapter,
+  decoder, ACID evaluation-disjoint calibration, sample-0 audit, quality gate,
+  and fixed eight-scene gate. It must not reuse classic-model identity code.
 - [x] Preserve `transplat_dl3dv_l1_15_v16_acid_disjoint_8scene_v1` as an
   invalid CPU-only preflight: the driver used the preparation record instead
   of the validated context identity, so all eight scenes failed before an

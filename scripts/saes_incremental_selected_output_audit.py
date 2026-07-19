@@ -27,6 +27,7 @@ from saes.incremental_selected_output_execution import (  # noqa: E402
     validate_native_dense_head_execution_evidence,
 )
 from saes.classic_backend import (  # noqa: E402
+    freeze_classic_backend_identity,
     resolve_classic_backend_contract,
     source_native_adapter_coordinates,
 )
@@ -708,6 +709,7 @@ def _load_evaluation_disjoint_l1_calibrations(
     checkpoint_path: Path,
     checkpoint_sha256: str,
     model_name: str = MODEL,
+    classic_backend_identity: Mapping[str, Any] | None = None,
     v15_calibration_record: Path,
     v16_calibration_record: Path,
     acid_calibration_plan: Path | None = None,
@@ -723,6 +725,21 @@ def _load_evaluation_disjoint_l1_calibrations(
 
     checkpoint_path = Path(checkpoint_path).resolve()
     backend_contract = resolve_classic_backend_contract(model_name, ROOT)
+    if backend_contract.model == "mvsplat":
+        live_classic_backend_identity = freeze_classic_backend_identity(
+            backend_contract
+        )
+        if (
+            classic_backend_identity is not None
+            and dict(classic_backend_identity) != live_classic_backend_identity
+        ):
+            raise RuntimeError("active MVSplat classic backend identity changed")
+    elif classic_backend_identity is not None:
+        raise RuntimeError(
+            "TranSplat audit must not carry a classic backend source identity"
+        )
+    else:
+        live_classic_backend_identity = None
     expected_application = {
         "model": backend_contract.model,
         "dataset": DATASET,
@@ -730,6 +747,10 @@ def _load_evaluation_disjoint_l1_calibrations(
             checkpoint_sha256, name="active Re10K checkpoint"
         ),
     }
+    if live_classic_backend_identity is not None:
+        expected_application["classic_backend_identity"] = (
+            live_classic_backend_identity
+        )
     plan_path = (
         Path(acid_calibration_plan).resolve()
         if acid_calibration_plan is not None
@@ -1870,7 +1891,14 @@ def _load_context_only_encoder(
     )
     if bundle.decoder is not None:
         raise RuntimeError("target-free audit unexpectedly constructed a decoder")
-    data = load_context_only_audit_data(loader, bundle, input_root=input_root)
+    classic_backend_identity = (
+        freeze_classic_backend_identity(backend_contract)
+        if backend_contract.model == "mvsplat"
+        else None
+    )
+    data = load_context_only_audit_data(
+        loader, bundle, input_root=input_root, model_name=backend_contract.model
+    )
     if "target" in data.batch:
         raise RuntimeError("target-free audit loader returned a target mapping")
     model = bundle.model
@@ -1879,28 +1907,31 @@ def _load_context_only_encoder(
         key: value.to(bundle.device) if torch.is_tensor(value) else value
         for key, value in data.batch["context"].items()
     }
+    execution = {
+        "model": backend_contract.model,
+        "checkpoint_sha256": _sha256_file(experiment.checkpoint),
+        "checkpoint_path": str(experiment.checkpoint.resolve()),
+        "checkpoint_name": RE10K_CHECKPOINT_NAME,
+        "checkpoint_experiment": RE10K_EXPERIMENT,
+        "environment_profile": experiment.environment_profile,
+        "raw_head_module": backend_contract.raw_head_module,
+        "gaussian_adapter_module": backend_contract.gaussian_adapter_module,
+        "decoder_module": backend_contract.decoder_module,
+        "coordinate_semantics": backend_contract.coordinate_semantics,
+        "encoder_only": True,
+        "decoder_constructed": False,
+        "native_encoder_device": str(bundle.device),
+        "target_mapping_present": False,
+        "target_rgb_accessed": False,
+        "target_camera_metadata_accessed": False,
+    }
+    if classic_backend_identity is not None:
+        execution["classic_backend_identity"] = classic_backend_identity
     return (
         model,
         context,
         input_identity,
-        {
-            "model": backend_contract.model,
-            "checkpoint_sha256": _sha256_file(experiment.checkpoint),
-            "checkpoint_path": str(experiment.checkpoint.resolve()),
-            "checkpoint_name": RE10K_CHECKPOINT_NAME,
-            "checkpoint_experiment": RE10K_EXPERIMENT,
-            "environment_profile": experiment.environment_profile,
-            "raw_head_module": backend_contract.raw_head_module,
-            "gaussian_adapter_module": backend_contract.gaussian_adapter_module,
-            "decoder_module": backend_contract.decoder_module,
-            "coordinate_semantics": backend_contract.coordinate_semantics,
-            "encoder_only": True,
-            "decoder_constructed": False,
-            "native_encoder_device": str(bundle.device),
-            "target_mapping_present": False,
-            "target_rgb_accessed": False,
-            "target_camera_metadata_accessed": False,
-        },
+        execution,
     )
 
 
@@ -1925,6 +1956,7 @@ def collect_incremental_selected_output_audit(
         checkpoint_path=Path(execution["checkpoint_path"]),
         checkpoint_sha256=execution["checkpoint_sha256"],
         model_name=model_name,
+        classic_backend_identity=execution.get("classic_backend_identity"),
         v15_calibration_record=v15_calibration_record,
         v16_calibration_record=v16_calibration_record,
         acid_calibration_plan=acid_calibration_plan,

@@ -18,7 +18,9 @@ def _png(value: int) -> bytes:
     return stream.getvalue()
 
 
-def _source_input(tmp_path: Path, *, source_sample_index: int = 0) -> Path:
+def _source_input(
+    tmp_path: Path, *, source_sample_index: int = 0, model: str = "transplat"
+) -> Path:
     from data.build_manifest import build
     from scripts.calibration_inputs import materialize_target_free_inputs, sha256_file
     from scripts.compile_protocol import canonicalize_index
@@ -54,7 +56,7 @@ def _source_input(tmp_path: Path, *, source_sample_index: int = 0) -> Path:
     source_record = {
         "kind": "dl3dv_target_free_l1_primary_reference_audit_input",
         "status": "PASS",
-        "model": "transplat",
+        "model": model,
         "dataset": "dl3dv",
         "source_sample_index": source_sample_index,
         "target_rgb_included": False,
@@ -218,6 +220,64 @@ def test_context_only_loader_never_returns_a_target_mapping(
     assert batch["context"]["extrinsics"].shape == (1, 2, 4, 4)
     assert batch["calibration"]["target_mapping_present"] is False
     assert batch["calibration"]["target_camera_metadata_accessed"] is False
+
+
+def test_context_only_loader_binds_the_requested_model_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from data.context_only_audit_input import prepare_context_only_audit_input
+    from integration.model_loader import load_context_only_audit_data
+
+    source = _source_input(tmp_path, model="mvsplat")
+    output = tmp_path / "mvsplat-context-only"
+    prepare_context_only_audit_input(source, output_root=output, model="mvsplat")
+
+    src = ModuleType("src")
+    dataset = ModuleType("src.dataset")
+    shims = ModuleType("src.dataset.shims")
+    crop = ModuleType("src.dataset.shims.crop_shim")
+    patch = ModuleType("src.dataset.shims.patch_shim")
+    crop.apply_crop_shim_to_views = lambda views, _shape: views
+    patch.apply_patch_shim_to_views = lambda views, _patch_size: views
+    src.dataset = dataset
+    dataset.shims = shims
+    shims.crop_shim = crop
+    shims.patch_shim = patch
+    monkeypatch.setitem(sys.modules, "src", src)
+    monkeypatch.setitem(sys.modules, "src.dataset", dataset)
+    monkeypatch.setitem(sys.modules, "src.dataset.shims", shims)
+    monkeypatch.setitem(sys.modules, "src.dataset.shims.crop_shim", crop)
+    monkeypatch.setitem(sys.modules, "src.dataset.shims.patch_shim", patch)
+
+    class Loader:
+        def _setup_imports(self):
+            return None
+
+        def _restore_cwd(self):
+            return None
+
+    bundle = SimpleNamespace(
+        encoder=SimpleNamespace(
+            cfg=SimpleNamespace(shim_patch_size=1, downscale_factor=1)
+        ),
+        config=SimpleNamespace(
+            dataset=SimpleNamespace(
+                image_shape=(8, 8),
+                make_baseline_1=False,
+                near=1.0,
+                far=2.0,
+                baseline_scale_bounds=False,
+            )
+        ),
+    )
+    batch = load_context_only_audit_data(
+        Loader(), bundle, input_root=output, model_name="mvsplat"
+    ).batch
+
+    assert "target" not in batch
+    assert batch["scene"] == ["scene-fixed"]
+    with pytest.raises(ValueError, match="isolation contract"):
+        load_context_only_audit_data(Loader(), bundle, input_root=output)
 
 
 def test_context_only_validator_rejects_unexpected_payload_fields(tmp_path: Path):

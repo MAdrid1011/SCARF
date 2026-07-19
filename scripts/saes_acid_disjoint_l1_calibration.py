@@ -30,6 +30,10 @@ if str(ROOT) not in sys.path:
 from integration.acid_joint_context import load_acid_joint_context
 from integration.acid_joint_model_context import prepare_acid_joint_model_context
 from integration.model_loader import create_model_loader
+from saes.classic_backend import (
+    freeze_classic_backend_identity,
+    resolve_classic_backend_contract,
+)
 from saes.evaluation_disjoint_l1_calibration import (
     CLASSIC_APPLICATION_MODELS,
     DEFAULT_MATERIALIZATION_ROOT,
@@ -96,6 +100,20 @@ def _application_model_name(value: Any) -> str:
     if value not in CLASSIC_APPLICATION_MODELS:
         raise ValueError("ACID calibration requires a supported classic application model")
     return str(value)
+
+
+def _freeze_application_classic_backend_identity(
+    model_name: str,
+) -> dict[str, Any] | None:
+    """Freeze the source boundary for MVSplat's model-specific calibration."""
+
+    model_name = _application_model_name(model_name)
+    if model_name == "transplat":
+        return None
+    contract = resolve_classic_backend_contract(model_name, ROOT)
+    if contract.model != model_name:
+        raise RuntimeError("ACID calibration classic backend contract changed")
+    return freeze_classic_backend_identity(contract)
 
 
 def _release_cuda_cache(device: torch.device) -> None:
@@ -774,6 +792,9 @@ def collect_frozen_calibration_records(
         device, model_name=model_name
     )
     try:
+        application_classic_backend_identity = (
+            _freeze_application_classic_backend_identity(model_name)
+        )
         v15_train = _collect_v15_split(
             model=model,
             bundle=bundle,
@@ -794,6 +815,9 @@ def collect_frozen_calibration_records(
             binding=binding,
             application_checkpoint_sha256=checkpoint_sha256,
             application_model=model_name,
+            application_classic_backend_identity=(
+                application_classic_backend_identity
+            ),
             train_scene_records=v15_train,
             holdout_scene_records=v15_holdout,
         )
@@ -832,6 +856,9 @@ def collect_frozen_calibration_records(
             binding=binding,
             application_checkpoint_sha256=checkpoint_sha256,
             application_model=model_name,
+            application_classic_backend_identity=(
+                application_classic_backend_identity
+            ),
             v15_record_sha256=verified_v15["sha256"],
             train_scene_records=v16_train,
             holdout_scene_records=v16_holdout,

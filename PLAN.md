@@ -242,6 +242,15 @@
   identities and the same sample-0 then eight-scene target-free quality
   contract. A failed audit or quality gate repairs that backend; it never
   borrows the TranSplat V16 threshold or adjusts global route ratios.
+- MVSplat application-identity repair: its V15/V16 calibration application
+  record now requires one frozen `classic_backend_identity` containing the
+  native raw-head, Adapter, decoder boundary, coordinate-source hashes, and
+  submodule commit. The frozen loader recomputes and validates that identity
+  before using either threshold. The MVSplat loader also rejects a foreign or
+  mixed cached top-level `src` namespace instead of silently importing another
+  classic model. CPU contract coverage and a fresh CUDA encoder-only MVSplat
+  load passed; the previous partial ACID collection remains invalid and must
+  be replaced by a new output directory.
 
 ## 2. Baseline And Comparability
 
