@@ -295,7 +295,7 @@
   audits are diagnostic-only and cannot be promoted into this chain.
 - DepthSplat selected-boundary checkpoint (2026-07-20): the native DL3DV
   sample-0 target-free audit at
-  `outputs/ae_dl3dv_repair_diagnostics/depthsplat_sample0_selected_rgb_adapter_audit_v1/`
+  `outputs/ae_dl3dv_repair_diagnostics/depthsplat_sample0_selected_rgb_adapter_audit_v2/`
   reached the original Adapter through a source-bound packet. It replayed the
   replicate-padded 37-channel final head for 57,344 selected descriptors after
   native dense regressor execution, passed the fixed raw-head equivalence
