@@ -18,7 +18,7 @@ def _png(value: int) -> bytes:
     return stream.getvalue()
 
 
-def _source_input(tmp_path: Path) -> Path:
+def _source_input(tmp_path: Path, *, source_sample_index: int = 0) -> Path:
     from data.build_manifest import build
     from scripts.calibration_inputs import materialize_target_free_inputs, sha256_file
     from scripts.compile_protocol import canonicalize_index
@@ -56,9 +56,19 @@ def _source_input(tmp_path: Path) -> Path:
         "status": "PASS",
         "model": "transplat",
         "dataset": "dl3dv",
-        "source_sample_index": 0,
+        "source_sample_index": source_sample_index,
         "target_rgb_included": False,
-        "selected_sample": {"scene": scene, "context_indices": [0, 4]},
+        "selected_sample": {
+            "scene": scene,
+            "context_indices": [0, 4],
+            "target_indices": [1, 2, 3, 5],
+        },
+        "canonical_selection": {
+            "source_sample_index": source_sample_index,
+            "scene": scene,
+            "context_indices": [0, 4],
+            "target_indices": [1, 2, 3, 5],
+        },
         "canonical_protocol": {
             "source_index_sha256": "a" * 64,
             "sample_selection_sha256": "b" * 64,
@@ -86,8 +96,10 @@ def test_context_only_preparation_removes_target_rows_and_metadata(tmp_path: Pat
     assert record["target_rgb_included"] is False
     assert record["target_camera_metadata_included"] is False
     assert record["target_index_included"] is False
+    assert record["source_sample_index"] == 0
     assert identity["target_rgb_accessed"] is False
     assert identity["target_camera_metadata_accessed"] is False
+    assert identity["source_sample_index"] == 0
     assert set(payload) == {
         "schema_version",
         "kind",
@@ -101,6 +113,54 @@ def test_context_only_preparation_removes_target_rows_and_metadata(tmp_path: Pat
     assert payload["context_cameras"].shape == (2, 18)
     assert payload["context_cameras"][1, 9].item() == pytest.approx(0.25)
     assert len(payload["context_images"]) == 2
+
+
+def test_context_only_preparation_preserves_nonzero_source_sample_identity(
+    tmp_path: Path,
+):
+    from data.context_only_audit_input import (
+        load_context_only_audit_record,
+        prepare_context_only_audit_input,
+        validate_context_only_audit_input,
+    )
+
+    source = _source_input(tmp_path, source_sample_index=7)
+    output = tmp_path / "context-only"
+    record = prepare_context_only_audit_input(source, output_root=output)
+    identity = validate_context_only_audit_input(output)
+    payload = load_context_only_audit_record(output)
+
+    assert record["source_sample_index"] == 7
+    assert identity["source_sample_index"] == 7
+    assert payload["input_identity"]["source_sample_index"] == 7
+    assert "target" not in payload
+    assert record["target_rgb_included"] is False
+    assert record["target_camera_metadata_included"] is False
+    assert record["target_index_included"] is False
+
+
+def test_context_only_preparation_rejects_negative_source_sample_index(tmp_path: Path):
+    from data.context_only_audit_input import prepare_context_only_audit_input
+
+    source = _source_input(tmp_path, source_sample_index=-1)
+    with pytest.raises(ValueError, match="source sample index"):
+        prepare_context_only_audit_input(source, output_root=tmp_path / "context-only")
+
+
+def test_context_only_preparation_rejects_mismatched_canonical_selection(tmp_path: Path):
+    from data.build_manifest import build
+    from data.context_only_audit_input import prepare_context_only_audit_input
+
+    source = _source_input(tmp_path, source_sample_index=7)
+    record_path = source / "audit-input.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["canonical_selection"]["source_sample_index"] = 6
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    manifest = build(source, "source", "fixture", "fixture")
+    (source / ".scarf-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="canonical selection"):
+        prepare_context_only_audit_input(source, output_root=tmp_path / "context-only")
 
 
 def test_context_only_loader_never_returns_a_target_mapping(

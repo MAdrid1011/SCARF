@@ -85,6 +85,48 @@ TARGET_FREE_AUDIT_KIND = "saes_incremental_selected_output_packed_adapter_audit"
 TARGET_FREE_AUDIT_STATUS = "PASS"
 
 
+def _require_nonnegative_sample_index(sample_index: Any) -> int:
+    if (
+        isinstance(sample_index, bool)
+        or not isinstance(sample_index, int)
+        or sample_index < 0
+    ):
+        raise ValueError("sample_index must be a non-negative integer")
+    return sample_index
+
+
+def _require_positive_sample_count(sample_count: Any) -> int:
+    if (
+        isinstance(sample_count, bool)
+        or not isinstance(sample_count, int)
+        or sample_count <= 0
+    ):
+        raise ValueError("native_sample_count must be a positive integer")
+    return sample_count
+
+
+def _canonical_source_selection(
+    *,
+    index_path: Path,
+    source_index_sha256: str,
+    sample_index: int,
+) -> dict[str, Any]:
+    """Resolve one stable source ordinal without touching target-side data."""
+    from scripts.compile_protocol import canonicalize_index
+
+    rows, _summary = canonicalize_index(index_path, source_index_sha256)
+    matches = [row for row in rows if row["sample_index"] == sample_index]
+    if len(matches) != 1:
+        raise ValueError("canonical evaluation index has no requested source sample")
+    selection = matches[0]
+    return {
+        "source_sample_index": selection["sample_index"],
+        "scene": selection["scene"],
+        "context_indices": list(selection["context_indices"]),
+        "target_indices": list(selection["target_indices"]),
+    }
+
+
 def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -172,8 +214,10 @@ def _validate_target_free_quality_audit(
     source_selection_mask_sha256: str,
     selected_output_mask_sha256: str,
     packed_source_trace_sha256: str,
+    sample_index: int = SAMPLE_INDEX,
 ) -> dict[str, Any]:
     """Require a frozen target-free audit for the exact packet about to render."""
+    sample_index = _require_nonnegative_sample_index(sample_index)
     audit, file_sha256 = _read_target_free_quality_audit(path)
     if (
         audit.get("kind") != TARGET_FREE_AUDIT_KIND
@@ -229,7 +273,7 @@ def _validate_target_free_quality_audit(
     if (
         not isinstance(input_identity, Mapping)
         or input_identity.get("scene") != scene
-        or input_identity.get("source_sample_index") != SAMPLE_INDEX
+        or input_identity.get("source_sample_index") != sample_index
         or input_identity.get("target_rgb_accessed") is not False
         or input_identity.get("target_camera_metadata_accessed") is not False
         or input_identity.get("context_indices") != context_indices
@@ -279,6 +323,7 @@ def _validate_target_free_quality_audit(
         "file_sha256": file_sha256,
         "record_sha256": audit["sha256"],
         "checkpoint_sha256": checkpoint_sha256,
+        "sample_index": sample_index,
         "v15_calibration_sha256": expected_v15["sha256"],
         "v16_calibration_sha256": expected_v16["sha256"],
         **expected_route_binding,
@@ -615,13 +660,20 @@ def _load_native_target_batch_after_packet_gate(
     *,
     scene: str,
     context_indices: list[int],
+    target_indices: list[int],
+    execution_index: int = SAMPLE_INDEX,
+    native_sample_count: int = 1,
 ) -> dict[str, Any]:
     """Open target-side data only after the audited compact packet is accepted."""
+    execution_index = _require_nonnegative_sample_index(execution_index)
+    native_sample_count = _require_positive_sample_count(native_sample_count)
+    if execution_index >= native_sample_count:
+        raise ValueError("execution_index must be smaller than native_sample_count")
     data = loader.load_data(
         model_bundle,
         dataset_name=DATASET,
-        num_samples=1,
-        sample_index=SAMPLE_INDEX,
+        num_samples=native_sample_count,
+        sample_index=execution_index,
     )
     native_batch = data.batch
     if native_batch.get("scene") != [scene]:
@@ -640,6 +692,11 @@ def _load_native_target_batch_after_packet_gate(
     target = native_batch.get("target")
     if not isinstance(target, dict):
         raise RuntimeError("compact packet pilot requires a native target mapping")
+    native_target_indices = target.get("index")
+    if not torch.is_tensor(native_target_indices):
+        raise RuntimeError("native target batch has no target index identity")
+    if [int(value) for value in native_target_indices[0].tolist()] != target_indices:
+        raise RuntimeError("native target batch target indices do not match the canonical selection")
     return {"scene": [scene], "target": target}
 
 
@@ -651,18 +708,34 @@ def collect_paper_compact_packet_pilot(
     v16_calibration_record: Path,
     target_free_audit_artifact: Path,
     target_free_input_root: Path,
+    sample_index: int = SAMPLE_INDEX,
+    execution_index: int | None = None,
+    native_sample_count: int | None = None,
     acid_plan_path: Path = DEFAULT_PLAN_PATH,
     acid_materialization_root: Path = DEFAULT_MATERIALIZATION_ROOT,
 ) -> dict[str, Any]:
     """Run one packet pilot, optionally stopping at the target-free domain audit."""
     if not isinstance(posthoc_domain_audit_only, bool):
         raise TypeError("posthoc domain audit mode must be boolean")
+    sample_index = _require_nonnegative_sample_index(sample_index)
     from integration import create_model_loader, load_context_only_audit_data
     from scripts.ae_config import resolve_claim_selection, resolve_experiment
     from scripts.result_record import cached_sha256_file, source_identity
 
     experiment = resolve_experiment(MODEL, DATASET, PACKET_ROOT)
     selection = resolve_claim_selection(MODEL, DATASET, PACKET_ROOT)
+    execution_index = (
+        sample_index
+        if execution_index is None
+        else _require_nonnegative_sample_index(execution_index)
+    )
+    native_sample_count = (
+        selection.sample_count
+        if native_sample_count is None
+        else _require_positive_sample_count(native_sample_count)
+    )
+    if execution_index >= native_sample_count:
+        raise ValueError("execution_index must be smaller than native_sample_count")
     checkpoint_sha256 = cached_sha256_file(experiment.checkpoint)
     v15_calibration = load_frozen_v15_threshold(
         v15_calibration_record,
@@ -723,6 +796,10 @@ def collect_paper_compact_packet_pilot(
     if context["image"].shape[0] != 1:
         raise RuntimeError("compact packet pilot requires batch size one")
     _, _views, _, height, width = context["image"].shape
+    context_indices = [
+        int(value)
+        for value in context["index"][0].detach().to(device="cpu").tolist()
+    ]
 
     with strict_fp32_convolution_execution() as numerical_execution:
         planning = _capture_s1_s2_without_dense_adapter(model, context)
@@ -756,10 +833,6 @@ def collect_paper_compact_packet_pilot(
         compact_anchor_count = int(preflight.update_dense_slots.numel())
         route_summary = _route_summary(capture)
         route_diagnostics = _route_diagnostics(plan, capture)
-        context_indices = [
-            int(value)
-            for value in context["index"][0].detach().to(device="cpu").tolist()
-        ]
         quality_gate = _validate_target_free_quality_audit(
             target_free_audit_artifact,
             scene=scene,
@@ -779,6 +852,7 @@ def collect_paper_compact_packet_pilot(
                 final_packed.source_trace_sha256,
                 label="compact packet source trace",
             ),
+            sample_index=sample_index,
         )
         if (
             quality_gate["record_sha256"] != target_free_audit["sha256"]
@@ -789,6 +863,21 @@ def collect_paper_compact_packet_pilot(
             **quality_gate,
             "context_input_identity": context_input_identity,
         }
+        # The packet is committed before the canonical target-view metadata is
+        # interpreted.  This preserves the target-free route boundary while
+        # still rejecting a native target batch from a different selection.
+        source_selection = _canonical_source_selection(
+            index_path=selection.index_path,
+            source_index_sha256=selection.source_index_sha256,
+            sample_index=sample_index,
+        )
+        if (
+            scene != source_selection["scene"]
+            or context_indices != source_selection["context_indices"]
+            or context_input_identity.get("source_sample_index")
+            != source_selection["source_sample_index"]
+        ):
+            raise RuntimeError("context-only input does not match the canonical source selection")
         if compact_anchor_count == 0:
             return {
                 "schema_version": "1.0",
@@ -797,7 +886,9 @@ def collect_paper_compact_packet_pilot(
                 "paper_result_eligible": False,
                 "model": MODEL,
                 "dataset": DATASET,
-                "sample_index": SAMPLE_INDEX,
+                "sample_index": sample_index,
+                "execution_index": execution_index,
+                "native_sample_count": native_sample_count,
                 "scene": scene,
                 "target_rgb_provenance": {
                     "loaded_by_native_dataloader": False,
@@ -840,7 +931,9 @@ def collect_paper_compact_packet_pilot(
                 "paper_result_eligible": False,
                 "model": MODEL,
                 "dataset": DATASET,
-                "sample_index": SAMPLE_INDEX,
+                "sample_index": sample_index,
+                "execution_index": execution_index,
+                "native_sample_count": native_sample_count,
                 "scene": scene,
                 "target_rgb_provenance": {
                     "loaded_by_native_dataloader": False,
@@ -883,6 +976,9 @@ def collect_paper_compact_packet_pilot(
             bundle,
             scene=scene,
             context_indices=context_indices,
+            target_indices=source_selection["target_indices"],
+            execution_index=execution_index,
+            native_sample_count=native_sample_count,
         )
         target_mapping = target_batch.get("target")
         if not isinstance(target_mapping, dict) or not torch.is_tensor(target_mapping.get("image")):
@@ -925,7 +1021,9 @@ def collect_paper_compact_packet_pilot(
         "paper_result_eligible": False,
         "model": MODEL,
         "dataset": DATASET,
-        "sample_index": SAMPLE_INDEX,
+        "sample_index": sample_index,
+        "execution_index": execution_index,
+        "native_sample_count": native_sample_count,
         "scene": scene,
         "context_indices": context_indices,
         "target_indices": [
@@ -990,6 +1088,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--posthoc-domain-audit-only", action="store_true")
+    parser.add_argument("--sample-index", type=int, default=SAMPLE_INDEX)
+    parser.add_argument(
+        "--execution-index",
+        type=int,
+        help="Prepared-dataloader ordinal; defaults to --sample-index for legacy sample-0 use",
+    )
+    parser.add_argument(
+        "--native-sample-count",
+        type=int,
+        help="Prepared-dataloader length; defaults to the frozen claim selection count",
+    )
     parser.add_argument("--v15-calibration-record", type=Path, required=True)
     parser.add_argument("--v16-calibration-record", type=Path, required=True)
     parser.add_argument("--target-free-audit-artifact", type=Path, required=True)
@@ -1001,6 +1110,12 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MATERIALIZATION_ROOT,
     )
     args = parser.parse_args(argv)
+    if args.sample_index < 0:
+        parser.error("--sample-index must be non-negative")
+    if args.execution_index is not None and args.execution_index < 0:
+        parser.error("--execution-index must be non-negative")
+    if args.native_sample_count is not None and args.native_sample_count <= 0:
+        parser.error("--native-sample-count must be positive")
     if args.output_dir.exists():
         parser.error("--output-dir must be new")
     device = torch.device(args.device)
@@ -1021,6 +1136,9 @@ def main(argv: list[str] | None = None) -> int:
             v16_calibration_record=args.v16_calibration_record,
             target_free_audit_artifact=args.target_free_audit_artifact,
             target_free_input_root=args.target_free_input_root,
+            sample_index=args.sample_index,
+            execution_index=args.execution_index,
+            native_sample_count=args.native_sample_count,
             acid_plan_path=args.acid_plan_path,
             acid_materialization_root=args.acid_materialization_root,
         )
@@ -1033,7 +1151,9 @@ def main(argv: list[str] | None = None) -> int:
             "paper_result_eligible": False,
             "model": MODEL,
             "dataset": DATASET,
-            "sample_index": SAMPLE_INDEX,
+            "sample_index": args.sample_index,
+            "execution_index": args.execution_index,
+            "native_sample_count": args.native_sample_count,
             "failure": {"type": type(exc).__name__, "message": str(exc)},
         }
         exit_code = 1

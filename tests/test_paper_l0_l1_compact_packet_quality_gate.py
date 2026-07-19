@@ -30,7 +30,9 @@ def _calibration(character: str) -> dict:
     }
 
 
-def _audit_record(pilot) -> tuple[dict, dict, dict, dict]:
+def _audit_record(pilot, *, sample_index: int | None = None) -> tuple[dict, dict, dict, dict]:
+    if sample_index is None:
+        sample_index = pilot.SAMPLE_INDEX
     checkpoint_sha256 = _sha("b")
     v15 = _calibration("c")
     v16 = _calibration("d")
@@ -74,7 +76,7 @@ def _audit_record(pilot) -> tuple[dict, dict, dict, dict]:
         },
         "input_identity": {
             "scene": "sample-zero",
-            "source_sample_index": pilot.SAMPLE_INDEX,
+            "source_sample_index": sample_index,
             "target_rgb_accessed": False,
             "target_camera_metadata_accessed": False,
             "context_indices": [0, 9],
@@ -108,7 +110,17 @@ def _write_audit(path: Path, record: dict, pilot) -> None:
     path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
 
 
-def _validate(path: Path, pilot, v15: dict, v16: dict, route: dict) -> dict:
+def _validate(
+    path: Path,
+    pilot,
+    v15: dict,
+    v16: dict,
+    route: dict,
+    *,
+    sample_index: int | None = None,
+) -> dict:
+    if sample_index is None:
+        sample_index = pilot.SAMPLE_INDEX
     return pilot._validate_target_free_quality_audit(
         path,
         scene="sample-zero",
@@ -116,6 +128,7 @@ def _validate(path: Path, pilot, v15: dict, v16: dict, route: dict) -> dict:
         checkpoint_sha256=_sha("b"),
         v15_calibration=v15,
         v16_calibration=v16,
+        sample_index=sample_index,
         **route,
     )
 
@@ -133,7 +146,23 @@ def test_quality_gate_binds_the_target_free_audit_to_packet_and_calibrations(tmp
     assert gate["file_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
     assert gate["v15_calibration_sha256"] == v15["sha256"]
     assert gate["v16_calibration_sha256"] == v16["sha256"]
+    assert gate["sample_index"] == pilot.SAMPLE_INDEX
     assert gate["packed_source_trace_sha256"] == route["packed_source_trace_sha256"]
+
+
+def test_quality_gate_requires_the_audited_nondefault_sample_index(tmp_path: Path):
+    from scripts import saes_paper_l0_l1_compact_packet_pilot as pilot
+
+    sample_index = 7
+    record, v15, v16, route = _audit_record(pilot, sample_index=sample_index)
+    path = tmp_path / "target-free-audit.json"
+    _write_audit(path, record, pilot)
+
+    assert _validate(path, pilot, v15, v16, route, sample_index=sample_index)[
+        "sample_index"
+    ] == sample_index
+    with pytest.raises(ValueError, match="input identity"):
+        _validate(path, pilot, v15, v16, route, sample_index=sample_index + 1)
 
 
 @pytest.mark.parametrize(
@@ -276,7 +305,7 @@ def test_quality_gate_rejects_a_context_root_with_changed_identity(
         pilot._validate_target_free_context_input(audit, tmp_path / "other-root")
 
 
-def test_native_target_loader_runs_after_gate_and_discards_native_context():
+def test_native_target_loader_uses_the_audited_execution_index_after_gate():
     from scripts import saes_paper_l0_l1_compact_packet_pilot as pilot
 
     target = {
@@ -298,20 +327,54 @@ def test_native_target_loader_runs_after_gate_and_discards_native_context():
 
     bundle = object()
     target_batch = pilot._load_native_target_batch_after_packet_gate(
-        Loader(), bundle, scene="sample-zero", context_indices=[0, 9]
+        Loader(),
+        bundle,
+        scene="sample-zero",
+        context_indices=[0, 9],
+        target_indices=[1, 3],
+        execution_index=7,
+        native_sample_count=8,
     )
 
     assert calls == [
         {
             "bundle": bundle,
             "dataset_name": "dl3dv",
-            "num_samples": 1,
-            "sample_index": 0,
+            "num_samples": 8,
+            "sample_index": 7,
         }
     ]
     assert target_batch["scene"] == ["sample-zero"]
     assert target_batch["target"] is target
     assert "context" not in target_batch
+
+
+def test_native_target_loader_rejects_target_index_drift_after_packet_gate():
+    from scripts import saes_paper_l0_l1_compact_packet_pilot as pilot
+
+    class Loader:
+        def load_data(self, _bundle, **_kwargs):
+            return SimpleNamespace(
+                batch={
+                    "scene": ["sample-zero"],
+                    "context": {"index": torch.tensor([[0, 9]])},
+                    "target": {
+                        "image": torch.zeros((1, 2, 3, 4, 4)),
+                        "index": torch.tensor([[1, 5]]),
+                    },
+                }
+            )
+
+    with pytest.raises(RuntimeError, match="target indices"):
+        pilot._load_native_target_batch_after_packet_gate(
+            Loader(),
+            object(),
+            scene="sample-zero",
+            context_indices=[0, 9],
+            target_indices=[1, 3],
+            execution_index=0,
+            native_sample_count=1,
+        )
 
 
 def test_quality_cli_requires_disjoint_calibrations_and_target_free_audit(
@@ -328,3 +391,44 @@ def test_quality_cli_requires_disjoint_calibrations_and_target_free_audit(
     assert "--v16-calibration-record" in stderr
     assert "--target-free-audit-artifact" in stderr
     assert "--target-free-input-root" in stderr
+
+
+def test_quality_collector_rejects_a_negative_sample_index_before_loading(tmp_path: Path):
+    from scripts import saes_paper_l0_l1_compact_packet_pilot as pilot
+
+    with pytest.raises(ValueError, match="sample_index"):
+        pilot.collect_paper_compact_packet_pilot(
+            device=torch.device("cpu"),
+            v15_calibration_record=tmp_path / "v15.json",
+            v16_calibration_record=tmp_path / "v16.json",
+            target_free_audit_artifact=tmp_path / "audit.json",
+            target_free_input_root=tmp_path / "input",
+            sample_index=-1,
+        )
+
+
+def test_quality_cli_rejects_a_negative_sample_index(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    from scripts import saes_paper_l0_l1_compact_packet_pilot as pilot
+
+    with pytest.raises(SystemExit) as error:
+        pilot.main(
+            [
+                "--output-dir",
+                str(tmp_path / "output"),
+                "--v15-calibration-record",
+                str(tmp_path / "v15.json"),
+                "--v16-calibration-record",
+                str(tmp_path / "v16.json"),
+                "--target-free-audit-artifact",
+                str(tmp_path / "audit.json"),
+                "--target-free-input-root",
+                str(tmp_path / "input"),
+                "--sample-index",
+                "-1",
+            ]
+        )
+
+    assert error.value.code == 2
+    assert "--sample-index must be non-negative" in capsys.readouterr().err

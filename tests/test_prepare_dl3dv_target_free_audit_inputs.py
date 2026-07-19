@@ -48,13 +48,16 @@ def _write_raw_scene(root: Path, scene: str) -> None:
     )
 
 
-def _fixture(tmp_path: Path) -> tuple[Path, Path]:
+def _fixture(tmp_path: Path, *, sample_count: int = 1) -> tuple[Path, Path]:
     from data.convert_dl3dv import _canonical_sha256
     from scripts.compile_protocol import canonicalize_index
 
-    scene = "scene-fixed"
+    if sample_count not in {1, 2}:
+        raise ValueError("fixture supports one or two samples")
+    scenes = ["scene-fixed", "scene-second"][:sample_count]
     raw_root = tmp_path / "raw"
-    _write_raw_scene(raw_root, scene)
+    for scene in scenes:
+        _write_raw_scene(raw_root, scene)
     source_plans = {
         scene: {
             "re10k": {
@@ -62,6 +65,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
                 "source_image_shape": [540, 960],
             }
         }
+        for scene in scenes
     }
     (raw_root / ".scarf-dl3dv-source.json").write_text(
         json.dumps(
@@ -77,7 +81,17 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     )
     index = tmp_path / "official-index.json"
     index.write_text(
-        json.dumps({scene: {"context": [0, 5], "target": [1, 2, 3, 4]}}),
+        json.dumps(
+            {
+                scene: {
+                    "context": [0, 5] if scene == "scene-fixed" else [1, 4],
+                    "target": [1, 2, 3, 4]
+                    if scene == "scene-fixed"
+                    else [0, 2, 3, 5],
+                }
+                for scene in scenes
+            }
+        ),
         encoding="utf-8",
     )
     index_sha256 = _sha256(index)
@@ -91,7 +105,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
                         "index_path": str(index),
                         "source_index_sha256": index_sha256,
                         "sample_selection_sha256": summary["sample_selection_sha256"],
-                        "sample_count": 1,
+                        "sample_count": sample_count,
                         "dataset_tree_sha256": "d" * 64,
                     }
                 }
@@ -127,6 +141,12 @@ def test_target_free_audit_preparation_opens_only_context_rgb(
     assert record["target_rgb_included"] is False
     assert record["target_rgb_opened"] is False
     assert record["target_rgb_paths_passed_to_encoder"] is False
+    assert record["source_sample_index"] == 0
+    assert record["source"]["scene_source_plans_sha256"] == convert_dl3dv._canonical_sha256(
+        json.loads((raw_root / ".scarf-dl3dv-source.json").read_text(encoding="utf-8"))[
+            "scene_source_plans"
+        ]
+    )
     assert record["opened_source_file_count"] == 3
     assert [entry["role"] for entry in record["opened_source_files"]] == [
         "camera_geometry",
@@ -140,6 +160,52 @@ def test_target_free_audit_preparation_opens_only_context_rgb(
     assert all(key not in sidecar for key in ("images", "target_images", "target_rgb"))
     tree = verify_tree_manifest(output, output / ".scarf-manifest.json")
     assert tree["tree_sha256"] == record["output_tree_sha256"]
+
+
+def test_target_free_audit_preparation_binds_nonzero_sample_to_context_only_identity(
+    tmp_path: Path,
+):
+    from data.context_only_audit_input import (
+        prepare_context_only_audit_input,
+        validate_context_only_audit_input,
+    )
+    from data.prepare_dl3dv_target_free_audit_inputs import prepare_inputs
+
+    raw_root, protocol = _fixture(tmp_path, sample_count=2)
+    source_output = tmp_path / "source-audit-input"
+    source_record = prepare_inputs(
+        raw_root,
+        output_dir=source_output,
+        protocol_path=protocol,
+        sample_index=1,
+    )
+    context_output = tmp_path / "context-only"
+    context_record = prepare_context_only_audit_input(
+        source_output, output_root=context_output
+    )
+    identity = validate_context_only_audit_input(context_output)
+
+    assert source_record["source_sample_index"] == 1
+    assert source_record["selected_sample"]["scene"] == "scene-second"
+    assert source_record["selected_sample"]["context_indices"] == [1, 4]
+    assert context_record["source_sample_index"] == 1
+    assert identity["source_sample_index"] == 1
+    assert context_record["target_rgb_included"] is False
+    assert context_record["target_camera_metadata_included"] is False
+    assert context_record["target_index_included"] is False
+
+
+def test_target_free_audit_preparation_rejects_negative_sample_index(tmp_path: Path):
+    from data.prepare_dl3dv_target_free_audit_inputs import AuditInputError, prepare_inputs
+
+    raw_root, protocol = _fixture(tmp_path)
+    with pytest.raises(AuditInputError, match="sample index"):
+        prepare_inputs(
+            raw_root,
+            output_dir=tmp_path / "audit-input",
+            protocol_path=protocol,
+            sample_index=-1,
+        )
 
 
 def test_target_free_audit_preparation_rejects_context_target_overlap(tmp_path: Path):
@@ -170,10 +236,43 @@ def test_target_free_audit_cli_has_no_scene_or_threshold_override(
             "prepare_dl3dv_target_free_audit_inputs.py",
             "--output-dir",
             "outputs/new-audit-input",
-            "--sample-index",
-            "1",
+            "--scene",
+            "scene-override",
         ],
     )
     with pytest.raises(SystemExit) as exc:
         main()
     assert exc.value.code == 2
+
+
+def test_target_free_audit_cli_forwards_nonzero_sample_index(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from data import prepare_dl3dv_target_free_audit_inputs as module
+
+    captured: dict[str, object] = {}
+
+    def fake_prepare_inputs(raw_root, *, output_dir, sample_index):
+        captured.update(
+            {
+                "raw_root": raw_root,
+                "output_dir": output_dir,
+                "sample_index": sample_index,
+            }
+        )
+        return {"output_tree_sha256": "a" * 64}
+
+    monkeypatch.setattr(module, "prepare_inputs", fake_prepare_inputs)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "prepare_dl3dv_target_free_audit_inputs.py",
+            "--output-dir",
+            "outputs/new-audit-input",
+            "--sample-index",
+            "1",
+        ],
+    )
+
+    assert module.main() == 0
+    assert captured["sample_index"] == 1

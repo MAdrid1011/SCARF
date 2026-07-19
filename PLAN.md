@@ -18,15 +18,16 @@
 
 ### Active Execution Priority (2026-07-19)
 
-1. Freeze V16 only from the existing evaluation-disjoint ACID 24/8
-   context-only contract. It may not use DL3DV samples 1--4, target RGB,
-   target cameras, or a mutable sample list.
-2. Run one DL3DV sample-0 target-free audit followed by at most one quality
-   gate. Promote to the fixed eight-scene gate only when PSNR loss is at most
-   0.15 dB and SSIM/LPIPS deltas are at most 0.005.
+1. The V16 ACID 24/8 context-only freeze and the one valid DL3DV sample-0
+   gate are complete. Their thresholds, checkpoint, route semantics, and
+   target-free audit identity are immutable inputs to the next gate.
+2. Execute the dedicated TranSplat/DL3DV fixed eight-scene V16 gate. It must
+   bind stable source ordinals `0..7` separately from prepared-dataloader
+   execution ordinals, build one context-only sidecar and target-free audit
+   per scene, and load native targets only after that scene's packet commits.
 3. Treat Full/fallback fidelity as a control only. Do not start sensitivity,
    physical-proxy, cross-dataset, or Full-only expansion work before the
-   frozen sparse route passes the sample-0 gate.
+   fixed eight-scene sparse route passes every per-scene and aggregate gate.
 
 ### Current L0/L1 Repair Contract (2026-07-19)
 
@@ -183,6 +184,17 @@
   fail-closed. Its final route is `L0/L1/Full=0/206/7986`, so it authorizes the
   fixed eight-scene V16 development gate only. It does not establish Table 1,
   Figure 11, timing, or S2/S3 sparse-execution eligibility.
+- Fixed eight-scene registration: `scripts/saes_paper_l0_l1_eight_scene_gate.py`
+  is the only authorized V16 expansion entrypoint. It freezes canonical source
+  indices `0..7`, source-index SHA `eab212...863f4`, selection SHA
+  `a2b432...b63e`, checkpoint `89e43...a69a`, V15 `821ce...e9596`, V16
+  `a2786...1ba`, mechanism `7dae4...b01f5`, prepared DL3DV tree
+  `4ea2...c6ef9`, and the raw DL3DV source record. Every scene independently
+  executes source context preparation, context-only conversion, target-free
+  packed Adapter audit, and exact-audit quality. The aggregate requires all
+  eight scene verdicts plus both the 32-view pooled and scene-macro quality
+  gates to pass; it records route totals and keeps
+  `whole_pipeline_s2_s3_sparse_execution_verified=false`.
 
 ## 2. Baseline And Comparability
 

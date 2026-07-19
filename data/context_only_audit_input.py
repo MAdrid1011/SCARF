@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 
 import torch
 
@@ -57,6 +58,7 @@ _SOURCE_BINDING_FIELDS = frozenset(
         "source_sidecar_tree_sha256",
     )
 )
+_OPTIONAL_SOURCE_BINDING_FIELDS = frozenset(("canonical_selection_sha256",))
 _SIDECAR_FIELDS = frozenset(("index_sha256", "record_sha256"))
 
 
@@ -84,10 +86,22 @@ def _indices(value: Any, label: str) -> list[int]:
     return list(value)
 
 
+def _sample_index(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"context-only audit has an invalid {label}")
+    return value
+
+
 def _sha256(value: Any, label: str) -> str:
     if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
         raise ValueError(f"context-only audit has an invalid {label}")
     return value
+
+
+def _canonical_sha256(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _copy_context_image(value: Any) -> Any:
@@ -100,23 +114,30 @@ def _copy_context_image(value: Any) -> Any:
     raise ValueError("context-only audit image has an unsupported type")
 
 
-def _source_contract(source_root: Path) -> tuple[dict[str, Any], list[int], str]:
+def _source_contract(
+    source_root: Path,
+) -> tuple[dict[str, Any], list[int], str, int, str]:
     source = _load_json(source_root / "audit-input.json", "source audit input")
+    source_sample_index = _sample_index(
+        source.get("source_sample_index"), "source sample index"
+    )
     if (
         source.get("kind") != "dl3dv_target_free_l1_primary_reference_audit_input"
         or source.get("status") != "PASS"
         or source.get("model") != "transplat"
         or source.get("dataset") != "dl3dv"
-        or source.get("source_sample_index") != 0
         or source.get("target_rgb_included") is not False
     ):
-        raise ValueError("source audit input violates the fixed DL3DV contract")
+        raise ValueError("source audit input violates the DL3DV contract")
     selected = source.get("selected_sample")
     if not isinstance(selected, dict) or not isinstance(selected.get("scene"), str):
         raise ValueError("source audit input has no fixed scene")
     context_indices = _indices(selected.get("context_indices"), "context indices")
+    target_indices = _indices(selected.get("target_indices"), "target indices")
     if len(context_indices) != 2:
         raise ValueError("context-only audit requires exactly two context views")
+    if set(context_indices) & set(target_indices):
+        raise ValueError("source audit context and target indices overlap")
     protocol = source.get("canonical_protocol")
     if not isinstance(protocol, dict):
         raise ValueError("source audit input lacks a canonical index hash")
@@ -125,13 +146,28 @@ def _source_contract(source_root: Path) -> tuple[dict[str, Any], list[int], str]
         protocol.get("sample_selection_sha256"),
         "source canonical sample-selection hash",
     )
-    return source, context_indices, str(selected["scene"])
+    canonical_selection = source.get("canonical_selection")
+    expected_selection = {
+        "source_sample_index": source_sample_index,
+        "scene": str(selected["scene"]),
+        "context_indices": context_indices,
+        "target_indices": target_indices,
+    }
+    if not isinstance(canonical_selection, Mapping) or dict(canonical_selection) != expected_selection:
+        raise ValueError("source audit input canonical selection changed")
+    return (
+        source,
+        context_indices,
+        str(selected["scene"]),
+        source_sample_index,
+        _canonical_sha256(expected_selection),
+    )
 
 
 def prepare_context_only_audit_input(
     source_root: Path, *, output_root: Path
 ) -> dict[str, Any]:
-    """Compile the fixed source sidecar to only its two context camera records.
+    """Compile one source-bound sidecar to only its two context camera records.
 
     The source sidecar is consumed only by this preparation step. The emitted
     tree does not retain target image bytes, target indices, or target camera
@@ -143,7 +179,14 @@ def prepare_context_only_audit_input(
         raise FileExistsError(
             f"context-only audit output already exists: {output_root}"
         )
-    source, context_indices, scene = _source_contract(source_root)
+    source_tree = verify_tree_manifest(source_root, source_root / ".scarf-manifest.json")
+    (
+        source,
+        context_indices,
+        scene,
+        source_sample_index,
+        canonical_selection_sha256,
+    ) = _source_contract(source_root)
     source_sidecar_identity = validate_target_free_input_root(
         source_root / "sidecar", "dl3dv"
     )
@@ -188,19 +231,18 @@ def prepare_context_only_audit_input(
         "paper_result_eligible": False,
         "model": "transplat",
         "dataset": "dl3dv",
-        "source_sample_index": 0,
+        "source_sample_index": source_sample_index,
         "fixed_context": {"scene": scene, "context_indices": context_indices},
         "source_binding": {
             "source_audit_input_sha256": sha256_file(source_root / "audit-input.json"),
-            "source_audit_tree_sha256": verify_tree_manifest(
-                source_root, source_root / ".scarf-manifest.json"
-            )["tree_sha256"],
+            "source_audit_tree_sha256": source_tree["tree_sha256"],
             "canonical_index_sha256": source["canonical_protocol"][
                 "source_index_sha256"
             ],
             "canonical_sample_selection_sha256": source["canonical_protocol"].get(
                 "sample_selection_sha256"
             ),
+            "canonical_selection_sha256": canonical_selection_sha256,
             "source_sidecar_tree_sha256": source_sidecar_identity["tree_sha256"],
         },
         "sidecar": {
@@ -248,6 +290,9 @@ def validate_context_only_audit_input(root: Path) -> dict[str, Any]:
     """Validate a context-only input without exposing target-side fields."""
     root = Path(root).resolve()
     audit = _load_json(root / "audit-input.json", "context-only audit input")
+    source_sample_index = _sample_index(
+        audit.get("source_sample_index"), "source sample index"
+    )
     if (
         set(audit) != _INPUT_FIELDS
         or audit.get("schema_version") != "1.0"
@@ -256,7 +301,6 @@ def validate_context_only_audit_input(root: Path) -> dict[str, Any]:
         or audit.get("paper_result_eligible") is not False
         or audit.get("model") != "transplat"
         or audit.get("dataset") != "dl3dv"
-        or audit.get("source_sample_index") != 0
         or audit.get("target_rgb_included") is not False
         or audit.get("target_camera_metadata_included") is not False
         or audit.get("target_index_included") is not False
@@ -281,11 +325,20 @@ def validate_context_only_audit_input(root: Path) -> dict[str, Any]:
     source_binding = audit.get("source_binding")
     if (
         not isinstance(source_binding, dict)
-        or set(source_binding) != _SOURCE_BINDING_FIELDS
+        or set(source_binding)
+        not in {
+            _SOURCE_BINDING_FIELDS,
+            _SOURCE_BINDING_FIELDS | _OPTIONAL_SOURCE_BINDING_FIELDS,
+        }
     ):
         raise ValueError("context-only audit input has an invalid source binding")
     for key in _SOURCE_BINDING_FIELDS:
         _sha256(source_binding.get(key), f"source binding {key}")
+    if "canonical_selection_sha256" in source_binding:
+        _sha256(
+            source_binding.get("canonical_selection_sha256"),
+            "source binding canonical selection",
+        )
     test_root = root / "sidecar" / "test"
     index = _load_json(test_root / "index.json", "context-only audit sidecar index")
     if set(index) != {fixed["scene"]}:
@@ -326,7 +379,7 @@ def validate_context_only_audit_input(root: Path) -> dict[str, Any]:
         "tree_sha256": tree["tree_sha256"],
         "manifest_sha256": tree["manifest_sha256"],
         "audit_input_sha256": sha256_file(root / "audit-input.json"),
-        "source_sample_index": int(audit["source_sample_index"]),
+        "source_sample_index": source_sample_index,
         "source_binding": dict(source_binding),
         "sidecar": dict(sidecar),
         "target_rgb_accessed": False,

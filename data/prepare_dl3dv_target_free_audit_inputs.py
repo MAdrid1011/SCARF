@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare one fixed DL3DV context-only sidecar for a target-free SAES audit."""
+"""Prepare one selected DL3DV context-only sidecar for a target-free SAES audit."""
 
 from __future__ import annotations
 
@@ -51,7 +51,16 @@ def _load_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def _protocol_selection(protocol_path: Path) -> tuple[dict[str, Any], Path, dict[str, Any], dict[str, Any]]:
+def _sample_index(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AuditInputError("DL3DV sample index must be a nonnegative integer")
+    return value
+
+
+def _protocol_selection(
+    protocol_path: Path, *, sample_index: int
+) -> tuple[dict[str, Any], Path, dict[str, Any], dict[str, Any]]:
+    sample_index = _sample_index(sample_index)
     protocol = _load_json(protocol_path, "evaluation protocol")
     pairs = protocol.get("pairs")
     contract = pairs.get(PAIR) if isinstance(pairs, Mapping) else None
@@ -63,9 +72,12 @@ def _protocol_selection(protocol_path: Path) -> tuple[dict[str, Any], Path, dict
         raise AuditInputError("DL3DV protocol has no source-bound index")
     resolved_index = (ROOT / index_path).resolve()
     rows, summary = canonicalize_index(resolved_index, index_sha256)
-    if len(rows) != contract.get("sample_count") or SAMPLE_INDEX >= len(rows):
-        raise AuditInputError("DL3DV protocol has an invalid fixed sample count")
-    row = rows[SAMPLE_INDEX]
+    if len(rows) != contract.get("sample_count"):
+        raise AuditInputError("DL3DV protocol sample count does not match its index")
+    rows_by_source_index = {row["sample_index"]: row for row in rows}
+    if sample_index not in rows_by_source_index:
+        raise AuditInputError("DL3DV protocol has no requested sample index")
+    row = rows_by_source_index[sample_index]
     context = row.get("context_indices")
     target = row.get("target_indices")
     if (
@@ -148,13 +160,17 @@ def prepare_inputs(
     *,
     output_dir: Path,
     protocol_path: Path = DEFAULT_PROTOCOL,
+    sample_index: int = SAMPLE_INDEX,
 ) -> dict[str, Any]:
-    """Write the immutable sample-0 sidecar without decoding target RGB."""
+    """Write one source-bound sidecar without decoding target RGB."""
     raw_root = Path(raw_root).resolve()
     output_dir = Path(output_dir).resolve()
     if output_dir.exists():
         raise FileExistsError(f"target-free audit output already exists: {output_dir}")
-    contract, index_path, row, selection_summary = _protocol_selection(protocol_path)
+    sample_index = _sample_index(sample_index)
+    contract, index_path, row, selection_summary = _protocol_selection(
+        protocol_path, sample_index=sample_index
+    )
     scene = row["scene"]
     context_indices = list(row["context_indices"])
     target_indices = list(row["target_indices"])
@@ -197,13 +213,19 @@ def prepare_inputs(
         "paper_result_eligible": False,
         "model": "transplat",
         "dataset": "dl3dv",
-        "source_sample_index": SAMPLE_INDEX,
+        "source_sample_index": sample_index,
         "selected_sample": {
             "scene": scene,
             "context_indices": context_indices,
             "target_indices": target_indices,
             "audit_selection_sha256": audit_selection_summary["sample_selection_sha256"],
             "audit_selection_file_sha256": selection_sha256,
+        },
+        "canonical_selection": {
+            "source_sample_index": row["sample_index"],
+            "scene": scene,
+            "context_indices": context_indices,
+            "target_indices": target_indices,
         },
         "canonical_protocol": {
             "pair": PAIR,
@@ -216,6 +238,7 @@ def prepare_inputs(
             "revision": source.get("revision"),
             "benchmark_metadata_sha256": source.get("benchmark_metadata_sha256"),
             "filelist_sha256": source.get("filelist_sha256"),
+            "scene_source_plans_sha256": source.get("scene_source_plans_sha256"),
             "source_record_sha256": source_record_sha256,
         },
         "target_rgb_included": False,
@@ -233,7 +256,7 @@ def prepare_inputs(
         output_dir,
         "dl3dv-target-free-audit",
         "official DL3DV benchmark context-only sidecar",
-        f"protocol:{contract['source_index_sha256']};sample:{SAMPLE_INDEX}",
+        f"protocol:{contract['source_index_sha256']};sample:{sample_index}",
     )
     manifest_path = output_dir / ".scarf-manifest.json"
     manifest_path.write_text(
@@ -250,9 +273,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-root", type=Path, default=DEFAULT_RAW_ROOT)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--sample-index", type=int, default=SAMPLE_INDEX)
     args = parser.parse_args()
     try:
-        record = prepare_inputs(args.raw_root, output_dir=args.output_dir)
+        record = prepare_inputs(
+            args.raw_root,
+            output_dir=args.output_dir,
+            sample_index=args.sample_index,
+        )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

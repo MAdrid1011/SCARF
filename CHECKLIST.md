@@ -72,6 +72,12 @@
   `0.0004545`. The committed route is `L0/L1/Full=0/206/7986`; it authorizes
   only the fixed V16 8-scene development gate, not a sparse-execution claim or
   metric tuning rerun.
+- [ ] Run the registered TranSplat/DL3DV fixed eight-scene V16 gate with
+  source ordinals `0..7`. Each scene must first produce its own target-free
+  source/context sidecar and packed Adapter audit, then pass the exact-audit
+  quality gate. Require every scene plus 32-view pooled and scene-macro
+  PSNR/SSIM/LPIPS gates to pass before any MVSplat, DepthSplat, 140-scene,
+  Figure 11, or cross-dataset work.
 
 ## Documentation
 
