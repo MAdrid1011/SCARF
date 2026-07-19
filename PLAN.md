@@ -18,18 +18,18 @@
 
 ### Active Execution Priority (2026-07-19)
 
-1. The historical V16 ACID 24/8 freeze and one valid DL3DV sample-0 gate are
-   complete, but are superseded for future runs by the native dense raw-head
-   closure repair. The repair changes V16's selected-anchor attributes, so a
-   new ACID 24/8 V16 record is required before any new DL3DV audit or quality
-   result may be accepted.
-2. Execute the dedicated TranSplat/DL3DV fixed eight-scene V16 gate. It must
-   bind stable source ordinals `0..7` separately from prepared-dataloader
-   execution ordinals, build one context-only sidecar and target-free audit
-   per scene, and load native targets only after that scene's packet commits.
-3. Treat Full/fallback fidelity as a control only. Do not start sensitivity,
-   physical-proxy, cross-dataset, or Full-only expansion work before the
-   fixed eight-scene sparse route passes every per-scene and aggregate gate.
+1. The native-dense raw-head repair has a fresh ACID 24/8 V15/V16 freeze and
+   one valid DL3DV sample-0 gate. The frozen V16 is
+   `3d8624...698396ac`; the historical V2 record is superseded.
+2. The dedicated TranSplat/DL3DV fixed eight-scene V16 gate has passed under
+   source ordinals `0..7`, with one context-only sidecar and target-free audit
+   per scene before native targets load. Its result is a development quality
+   gate, not Table 1, Figure 11, sparse-execution, or timing evidence.
+3. Next, parameterize the native-dense V16 simulator by explicit model,
+   checkpoint, raw-head, Adapter, and decoder contracts. MVSplat and
+   DepthSplat each require their own evaluation-disjoint calibration, sample-0
+   target-free audit, quality gate, and fixed eight-scene gate. Do not reuse
+   TranSplat thresholds, route evidence, or result eligibility across models.
 
 ### Current L0/L1 Repair Contract (2026-07-19)
 
@@ -211,6 +211,37 @@
   Adapter equivalence. The V16 calibration loader now binds this execution
   contract, so the prior V16 record is intentionally rejected pending a fresh
   ACID 24/8 freeze.
+- Native-dense V5 freeze: the fresh ACID 24/8 target-free collection at
+  `outputs/ae_dl3dv_repair_diagnostics/acid_disjoint_l1_15_16_calibration_v5_native_dense_evidence_bound_extension/`
+  retained V15 `821ce...e9596` and froze V16 `3d8624...698396ac` at
+  `0.5819945335` under
+  `native-dense-head-closure-selected-packet-v2`. Its mechanism identity is
+  `418c501d...866d71`; the train/holdout split, checkpoint, and target-free
+  access contracts were revalidated before promotion.
+- Native-dense sample-0 gate: the required target-free audit and exact-audit
+  quality run at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_v16_native_dense_evidence_v1/`
+  both passed. The route is `L0/L1/Full=0/206/7986`; PSNR loss is `0.0600014`
+  dB, SSIM loss `0.0002271`, and LPIPS increase `0.0004551`. Both raw-head
+  convolution deltas are exactly zero and the dense head is reuse-only for a
+  guard-requested Full extension.
+- Native-dense fixed eight-scene v3: the new non-overwriting gate at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_dl3dv_l1_15_v16_acid_disjoint_8scene_v3_native_dense_evidence_bound_extension/`
+  passed all eight target-free audits and quality gates (32 views; pooled and
+  scene-macro PSNR loss `0.0137366` dB, SSIM loss `0.000135224`, LPIPS increase
+  `0.000244580`; worst PSNR loss `0.0600014` dB). Its self-hash is
+  `25130728...d9d750`, route totals are `L0/L1/Full=0/1816/63720`, and all
+  Full tiles used the audited native-dense reuse path with no raw-head equality
+  failure. It remains explicitly
+  `paper_result_eligible=false`, with zero claimed S2/S3 saving and no timing
+  claim.
+- Post-gate decision: do not run `run_ae quality` for MVSplat or DepthSplat.
+  That path is a 140-scene `--claim-run` and is correctly fail-closed while
+  model-specific source-bound S2/S3 evidence is absent. Instead, first build
+  development-only model backends with fresh per-model calibration/application
+  identities and the same sample-0 then eight-scene target-free quality
+  contract. A failed audit or quality gate repairs that backend; it never
+  borrows the TranSplat V16 threshold or adjusts global route ratios.
 
 ## 2. Baseline And Comparability
 

@@ -80,12 +80,24 @@
   raw-head convolutions when the route already requires dense S3 work, expose
   only selected outputs to the packet, record zero S3 head saving, and pass a
   target-free sample-1 exact-equality diagnostic.
-- [ ] Freeze a new ACID 24/8 V16 record bound to the native dense raw-head
-  closure contract; do not reuse the superseded V16 SHA.
-- [ ] Re-run one DL3DV sample-0 target-free audit and one exact-audit quality
-  gate under the new V16 record. Only then re-run the fixed 8-scene gate and
-  require every scene plus the pooled and macro quality thresholds before any
-  MVSplat, DepthSplat, 140-scene, Figure 11, or cross-dataset work.
+- [x] Freeze the fresh ACID 24/8 V15/V16 pair bound to the native dense
+  raw-head closure: V15 remains `821ce...e9596`; V16 is
+  `3d8624...698396ac` under
+  `native-dense-head-closure-selected-packet-v2`, with mechanism
+  `418c501d...866d71`. Do not reuse the superseded V16 SHA.
+- [x] Re-run the one DL3DV sample-0 target-free audit and exact-audit quality
+  gate under the new V16 record, then the fixed eight-scene gate. The new
+  sample-0 root is `transplat_sample0_v16_native_dense_evidence_v1` and the
+  eight-scene v3 root passed 8/8 audits and quality gates (32 views, pooled
+  PSNR loss `0.0137366` dB, SSIM loss `0.000135224`, LPIPS increase
+  `0.000244580`; self-hash `25130728...d9d750`). This authorizes only the
+  next development-stage model-specific repair, not Table 1, Figure 11,
+  sparse execution, timing, or cross-dataset claims.
+- [ ] Parameterize the native-dense target-free simulator for MVSplat and
+  DepthSplat with distinct model/checkpoint/raw-head/Adapter/decoder bindings.
+  For each model, require a fresh ACID evaluation-disjoint calibration,
+  sample-0 audit, one quality gate, and fixed eight-scene gate before any
+  140-scene or Table 1 claim path.
 - [x] Preserve `transplat_dl3dv_l1_15_v16_acid_disjoint_8scene_v1` as an
   invalid CPU-only preflight: the driver used the preparation record instead
   of the validated context identity, so all eight scenes failed before an
