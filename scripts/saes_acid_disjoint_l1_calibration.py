@@ -254,9 +254,6 @@ def _native_dense_v16_execution_evidence(
         or final["execution_finalized"] is not True
     ):
         raise RuntimeError("ACID V16 capture changed its initial/final head boundary")
-    expected_final = {**initial, "execution_finalized": True}
-    if final != expected_final:
-        raise RuntimeError("ACID V16 capture changed after the native dense initial route")
     plan_events = getattr(plan, "events", None)
     if not isinstance(plan_events, Mapping):
         raise RuntimeError("ACID V16 capture has no route-plan events")
@@ -264,11 +261,33 @@ def _native_dense_v16_execution_evidence(
     if (
         not isinstance(selection_digest, str)
         or initial_events.get("computed_mask_sha256") != selection_digest
-        or final_events.get("computed_mask_sha256") != selection_digest
         or initial_events.get("full_extension_dispatched") is not False
-        or final_events.get("full_extension_dispatched") is not False
     ):
         raise RuntimeError("ACID V16 capture does not bind the native dense route plan")
+    if len(final["phases"]) == 3:
+        if (
+            final != {**initial, "execution_finalized": True}
+            or final_events.get("computed_mask_sha256") != selection_digest
+            or final_events.get("full_extension_dispatched") is not False
+        ):
+            raise RuntimeError("ACID V16 capture changed after the native dense initial route")
+        return initial
+    guarded_route = capture.get("guarded_route")
+    guard_events = getattr(guarded_route, "events", None)
+    extension_event = capture.get("extension_event")
+    extension = final["phases"][-1]
+    if (
+        len(final["phases"]) != 4
+        or final["phases"][:3] != initial["phases"]
+        or not isinstance(guard_events, Mapping)
+        or not isinstance(extension_event, Mapping)
+        or final_events.get("full_extension_dispatched") is not True
+        or final_events.get("computed_mask_sha256")
+        != guard_events.get("raw_head_request_mask_sha256")
+        or extension.get("mask_sha256")
+        != guard_events.get("additional_full_mask_sha256")
+    ):
+        raise RuntimeError("ACID V16 capture has an unbound native dense Full extension")
     return initial
 
 

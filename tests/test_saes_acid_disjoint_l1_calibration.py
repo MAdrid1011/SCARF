@@ -291,6 +291,59 @@ def test_collector_refuses_existing_frozen_outputs(tmp_path: Path):
         )
 
 
+def test_v16_execution_evidence_accepts_a_bound_native_dense_full_extension(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    initial = _native_dense_execution(finalized=False)
+    guarded = {
+        **_native_dense_execution(finalized=True),
+        "phases": [
+            *_native_dense_execution(finalized=False)["phases"],
+            {
+                "phase": "full_extension",
+                "mask_sha256": _sha("b"),
+                "tile_trace_sha256": _sha("c"),
+                "first_conv_positions_executed": 0,
+                "native_dense_first_conv_positions_executed": 0,
+                "second_conv_positions_executed": 0,
+                "native_dense_second_conv_positions_executed": 0,
+            },
+        ],
+    }
+    initial_events = {
+        "kind": "initial",
+        "computed_mask_sha256": _sha("a"),
+        "full_extension_dispatched": False,
+    }
+    final_events = {
+        "kind": "final",
+        "computed_mask_sha256": _sha("d"),
+        "full_extension_dispatched": True,
+    }
+    monkeypatch.setattr(
+        collector,
+        "native_dense_head_execution_evidence",
+        lambda events: initial if events["kind"] == "initial" else guarded,
+    )
+
+    result = collector._native_dense_v16_execution_evidence(
+        {
+            "initial_head_events": initial_events,
+            "final_head_events": final_events,
+            "extension_event": {"phase": "full_extension"},
+            "guarded_route": SimpleNamespace(
+                events={
+                    "raw_head_request_mask_sha256": _sha("d"),
+                    "additional_full_mask_sha256": _sha("b"),
+                }
+            ),
+        },
+        plan=SimpleNamespace(events={"selection_mask_sha256": _sha("a")}),
+    )
+
+    assert result == initial
+
+
 def test_collector_rejects_target_side_source_or_prepared_context():
     raw = SimpleNamespace(
         context={
