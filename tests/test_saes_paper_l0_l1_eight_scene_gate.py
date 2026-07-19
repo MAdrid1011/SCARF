@@ -195,6 +195,11 @@ def _install_fake_pipeline(monkeypatch: pytest.MonkeyPatch, module, tmp_path: Pa
 
     monkeypatch.setattr(module, "prepare_inputs", source_prepare)
     monkeypatch.setattr(module, "prepare_context_only_audit_input", context_prepare)
+    monkeypatch.setattr(
+        module,
+        "validate_context_only_audit_input",
+        lambda root: context_by_index[int(Path(root).parent.name.rsplit("_", 1)[1])],
+    )
     monkeypatch.setattr(module, "collect_incremental_selected_output_audit", audit_collect)
     monkeypatch.setattr(module, "collect_paper_compact_packet_pilot", quality_collect)
     monkeypatch.setattr(module, "source_identity", lambda: {"fixture": True})

@@ -26,7 +26,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.context_only_audit_input import prepare_context_only_audit_input
+from data.context_only_audit_input import (
+    prepare_context_only_audit_input,
+    validate_context_only_audit_input,
+)
 from data.prepare_dl3dv_target_free_audit_inputs import (
     DEFAULT_RAW_ROOT,
     prepare_inputs,
@@ -553,7 +556,8 @@ def _run_sample(
     quality_root = root / "quality"
     source = prepare_inputs(raw_root, output_dir=source_root, sample_index=sample_index)
     source_contract = _source_contract(source, selection)
-    context_identity = prepare_context_only_audit_input(source_root, output_root=context_root)
+    prepare_context_only_audit_input(source_root, output_root=context_root)
+    context_identity = validate_context_only_audit_input(context_root)
     if (
         context_identity.get("source_sample_index") != sample_index
         or context_identity.get("scene") != expected["scene"]

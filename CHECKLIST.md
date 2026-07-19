@@ -78,6 +78,11 @@
   quality gate. Require every scene plus 32-view pooled and scene-macro
   PSNR/SSIM/LPIPS gates to pass before any MVSplat, DepthSplat, 140-scene,
   Figure 11, or cross-dataset work.
+- [x] Preserve `transplat_dl3dv_l1_15_v16_acid_disjoint_8scene_v1` as an
+  invalid CPU-only preflight: the driver used the preparation record instead
+  of the validated context identity, so all eight scenes failed before an
+  audit, native target load, renderer, or metric. The corrected driver must
+  use a new output root; this record is not an 8-scene quality attempt.
 
 ## Documentation
 
