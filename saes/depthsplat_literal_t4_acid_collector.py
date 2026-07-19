@@ -45,7 +45,7 @@ from saes.depthsplat_l0_l1_materializer import (
 )
 from saes.depthsplat_literal_t4_acid_calibration import (
     HOLDOUT_SPLIT,
-    LITERAL_T4_COVERAGE_CERTIFICATE,
+    LITERAL_T4_MOMENT_CERTIFICATE,
     LITERAL_T4_MATERIALIZATION_PROFILE,
     LITERAL_T4_PROFILE_ID,
     LITERAL_T4_PROFILE_SCHEMA,
@@ -301,6 +301,25 @@ def _require_bitwise_equivalent(report: Mapping[str, Any], label: str) -> dict[s
     return dict(report)
 
 
+def _copy_scalar_trace_evidence(value: Any, *, label: str) -> Any:
+    """Detach persisted trace evidence from live native tensor packets."""
+
+    if torch.is_tensor(value):
+        raise RuntimeError(f"literal T=4 collector {label} retained a tensor")
+    if isinstance(value, Mapping):
+        return {
+            key: _copy_scalar_trace_evidence(item, label=label)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_copy_scalar_trace_evidence(item, label=label) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_scalar_trace_evidence(item, label=label) for item in value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise RuntimeError(f"literal T=4 collector {label} is not scalar trace evidence")
+
+
 def load_literal_t4_collection_runtime(*, device: torch.device) -> LiteralT4CollectionRuntime:
     """Load exactly the encoder required by the literal ACID observer."""
 
@@ -357,192 +376,260 @@ def collect_literal_t4_native_scene_observation(
 
     if not isinstance(runtime, LiteralT4CollectionRuntime):
         raise TypeError("literal T=4 collector requires a native runtime")
+    raw: Any | None = None
     context: Mapping[str, Any] | None = None
+    preparation: Mapping[str, Any] | None = None
+    execution: Any | None = None
+    plan: Any | None = None
+    initial_replay: Any | None = None
+    initial_packet: Any | None = None
+    initial_packed: Any | None = None
+    consumer: Any | None = None
+    preflight: Any | None = None
+    final_route: Any | None = None
+    producer_replay: Any | None = None
+    producer_packet: Any | None = None
+    final_packet: Any | None = None
+    final_packed: Any | None = None
+    materialized: Any | None = None
+    sample_image_grid: Any | None = None
+    get_world_rays: Any | None = None
+    aggregate: Mapping[str, Any] | None = None
+    update_binding: Mapping[str, Any] | None = None
+    full_binding: Any | None = None
+    full_bitwise: Mapping[str, Any] | None = None
+    trace: list[dict[str, Any]] | None = None
+    observation: dict[str, Any] | None = None
     try:
-        raw = context_loader(
-            materialization_root=Path(materialization_root),
-            split=split,
-            sample_index=sample_index,
-            plan_path=Path(plan_path),
-        )
-        context, preparation = prepare_acid_joint_model_context(
-            raw,
-            dataset_cfg=runtime.bundle.config.dataset,
-            encoder_cfg=runtime.bundle.config.model.encoder,
-            device=runtime.bundle.device,
-        )
-        _require_target_free_context(
-            raw,
-            preparation,
-            split=split,
-            sample_index=sample_index,
-            expected_scene=scene,
-        )
-        _require_prepared_context(context)
-        with strict_fp32_convolution_execution():
-            execution = capture_depthsplat_native_execution(
-                runtime.bundle.encoder, context, source_root=ROOT / "depthsplat"
+        # The native encoder retains a custom checkpoint/autograd path in its
+        # source tree. ``no_grad`` prevents graph retention without turning
+        # its captured tensors into inference tensors.
+        with torch.no_grad():
+            raw = context_loader(
+                materialization_root=Path(materialization_root),
+                split=split,
+                sample_index=sample_index,
+                plan_path=Path(plan_path),
             )
-            if execution.routing_features is None or execution.routing_z_depths is None:
-                raise RuntimeError("literal T=4 collector has no routing tensors")
-            _views, _channels, height, width = execution.dense_raw_head.shape
-            if height % TILE_SIZE or width % TILE_SIZE:
-                raise RuntimeError("literal T=4 collector image shape is not divisible by four")
-            plan = build_literal_paper_t4_probe_first_plan(
-                execution.routing_features,
-                execution.routing_z_depths,
-                height=height,
-                width=width,
-                feature_threshold=FEATURE_THRESHOLD,
-                depth_threshold=DEPTH_THRESHOLD,
+            context, preparation = prepare_acid_joint_model_context(
+                raw,
+                dataset_cfg=runtime.bundle.config.dataset,
+                encoder_cfg=runtime.bundle.config.model.encoder,
+                device=runtime.bundle.device,
             )
-            if plan.events.get("contract_version") != LITERAL_PAPER_T4_PLAN_CONTRACT:
-                raise RuntimeError("literal T=4 collector route plan changed")
-            initial_replay = replay_depthsplat_selected_head(
-                runtime.bundle.encoder.gaussian_head,
-                execution.gaussian_head_input,
-                execution.dense_raw_head,
-                plan.selection_mask,
-                native_full_mask=plan.full_mask,
+            _require_target_free_context(
+                raw,
+                preparation,
+                split=split,
+                sample_index=sample_index,
+                expected_scene=scene,
             )
-            _require_equivalent(initial_replay.equivalence, "initial selected head")
-            initial_packet = build_depthsplat_sparse_raw_packet(execution, initial_replay)
-            consumer = DepthSplatPackedGaussianConsumer(runtime.bundle.encoder.gaussian_adapter)
-            initial_packed = consumer.convert(
-                initial_packet,
-                image_shape=(height, width),
-                native_execution=execution,
-                native_full_mask=plan.full_mask,
+            _require_prepared_context(context)
+            with strict_fp32_convolution_execution():
+                execution = capture_depthsplat_native_execution(
+                    runtime.bundle.encoder, context, source_root=ROOT / "depthsplat"
+                )
+                if execution.routing_features is None or execution.routing_z_depths is None:
+                    raise RuntimeError("literal T=4 collector has no routing tensors")
+                _views, _channels, height, width = execution.dense_raw_head.shape
+                if height % TILE_SIZE or width % TILE_SIZE:
+                    raise RuntimeError("literal T=4 collector image shape is not divisible by four")
+                plan = build_literal_paper_t4_probe_first_plan(
+                    execution.routing_features,
+                    execution.routing_z_depths,
+                    height=height,
+                    width=width,
+                    feature_threshold=FEATURE_THRESHOLD,
+                    depth_threshold=DEPTH_THRESHOLD,
+                )
+                if plan.events.get("contract_version") != LITERAL_PAPER_T4_PLAN_CONTRACT:
+                    raise RuntimeError("literal T=4 collector route plan changed")
+                initial_replay = replay_depthsplat_selected_head(
+                    runtime.bundle.encoder.gaussian_head,
+                    execution.gaussian_head_input,
+                    execution.dense_raw_head,
+                    plan.selection_mask,
+                    native_full_mask=plan.full_mask,
+                )
+                _require_equivalent(initial_replay.equivalence, "initial selected head")
+                initial_packet = build_depthsplat_sparse_raw_packet(execution, initial_replay)
+                consumer = DepthSplatPackedGaussianConsumer(runtime.bundle.encoder.gaussian_adapter)
+                initial_packed = consumer.convert(
+                    initial_packet,
+                    image_shape=(height, width),
+                    native_execution=execution,
+                    native_full_mask=plan.full_mask,
+                )
+                _require_equivalent(
+                    compare_depthsplat_packed_to_dense(initial_packed, execution.dense_gaussians),
+                    "initial Adapter packet",
+                )
+                sample_image_grid, get_world_rays = _source_geometry_functions(runtime.bundle.encoder)
+                preflight = preflight_depthsplat_l0_l1_materialization(
+                    initial_packet,
+                    initial_packed,
+                    plan,
+                    execution.routing_features,
+                    execution.routing_z_depths,
+                    source_sample_image_grid=sample_image_grid,
+                    source_get_world_rays=get_world_rays,
+                    maximum_coverage_covariance_scale=1.0,
+                    execution_profile=DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
+                    collect_selected_anchor_attribute_loo_risk=True,
+                )
+                if (
+                    preflight.events.get("execution_profile")
+                    != LITERAL_T4_MATERIALIZATION_PROFILE
+                    or preflight.events.get("maximum_coverage_covariance_scale") != 1.0
+                    or preflight.events.get("selected_anchor_attribute_loo_collect_only")
+                    is not True
+                    or preflight.events.get("selected_anchor_attribute_loo_frozen_guard") is not None
+                    or int(preflight.update_dense_slots.numel()) < 1
+                ):
+                    raise RuntimeError("literal T=4 collector preflight profile changed")
+                aggregate = preflight.events.get("selected_anchor_attribute_loo_aggregate")
+                if not isinstance(aggregate, Mapping):
+                    raise RuntimeError("literal T=4 collector has no LOO aggregate")
+                final_route = resolve_depthsplat_compact_final_route(plan, preflight)
+                producer_replay = replay_depthsplat_selected_head(
+                    runtime.bundle.encoder.gaussian_head,
+                    execution.gaussian_head_input,
+                    execution.dense_raw_head,
+                    final_route.raw_head_request_mask,
+                    native_full_mask=final_route.full_passthrough_mask,
+                )
+                _require_equivalent(producer_replay.equivalence, "final selected head")
+                producer_packet = build_depthsplat_sparse_raw_packet(execution, producer_replay)
+                final_packet = subset_depthsplat_sparse_raw_packet(
+                    producer_packet, final_route.selected_output_mask
+                )
+                final_packed = consumer.convert(
+                    final_packet,
+                    image_shape=(height, width),
+                    native_execution=execution,
+                    native_full_mask=final_route.full_passthrough_mask,
+                )
+                _require_equivalent(
+                    compare_depthsplat_packed_to_dense(final_packed, execution.dense_gaussians),
+                    "final Adapter packet",
+                )
+                full_bitwise = _require_bitwise_equivalent(
+                    compare_depthsplat_full_passthrough_to_dense_bitwise(
+                        final_packed,
+                        execution.dense_gaussians,
+                        final_route.full_passthrough_mask,
+                    ),
+                    "final Full attributes",
+                )
+                materialized = apply_depthsplat_compact_l0_l1_materialization(
+                    final_packed, preflight, final_route
+                )
+                _require_bitwise_equivalent(
+                    compare_depthsplat_full_passthrough_to_dense_bitwise(
+                        materialized,
+                        execution.dense_gaussians,
+                        final_route.full_passthrough_mask,
+                    ),
+                    "materialized Full attributes",
+                )
+
+            update_binding = preflight.events.get("update_binding")
+            if not isinstance(update_binding, Mapping):
+                raise RuntimeError("literal T=4 collector preflight has no update binding")
+            full_binding = final_packed.source_trace.get(
+                "native_full_adapter_attribute_binding_sha256"
             )
-            _require_equivalent(
-                compare_depthsplat_packed_to_dense(initial_packed, execution.dense_gaussians),
-                "initial Adapter packet",
+            trace = [
+                _copy_scalar_trace_evidence(entry, label="preflight tile trace")
+                for entry in preflight.tile_trace
+            ]
+            frozen_aggregate = _copy_scalar_trace_evidence(
+                aggregate, label="selected-anchor LOO aggregate"
             )
-            sample_image_grid, get_world_rays = _source_geometry_functions(runtime.bundle.encoder)
-            preflight = preflight_depthsplat_l0_l1_materialization(
-                initial_packet,
-                initial_packed,
-                plan,
-                execution.routing_features,
-                execution.routing_z_depths,
-                source_sample_image_grid=sample_image_grid,
-                source_get_world_rays=get_world_rays,
-                maximum_coverage_covariance_scale=1.0,
-                execution_profile=DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
-                collect_selected_anchor_attribute_loo_risk=True,
-            )
-            if (
-                preflight.events.get("execution_profile")
-                != LITERAL_T4_MATERIALIZATION_PROFILE
-                or preflight.events.get("maximum_coverage_covariance_scale") != 1.0
-                or preflight.events.get("selected_anchor_attribute_loo_collect_only")
-                is not True
-                or preflight.events.get("selected_anchor_attribute_loo_frozen_guard") is not None
-                or int(preflight.update_dense_slots.numel()) < 1
-            ):
-                raise RuntimeError("literal T=4 collector preflight profile changed")
-            aggregate = preflight.events.get("selected_anchor_attribute_loo_aggregate")
-            if not isinstance(aggregate, Mapping):
-                raise RuntimeError("literal T=4 collector has no LOO aggregate")
-            final_route = resolve_depthsplat_compact_final_route(plan, preflight)
-            producer_replay = replay_depthsplat_selected_head(
-                runtime.bundle.encoder.gaussian_head,
-                execution.gaussian_head_input,
-                execution.dense_raw_head,
-                final_route.raw_head_request_mask,
-                native_full_mask=final_route.full_passthrough_mask,
-            )
-            _require_equivalent(producer_replay.equivalence, "final selected head")
-            producer_packet = build_depthsplat_sparse_raw_packet(execution, producer_replay)
-            final_packet = subset_depthsplat_sparse_raw_packet(
-                producer_packet, final_route.selected_output_mask
-            )
-            final_packed = consumer.convert(
-                final_packet,
-                image_shape=(height, width),
-                native_execution=execution,
-                native_full_mask=final_route.full_passthrough_mask,
-            )
-            _require_equivalent(
-                compare_depthsplat_packed_to_dense(final_packed, execution.dense_gaussians),
-                "final Adapter packet",
-            )
-            full_bitwise = _require_bitwise_equivalent(
-                compare_depthsplat_full_passthrough_to_dense_bitwise(
-                    final_packed,
-                    execution.dense_gaussians,
-                    final_route.full_passthrough_mask,
+            if not isinstance(frozen_aggregate, Mapping):
+                raise RuntimeError("literal T=4 collector LOO aggregate copy changed")
+            observation = {
+                "scene": scene,
+                "maximum_held_out_risks": list(
+                    frozen_aggregate.get("maximum_held_out_risks", [])
                 ),
-                "final Full attributes",
-            )
-            materialized = apply_depthsplat_compact_l0_l1_materialization(
-                final_packed, preflight, final_route
-            )
-            _require_bitwise_equivalent(
-                compare_depthsplat_full_passthrough_to_dense_bitwise(
-                    materialized,
-                    execution.dense_gaussians,
-                    final_route.full_passthrough_mask,
-                ),
-                "materialized Full attributes",
-            )
+                "preflight_tile_trace": trace,
+                "selected_anchor_loo_aggregate": dict(frozen_aggregate),
+                "evidence": {
+                    "profile_sha256": literal_t4_profile_sha256(),
+                    "route_plan_config_sha256": literal_t4_profile()["route_plan_config_sha256"],
+                    "native_execution_sha256": _require_sha256(
+                        execution.events.get("native_execution_sha256"), "native execution"
+                    ),
+                    "initial_attribute_binding_sha256": _require_sha256(
+                        initial_packed.attribute_binding_sha256, "initial Adapter binding"
+                    ),
+                    "final_selected_attribute_binding_sha256": _require_sha256(
+                        final_packed.attribute_binding_sha256, "final selected Adapter binding"
+                    ),
+                    "materialized_attribute_binding_sha256": _require_sha256(
+                        materialized.attribute_binding_sha256, "materialized Adapter binding"
+                    ),
+                    "full_passthrough_mask_sha256": _require_sha256(
+                        final_route.events.get("full_passthrough_mask_sha256"),
+                        "Full passthrough mask",
+                    ),
+                    "full_attribute_binding_sha256": _require_sha256(
+                        full_binding, "Full attribute binding"
+                    ),
+                    "full_attributes_bitwise_native": full_bitwise["bitwise_equivalent"],
+                    "coverage_certificate": preflight.events.get("coverage_certificate"),
+                    "coverage_certificate_sha256": _require_sha256(
+                        preflight.events.get("coverage_certificate_sha256"),
+                        "coverage certificate",
+                    ),
+                    "accepted_update_slots_sha256": _require_sha256(
+                        update_binding.get("slots_sha256"), "accepted update slots"
+                    ),
+                    "accepted_update_slot_count": int(preflight.update_dense_slots.numel()),
+                    "source_nonprobe_s3_attribute_reads": preflight.events.get(
+                        "source_nonprobe_s3_attribute_reads"
+                    ),
+                    "nonzero_merge_applied": int(preflight.update_dense_slots.numel()) > 0,
+                    "renderer_executed": False,
+                    "quality_metrics_computed": False,
+                    "whole_pipeline_s2_s3_sparse_execution_verified": False,
+                    "global_s2_s3_savings_claimed": False,
+                },
+                "access": dict(_ACCESS),
+            }
     finally:
-        if context is not None:
-            del context
+        # The returned observation contains only copied scalar/trace evidence.
+        # Drop every scene-sized packet before returning blocks to CUDA's cache.
+        materialized = None
+        final_packed = None
+        final_packet = None
+        producer_packet = None
+        producer_replay = None
+        final_route = None
+        preflight = None
+        initial_packed = None
+        initial_packet = None
+        initial_replay = None
+        consumer = None
+        plan = None
+        execution = None
+        sample_image_grid = None
+        get_world_rays = None
+        aggregate = None
+        update_binding = None
+        full_binding = None
+        full_bitwise = None
+        trace = None
+        preparation = None
+        context = None
+        raw = None
         if runtime.bundle.device.type == "cuda":
             torch.cuda.empty_cache()
 
-    update_binding = preflight.events.get("update_binding")
-    if not isinstance(update_binding, Mapping):
-        raise RuntimeError("literal T=4 collector preflight has no update binding")
-    full_binding = final_packed.source_trace.get("native_full_adapter_attribute_binding_sha256")
-    trace = list(preflight.tile_trace)
-    return {
-        "scene": scene,
-        "maximum_held_out_risks": list(aggregate.get("maximum_held_out_risks", [])),
-        "preflight_tile_trace": trace,
-        "selected_anchor_loo_aggregate": dict(aggregate),
-        "evidence": {
-            "profile_sha256": literal_t4_profile_sha256(),
-            "route_plan_config_sha256": literal_t4_profile()["route_plan_config_sha256"],
-            "native_execution_sha256": _require_sha256(
-                execution.events.get("native_execution_sha256"), "native execution"
-            ),
-            "initial_attribute_binding_sha256": _require_sha256(
-                initial_packed.attribute_binding_sha256, "initial Adapter binding"
-            ),
-            "final_selected_attribute_binding_sha256": _require_sha256(
-                final_packed.attribute_binding_sha256, "final selected Adapter binding"
-            ),
-            "materialized_attribute_binding_sha256": _require_sha256(
-                materialized.attribute_binding_sha256, "materialized Adapter binding"
-            ),
-            "full_passthrough_mask_sha256": _require_sha256(
-                final_route.events.get("full_passthrough_mask_sha256"), "Full passthrough mask"
-            ),
-            "full_attribute_binding_sha256": _require_sha256(
-                full_binding, "Full attribute binding"
-            ),
-            "full_attributes_bitwise_native": full_bitwise["bitwise_equivalent"],
-            "coverage_certificate": preflight.events.get("coverage_certificate"),
-            "coverage_certificate_sha256": _require_sha256(
-                preflight.events.get("coverage_certificate_sha256"), "coverage certificate"
-            ),
-            "accepted_update_slots_sha256": _require_sha256(
-                update_binding.get("slots_sha256"), "accepted update slots"
-            ),
-            "accepted_update_slot_count": int(preflight.update_dense_slots.numel()),
-            "source_nonprobe_s3_attribute_reads": preflight.events.get(
-                "source_nonprobe_s3_attribute_reads"
-            ),
-            "nonzero_merge_applied": int(preflight.update_dense_slots.numel()) > 0,
-            "renderer_executed": False,
-            "quality_metrics_computed": False,
-            "whole_pipeline_s2_s3_sparse_execution_verified": False,
-            "global_s2_s3_savings_claimed": False,
-        },
-        "access": dict(_ACCESS),
-    }
+    if observation is None:
+        raise RuntimeError("literal T=4 collector did not produce scene evidence")
+    return observation
 
 
 def _scene_record_from_observation(
@@ -574,7 +661,7 @@ def _scene_record_from_observation(
         base_evidence.get("profile_sha256") != literal_t4_profile_sha256()
         or base_evidence.get("route_plan_config_sha256")
         != literal_t4_profile()["route_plan_config_sha256"]
-        or base_evidence.get("coverage_certificate") != LITERAL_T4_COVERAGE_CERTIFICATE
+        or base_evidence.get("coverage_certificate") != LITERAL_T4_MOMENT_CERTIFICATE
         or base_evidence.get("accepted_update_slot_count", 0) < 1
         or base_evidence.get("nonzero_merge_applied") is not True
         or base_evidence.get("renderer_executed") is not False

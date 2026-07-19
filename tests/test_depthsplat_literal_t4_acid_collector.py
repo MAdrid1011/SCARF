@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import gc
 import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
+import weakref
 
 import pytest
 
@@ -127,7 +131,7 @@ def _observation(calibration, *, split: str, scene: str, sample_index: int) -> d
             "full_passthrough_mask_sha256": _digest(5000 + number),
             "full_attribute_binding_sha256": _digest(6000 + number),
             "full_attributes_bitwise_native": True,
-            "coverage_certificate": calibration.LITERAL_T4_COVERAGE_CERTIFICATE,
+            "coverage_certificate": calibration.LITERAL_T4_MOMENT_CERTIFICATE,
             "coverage_certificate_sha256": _digest(7000 + number),
             "accepted_update_slots_sha256": _digest(8000 + number),
             "accepted_update_slot_count": 1,
@@ -281,3 +285,266 @@ def test_trace_path_is_scene_safe_and_index_stable():
     assert path.startswith("scenes/calibration_train/007-")
     assert path.endswith(".json")
     assert "/../" not in path
+
+
+def test_native_scene_observation_uses_no_grad_and_releases_before_cuda_cache(monkeypatch):
+    import saes.depthsplat_literal_t4_acid_collector as collector
+
+    class Tracked:
+        pass
+
+    class TrackedMapping(dict):
+        pass
+
+    references: dict[str, weakref.ReferenceType[object]] = {}
+    execution_calls: list[tuple[str, bool]] = []
+    cache_liveness: list[list[str]] = []
+
+    def remember(name: str, value):
+        assert name not in references
+        references[name] = weakref.ref(value)
+        return value
+
+    def tracked(name: str, **attributes):
+        value = Tracked()
+        for key, item in attributes.items():
+            setattr(value, key, item)
+        return remember(name, value)
+
+    def record(name: str) -> None:
+        execution_calls.append((name, torch.is_grad_enabled()))
+
+    def context_loader(**_kwargs):
+        record("context_loader")
+        raw_context = remember(
+            "raw_context",
+            TrackedMapping(
+                image=None,
+                extrinsics=None,
+                intrinsics=None,
+                index=None,
+            ),
+        )
+        return tracked(
+            "raw",
+            context=raw_context,
+            identity={
+                "split": collector.TRAIN_SPLIT,
+                "sample_index": 0,
+                "scene": "scene-0",
+                "target_rgb_accessed": False,
+                "target_camera_metadata_accessed": False,
+                "target_index_accessed": False,
+                "teacher_artifact_accessed": False,
+                "expected_results_accessed": False,
+            },
+        )
+
+    def prepare(raw, **_kwargs):
+        record("prepare")
+        assert raw.context["image"] is None
+        prepared_context = remember(
+            "context",
+            TrackedMapping(
+                image=torch.zeros(1),
+                extrinsics=torch.zeros(1),
+                intrinsics=torch.zeros(1),
+                index=torch.zeros(1),
+                near=torch.zeros(1),
+                far=torch.zeros(1),
+            ),
+        )
+        return prepared_context, {
+            "target_mapping_present": False,
+            "target_rgb_accessed": False,
+            "target_camera_metadata_accessed": False,
+            "target_index_accessed": False,
+        }
+
+    def capture(*_args, **_kwargs):
+        record("capture")
+        return tracked(
+            "execution",
+            routing_features=torch.zeros(1),
+            routing_z_depths=torch.zeros(1),
+            dense_raw_head=torch.zeros(1, 1, 4, 4),
+            gaussian_head_input=torch.zeros(1),
+            dense_gaussians=object(),
+            events={"native_execution_sha256": _digest(1)},
+        )
+
+    def build_plan(*_args, **_kwargs):
+        record("build_plan")
+        selection_mask = torch.zeros(1, 4, 4, dtype=torch.bool)
+        return tracked(
+            "plan",
+            events={"contract_version": collector.LITERAL_PAPER_T4_PLAN_CONTRACT},
+            selection_mask=selection_mask,
+            full_mask=selection_mask.clone(),
+        )
+
+    replay_count = 0
+
+    def replay(*_args, **_kwargs):
+        nonlocal replay_count
+        record("replay")
+        replay_count += 1
+        return tracked(
+            "initial_replay" if replay_count == 1 else "producer_replay",
+            equivalence={"equivalent": True},
+        )
+
+    packet_count = 0
+
+    def build_packet(*_args, **_kwargs):
+        nonlocal packet_count
+        record("build_packet")
+        packet_count += 1
+        return tracked(
+            "initial_packet" if packet_count == 1 else "producer_packet"
+        )
+
+    class Consumer:
+        convert_count = 0
+
+        def __init__(self, _adapter):
+            record("consumer")
+            remember("consumer", self)
+
+        def convert(self, *_args, **_kwargs):
+            record("convert")
+            type(self).convert_count += 1
+            if type(self).convert_count == 1:
+                return tracked(
+                    "initial_packed",
+                    attribute_binding_sha256=_digest(2),
+                    source_trace={},
+                )
+            return tracked(
+                "final_packed",
+                attribute_binding_sha256=_digest(3),
+                source_trace={
+                    "native_full_adapter_attribute_binding_sha256": _digest(4)
+                },
+            )
+
+    def compare_packed(*_args, **_kwargs):
+        record("compare_packed")
+        return {"equivalent": True}
+
+    def source_geometry(*_args, **_kwargs):
+        record("source_geometry")
+        return (lambda *_args, **_kwargs: None, lambda *_args, **_kwargs: None)
+
+    def preflight(*_args, **_kwargs):
+        record("preflight")
+        return tracked(
+            "preflight",
+            events={
+                "execution_profile": collector.LITERAL_T4_MATERIALIZATION_PROFILE,
+                "maximum_coverage_covariance_scale": 1.0,
+                "selected_anchor_attribute_loo_collect_only": True,
+                "selected_anchor_attribute_loo_frozen_guard": None,
+                "selected_anchor_attribute_loo_aggregate": {
+                    "maximum_held_out_risks": [0.125]
+                },
+                "coverage_certificate": collector.LITERAL_T4_MOMENT_CERTIFICATE,
+                "coverage_certificate_sha256": _digest(5),
+                "update_binding": {"slots_sha256": _digest(6)},
+                "source_nonprobe_s3_attribute_reads": 0,
+            },
+            tile_trace=(
+                {
+                    "view": 0,
+                    "tile_y": 0,
+                    "tile_x": 0,
+                    "selected_anchor_attribute_loo": None,
+                },
+            ),
+            update_dense_slots=torch.tensor([0]),
+        )
+
+    def final_route(*_args, **_kwargs):
+        record("final_route")
+        mask = torch.zeros(1, 4, 4, dtype=torch.bool)
+        return tracked(
+            "final_route",
+            raw_head_request_mask=mask,
+            full_passthrough_mask=mask.clone(),
+            selected_output_mask=mask.clone(),
+            events={"full_passthrough_mask_sha256": _digest(7)},
+        )
+
+    def subset_packet(*_args, **_kwargs):
+        record("subset_packet")
+        return tracked("final_packet")
+
+    def compare_full(*_args, **_kwargs):
+        record("compare_full")
+        return {"bitwise_equivalent": True}
+
+    def materialize(*_args, **_kwargs):
+        record("materialize")
+        return tracked("materialized", attribute_binding_sha256=_digest(8))
+
+    @contextmanager
+    def strict_fp32():
+        record("strict_enter")
+        try:
+            yield
+        finally:
+            record("strict_exit")
+
+    def empty_cache():
+        gc.collect()
+        cache_liveness.append(
+            sorted(name for name, reference in references.items() if reference() is not None)
+        )
+
+    encoder = SimpleNamespace(gaussian_head=object(), gaussian_adapter=object())
+    runtime = collector.LiteralT4CollectionRuntime(
+        bundle=SimpleNamespace(
+            config=SimpleNamespace(
+                dataset=object(), model=SimpleNamespace(encoder=object())
+            ),
+            device=SimpleNamespace(type="cuda"),
+            encoder=encoder,
+        ),
+        backend_identity={},
+        checkpoint_sha256=_digest(9),
+    )
+    monkeypatch.setattr(collector, "prepare_acid_joint_model_context", prepare)
+    monkeypatch.setattr(collector, "strict_fp32_convolution_execution", strict_fp32)
+    monkeypatch.setattr(collector, "capture_depthsplat_native_execution", capture)
+    monkeypatch.setattr(collector, "build_literal_paper_t4_probe_first_plan", build_plan)
+    monkeypatch.setattr(collector, "replay_depthsplat_selected_head", replay)
+    monkeypatch.setattr(collector, "build_depthsplat_sparse_raw_packet", build_packet)
+    monkeypatch.setattr(collector, "DepthSplatPackedGaussianConsumer", Consumer)
+    monkeypatch.setattr(collector, "compare_depthsplat_packed_to_dense", compare_packed)
+    monkeypatch.setattr(collector, "_source_geometry_functions", source_geometry)
+    monkeypatch.setattr(collector, "preflight_depthsplat_l0_l1_materialization", preflight)
+    monkeypatch.setattr(collector, "resolve_depthsplat_compact_final_route", final_route)
+    monkeypatch.setattr(collector, "subset_depthsplat_sparse_raw_packet", subset_packet)
+    monkeypatch.setattr(
+        collector, "compare_depthsplat_full_passthrough_to_dense_bitwise", compare_full
+    )
+    monkeypatch.setattr(collector, "apply_depthsplat_compact_l0_l1_materialization", materialize)
+    monkeypatch.setattr(collector.torch.cuda, "empty_cache", empty_cache)
+
+    observation = collector.collect_literal_t4_native_scene_observation(
+        runtime=runtime,
+        materialization_root=Path("materialization"),
+        plan_path=Path("plan.json"),
+        split=collector.TRAIN_SPLIT,
+        sample_index=0,
+        scene="scene-0",
+        context_loader=context_loader,
+    )
+
+    assert observation["maximum_held_out_risks"] == [0.125]
+    assert observation["preflight_tile_trace"][0]["view"] == 0
+    assert execution_calls
+    assert all(not grad_enabled for _, grad_enabled in execution_calls)
+    assert cache_liveness == [[]]
+    gc.collect()
+    assert all(reference() is None for reference in references.values())

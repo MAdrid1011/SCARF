@@ -29,6 +29,9 @@ from saes.depthsplat_acid_disjoint_calibration import (
     canonical_sha256,
     resolve_depthsplat_acid_binding,
 )
+from saes.depthsplat_l0_l1_materializer import (
+    DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE,
+)
 from saes.probe_first_schedule import (
     LITERAL_PAPER_T4_PLAN_CONTRACT,
     PAPER_KP_ANCHOR_SEMANTICS,
@@ -45,17 +48,18 @@ SPLITS = (TRAIN_SPLIT, HOLDOUT_SPLIT)
 V16T4_KIND = "depthsplat-nonzero-l0-l1-acid-disjoint-v16l-t4"
 FROZEN_STATUS = "FROZEN_EVALUATION_DISJOINT_TARGET_FREE"
 
-LITERAL_T4_PROFILE_ID = "depthsplat-literal-paper-t4-probe-only-v1"
+LITERAL_T4_PROFILE_ID = "depthsplat-literal-paper-t4-probe-only-v2"
 LITERAL_T4_MATERIALIZATION_PROFILE = (
     "depthsplat-literal-paper-t4-selected-probe-moment-v1"
 )
 LITERAL_T4_RISK_METRIC = "maximum-held-out-anchor-risk-v1"
 LITERAL_T4_THRESHOLD_RULE = "train-minimum-per-scene-q25"
 LITERAL_T4_GUARD_SCHEMA = "depthsplat-selected-anchor-attribute-loo-frozen-v16-guard-v1"
-LITERAL_T4_PROFILE_SCHEMA = "depthsplat-literal-paper-t4-v16-profile-v1"
-LITERAL_T4_COVERAGE_CERTIFICATE = (
-    "depthsplat-selected-z-depth-3d-2sigma-ellipsoid-support-v2"
-)
+LITERAL_T4_PROFILE_SCHEMA = "depthsplat-literal-paper-t4-v16-profile-v2"
+LITERAL_T4_MOMENT_CERTIFICATE = DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE
+# Retained as an import-compatible alias for older local test fixtures.  The
+# literal value is a moment-merge certificate, not a support-containment claim.
+LITERAL_T4_COVERAGE_CERTIFICATE = LITERAL_T4_MOMENT_CERTIFICATE
 LITERAL_T4_LOO_CERTIFICATE = "depthsplat-selected-rgb-sh-opacity-all-anchor-loo-v1"
 LITERAL_T4_LOO_POLICY = "all-retained-l0-l1-anchors-selected-labels-only-v1"
 LITERAL_T4_LOO_AGGREGATE_SCHEMA = "depthsplat-selected-anchor-attribute-loo-aggregate-v1"
@@ -270,6 +274,9 @@ def literal_t4_profile() -> dict[str, Any]:
         "l1_anchor_count": 4,
         "secondary_mask_required_empty": True,
         "depth_checked_after_l0_miss_only": True,
+        "moment_merge_certificate": LITERAL_T4_MOMENT_CERTIFICATE,
+        "moment_merge_policy": "finite-psd-fixed-scale-no-support-containment-v1",
+        "moment_covariance_scale": 1.0,
         "route_plan_config_sha256": literal_paper_t4_route_config_sha256(route_events),
     }
 
@@ -1019,7 +1026,10 @@ def _validate_scene_evidence(
         value.get("profile_sha256") != profile_sha256
         or value.get("route_plan_config_sha256")
         != literal_t4_profile()["route_plan_config_sha256"]
-        or value.get("coverage_certificate") != LITERAL_T4_COVERAGE_CERTIFICATE
+        # The historical field name is retained in persisted evidence, but
+        # literal T=4 binds a finite-PSD moment certificate rather than an
+        # invented support-containment assertion.
+        or value.get("coverage_certificate") != LITERAL_T4_MOMENT_CERTIFICATE
         or value.get("full_attributes_bitwise_native") is not True
         or value.get("nonzero_merge_applied") is not True
         or value.get("renderer_executed") is not False
@@ -1515,6 +1525,7 @@ __all__ = [
     "HOLDOUT_SPLIT",
     "LITERAL_T4_GUARD_SCHEMA",
     "LITERAL_T4_MATERIALIZATION_PROFILE",
+    "LITERAL_T4_MOMENT_CERTIFICATE",
     "LITERAL_T4_PROFILE_ID",
     "LITERAL_T4_PROFILE_SCHEMA",
     "LITERAL_T4_RISK_METRIC",

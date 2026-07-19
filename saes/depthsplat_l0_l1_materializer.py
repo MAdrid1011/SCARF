@@ -10,8 +10,10 @@ and the already source-bound S2 z-depth map, then absorbs them into retained
 anchors by first/second moment matching.
 
 The materializer is fail-closed.  Any provenance, RGB/SH, z-depth, PSD,
-continuity, opacity, or support-coverage inconsistency promotes the whole tile
-to its source-native Full path before the final packet is committed.
+continuity, or opacity inconsistency promotes the whole tile to its
+source-native Full path before the final packet is committed.  The development
+profile additionally closes virtual 2-sigma support by covariance expansion;
+the literal paper profile deliberately does not add that non-paper route guard.
 """
 
 from __future__ import annotations
@@ -52,6 +54,9 @@ DEPTHSPLAT_COMPACT_AGGREGATION = (
 )
 DEPTHSPLAT_COVERAGE_CERTIFICATE = (
     "depthsplat-selected-z-depth-3d-2sigma-ellipsoid-support-v2"
+)
+DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE = (
+    "depthsplat-literal-paper-t4-finite-psd-moment-merge-fixed-scale-v1"
 )
 DEPTHSPLAT_COMPACT_COVERAGE_MAX_COVARIANCE_SCALE = 16.0
 DEPTHSPLAT_FEATURE_INTERPOLATION_MAX_RELATIVE_RESIDUAL = 1.0
@@ -1540,10 +1545,83 @@ def _coverage_certificate_payload(
     }
 
 
+def _literal_moment_merge_certificate_payload(
+    *,
+    update_slots: torch.Tensor,
+    update_binding: Mapping[str, str],
+    update_means: torch.Tensor,
+    update_covariances: torch.Tensor,
+    per_update: list[dict[str, Any]],
+    tile_trace_sha256: str,
+) -> dict[str, Any]:
+    """Bind literal finite-PSD, fixed-scale moment results to their packet."""
+
+    if (
+        not torch.is_tensor(update_slots)
+        or update_slots.ndim != 1
+        or update_slots.dtype != torch.int64
+        or not isinstance(update_binding, Mapping)
+        or not torch.is_tensor(update_means)
+        or update_means.shape != (int(update_slots.numel()), 3)
+        or not torch.is_tensor(update_covariances)
+        or update_covariances.shape != (int(update_slots.numel()), 3, 3)
+        or not isinstance(tile_trace_sha256, str)
+    ):
+        raise ValueError("DepthSplat literal moment certificate inputs are invalid")
+    if (
+        not bool(torch.isfinite(update_means).all())
+        or not bool(torch.isfinite(update_covariances).all())
+    ):
+        raise ValueError("DepthSplat literal moment certificate is non-finite")
+    symmetric_covariances = (update_covariances + update_covariances.mT) * 0.5
+    if bool((torch.linalg.eigvalsh(symmetric_covariances) < -1e-6).any()):
+        raise ValueError("DepthSplat literal moment certificate is not PSD")
+    slots = update_slots.detach().to(device="cpu", dtype=torch.int64).tolist()
+    if len(per_update) != len(slots):
+        raise ValueError("DepthSplat literal moment certificate update count is incomplete")
+    normalized_rows: list[dict[str, Any]] = []
+    for update_index, (slot, row) in enumerate(zip(slots, per_update)):
+        if not isinstance(row, Mapping):
+            raise ValueError("DepthSplat literal moment certificate row is invalid")
+        virtual_count = row.get("virtual_count")
+        if (
+            row.get("update_dense_slot") != int(slot)
+            or row.get("update_index") != update_index
+            or isinstance(virtual_count, bool)
+            or not isinstance(virtual_count, int)
+            or virtual_count < 0
+            or row.get("finite_psd_moment_merge") is not True
+            or row.get("moment_covariance_scale") != 1.0
+            or row.get("support_containment_guard") is not False
+        ):
+            raise ValueError("DepthSplat literal moment certificate slot binding changed")
+        normalized_rows.append(
+            {
+                "update_dense_slot": int(slot),
+                "update_index": update_index,
+                "virtual_count": virtual_count,
+                "finite_psd_moment_merge": True,
+                "moment_covariance_scale": 1.0,
+                "support_containment_guard": False,
+            }
+        )
+    return {
+        "schema": DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE,
+        "geometry": "gaussian-parameter-space-first-second-moment-v1",
+        "finite_psd_moment_merge": True,
+        "fixed_moment_covariance_scale": 1.0,
+        "support_containment_guard": False,
+        "tile_trace_sha256": tile_trace_sha256,
+        "update_binding": dict(update_binding),
+        "update_slots": [int(slot) for slot in slots],
+        "per_update": normalized_rows,
+    }
+
+
 def _validate_coverage_certificate(
     preflight: DepthSplatCompactMaterializationPreflight,
 ) -> dict[str, Any]:
-    """Reject a route if its shape-aware support certificate is incomplete."""
+    """Revalidate the profile-specific materialization certificate."""
 
     events = preflight.events
     update_binding = _update_binding(
@@ -1556,26 +1634,47 @@ def _validate_coverage_certificate(
     payload = events.get("coverage_certificate_payload")
     if not isinstance(payload, Mapping):
         raise ValueError("DepthSplat coverage certificate payload is missing")
+    profile = events.get("execution_profile")
     maximum_scale = events.get("maximum_coverage_covariance_scale")
+    if profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE:
+        if (
+            isinstance(maximum_scale, bool)
+            or not isinstance(maximum_scale, (int, float))
+            or float(maximum_scale) != 1.0
+        ):
+            raise ValueError("DepthSplat literal moment certificate scale changed")
+        expected_certificate = DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE
+        expected = _literal_moment_merge_certificate_payload(
+            update_slots=preflight.update_dense_slots,
+            update_binding=update_binding,
+            update_means=preflight.means,
+            update_covariances=preflight.covariances,
+            per_update=list(payload.get("per_update", [])),
+            tile_trace_sha256=str(events.get("tile_trace_sha256")),
+        )
+    elif profile == DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE:
+        if (
+            isinstance(maximum_scale, bool)
+            or not isinstance(maximum_scale, (int, float))
+            or float(maximum_scale) < 1.0
+        ):
+            raise ValueError("DepthSplat coverage certificate scale limit is invalid")
+        expected_certificate = DEPTHSPLAT_COVERAGE_CERTIFICATE
+        expected = _coverage_certificate_payload(
+            update_slots=preflight.update_dense_slots,
+            update_binding=update_binding,
+            per_update=list(payload.get("per_update", [])),
+            tile_trace_sha256=str(events.get("tile_trace_sha256")),
+            maximum_covariance_scale=float(maximum_scale),
+        )
+    else:
+        raise ValueError("DepthSplat materialization certificate profile is invalid")
     if (
-        isinstance(maximum_scale, bool)
-        or not isinstance(maximum_scale, (int, float))
-        or float(maximum_scale) < 1.0
-    ):
-        raise ValueError("DepthSplat coverage certificate scale limit is invalid")
-    expected = _coverage_certificate_payload(
-        update_slots=preflight.update_dense_slots,
-        update_binding=update_binding,
-        per_update=list(payload.get("per_update", [])),
-        tile_trace_sha256=str(events.get("tile_trace_sha256")),
-        maximum_covariance_scale=float(maximum_scale),
-    )
-    if (
-        events.get("coverage_certificate") != DEPTHSPLAT_COVERAGE_CERTIFICATE
+        events.get("coverage_certificate") != expected_certificate
         or dict(payload) != expected
         or events.get("coverage_certificate_sha256") != _canonical_sha256(expected)
     ):
-        raise ValueError("DepthSplat coverage certificate binding changed")
+        raise ValueError("DepthSplat materialization certificate binding changed")
     return expected
 
 
@@ -1835,17 +1934,19 @@ def _build_tile_updates(
     }
 
 
-def _paper_support_without_covariance_expansion(
+def _literal_finite_psd_moment_merge(
     covariance: torch.Tensor,
     mean: torch.Tensor,
     virtual_means: torch.Tensor,
     virtual_covariances: torch.Tensor,
-) -> dict[str, float]:
-    """Validate literal 2-sigma support and promote Full instead of expanding.
+) -> dict[str, Any]:
+    """Validate a literal fixed-scale first/second-moment merge.
 
-    The development profile closes support by scaling covariance.  That is a
-    useful diagnostic, but is not part of the literal selected-probe moment
-    construction.  Here a support miss is deliberately a local Full fallback.
+    Section 3 defines bilateral probe assignment followed by first/second
+    moment matching.  It does not impose a separate 2-sigma containment test
+    between each virtual Gaussian and its retained representative.  The
+    literal route therefore accepts every finite PSD moment result unchanged
+    and leaves support-closure only to the development profile.
     """
 
     if (
@@ -1855,62 +1956,40 @@ def _paper_support_without_covariance_expansion(
         or virtual_means.shape[1] != 3
         or virtual_covariances.shape != (virtual_means.shape[0], 3, 3)
     ):
-        raise ValueError("DepthSplat formal paper support inputs are invalid")
+        raise ValueError("DepthSplat formal paper moment inputs are invalid")
     covariance = (covariance + covariance.mT) * 0.5
-    if not bool(torch.isfinite(covariance).all()) or bool(
-        (torch.linalg.eigvalsh(covariance) < -1e-6).any()
+    projected_virtual_covariances = (
+        virtual_covariances + virtual_covariances.mT
+    ) * 0.5
+    if (
+        not bool(torch.isfinite(mean).all())
+        or not bool(torch.isfinite(covariance).all())
+        or not bool(torch.isfinite(virtual_means).all())
+        or not bool(torch.isfinite(projected_virtual_covariances).all())
+    ):
+        raise ValueError("DepthSplat formal paper moment merge is non-finite")
+    covariance_eigenvalues = torch.linalg.eigvalsh(covariance)
+    virtual_eigenvalues = (
+        torch.linalg.eigvalsh(projected_virtual_covariances)
+        if virtual_means.numel()
+        else torch.empty(0, device=covariance.device, dtype=covariance.dtype)
+    )
+    if bool((covariance_eigenvalues < -1e-6).any()) or bool(
+        (virtual_eigenvalues < -1e-6).any()
     ):
         raise ValueError("DepthSplat formal paper moment covariance is not PSD")
-    if virtual_means.numel() == 0:
-        return {
-            "maximum_containment_lhs_before_scale": 0.0,
-            "maximum_containment_lhs_after_scale": 0.0,
-            "maximum_whitened_virtual_covariance_eigenvalue": 0.0,
-            "containment_radius": 2.0,
-            "moment_covariance_scale": 1.0,
-        }
-    try:
-        cholesky = torch.linalg.cholesky(covariance)
-        deltas = virtual_means - mean.unsqueeze(0)
-        whitened_deltas = torch.linalg.solve_triangular(
-            cholesky, deltas.mT, upper=False
-        ).mT
-        projected = (virtual_covariances + virtual_covariances.mT) * 0.5
-        eigenvalues = torch.linalg.eigvalsh(projected)
-        if bool((eigenvalues < -1e-6).any()):
-            raise ValueError("DepthSplat formal paper virtual covariance is not PSD")
-        left = torch.linalg.solve_triangular(
-            cholesky.unsqueeze(0).expand(projected.shape[0], -1, -1),
-            projected,
-            upper=False,
-        )
-        whitened_covariances = torch.linalg.solve_triangular(
-            cholesky.unsqueeze(0).expand(projected.shape[0], -1, -1),
-            left.mT,
-            upper=False,
-        ).mT
-        whitened_eigenvalues = torch.linalg.eigvalsh(
-            (whitened_covariances + whitened_covariances.mT) * 0.5
-        )
-    except RuntimeError as error:
-        raise ValueError("DepthSplat formal paper support containment failed") from error
-    mahalanobis = whitened_deltas.square().sum(dim=1).clamp_min(0.0).sqrt()
-    maximum_eigenvalues = whitened_eigenvalues.amax(dim=1).clamp_min(0.0)
-    lhs = mahalanobis + 2.0 * maximum_eigenvalues.sqrt()
-    if not bool(torch.isfinite(lhs).all()) or not bool(
-        torch.isfinite(maximum_eigenvalues).all()
-    ):
-        raise ValueError("DepthSplat formal paper support is non-finite")
-    if bool((lhs > 2.0 + 1e-5).any()):
-        raise ValueError("DepthSplat formal paper support requires Full")
     return {
-        "maximum_containment_lhs_before_scale": float(lhs.max().item()),
-        "maximum_containment_lhs_after_scale": float(lhs.max().item()),
-        "maximum_whitened_virtual_covariance_eigenvalue": float(
-            maximum_eigenvalues.max().item()
-        ),
-        "containment_radius": 2.0,
+        "finite_psd_moment_merge": True,
         "moment_covariance_scale": 1.0,
+        "support_containment_guard": False,
+        "minimum_merged_covariance_eigenvalue": float(
+            covariance_eigenvalues.min().item()
+        ),
+        "minimum_virtual_covariance_eigenvalue": float(
+            virtual_eigenvalues.min().item()
+            if virtual_eigenvalues.numel()
+            else 0.0
+        ),
     }
 
 
@@ -1967,9 +2046,9 @@ def _build_literal_paper_t4_selected_only_tile_updates(
         return [], {
             "virtual_count": 0,
             "coverage": {
-                "certificate": DEPTHSPLAT_COVERAGE_CERTIFICATE,
-                "shape_aware_virtual_2sigma_support": True,
-                "maximum_containment_lhs_after_scale": 0.0,
+                "certificate": DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE,
+                "finite_psd_moment_merge": True,
+                "support_containment_guard": False,
                 "moment_covariance_scale_max": 1.0,
                 "per_update": [],
             },
@@ -2057,7 +2136,8 @@ def _build_literal_paper_t4_selected_only_tile_updates(
     assignment = torch.stack(assignments)
     updates: list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
     coverage_updates: list[dict[str, Any]] = []
-    coverage_lhs: list[float] = []
+    minimum_merged_eigenvalues: list[float] = []
+    minimum_virtual_eigenvalues: list[float] = []
     for anchor_offset, (slot, index) in enumerate(zip(anchor_slots, anchor_indices)):
         masses = torch.cat(
             (
@@ -2103,29 +2183,39 @@ def _build_literal_paper_t4_selected_only_tile_updates(
             or bool((merged_harmonics > source_harmonics.amax(dim=0) + 1e-5).any())
         ):
             raise ValueError("DepthSplat formal paper literal attribute average is invalid")
-        coverage = _paper_support_without_covariance_expansion(
+        coverage = _literal_finite_psd_moment_merge(
             merged_covariance,
             merged_mean,
             virtual_means,
             virtual_covariances,
         )
         updates.append((slot, merged_mean, merged_covariance, merged_harmonics, merged_opacity))
-        coverage_lhs.append(float(coverage["maximum_containment_lhs_after_scale"]))
+        minimum_merged_eigenvalues.append(
+            float(coverage["minimum_merged_covariance_eigenvalue"])
+        )
+        minimum_virtual_eigenvalues.append(
+            float(coverage["minimum_virtual_covariance_eigenvalue"])
+        )
         coverage_updates.append(
             {
                 "update_dense_slot": int(slot),
                 "virtual_count": len(target_local),
-                "shape_aware_virtual_2sigma_support": True,
                 **coverage,
             }
         )
     return updates, {
         "virtual_count": len(target_local),
         "coverage": {
-            "certificate": DEPTHSPLAT_COVERAGE_CERTIFICATE,
-            "shape_aware_virtual_2sigma_support": True,
-            "maximum_containment_lhs_after_scale": max(coverage_lhs, default=0.0),
+            "certificate": DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE,
+            "finite_psd_moment_merge": True,
+            "support_containment_guard": False,
             "moment_covariance_scale_max": 1.0,
+            "minimum_merged_covariance_eigenvalue": min(
+                minimum_merged_eigenvalues, default=0.0
+            ),
+            "minimum_virtual_covariance_eigenvalue": min(
+                minimum_virtual_eigenvalues, default=0.0
+            ),
             "per_update": coverage_updates,
         },
         "virtual_geometry_source": "selected-probe-gaussian-spatial-moment-v1",
@@ -2502,13 +2592,25 @@ def preflight_depthsplat_l0_l1_materialization(
         ordered_coverage_rows.append({**row, "update_index": update_index})
     if coverage_by_slot:
         raise ValueError("DepthSplat coverage has an unbound update slot")
-    coverage_certificate_payload = _coverage_certificate_payload(
-        update_slots=update_slots,
-        update_binding=update_binding,
-        per_update=ordered_coverage_rows,
-        tile_trace_sha256=trace_sha256,
-        maximum_covariance_scale=float(maximum_coverage_covariance_scale),
-    )
+    if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE:
+        coverage_certificate = DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE
+        coverage_certificate_payload = _literal_moment_merge_certificate_payload(
+            update_slots=update_slots,
+            update_binding=update_binding,
+            update_means=means,
+            update_covariances=covariances,
+            per_update=ordered_coverage_rows,
+            tile_trace_sha256=trace_sha256,
+        )
+    else:
+        coverage_certificate = DEPTHSPLAT_COVERAGE_CERTIFICATE
+        coverage_certificate_payload = _coverage_certificate_payload(
+            update_slots=update_slots,
+            update_binding=update_binding,
+            per_update=ordered_coverage_rows,
+            tile_trace_sha256=trace_sha256,
+            maximum_covariance_scale=float(maximum_coverage_covariance_scale),
+        )
     coverage_certificate_sha256 = _canonical_sha256(coverage_certificate_payload)
     materialization_session_sha256 = _canonical_sha256(
         {
@@ -2529,7 +2631,7 @@ def preflight_depthsplat_l0_l1_materialization(
     events = {
         "schema_version": DEPTHSPLAT_MATERIALIZER_SCHEMA_VERSION,
         "aggregation": DEPTHSPLAT_COMPACT_AGGREGATION,
-        "coverage_certificate": DEPTHSPLAT_COVERAGE_CERTIFICATE,
+        "coverage_certificate": coverage_certificate,
         "coverage_certificate_payload": coverage_certificate_payload,
         "coverage_certificate_sha256": coverage_certificate_sha256,
         "maximum_coverage_covariance_scale": float(maximum_coverage_covariance_scale),
@@ -2573,14 +2675,29 @@ def preflight_depthsplat_l0_l1_materialization(
         "promoted_full_tiles": sum(bool(record["attempted"] and not record["accepted"]) for record in trace),
         "update_anchor_count": int(update_slots.numel()),
         "coverage_checked_tiles": len(coverage_records),
-        "coverage_max_containment_lhs_after_scale": max(
-            (
-                float(record["maximum_containment_lhs_after_scale"])
-                for record in coverage_records
-            ),
+        "coverage_max_containment_lhs_after_scale": (
+            None
+            if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE
+            else max(
+                (
+                    float(record["maximum_containment_lhs_after_scale"])
+                    for record in coverage_records
+                ),
+                default=0.0,
+            )
+        ),
+        "coverage_max_moment_covariance_scale": max(
+            (float(record["moment_covariance_scale_max"]) for record in coverage_records),
             default=0.0,
         ),
-        "coverage_max_moment_covariance_scale": max((float(record["moment_covariance_scale_max"]) for record in coverage_records), default=0.0),
+        "literal_finite_psd_moment_merge": (
+            execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE
+        ),
+        "literal_support_containment_guard": (
+            False
+            if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE
+            else None
+        ),
         "selected_anchor_attribute_loo_certificate": (
             DEPTHSPLAT_SELECTED_ANCHOR_ATTRIBUTE_LOO_CERTIFICATE
         ),
@@ -2978,7 +3095,9 @@ def apply_depthsplat_compact_l0_l1_materialization(
             "depthsplat_compact_update_anchor_count": count,
             "depthsplat_compact_full_passthrough_count": int(full_indices.numel()),
             "depthsplat_compact_aggregation": DEPTHSPLAT_COMPACT_AGGREGATION,
-            "depthsplat_compact_coverage_certificate": DEPTHSPLAT_COVERAGE_CERTIFICATE,
+            "depthsplat_compact_coverage_certificate": preflight.events[
+                "coverage_certificate"
+            ],
             "depthsplat_compact_coverage_certificate_sha256": preflight.events[
                 "coverage_certificate_sha256"
             ],
@@ -3034,6 +3153,7 @@ __all__ = [
     "DEPTHSPLAT_COMPACT_AGGREGATION",
     "DEPTHSPLAT_COMPACT_COVERAGE_MAX_COVARIANCE_SCALE",
     "DEPTHSPLAT_COVERAGE_CERTIFICATE",
+    "DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE",
     "DEPTHSPLAT_MATERIALIZER_SCHEMA_VERSION",
     "DepthSplatCompactFinalRoute",
     "DepthSplatCompactMaterializationPreflight",

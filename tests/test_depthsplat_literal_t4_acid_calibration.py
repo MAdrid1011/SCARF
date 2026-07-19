@@ -153,7 +153,7 @@ def _evidence(module, number: int, *, aggregate, reference):
         "full_passthrough_mask_sha256": _digest(5000 + number),
         "full_attribute_binding_sha256": _digest(6000 + number),
         "full_attributes_bitwise_native": True,
-        "coverage_certificate": module.LITERAL_T4_COVERAGE_CERTIFICATE,
+        "coverage_certificate": module.LITERAL_T4_MOMENT_CERTIFICATE,
         "coverage_certificate_sha256": _digest(7000 + number),
         "accepted_update_slots_sha256": _digest(8000 + number),
         "accepted_update_slot_count": 1,
@@ -294,6 +294,28 @@ def test_literal_profile_rejects_legacy_kind_and_adaptive_profile(tmp_path: Path
     _rehash(calibration, record)
     with pytest.raises(ValueError, match="kind or schema"):
         _load(calibration, tmp_path, monkeypatch, record, binding)
+
+
+def test_literal_profile_binds_fixed_scale_psd_moment_merge_semantics():
+    import saes.depthsplat_literal_t4_acid_calibration as calibration
+    from saes.depthsplat_l0_l1_materializer import (
+        DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE,
+    )
+
+    profile = calibration.literal_t4_profile()
+    assert profile["moment_merge_certificate"] == (
+        DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE
+    )
+    assert profile["moment_merge_policy"] == (
+        "finite-psd-fixed-scale-no-support-containment-v1"
+    )
+    assert profile["moment_covariance_scale"] == pytest.approx(1.0)
+    assert calibration.LITERAL_T4_MOMENT_CERTIFICATE == (
+        DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE
+    )
+    assert calibration.LITERAL_T4_COVERAGE_CERTIFICATE == (
+        calibration.LITERAL_T4_MOMENT_CERTIFICATE
+    )
 
 
 def test_threshold_recomputes_from_train_scene_q25_only(tmp_path: Path, monkeypatch):

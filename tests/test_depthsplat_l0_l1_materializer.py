@@ -635,6 +635,74 @@ def test_literal_t4_materialization_ignores_poisoned_omitted_depths_and_source_g
         assert preflight.events["coverage_max_moment_covariance_scale"] <= 1.0 + 1e-6
 
 
+def test_literal_t4_accepts_finite_psd_moment_merges_without_support_containment():
+    from saes.depthsplat_l0_l1_materializer import (
+        DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE,
+        resolve_depthsplat_compact_final_route,
+    )
+
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, literal_paper_t4=True
+    )
+
+    # The selected-only spatial virtual field is finite PSD but its virtual
+    # ellipsoids do not satisfy the old, non-paper 2-sigma containment rule.
+    # Literal Section 3 only asks for probe-constrained moment matching.
+    assert plan.tile_trace[0]["pre_guard_route"] == "L0"
+    assert preflight.events["accepted_tiles"] == 1
+    assert preflight.events["promoted_full_tiles"] == 0
+    assert preflight.tile_trace[0]["reason"] == "accepted"
+    assert preflight.update_dense_slots.numel() == 4
+    assert preflight.events["coverage_certificate"] == (
+        DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE
+    )
+    assert preflight.events["coverage_max_containment_lhs_after_scale"] is None
+    assert preflight.events["literal_finite_psd_moment_merge"] is True
+    assert preflight.events["literal_support_containment_guard"] is False
+    certificate = preflight.events["coverage_certificate_payload"]
+    assert certificate["finite_psd_moment_merge"] is True
+    assert certificate["fixed_moment_covariance_scale"] == pytest.approx(1.0)
+    assert certificate["support_containment_guard"] is False
+    assert all(
+        row["moment_covariance_scale"] == pytest.approx(1.0)
+        and row["support_containment_guard"] is False
+        for row in certificate["per_update"]
+    )
+    assert torch.linalg.eigvalsh(preflight.covariances).min() >= -1e-6
+
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+    assert route.events["route_counts"] == {"L0": 1, "L1": 0, "Full": 0}
+    assert route.events["coverage_certificate_geometry"] == (
+        "gaussian-parameter-space-first-second-moment-v1"
+    )
+
+
+def test_literal_t4_invalid_moment_merge_promotes_the_entire_tile_full(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+
+    def invalid_moment(*_args, **_kwargs):
+        raise ValueError("DepthSplat formal paper moment merge is non-finite")
+
+    monkeypatch.setattr(
+        materializer, "_literal_finite_psd_moment_merge", invalid_moment
+    )
+    _plan_value, _packet, _packed, preflight = _preflight(
+        features, z_depths, literal_paper_t4=True
+    )
+
+    assert preflight.events["accepted_tiles"] == 0
+    assert preflight.events["promoted_full_tiles"] == 1
+    assert preflight.tile_trace[0]["reason"] == (
+        "DepthSplat formal paper moment merge is non-finite"
+    )
+    assert int(preflight.promote_full_mask.sum()) == 16
+
+
 def test_literal_t4_rejects_covariance_expansion_before_materialization():
     features = torch.zeros(1, 1, 3, 4, 4)
     z_depths = torch.full((1, 1, 4, 4), 2.0)
