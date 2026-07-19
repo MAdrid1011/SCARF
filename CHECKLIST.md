@@ -102,9 +102,12 @@
   `35.606287 -> 35.581249 dB` (PSNR loss `0.025038 dB`), SSIM loss
   `0.000186`, and LPIPS increase `0.000416`, all within the fixed
   `0.15 dB / 0.005 / 0.005` gate. It remains non-paper and non-timing evidence.
-- [ ] Run the model-bound MVSplat fixed eight-scene quality gate before any
-  140-scene or Table 1 path; it must bind the live backend/decoder source
-  identity and retain the same per-scene target-free audit boundary.
+- [x] Run the model-bound MVSplat fixed eight-scene quality gate at
+  `mvsplat_dl3dv_l1_15_v16_acid_disjoint_8scene_v1_native_dense_classic_backend_identity`:
+  `8/8` audits and quality gates passed, with 32-view pooled PSNR loss
+  `0.005959 dB`, SSIM loss `0.000126`, LPIPS increase `0.000199`, and worst
+  PSNR loss `0.025038 dB`. Self-hash `8c756d...55757726`; it is still only
+  development quality evidence, not Table 1, Figure 11, timing, or deletion.
 - [x] Complete the new MVSplat ACID 24/8 V15/V16 freeze at
   `mvsplat_acid_disjoint_l1_15_16_calibration_v16_native_dense_classic_backend_identity_v2`
   (V15 `fe356...e5eb`, V16 `912c2...d036`) and independently reload both

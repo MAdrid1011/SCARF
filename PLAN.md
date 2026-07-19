@@ -275,6 +275,15 @@
   `912c...d036`, mechanism `42156d...655e97`, and output a new root under
   `outputs/ae_dl3dv_repair_diagnostics/`. Any per-scene failure stops before
   140-scene, Table 1, Figure 11, timing, or sparse S2/S3 work.
+- MVSplat fixed-eight-scene result: PASS at
+  `mvsplat_dl3dv_l1_15_v16_acid_disjoint_8scene_v1_native_dense_classic_backend_identity`
+  (self-hash `8c756d...55757726`). All eight target-free audits and quality
+  gates passed; across 32 views, pooled and scene-macro PSNR loss are
+  `0.005959 dB`, SSIM loss `0.000126`, and LPIPS increase `0.000199`.
+  The worst PSNR loss is `0.025038 dB` on sample 0. Every quality record binds
+  `mvsplat/src/model/decoder/decoder_splatting_cuda.py` and
+  `mvsplat/src/model/types.py`; this remains development-only, without a
+  direct-deletion, sparse-S2/S3, timing, Figure 11, or Table 1 claim.
 
 ## 2. Baseline And Comparability
 
