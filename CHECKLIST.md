@@ -120,8 +120,15 @@
 - [x] Parameterize the compact-packet quality pilot for MVSplat's live decoder
   type and source identity, pass its CPU smoke, and run exactly one sample-0
   quality gate under the unchanged `0.15 dB / 0.005 / 0.005` tolerances.
-- [ ] Add DepthSplat `src` loader isolation and a live source/checkpoint
-  identity suitable for its native DL3DV `dl3dv.ckpt` route.
+- [x] Add DepthSplat `src` loader isolation and a live source/checkpoint
+  identity suitable for its native DL3DV `dl3dv.ckpt` route. The source-bound
+  identity also binds the native DL3DV index, the DINOv2 import tree, and the
+  simulator implementation files.
+- [x] Run one target-free native DepthSplat selected-output/Adapter boundary
+  audit on DL3DV sample 0. The source path replays 57,344 raw descriptors,
+  transports selected context RGB to `input_images`, and matches dense means,
+  covariances, SH, and opacity within the fixed FP32 contract. It is not an
+  L0/L1 merge, renderer, quality, timing, or sparse-S2/S3 result.
 - [ ] Add a source-faithful DepthSplat L0/L1 simulator over the native
   `gaussian_regressor -> gaussian_head` path, selected RGB/SH Adapter input,
   replicate padding, and z-depth coordinates. It must not reuse classic raw

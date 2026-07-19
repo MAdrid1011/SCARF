@@ -293,6 +293,18 @@
   `depthsplat/checkpoints/dl3dv.ckpt`, followed by exactly one sample-0 audit,
   quality gate, and fixed eight-scene gate. Existing DepthSplat dependency
   audits are diagnostic-only and cannot be promoted into this chain.
+- DepthSplat selected-boundary checkpoint (2026-07-20): the native DL3DV
+  sample-0 target-free audit at
+  `outputs/ae_dl3dv_repair_diagnostics/depthsplat_sample0_selected_rgb_adapter_audit_v1/`
+  reached the original Adapter through a source-bound packet. It replayed the
+  replicate-padded 37-channel final head for 57,344 selected descriptors after
+  native dense regressor execution, passed the fixed raw-head equivalence
+  contract, and matched dense selected mean/covariance/SH/opacity attributes.
+  The packet preserves `opacity(1) + offset_xy(2) + body(34)`, context RGB SH
+  initialization, and z-depth coordinates. It has no merge, deletion, decoder,
+  quality, timing, or global sparse-S2/S3 claim. The next implementation step
+  is a DepthSplat-specific L0/L1 materializer over this boundary, then an
+  independent ACID 24/8 V15/V16 calibration.
 
 ## 2. Baseline And Comparability
 
