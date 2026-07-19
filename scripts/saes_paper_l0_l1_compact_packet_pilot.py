@@ -32,12 +32,13 @@ from saes.probe_first_schedule import (
     ADAPTIVE_L1_15_ANCHOR_SEMANTICS,
     build_incremental_probe_first_plan,
 )
-from saes.adaptive_l1_calibration import load_frozen_threshold
-from saes.adaptive_l1_v4_attribute_calibration import (
-    load_frozen_threshold as load_v4_attribute_loo_threshold,
+from saes.evaluation_disjoint_l1_calibration import (
+    DEFAULT_MATERIALIZATION_ROOT,
+    DEFAULT_PLAN_PATH,
+    load_frozen_v15_threshold,
+    load_frozen_v16_threshold,
 )
 from saes.guarded_selected_route import (
-    ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_DEV_POLICY,
     ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
 )
 from saes.packed_l0_l1_materializer import (
@@ -80,11 +81,8 @@ PILOT_KIND = "saes_paper_normalized_l0_l1_15_anchor_compact_packet_quality_pilot
 DECISION_SEMANTICS = PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS
 L1_ANCHOR_SEMANTICS = ADAPTIVE_L1_15_ANCHOR_SEMANTICS
 COMPACT_AGGREGATION = CONDITIONAL_DIRECT_SPATIAL_ATTRIBUTE_AGGREGATION
-DEFAULT_CALIBRATION_RECORD = (
-    ROOT
-    / "outputs/ae_dl3dv_local_repro_v5"
-    / "saes_l1_absolute_residual_calibration_v15.json"
-)
+TARGET_FREE_AUDIT_KIND = "saes_incremental_selected_output_packed_adapter_audit"
+TARGET_FREE_AUDIT_STATUS = "PASS"
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -93,13 +91,206 @@ def _canonical_sha256(value: Any) -> str:
     ).hexdigest()
 
 
-def _paper_identity(
-    calibration: Mapping[str, Any],
-    v4_attribute_loo_calibration: Mapping[str, Any] | None = None,
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _require_sha256(value: Any, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{label} must be a lowercase SHA256")
+    return value
+
+
+def _read_target_free_quality_audit(path: Path) -> tuple[dict[str, Any], str]:
+    path = Path(path).resolve()
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("target-free quality audit is unavailable or invalid") from error
+    if not isinstance(record, dict):
+        raise ValueError("target-free quality audit must be an object")
+    recorded_sha256 = record.pop("sha256", None)
+    _require_sha256(recorded_sha256, label="target-free quality audit SHA256")
+    if recorded_sha256 != _canonical_sha256(record):
+        raise ValueError("target-free quality audit SHA256 is invalid")
+    return {**record, "sha256": recorded_sha256}, _sha256_file(path)
+
+
+def _frozen_calibration_identity(calibration: Mapping[str, Any]) -> dict[str, Any]:
+    required = {"sha256", "threshold_value", "acid_binding", "application"}
+    if not isinstance(calibration, Mapping) or not required.issubset(calibration):
+        raise ValueError("frozen calibration is incomplete")
+    _require_sha256(calibration["sha256"], label="frozen calibration SHA256")
+    return {key: calibration[key] for key in sorted(required)}
+
+
+def _target_free_audit_path(path: Path) -> str:
+    resolved = Path(path).resolve()
+    try:
+        return resolved.relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def _require_exact_audited_context_input_identity(
+    audit: Mapping[str, Any], input_identity: Mapping[str, Any]
 ) -> dict[str, Any]:
-    v4_loo_enabled = v4_attribute_loo_calibration is not None
+    """Fail closed unless the route input is exactly the audited sidecar."""
+    expected = audit.get("input_identity")
+    if not isinstance(expected, Mapping) or dict(expected) != dict(input_identity):
+        raise ValueError("target-free quality audit input identity changed")
+    return dict(input_identity)
+
+
+def _validate_target_free_context_input(
+    audit: Mapping[str, Any], input_root: Path
+) -> dict[str, Any]:
+    """Validate the context-only root before any native data loader can run."""
+    from data.context_only_audit_input import validate_context_only_audit_input
+
+    return _require_exact_audited_context_input_identity(
+        audit, validate_context_only_audit_input(input_root)
+    )
+
+
+def _validate_target_free_quality_audit(
+    path: Path,
+    *,
+    scene: str,
+    context_indices: list[int],
+    checkpoint_sha256: str,
+    v15_calibration: Mapping[str, Any],
+    v16_calibration: Mapping[str, Any],
+    source_selection_mask_sha256: str,
+    selected_output_mask_sha256: str,
+    packed_source_trace_sha256: str,
+) -> dict[str, Any]:
+    """Require a frozen target-free audit for the exact packet about to render."""
+    audit, file_sha256 = _read_target_free_quality_audit(path)
+    if (
+        audit.get("kind") != TARGET_FREE_AUDIT_KIND
+        or audit.get("status") != TARGET_FREE_AUDIT_STATUS
+        or audit.get("paper_result_eligible") is not False
+        or audit.get("model") != MODEL
+        or audit.get("dataset") != DATASET
+        or audit.get("scene") != scene
+    ):
+        raise ValueError("target-free quality audit identity changed")
+    for field in (
+        "target_mapping_present",
+        "target_rgb_accessed",
+        "target_camera_metadata_accessed",
+    ):
+        if audit.get(field) is not False:
+            raise ValueError(f"target-free quality audit crossed {field}")
+    access_evidence = audit.get("access_evidence")
+    if (
+        not isinstance(access_evidence, Mapping)
+        or access_evidence.get("target_mapping_present") is not False
+        or access_evidence.get("target_rgb_accessed") is not False
+        or access_evidence.get("target_camera_metadata_accessed") is not False
+        or access_evidence.get("target_index_accessed") is not False
+        or access_evidence.get("frozen_calibrations_target_free") is not True
+        or access_evidence.get("frozen_calibrations_verified_before_encoder_execution")
+        is not True
+        or access_evidence.get("packed_guard_executed_before_target_access") is not True
+    ):
+        raise ValueError("target-free quality audit access evidence changed")
+    if audit.get("checkpoint_sha256") != checkpoint_sha256:
+        raise ValueError("target-free quality audit checkpoint changed")
+    execution = audit.get("execution")
+    if (
+        not isinstance(execution, Mapping)
+        or execution.get("checkpoint_sha256") != checkpoint_sha256
+        or execution.get("encoder_only") is not True
+        or execution.get("decoder_constructed") is not False
+    ):
+        raise ValueError("target-free quality audit execution identity changed")
+    boundary = audit.get("execution_boundary")
+    if (
+        not isinstance(boundary, Mapping)
+        or boundary.get("renderer_executed") is not False
+        or boundary.get("quality_metrics_computed") is not False
+        or boundary.get("compact_nonzero_materialization_enabled") is not True
+        or boundary.get("frozen_l1_15_packed_guard_executed") is not True
+        or boundary.get("frozen_calibrations_verified_before_encoder_execution")
+        is not True
+    ):
+        raise ValueError("target-free quality audit crossed the rendering boundary")
+    input_identity = audit.get("input_identity")
+    if (
+        not isinstance(input_identity, Mapping)
+        or input_identity.get("scene") != scene
+        or input_identity.get("source_sample_index") != SAMPLE_INDEX
+        or input_identity.get("target_rgb_accessed") is not False
+        or input_identity.get("target_camera_metadata_accessed") is not False
+        or input_identity.get("context_indices") != context_indices
+    ):
+        raise ValueError("target-free quality audit input identity changed")
+    expected_mechanism = {
+        "decision_semantics": DECISION_SEMANTICS,
+        "l1_anchor_semantics": L1_ANCHOR_SEMANTICS,
+        "l1_anchor_count": 15,
+        "execution_policy": ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
+    }
+    if audit.get("frozen_l1_15_mechanism") != expected_mechanism:
+        raise ValueError("target-free quality audit mechanism changed")
+    expected_route_plan = {
+        "decision_semantics": DECISION_SEMANTICS,
+        "l1_anchor_semantics": L1_ANCHOR_SEMANTICS,
+        "l1_anchor_count": 15,
+        "tile_size": TILE_SIZE,
+        "feature_threshold": FEATURE_THRESHOLD,
+        "depth_threshold": DEPTH_THRESHOLD,
+    }
+    route_plan = audit.get("route_plan")
+    if not isinstance(route_plan, Mapping) or any(
+        route_plan.get(key) != value for key, value in expected_route_plan.items()
+    ):
+        raise ValueError("target-free quality audit route plan mechanism changed")
+    expected_v15 = _frozen_calibration_identity(v15_calibration)
+    expected_v16 = _frozen_calibration_identity(v16_calibration)
+    if audit.get("v15_calibration") != expected_v15:
+        raise ValueError("target-free quality audit V15 calibration changed")
+    if audit.get("v16_calibration") != expected_v16:
+        raise ValueError("target-free quality audit V16 calibration changed")
+    route_binding = audit.get("route_binding")
+    expected_route_binding = {
+        "source_selection_mask_sha256": source_selection_mask_sha256,
+        "selected_output_mask_sha256": selected_output_mask_sha256,
+        "packed_source_trace_sha256": packed_source_trace_sha256,
+    }
+    if not isinstance(route_binding, Mapping) or any(
+        route_binding.get(key) != value for key, value in expected_route_binding.items()
+    ):
+        raise ValueError("target-free quality audit route binding changed")
+    for label, value in expected_route_binding.items():
+        _require_sha256(value, label=f"target-free quality audit {label}")
+    return {
+        "path": _target_free_audit_path(path),
+        "file_sha256": file_sha256,
+        "record_sha256": audit["sha256"],
+        "checkpoint_sha256": checkpoint_sha256,
+        "v15_calibration_sha256": expected_v15["sha256"],
+        "v16_calibration_sha256": expected_v16["sha256"],
+        **expected_route_binding,
+    }
+
+
+def _paper_identity(
+    v15_calibration: Mapping[str, Any],
+    v16_calibration: Mapping[str, Any],
+) -> dict[str, Any]:
     identity = {
-        "schema_version": "saes-paper-normalized-l1-15-adaptive-packet-pilot-v8",
+        "schema_version": "saes-paper-normalized-l1-15-adaptive-packet-pilot-v9",
         "tile_size": TILE_SIZE,
         "feature_threshold": FEATURE_THRESHOLD,
         "depth_threshold": DEPTH_THRESHOLD,
@@ -113,13 +304,9 @@ def _paper_identity(
         "l1_retention_interpretation": (
             "engineering-legacy12-plus-three-center-anchors-not-specified-by-paper"
         ),
-        "nonzero_policy": (
-            ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY
-            if v4_loo_enabled
-            else ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_DEV_POLICY
-        ),
-        "adaptive_l1_absolute_residual_calibration_sha256": calibration["sha256"],
-        "adaptive_l1_absolute_residual_maximum": calibration["threshold_value"],
+        "nonzero_policy": ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
+        "adaptive_l1_absolute_residual_calibration_sha256": v15_calibration["sha256"],
+        "adaptive_l1_absolute_residual_maximum": v15_calibration["threshold_value"],
         "aggregation": COMPACT_AGGREGATION,
         "coverage_certificate": (
             "selected-only-direct-geometry-spatial-attribute-l0-depth-continuity-intra-tile-2sigma-v1"
@@ -130,17 +317,16 @@ def _paper_identity(
             "lpips_max_increase": 0.005,
         },
     }
-    if v4_loo_enabled:
-        identity.update(
-            {
-                "selected_anchor_v4_attribute_loo_calibration_sha256": v4_attribute_loo_calibration[
-                    "sha256"
-                ],
-                "selected_anchor_v4_attribute_loo_maximum_risk": v4_attribute_loo_calibration[
-                    "threshold_value"
-                ],
-            }
-        )
+    identity.update(
+        {
+            "selected_anchor_v4_attribute_loo_calibration_sha256": v16_calibration[
+                "sha256"
+            ],
+            "selected_anchor_v4_attribute_loo_maximum_risk": v16_calibration[
+                "threshold_value"
+            ],
+        }
+    )
     return {**identity, "sha256": _canonical_sha256(identity)}
 
 
@@ -423,61 +609,116 @@ def _posthoc_dense_domain_coverage_reference(
     }
 
 
+def _load_native_target_batch_after_packet_gate(
+    loader: Any,
+    model_bundle: Any,
+    *,
+    scene: str,
+    context_indices: list[int],
+) -> dict[str, Any]:
+    """Open target-side data only after the audited compact packet is accepted."""
+    data = loader.load_data(
+        model_bundle,
+        dataset_name=DATASET,
+        num_samples=1,
+        sample_index=SAMPLE_INDEX,
+    )
+    native_batch = data.batch
+    if native_batch.get("scene") != [scene]:
+        raise RuntimeError("native target batch scene does not match the audited context")
+    native_context = native_batch.pop("context", None)
+    if not isinstance(native_context, Mapping) or not torch.is_tensor(
+        native_context.get("index")
+    ):
+        raise RuntimeError("native target batch has no discardable context identity")
+    native_context_indices = [
+        int(value)
+        for value in native_context["index"][0].detach().to(device="cpu").tolist()
+    ]
+    if native_context_indices != context_indices:
+        raise RuntimeError("native target batch context does not match the audited context")
+    target = native_batch.get("target")
+    if not isinstance(target, dict):
+        raise RuntimeError("compact packet pilot requires a native target mapping")
+    return {"scene": [scene], "target": target}
+
+
 def collect_paper_compact_packet_pilot(
     *,
     device: torch.device,
     posthoc_domain_audit_only: bool = False,
-    calibration_record: Path = DEFAULT_CALIBRATION_RECORD,
-    v4_attribute_loo_calibration_record: Path | None = None,
+    v15_calibration_record: Path,
+    v16_calibration_record: Path,
+    target_free_audit_artifact: Path,
+    target_free_input_root: Path,
+    acid_plan_path: Path = DEFAULT_PLAN_PATH,
+    acid_materialization_root: Path = DEFAULT_MATERIALIZATION_ROOT,
 ) -> dict[str, Any]:
     """Run one packet pilot, optionally stopping at the target-free domain audit."""
     if not isinstance(posthoc_domain_audit_only, bool):
         raise TypeError("posthoc domain audit mode must be boolean")
+    from integration import create_model_loader, load_context_only_audit_data
     from scripts.ae_config import resolve_claim_selection, resolve_experiment
-    from scripts.demo import load_model_and_data
     from scripts.result_record import cached_sha256_file, source_identity
 
     experiment = resolve_experiment(MODEL, DATASET, PACKET_ROOT)
     selection = resolve_claim_selection(MODEL, DATASET, PACKET_ROOT)
     checkpoint_sha256 = cached_sha256_file(experiment.checkpoint)
-    calibration = load_frozen_threshold(
-        calibration_record,
-        evaluation_sample_index=SAMPLE_INDEX,
-        checkpoint_sha256=checkpoint_sha256,
-        source_index_sha256=selection.source_index_sha256,
-        sample_selection_sha256=selection.sample_selection_sha256,
-    )
-    v4_attribute_loo_calibration = (
-        load_v4_attribute_loo_threshold(
-            v4_attribute_loo_calibration_record,
-            evaluation_sample_index=SAMPLE_INDEX,
-            checkpoint_sha256=checkpoint_sha256,
-            source_index_sha256=selection.source_index_sha256,
-            sample_selection_sha256=selection.sample_selection_sha256,
-            v15_calibration_sha256=calibration["sha256"],
-        )
-        if v4_attribute_loo_calibration_record is not None
-        else None
-    )
-    paper_identity = _paper_identity(calibration, v4_attribute_loo_calibration)
-    model, batch, _cfg, loaded_device = load_model_and_data(
-        MODEL,
-        dataset_name=DATASET,
+    v15_calibration = load_frozen_v15_threshold(
+        v15_calibration_record,
         checkpoint_path=experiment.checkpoint,
+        plan_path=acid_plan_path,
+        materialization_root=acid_materialization_root,
+    )
+    v16_calibration = load_frozen_v16_threshold(
+        v16_calibration_record,
+        checkpoint_path=experiment.checkpoint,
+        v15_record_path=v15_calibration_record,
+        plan_path=acid_plan_path,
+        materialization_root=acid_materialization_root,
+    )
+    if v15_calibration["sha256"] != v16_calibration["base_v15_sha256"]:
+        raise RuntimeError("V16 calibration does not bind the loaded V15 calibration")
+    paper_identity = _paper_identity(v15_calibration, v16_calibration)
+    target_free_audit, target_free_audit_file_sha256 = _read_target_free_quality_audit(
+        target_free_audit_artifact
+    )
+    context_input_identity = _validate_target_free_context_input(
+        target_free_audit, target_free_input_root
+    )
+    loader = create_model_loader(MODEL)
+    bundle = loader.load_model(
+        str(experiment.checkpoint),
+        device=device,
+        experiment_name=experiment.experiment,
         dataset_root=experiment.dataset_root,
         evaluation_index=selection.index_path,
-        experiment_name=experiment.experiment,
         hydra_overrides=experiment.hydra_overrides,
-        device=device,
-        num_samples=1,
-        sample_index=SAMPLE_INDEX,
     )
+    if bundle.decoder is None:
+        raise RuntimeError("compact packet pilot requires the native packet decoder")
+    context_data = load_context_only_audit_data(
+        loader, bundle, input_root=target_free_input_root
+    )
+    if "target" in context_data.batch:
+        raise RuntimeError("compact packet pilot context route exposed a target mapping")
+    loaded_context_identity = context_data.batch.get("calibration")
+    if not isinstance(loaded_context_identity, Mapping) or any(
+        loaded_context_identity.get(key) != value
+        for key, value in context_input_identity.items()
+    ):
+        raise RuntimeError("context-only loader changed the audited input identity")
+    scene = str(context_data.batch["scene"][0])
+    if scene != context_input_identity["scene"]:
+        raise RuntimeError("context-only loader scene does not match the audited input")
+    model = bundle.model
+    loaded_device = bundle.device
     model.eval()
     from src.model.types import Gaussians
 
     context = {
         key: value.to(loaded_device) if torch.is_tensor(value) else value
-        for key, value in batch["context"].items()
+        for key, value in context_data.batch["context"].items()
     }
     if context["image"].shape[0] != 1:
         raise RuntimeError("compact packet pilot requires batch size one")
@@ -502,17 +743,9 @@ def collect_paper_compact_packet_pilot(
             context,
             plan=plan,
             compact_nonzero_materialization=True,
-            compact_execution_policy=(
-                ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY
-                if v4_attribute_loo_calibration is not None
-                else ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_DEV_POLICY
-            ),
-            adaptive_l1_maximum_leave_one_out_residual=calibration["threshold_value"],
-            selected_anchor_v4_attribute_loo_maximum_risk=(
-                v4_attribute_loo_calibration["threshold_value"]
-                if v4_attribute_loo_calibration is not None
-                else None
-            ),
+            compact_execution_policy=ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
+            adaptive_l1_maximum_leave_one_out_residual=v15_calibration["threshold_value"],
+            selected_anchor_v4_attribute_loo_maximum_risk=v16_calibration["threshold_value"],
         )
         preflight = capture["compact_materialization_preflight"]
         if preflight is None:
@@ -523,6 +756,39 @@ def collect_paper_compact_packet_pilot(
         compact_anchor_count = int(preflight.update_dense_slots.numel())
         route_summary = _route_summary(capture)
         route_diagnostics = _route_diagnostics(plan, capture)
+        context_indices = [
+            int(value)
+            for value in context["index"][0].detach().to(device="cpu").tolist()
+        ]
+        quality_gate = _validate_target_free_quality_audit(
+            target_free_audit_artifact,
+            scene=scene,
+            context_indices=context_indices,
+            checkpoint_sha256=checkpoint_sha256,
+            v15_calibration=v15_calibration,
+            v16_calibration=v16_calibration,
+            source_selection_mask_sha256=_require_sha256(
+                plan.events.get("selection_mask_sha256"),
+                label="compact packet source selection mask",
+            ),
+            selected_output_mask_sha256=_require_sha256(
+                capture["guarded_route"].events.get("selected_output_mask_sha256"),
+                label="compact packet selected output mask",
+            ),
+            packed_source_trace_sha256=_require_sha256(
+                final_packed.source_trace_sha256,
+                label="compact packet source trace",
+            ),
+        )
+        if (
+            quality_gate["record_sha256"] != target_free_audit["sha256"]
+            or quality_gate["file_sha256"] != target_free_audit_file_sha256
+        ):
+            raise RuntimeError("target-free quality audit changed after input validation")
+        quality_gate = {
+            **quality_gate,
+            "context_input_identity": context_input_identity,
+        }
         if compact_anchor_count == 0:
             return {
                 "schema_version": "1.0",
@@ -532,9 +798,9 @@ def collect_paper_compact_packet_pilot(
                 "model": MODEL,
                 "dataset": DATASET,
                 "sample_index": SAMPLE_INDEX,
-                "scene": str(batch["scene"][0]),
+                "scene": scene,
                 "target_rgb_provenance": {
-                    "loaded_by_native_dataloader": True,
+                    "loaded_by_native_dataloader": False,
                     "accessed_before_compact_commit": False,
                     "accessed_for_metrics": False,
                 },
@@ -546,8 +812,9 @@ def collect_paper_compact_packet_pilot(
                     "timing_claim": False,
                 },
                 "paper_identity": paper_identity,
-                "adaptive_l1_calibration": calibration,
-                "adaptive_l1_v4_attribute_loo_calibration": v4_attribute_loo_calibration,
+                "adaptive_l1_calibration": v15_calibration,
+                "adaptive_l1_v4_attribute_loo_calibration": v16_calibration,
+                "target_free_quality_gate": quality_gate,
                 "route_plan": plan.events,
                 "compact_route": route_summary,
                 "route_diagnostics": route_diagnostics,
@@ -574,9 +841,9 @@ def collect_paper_compact_packet_pilot(
                 "model": MODEL,
                 "dataset": DATASET,
                 "sample_index": SAMPLE_INDEX,
-                "scene": str(batch["scene"][0]),
+                "scene": scene,
                 "target_rgb_provenance": {
-                    "loaded_by_native_dataloader": True,
+                    "loaded_by_native_dataloader": False,
                     "accessed_before_compact_commit": False,
                     "accessed_for_metrics": False,
                 },
@@ -590,8 +857,9 @@ def collect_paper_compact_packet_pilot(
                     "timing_claim": False,
                 },
                 "paper_identity": paper_identity,
-                "adaptive_l1_calibration": calibration,
-                "adaptive_l1_v4_attribute_loo_calibration": v4_attribute_loo_calibration,
+                "adaptive_l1_calibration": v15_calibration,
+                "adaptive_l1_v4_attribute_loo_calibration": v16_calibration,
+                "target_free_quality_gate": quality_gate,
                 "route_plan": plan.events,
                 "compact_route": route_summary,
                 "route_diagnostics": route_diagnostics,
@@ -608,12 +876,18 @@ def collect_paper_compact_packet_pilot(
                 "checkpoint_sha256": checkpoint_sha256,
                 "source": source_identity(),
             }
-        # The compact route and packet are now committed. Target metadata is
-        # used solely by the later renderer/metric phase.
-        target_mapping = batch.get("target")
+        # The compact route and packet are now committed. Only now may the
+        # native loader construct target-side tensors; its context is discarded.
+        target_batch = _load_native_target_batch_after_packet_gate(
+            loader,
+            bundle,
+            scene=scene,
+            context_indices=context_indices,
+        )
+        target_mapping = target_batch.get("target")
         if not isinstance(target_mapping, dict) or not torch.is_tensor(target_mapping.get("image")):
             raise RuntimeError("compact packet pilot requires native target RGB for metrics")
-        target_cameras = _target_cameras(batch, loaded_device)
+        target_cameras = _target_cameras(target_batch, loaded_device)
         _packet_gaussians, packet_color = render_packed_gaussians(
             model.decoder,
             renderable,
@@ -638,7 +912,7 @@ def collect_paper_compact_packet_pilot(
             image_shape=(height, width),
         )
 
-    target_rgb = _take_target_rgb_for_metrics(batch, loaded_device)
+    target_rgb = _take_target_rgb_for_metrics(target_batch, loaded_device)
     baseline_views = _view_metrics(baseline_color[0], target_rgb[0])
     compact_views = _view_metrics(packet_color[0], target_rgb[0])
     baseline_quality = _mean_metrics(baseline_views)
@@ -652,9 +926,11 @@ def collect_paper_compact_packet_pilot(
         "model": MODEL,
         "dataset": DATASET,
         "sample_index": SAMPLE_INDEX,
-        "scene": str(batch["scene"][0]),
-        "context_indices": [int(value) for value in batch["context"]["index"][0].tolist()],
-        "target_indices": [int(value) for value in batch["target"]["index"][0].tolist()],
+        "scene": scene,
+        "context_indices": context_indices,
+        "target_indices": [
+            int(value) for value in target_batch["target"]["index"][0].tolist()
+        ],
         "target_rgb_provenance": {
             "loaded_by_native_dataloader": True,
             "accessed_before_compact_commit": False,
@@ -673,8 +949,9 @@ def collect_paper_compact_packet_pilot(
             "timing_claim": False,
         },
         "paper_identity": paper_identity,
-        "adaptive_l1_calibration": calibration,
-        "adaptive_l1_v4_attribute_loo_calibration": v4_attribute_loo_calibration,
+        "adaptive_l1_calibration": v15_calibration,
+        "adaptive_l1_v4_attribute_loo_calibration": v16_calibration,
+        "target_free_quality_gate": quality_gate,
         "route_plan": plan.events,
         "compact_route": route_summary,
         "route_diagnostics": route_diagnostics,
@@ -693,7 +970,9 @@ def collect_paper_compact_packet_pilot(
             "verdict": verdict,
             "views": [
                 {
-                    "target_index": int(batch["target"]["index"][0, index].item()),
+                    "target_index": int(
+                        target_batch["target"]["index"][0, index].item()
+                    ),
                     "baseline": baseline_views[index],
                     "compact": compact_views[index],
                 }
@@ -711,8 +990,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--posthoc-domain-audit-only", action="store_true")
-    parser.add_argument("--calibration-record", type=Path, default=DEFAULT_CALIBRATION_RECORD)
-    parser.add_argument("--v4-attribute-loo-calibration-record", type=Path)
+    parser.add_argument("--v15-calibration-record", type=Path, required=True)
+    parser.add_argument("--v16-calibration-record", type=Path, required=True)
+    parser.add_argument("--target-free-audit-artifact", type=Path, required=True)
+    parser.add_argument("--target-free-input-root", type=Path, required=True)
+    parser.add_argument("--acid-plan-path", type=Path, default=DEFAULT_PLAN_PATH)
+    parser.add_argument(
+        "--acid-materialization-root",
+        type=Path,
+        default=DEFAULT_MATERIALIZATION_ROOT,
+    )
     args = parser.parse_args(argv)
     if args.output_dir.exists():
         parser.error("--output-dir must be new")
@@ -730,8 +1017,12 @@ def main(argv: list[str] | None = None) -> int:
         record = collect_paper_compact_packet_pilot(
             device=device,
             posthoc_domain_audit_only=args.posthoc_domain_audit_only,
-            calibration_record=args.calibration_record,
-            v4_attribute_loo_calibration_record=args.v4_attribute_loo_calibration_record,
+            v15_calibration_record=args.v15_calibration_record,
+            v16_calibration_record=args.v16_calibration_record,
+            target_free_audit_artifact=args.target_free_audit_artifact,
+            target_free_input_root=args.target_free_input_root,
+            acid_plan_path=args.acid_plan_path,
+            acid_materialization_root=args.acid_materialization_root,
         )
         exit_code = 0 if record["status"] in {"PASS", "POSTHOC_DOMAIN_AUDIT_COMPLETE"} else 1
     except Exception as exc:

@@ -116,27 +116,73 @@
   an L1-15 selected-anchor V4 self-validation certificate that can only
   promote a tile to Full; it must be target-free and must never inspect the
   actual omitted center descriptor.
-- V15 uses a frozen target-free median absolute S1 LOO threshold from local
-  scene indices 1--4 (23,940 candidate tiles; record SHA256
-  `2535343a75b306ce8cc2b9fffee24b03c39f1ff572782dafcac8e683193dfc8f`).
-  It promoted 1,008 L1 tiles, retained 2,226, and produced `128846/131072`
-  descriptors. Target-free holes improved from 1,667 to 1,122 and uncontained
-  optical mass from `0.002530` to `0.001938`; route/materialization remained
-  target-free and selected-only. Its fixed quality gate improved PSNR from
-  33.9187 to 34.2030 dB and LPIPS increase from 0.00927 to 0.00724, but still
-  failed with a 0.6361 dB PSNR loss. The calibration record and p50 threshold
-  are frozen; do not sample-0-tune its quantile. Diagnose a complementary
-  selected-anchor self-supervised correction or risk signal before another
-  quality gate.
-- V16 is the selected low-risk follow-up: retain V15 as an unchanged first
-  filter, then replay each of the three selected center anchors from the other
-  fourteen selected anchors using V4's same spatial SH/opacity field. The
-  held-out selected center is a self-supervised attribute label; the actual
-  omitted center is never read. A frozen calibration record from sample indices
-  1--4 bounds the q75 replay risk, and a failure promotes the whole L1 tile to
-  Full before packet commit. This is deliberately a filter, not an output
-  correction: source geometry, V4 moment merge, covariance closure, SH/opacity
-  aggregation, and Full passthrough stay unchanged.
+- Historical V15 diagnostic: the target-free median absolute S1 LOO threshold
+  from local DL3DV scene indices 1--4 retained `128846/131072` descriptors and
+  reached 34.2030 dB, a 0.6361 dB loss from Full. It remains useful failure
+  analysis, but its calibration record is invalid for the active route because
+  it is not evaluation-disjoint from DL3DV and native loading constructed
+  target tensors. It must not parent V16, a sample-0 audit, or a quality gate.
+- V16 remains the selected low-risk mechanism: V15 first filters by the
+  selected-center S1 leave-one-out residual, then V4 replays selected center
+  anchors from the other fourteen selected anchors. The held-out selected
+  center is a self-supervised label; the actual omitted center is never read.
+  For the active route, freeze both thresholds on ACID's immutable 24-scene
+  context-only train split under the DL3DV/Re10K TranSplat checkpoint, use the
+  eight ACID holdout scenes only for fixed-threshold verification, then run one
+  DL3DV sample-0 target-free audit and at most one quality gate. Failed tiles
+  promote to Full; source geometry, V4 moment merge, covariance closure,
+  SH/opacity aggregation, and Full passthrough remain unchanged.
+- Native opacity endpoint repair: TranSplat's float32 sigmoid can legitimately
+  round to exact `1.0`. The materializer preserves native/Full alpha in
+  `[0,1]`, but a compact L0/L1 tile with an endpoint selected anchor records
+  `native_opacity_endpoint_requires_full` and promotes the whole tile before
+  V4 logit replay or merge. Compact updates and V4 replay remain strictly
+  `[0,1)`, and values above one remain invalid. This is a source-fidelity
+  repair, not a threshold or quality adjustment; it requires one target-free
+  ACID holdout smoke followed by a fresh complete V15/V16 freeze.
+- Endpoint smoke result: ACID holdout scene `4fa73a829dde9435` completed under
+  the verified ACID V15 parent (`821ce...e9596`) with three native selected
+  endpoints, zero endpoint compact-anchor promotions, and 4,019 viable V16
+  risk tiles. Its self-hashed record is
+  `outputs/ae_dl3dv_repair_diagnostics/acid_disjoint_l1_endpoint_smoke_holdout0_v1.json`
+  (`4dd3...6c1e`); target RGB/cameras/index, target mappings, and skipped-S3
+  attributes were all false. It is target-free repair evidence, not a quality
+  or paper metric.
+- Fresh ACID freeze result: the new 24/8 run at
+  `outputs/ae_dl3dv_repair_diagnostics/acid_disjoint_l1_15_16_calibration_v2_endpoint_repair/`
+  completed with V15 record `821ce...e9596` and V16 record `a2786...1ba`.
+  V15 remains `6.736323121e-5`; V16 is the train-minimum per-scene-q25
+  threshold `0.5819727182`. Both holdout records state `threshold_updated:
+  false`, bind Re10K checkpoint `89e43...a69a`, and record no target or
+  skipped-S3 access. These are the only records eligible to parent the single
+  DL3DV sample-0 audit and subsequent conditional quality gate.
+- DL3DV sample-0 target-free audit result: the frozen pair produced `PASS` at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_incremental_selected_output_adapter_v16_acid_disjoint_v1/results.json`
+  (self-hash `d09de...7589`). It verified both frozen records before encoder
+  execution, read no target mapping/RGB/camera/index or skipped-S3 attributes,
+  and established selected packet/native input equivalence. The final route
+  has `L0=0`, `L1=206`, `Full=7986`; it is a target-free packet audit only and
+  explicitly does not verify whole-pipeline S2/S3 savings or timing.
+- Invalid quality preflight: the first `quality_v1` invocation is preserved at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_l1_15_v16_acid_disjoint_quality_v1/`.
+  It failed before renderer or metric execution with `target-free quality audit
+  route binding changed`, so it reports no PSNR/SSIM/LPIPS and is not quality
+  evidence. The failure exposed that the runner constructed a native batch
+  before validating the audit route, while the audited packet was derived from
+  a frozen context-only sidecar. Repair the runner to consume that exact
+  sidecar through packet commit and route-hash validation before it opens the
+  native target batch. Do not weaken the three route hashes; a clean gate is
+  justified only after this order/input repair and its tests pass.
+- Valid quality gate: the repaired exact-sidecar `quality_v2` run at
+  `outputs/ae_dl3dv_repair_diagnostics/transplat_sample0_l1_15_v16_acid_disjoint_quality_v2_exact_sidecar/`
+  passed the unchanged gate: Full/compact PSNR is `34.839137 -> 34.779134 dB`
+  (loss `0.060003 dB`), SSIM is `0.9736013 -> 0.9733740` (loss `0.0002273`),
+  and LPIPS is `0.0327651 -> 0.0332196` (increase `0.0004545`). It binds the
+  ACID V15/V16 records and the target-free audit self-hash before native target
+  loading; route-plan semantics, anchor layout, and thresholds are now also
+  fail-closed. Its final route is `L0/L1/Full=0/206/7986`, so it authorizes the
+  fixed eight-scene V16 development gate only. It does not establish Table 1,
+  Figure 11, timing, or S2/S3 sparse-execution eligibility.
 
 ## 2. Baseline And Comparability
 

@@ -37,7 +37,13 @@ from saes.progressive_saes import (
 from saes.sparse_gaussian_consumer import PackedGaussianAttributes, SparseRawGaussianPacket
 
 
-MATERIALIZER_SCHEMA_VERSION = "saes-packed-l0-l1-materializer-v3"
+MATERIALIZER_SCHEMA_VERSION = "saes-packed-l0-l1-materializer-v4"
+
+# A native producer can legitimately saturate its floating-point sigmoid at
+# exactly one.  Compact attribute interpolation and V4's logit-domain replay
+# cannot represent that endpoint without changing it, so the whole tile keeps
+# the native Full path instead.
+NATIVE_OPACITY_ENDPOINT_FULL_REASON = "native_opacity_endpoint_requires_full"
 
 # v1 is retained only to reproduce and diagnose the already-recorded failed
 # candidate. It synthesizes a skipped descriptor from every probe and then
@@ -277,8 +283,8 @@ def _validate_selected_source(
         raise ValueError("compact materializer selected inputs must be finite")
     if not bool((packet.depths > 0.0).all()):
         raise ValueError("compact materializer requires positive selected probe depths")
-    if not bool((packed.opacities >= 0.0).all()) or not bool((packed.opacities < 1.0).all()):
-        raise ValueError("compact materializer requires selected opacities in [0, 1)")
+    if not bool((packed.opacities >= 0.0).all()) or not bool((packed.opacities <= 1.0).all()):
+        raise ValueError("compact materializer requires selected opacities in [0, 1]")
     if not bool((packed.batch_indices == 0).all()):
         raise ValueError("compact materializer currently supports B=1 only")
     expected = plan.selection_mask.nonzero(as_tuple=False)
@@ -1765,6 +1771,9 @@ def preflight_compact_l0_l1_materialization(
         height=height,
         width=width,
     )
+    native_opacity_endpoint_selected_count = int(
+        (initial_packed.opacities == 1.0).sum().item()
+    )
     primary_positions = compute_probe_positions(4)
     expected_l1_count = int(plan.events["l1_anchor_count"])
     if len(primary_positions) != 4 or expected_l1_count not in {4, 12, 15}:
@@ -1828,6 +1837,7 @@ def preflight_compact_l0_l1_materialization(
                     "nonprobe_count": 0,
                     "coverage": None,
                     "selected_anchor_v4_attribute_loo": None,
+                    "native_opacity_endpoint_anchor_count": 0,
                 }
                 if level == "Full":
                     trace.append(tile_entry)
@@ -1851,6 +1861,30 @@ def preflight_compact_l0_l1_materialization(
                 tile_entry["anchor_count"] = len(anchors)
                 tile_entry["nonprobe_count"] = 16 - len(anchors)
                 try:
+                    anchor_slots = _tile_slots(
+                        view=view,
+                        tile_y=tile_y,
+                        tile_x=tile_x,
+                        height=height,
+                        width=width,
+                        tile_size=4,
+                        positions=anchors,
+                    )
+                    if any(slot not in slot_to_index for slot in anchor_slots):
+                        raise ValueError("compact materializer tile anchor is absent from selection")
+                    endpoint_anchor_count = int(
+                        (
+                            initial_packed.opacities[
+                                [slot_to_index[slot] for slot in anchor_slots]
+                            ]
+                            == 1.0
+                        )
+                        .sum()
+                        .item()
+                    )
+                    tile_entry["native_opacity_endpoint_anchor_count"] = endpoint_anchor_count
+                    if endpoint_anchor_count:
+                        raise ValueError(NATIVE_OPACITY_ENDPOINT_FULL_REASON)
                     feature_variance = _tile_feature_variance(
                         plan_record,
                         decision_semantics,
@@ -2027,6 +2061,11 @@ def preflight_compact_l0_l1_materialization(
             int(record.get("selected_anchor_s3_attribute_label_reads", 0))
             for record in v4_attribute_loo_records
         ),
+        "native_opacity_endpoint_selected_count": native_opacity_endpoint_selected_count,
+        "native_opacity_endpoint_promoted_full_tiles": sum(
+            record.get("reason") == NATIVE_OPACITY_ENDPOINT_FULL_REASON
+            for record in trace
+        ),
         "l1_anchor_semantics": semantics,
         "paper_l1_retention_interpretation": (
             "literal-probe-set-only-not-specified-by-paper"
@@ -2187,6 +2226,12 @@ def apply_compact_l0_l1_materialization(
     update_slots = preflight.update_dense_slots.detach().to(device="cpu", dtype=torch.int64).tolist()
     if any(slot not in slot_to_index for slot in update_slots):
         raise ValueError("compact materializer update does not belong to final output")
+    if update_count and (
+        not bool(torch.isfinite(preflight.opacities).all())
+        or not bool((preflight.opacities >= 0.0).all())
+        or not bool((preflight.opacities < 1.0).all())
+    ):
+        raise ValueError("compact materializer updates require opacities in [0, 1)")
     means = final_packed.means.clone()
     covariances = final_packed.covariances.clone()
     harmonics = final_packed.harmonics.clone()
@@ -2213,7 +2258,7 @@ def apply_compact_l0_l1_materialization(
         or not bool(torch.isfinite(harmonics).all())
         or not bool(torch.isfinite(opacities).all())
         or not bool((opacities >= 0.0).all())
-        or not bool((opacities < 1.0).all())
+        or not bool((opacities <= 1.0).all())
         or bool((torch.linalg.eigvalsh((covariances + covariances.mT) * 0.5) < -1e-6).any())
     ):
         raise ValueError("compact materializer final attributes violate their contract")
@@ -2230,6 +2275,12 @@ def apply_compact_l0_l1_materialization(
             ],
             "compact_materialization_update_anchor_count": update_count,
             "compact_materialization_full_passthrough_count": int(means.shape[0]) - update_count,
+            "compact_materialization_native_opacity_endpoint_selected_count": preflight.events[
+                "native_opacity_endpoint_selected_count"
+            ],
+            "compact_materialization_native_opacity_endpoint_promoted_full_tiles": preflight.events[
+                "native_opacity_endpoint_promoted_full_tiles"
+            ],
             "compact_materialization_aggregation": preflight.events["aggregation"],
             "compact_materialization_coverage_certificate": preflight.events[
                 "coverage_certificate"
@@ -2273,6 +2324,7 @@ __all__ = [
     "SPATIAL_VIRTUAL_SINGLE_ASSIGNMENT_AGGREGATION",
     "LEGACY_L1_ANCHOR_SEMANTICS",
     "MATERIALIZER_SCHEMA_VERSION",
+    "NATIVE_OPACITY_ENDPOINT_FULL_REASON",
     "PAPER_KP_ANCHOR_SEMANTICS",
     "SELECTED_ANCHOR_V4_ATTRIBUTE_LOO_CERTIFICATE",
     "apply_compact_l0_l1_materialization",

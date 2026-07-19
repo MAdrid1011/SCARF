@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -74,8 +75,9 @@ def _packet_and_packed(mask):
 
     positions = mask.nonzero(as_tuple=False)
     count = int(positions.shape[0])
-    pixels = positions[:, 1] * 4 + positions[:, 2]
-    slots = positions[:, 0] * 16 + pixels
+    height, width = (int(value) for value in mask.shape[-2:])
+    pixels = positions[:, 1] * width + positions[:, 2]
+    slots = positions[:, 0] * (height * width) + pixels
     raw = torch.zeros(count, 8)
     raw[:, 2:] = torch.linspace(-0.2, 0.2, count).unsqueeze(1)
     trace = _source_trace()
@@ -97,7 +99,10 @@ def _packet_and_packed(mask):
         ),
         primitive_to_descriptor=torch.arange(count, dtype=torch.int64),
         coordinates=torch.stack(
-            ((positions[:, 2].to(torch.float32) + 0.5) / 4.0, (positions[:, 1].to(torch.float32) + 0.5) / 4.0),
+            (
+                (positions[:, 2].to(torch.float32) + 0.5) / width,
+                (positions[:, 1].to(torch.float32) + 0.5) / height,
+            ),
             dim=1,
         ),
         depths=torch.ones(count),
@@ -122,6 +127,20 @@ def _packet_and_packed(mask):
         source_trace_sha256=_hash_trace(trace),
     )
     return packet, packed
+
+
+def _with_selected_opacity(packet, packed, *, dense_slot, opacity):
+    matches = (packed.dense_slots == dense_slot).nonzero(as_tuple=False).reshape(-1)
+    assert matches.numel() == 1
+    index = int(matches.item())
+    mapped_opacities = packet.mapped_opacities.clone()
+    packed_opacities = packed.opacities.clone()
+    mapped_opacities[index] = opacity
+    packed_opacities[index] = opacity
+    return (
+        replace(packet, mapped_opacities=mapped_opacities),
+        replace(packed, opacities=packed_opacities),
+    )
 
 
 def _route(plan, level):
@@ -717,6 +736,88 @@ def test_v4_attribute_loo_rejection_promotes_one_adaptive_l1_omission_to_full():
     assert int(final_route.additional_full_mask.sum()) == 1
 
 
+def test_v4_endpoint_opacity_promotes_before_logit_replay():
+    from saes.guarded_selected_route import (
+        ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
+        GuardedSelectedRoute,
+    )
+    from saes.packed_l0_l1_materializer import (
+        NATIVE_OPACITY_ENDPOINT_FULL_REASON,
+        _mask_sha256,
+        preflight_compact_l0_l1_materialization,
+        resolve_compact_final_route,
+    )
+    from saes.probe_first_schedule import (
+        ADAPTIVE_L1_15_ANCHOR_SEMANTICS,
+        build_incremental_probe_first_plan,
+    )
+
+    features = _features("L1")
+    depths = torch.ones(1, 1, 16, 1, 1)
+    plan = build_incremental_probe_first_plan(
+        features,
+        depths,
+        height=4,
+        width=4,
+        tile_size=4,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+        decision_semantics="probe-normalized-std-first-hit",
+        l1_anchor_semantics=ADAPTIVE_L1_15_ANCHOR_SEMANTICS,
+    )
+    packet, packed = _packet_and_packed(plan.selection_mask)
+    endpoint_slot = int(packet.dense_slots[0].item())
+    packet, packed = _with_selected_opacity(
+        packet, packed, dense_slot=endpoint_slot, opacity=1.0
+    )
+    retained = plan.tile_trace[0]["l1_anchor_local_positions"]
+    route = GuardedSelectedRoute(
+        selected_output_mask=plan.selection_mask.clone(),
+        additional_full_mask=torch.zeros_like(plan.selection_mask),
+        raw_head_request_mask=plan.selection_mask.clone(),
+        tile_trace=(
+            {
+                "view": 0,
+                "tile_y": 0,
+                "tile_x": 0,
+                "pre_guard_route": "L1",
+                "depth_uniform": True,
+                "retained_local_positions": retained,
+                "final_route": "L1",
+            },
+        ),
+        events={
+            "execution_policy": ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
+            "source_tile_trace_sha256": plan.events["tile_trace_sha256"],
+            "source_selection_mask_sha256": _mask_sha256(plan.selection_mask),
+            "l1_anchor_semantics": ADAPTIVE_L1_15_ANCHOR_SEMANTICS,
+            "l1_anchor_count": 15,
+        },
+    )
+    extrinsics, intrinsics = _context()
+    preflight = preflight_compact_l0_l1_materialization(
+        packet,
+        packed,
+        route,
+        plan,
+        features,
+        extrinsics,
+        intrinsics,
+        selected_anchor_v4_attribute_loo_maximum_risk=1.0,
+    )
+
+    tile = preflight.tile_trace[0]
+    assert tile["reason"] == NATIVE_OPACITY_ENDPOINT_FULL_REASON
+    assert tile["native_opacity_endpoint_anchor_count"] == 1
+    assert tile["selected_anchor_v4_attribute_loo"] is None
+    assert preflight.events["selected_anchor_v4_attribute_loo_checked_tiles"] == 0
+    assert preflight.events["native_opacity_endpoint_selected_count"] == 1
+    assert preflight.events["native_opacity_endpoint_promoted_full_tiles"] == 1
+    assert int(preflight.promote_full_mask.sum()) == 16
+    final_route = resolve_compact_final_route(route, plan, preflight)
+    assert final_route.events["route_counts"] == {"L0": 0, "L1": 0, "Full": 1}
+
+
 def test_spatial_virtual_field_is_continuous_and_changes_range_constrained_attributes():
     from saes.packed_l0_l1_materializer import (
         _spatial_virtual_weights,
@@ -1087,6 +1188,185 @@ def test_failed_preflight_promotes_whole_tile_and_preserves_full_attributes():
     assert torch.equal(output.covariances, full_packed.covariances)
     assert torch.equal(output.harmonics, full_packed.harmonics)
     assert torch.equal(output.opacities, full_packed.opacities)
+
+
+def test_endpoint_compact_tile_promotes_full_and_preserves_native_full_alpha():
+    from saes.packed_l0_l1_materializer import (
+        NATIVE_OPACITY_ENDPOINT_FULL_REASON,
+        apply_compact_l0_l1_materialization,
+        preflight_compact_l0_l1_materialization,
+        resolve_compact_final_route,
+    )
+
+    plan, features = _plan("L0")
+    packet, packed = _packet_and_packed(plan.selection_mask)
+    endpoint_slot = int(packet.dense_slots[0].item())
+    packet, packed = _with_selected_opacity(
+        packet, packed, dense_slot=endpoint_slot, opacity=1.0
+    )
+    extrinsics, intrinsics = _context()
+    guard = _route(plan, "L0")
+    preflight = preflight_compact_l0_l1_materialization(
+        packet, packed, guard, plan, features, extrinsics, intrinsics
+    )
+
+    assert preflight.update_dense_slots.numel() == 0
+    assert preflight.tile_trace[0]["reason"] == NATIVE_OPACITY_ENDPOINT_FULL_REASON
+    assert preflight.tile_trace[0]["native_opacity_endpoint_anchor_count"] == 1
+    assert preflight.events["native_opacity_endpoint_selected_count"] == 1
+    assert preflight.events["native_opacity_endpoint_promoted_full_tiles"] == 1
+    assert preflight.events["rejection_reasons"] == {
+        NATIVE_OPACITY_ENDPOINT_FULL_REASON: 1
+    }
+    final_route = resolve_compact_final_route(guard, plan, preflight)
+    assert final_route.events["route_counts"] == {"L0": 0, "L1": 0, "Full": 1}
+
+    full_packet, full_packed = _packet_and_packed(
+        torch.ones(1, 4, 4, dtype=torch.bool)
+    )
+    _full_packet, full_packed = _with_selected_opacity(
+        full_packet, full_packed, dense_slot=endpoint_slot, opacity=1.0
+    )
+    output = apply_compact_l0_l1_materialization(full_packed, preflight, final_route)
+
+    assert output.opacities[endpoint_slot].item() == 1.0
+    assert torch.equal(output.means, full_packed.means)
+    assert torch.equal(output.covariances, full_packed.covariances)
+    assert torch.equal(output.harmonics, full_packed.harmonics)
+    assert torch.equal(output.opacities, full_packed.opacities)
+    assert output.source_trace[
+        "compact_materialization_native_opacity_endpoint_promoted_full_tiles"
+    ] == 1
+
+
+def test_endpoint_promotes_only_its_compact_tile_and_keeps_adjacent_tile_compact():
+    from saes.guarded_selected_route import GuardedSelectedRoute
+    from saes.packed_l0_l1_materializer import (
+        NATIVE_OPACITY_ENDPOINT_FULL_REASON,
+        apply_compact_l0_l1_materialization,
+        preflight_compact_l0_l1_materialization,
+        resolve_compact_final_route,
+    )
+    from saes.probe_first_schedule import (
+        PAPER_KP_ANCHOR_SEMANTICS,
+        build_incremental_probe_first_plan,
+    )
+
+    features = torch.zeros(1, 1, 2, 4, 8)
+    depths = torch.ones(1, 1, 32, 1, 1)
+    plan = build_incremental_probe_first_plan(
+        features,
+        depths,
+        height=4,
+        width=8,
+        tile_size=4,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+        decision_semantics="paper-probe-feature-variance-first-hit",
+        l1_anchor_semantics=PAPER_KP_ANCHOR_SEMANTICS,
+    )
+    assert [record["pre_guard_route"] for record in plan.tile_trace] == ["L0", "L0"]
+    packet, packed = _packet_and_packed(plan.selection_mask)
+    endpoint_slot = int(packet.dense_slots[0].item())
+    packet, packed = _with_selected_opacity(
+        packet, packed, dense_slot=endpoint_slot, opacity=1.0
+    )
+    route = GuardedSelectedRoute(
+        selected_output_mask=plan.selection_mask.clone(),
+        additional_full_mask=torch.zeros_like(plan.selection_mask),
+        raw_head_request_mask=plan.selection_mask.clone(),
+        tile_trace=tuple(
+            {
+                "view": 0,
+                "tile_y": 0,
+                "tile_x": tile_x,
+                "pre_guard_route": "L0",
+                "depth_uniform": True,
+                "guard_checks": [],
+                "final_route": "L0",
+            }
+            for tile_x in range(2)
+        ),
+        events={
+            "schema_version": "synthetic-guard-v1",
+            "execution_policy": "paper-nonzero-dev",
+            "route_counts": {"L0": 2},
+        },
+    )
+    extrinsics, intrinsics = _context()
+
+    preflight = preflight_compact_l0_l1_materialization(
+        packet, packed, route, plan, features, extrinsics, intrinsics
+    )
+
+    left, right = preflight.tile_trace
+    assert left["reason"] == NATIVE_OPACITY_ENDPOINT_FULL_REASON
+    assert left["accepted"] is False
+    assert right["reason"] == "accepted"
+    assert right["accepted"] is True
+    assert preflight.update_dense_slots.numel() == 4
+    assert bool(preflight.promote_full_mask[0, :, :4].all())
+    assert not bool(preflight.promote_full_mask[0, :, 4:].any())
+
+    final_route = resolve_compact_final_route(route, plan, preflight)
+    assert final_route.events["route_counts"] == {"L0": 1, "L1": 0, "Full": 1}
+    assert int(final_route.additional_full_mask.sum()) == 12
+    assert bool(final_route.selected_output_mask[0, :, :4].all())
+    assert torch.equal(
+        final_route.selected_output_mask[0, :, 4:], plan.selection_mask[0, :, 4:]
+    )
+
+    full_packet, full_packed = _packet_and_packed(final_route.selected_output_mask)
+    _full_packet, full_packed = _with_selected_opacity(
+        full_packet, full_packed, dense_slot=endpoint_slot, opacity=1.0
+    )
+    output = apply_compact_l0_l1_materialization(full_packed, preflight, final_route)
+    endpoint_index = int((output.dense_slots == endpoint_slot).nonzero().item())
+    assert output.opacities[endpoint_index].item() == 1.0
+    compact_slots = preflight.update_dense_slots.tolist()
+    compact_indices = torch.tensor(
+        [int((output.dense_slots == slot).nonzero().item()) for slot in compact_slots]
+    )
+    torch.testing.assert_close(output.opacities[compact_indices], preflight.opacities)
+    assert bool((output.opacities[compact_indices] < 1.0).all())
+
+
+def test_native_opacity_above_one_is_rejected_and_compact_updates_stay_open():
+    from saes.packed_l0_l1_materializer import (
+        _opacity_logits,
+        apply_compact_l0_l1_materialization,
+        preflight_compact_l0_l1_materialization,
+        resolve_compact_final_route,
+    )
+
+    plan, features = _plan("L0")
+    packet, packed = _packet_and_packed(plan.selection_mask)
+    endpoint_slot = int(packet.dense_slots[0].item())
+    invalid_packet, invalid_packed = _with_selected_opacity(
+        packet, packed, dense_slot=endpoint_slot, opacity=1.01
+    )
+    extrinsics, intrinsics = _context()
+    guard = _route(plan, "L0")
+    with pytest.raises(ValueError, match=r"selected opacities in \[0, 1\]"):
+        preflight_compact_l0_l1_materialization(
+            invalid_packet,
+            invalid_packed,
+            guard,
+            plan,
+            features,
+            extrinsics,
+            intrinsics,
+        )
+
+    preflight = preflight_compact_l0_l1_materialization(
+        packet, packed, guard, plan, features, extrinsics, intrinsics
+    )
+    final_route = resolve_compact_final_route(guard, plan, preflight)
+    invalid_updates = replace(preflight, opacities=torch.ones_like(preflight.opacities))
+    with pytest.raises(ValueError, match=r"updates require opacities in \[0, 1\)"):
+        apply_compact_l0_l1_materialization(packed, invalid_updates, final_route)
+    with pytest.raises(ValueError, match="replay opacity is invalid"):
+        _opacity_logits(torch.ones(1))
 
 
 def test_final_packet_rejects_guard_only_request_slots():

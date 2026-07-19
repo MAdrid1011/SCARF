@@ -38,21 +38,40 @@
 - [x] Run the fixed V14c sample-0 quality gate after correcting target access
   order: `34.8391 -> 34.8387 dB`, but it is an effectively Full upper bound
   with only three L1 tiles and must not tune the S1 dominance threshold.
-- [ ] Rework V16's selected-anchor-only V4 center leave-one-out replay
+- [x] Rework V16's selected-anchor-only V4 center leave-one-out replay
   certificate for L1-15 tiles as an evaluation-disjoint, immutable-manifest
-  route; any failed tile must promote Full.
-- [x] Freeze a target-free four-scene S1 absolute-LOO calibration record and
-  run V15: 1,008 risk tiles promoted, `128846/131072` descriptors, holes
-  `1667 -> 1122`, and no route/materializer target or skipped-S3 access.
-- [x] Run the fixed V15 quality gate: `33.9187 -> 34.2030 dB`, an improvement
-  of 0.2843 dB, but PSNR loss 0.6361 dB and LPIPS increase 0.00724 still fail.
+  route; any failed tile promotes Full and its 24/8 ACID records are frozen.
+- [x] Historical only: freeze a target-free four-scene S1 absolute-LOO V15
+  diagnostic and run its quality gate. It retained `128846/131072` descriptors
+  and reached 34.2030 dB, but its DL3DV sample-1--4 calibration cannot
+  authorize the active evaluation-disjoint route.
 - [x] Select V16 as the distinct complementary mechanism: a frozen,
   selected-anchor V4 center-LOO certificate. It is a risk filter only; V4's
   output formula and V15's frozen p50 threshold remain unchanged.
-- [ ] Replace the legacy DL3DV sample-1--4 V15/V16 calibration records with
-  the ACID 24/8 context-only train/holdout contract. Freeze thresholds on the
-  train split, use the holdout only for verification, then run one DL3DV
-  sample-0 target-free audit and at most one quality gate.
+- [x] Repair the native `opacity=1.0` endpoint without clamping: preserve it
+  on Full, promote an affected compact tile Full before V4/logit replay, keep
+  compact updates open-interval, and reject values above one. Materializer and
+  incremental-adapter CPU regressions pass.
+- [x] Run the target-free ACID holdout endpoint smoke before the fresh V15/V16
+  freeze: `4fa73a829dde9435` completed with three native endpoints, zero
+  endpoint compact-anchor promotions, 4,019 risk tiles, a valid self-hash,
+  and no target or skipped-S3 access.
+- [x] Replace the legacy DL3DV sample-1--4 calibration records with the ACID
+  24/8 context-only freeze: V15 `821ce...e9596`, V16 `a2786...1ba`, train-only
+  thresholds, and fixed-threshold holdout verification.
+- [x] Run one DL3DV sample-0 target-free audit under the frozen pair: PASS,
+  self-hash `d09de...7589`, target-free access evidence, and source-bound
+  packed Adapter equivalence are recorded.
+- [x] Preserve `quality_v1` as an invalid pre-render preflight: route binding
+  drift was rejected before metrics, so it supplies no quality result and may
+  not be used for tuning or reporting.
+- [x] Run the one permitted quality gate under the same V15/V16/audit SHA
+  bindings after the quality runner consumes the exact audited sidecar before
+  loading target data: `quality_v2` passed at `34.839137 -> 34.779134 dB`
+  (PSNR loss `0.060003 dB`), with SSIM loss `0.0002273` and LPIPS increase
+  `0.0004545`. The committed route is `L0/L1/Full=0/206/7986`; it authorizes
+  only the fixed V16 8-scene development gate, not a sparse-execution claim or
+  metric tuning rerun.
 
 ## Documentation
 

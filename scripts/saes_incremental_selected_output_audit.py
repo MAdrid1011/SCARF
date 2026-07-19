@@ -39,7 +39,10 @@ from saes.probe_first_schedule import (  # noqa: E402
     LEGACY_L1_ANCHOR_SEMANTICS,
     build_incremental_probe_first_plan,
 )
-from saes.progressive_saes import DELETION_CERTIFICATE_SOURCE_KIND  # noqa: E402
+from saes.progressive_saes import (  # noqa: E402
+    DELETION_CERTIFICATE_SOURCE_KIND,
+    PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS,
+)
 from saes.selected_output_replay import FP32_ATOL, FP32_RTOL  # noqa: E402
 from saes.sparse_gaussian_consumer import (  # noqa: E402
     PackedGaussianConsumer,
@@ -57,10 +60,15 @@ TILE_SIZE = 4
 FEATURE_THRESHOLD = 0.20
 DEPTH_THRESHOLD = 0.10
 DECISION_SEMANTICS = "probe-normalized-std-first-hit"
+EVALUATION_DISJOINT_L1_15_DECISION_SEMANTICS = (
+    PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS
+)
 AUDIT_SCHEMA_VERSION = "saes-incremental-selected-output-adapter-audit-v1"
 GUARD_DISTRIBUTION_SCHEMA_VERSION = "saes-guarded-route-geometry-distribution-v1"
 GUARD_DISTRIBUTION_FILENAME = "guard-distribution.json"
 GUARD_DISTRIBUTION_THRESHOLDS = (2.0, 2.146, 2.448)
+RE10K_EXPERIMENT = "re10k"
+RE10K_CHECKPOINT_NAME = "re10k.ckpt"
 
 
 class _AdapterPreempted(RuntimeError):
@@ -577,6 +585,208 @@ def _require_sha256(value: Any, *, name: str) -> str:
     return value
 
 
+def _require_finite_nonnegative(value: Any, *, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0.0
+    ):
+        raise ValueError(f"{name} must be finite and nonnegative")
+    return float(value)
+
+
+def _with_record_sha256(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Bind a persisted audit record to canonical content excluding itself."""
+    if not isinstance(record, Mapping):
+        raise TypeError("audit record SHA256 binding requires a mapping")
+    payload = dict(record)
+    payload.pop("sha256", None)
+    encoded = json.dumps(
+        payload, allow_nan=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return {**payload, "sha256": hashlib.sha256(encoded).hexdigest()}
+
+
+def _frozen_calibration_identity(
+    record: Mapping[str, Any],
+    *,
+    label: str,
+    expected_application: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Retain only the frozen threshold identity consumed by this audit."""
+    if not isinstance(record, Mapping):
+        raise TypeError(f"{label} calibration loader did not return a mapping")
+    application = record.get("application")
+    acid_binding = record.get("acid_binding")
+    access = record.get("access")
+    if application != expected_application:
+        raise RuntimeError(f"{label} calibration does not bind the active Re10K checkpoint")
+    if not isinstance(acid_binding, Mapping):
+        raise RuntimeError(f"{label} calibration has no verified ACID binding")
+    if not isinstance(access, Mapping) or any(
+        access.get(key) is not False
+        for key in (
+            "target_mapping_present",
+            "target_rgb_accessed",
+            "target_camera_metadata_accessed",
+            "target_index_accessed",
+            "skipped_s3_attributes_accessed",
+        )
+    ):
+        raise RuntimeError(f"{label} calibration is not target-free")
+    return {
+        "sha256": _require_sha256(record.get("sha256"), name=f"{label} calibration"),
+        "threshold_value": _require_finite_nonnegative(
+            record.get("threshold_value"), name=f"{label} calibration threshold"
+        ),
+        "acid_binding": dict(acid_binding),
+        "application": dict(application),
+    }
+
+
+def _load_evaluation_disjoint_l1_calibrations(
+    *,
+    checkpoint_path: Path,
+    checkpoint_sha256: str,
+    v15_calibration_record: Path,
+    v16_calibration_record: Path,
+    acid_calibration_plan: Path | None = None,
+    acid_materialization_root: Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Load only the ACID-disjoint V15/V16 pair bound to this Re10K file."""
+    from saes.evaluation_disjoint_l1_calibration import (
+        DEFAULT_MATERIALIZATION_ROOT,
+        DEFAULT_PLAN_PATH,
+        load_frozen_v15_threshold,
+        load_frozen_v16_threshold,
+    )
+
+    checkpoint_path = Path(checkpoint_path).resolve()
+    expected_application = {
+        "model": MODEL,
+        "dataset": DATASET,
+        "checkpoint_sha256": _require_sha256(
+            checkpoint_sha256, name="active Re10K checkpoint"
+        ),
+    }
+    plan_path = (
+        Path(acid_calibration_plan).resolve()
+        if acid_calibration_plan is not None
+        else DEFAULT_PLAN_PATH
+    )
+    materialization_root = (
+        Path(acid_materialization_root).resolve()
+        if acid_materialization_root is not None
+        else DEFAULT_MATERIALIZATION_ROOT
+    )
+    v15 = load_frozen_v15_threshold(
+        Path(v15_calibration_record),
+        checkpoint_path=checkpoint_path,
+        plan_path=plan_path,
+        materialization_root=materialization_root,
+    )
+    v16 = load_frozen_v16_threshold(
+        Path(v16_calibration_record),
+        checkpoint_path=checkpoint_path,
+        v15_record_path=Path(v15_calibration_record),
+        plan_path=plan_path,
+        materialization_root=materialization_root,
+    )
+    v15_identity = _frozen_calibration_identity(
+        v15, label="V15", expected_application=expected_application
+    )
+    v16_identity = _frozen_calibration_identity(
+        v16, label="V16", expected_application=expected_application
+    )
+    if v15_identity["acid_binding"] != v16_identity["acid_binding"]:
+        raise RuntimeError("V15 and V16 calibration ACID bindings differ")
+    return {
+        "v15_calibration": v15_identity,
+        "v16_calibration": v16_identity,
+    }
+
+
+def _require_frozen_l1_15_packed_guard(
+    *,
+    plan: Any,
+    capture: Mapping[str, Any],
+    v15_calibration: Mapping[str, Any],
+    v16_calibration: Mapping[str, Any],
+) -> dict[str, str]:
+    """Fail closed unless the frozen pair drove the final packed L1-15 route."""
+    plan_events = getattr(plan, "events", None)
+    if not isinstance(plan_events, Mapping) or (
+        plan_events.get("decision_semantics")
+        != EVALUATION_DISJOINT_L1_15_DECISION_SEMANTICS
+        or plan_events.get("l1_anchor_semantics")
+        != ADAPTIVE_L1_15_ANCHOR_SEMANTICS
+        or plan_events.get("l1_anchor_count") != 15
+    ):
+        raise RuntimeError(
+            "frozen packed guard did not use paper-normalized adaptive L1-15 anchors"
+        )
+    if capture.get("compact_nonzero_materialization") is not True:
+        raise RuntimeError("frozen packed guard did not enable compact nonzero materialization")
+    preflight = capture.get("compact_materialization_preflight")
+    route = capture.get("guarded_route")
+    final_packed = capture.get("final_packed")
+    preflight_events = getattr(preflight, "events", None)
+    route_events = getattr(route, "events", None)
+    source_trace = getattr(final_packed, "source_trace", None)
+    if not all(
+        isinstance(value, Mapping)
+        for value in (preflight_events, route_events, source_trace)
+    ):
+        raise RuntimeError("frozen packed guard has incomplete materialization evidence")
+    v15_threshold = _require_finite_nonnegative(
+        v15_calibration.get("threshold_value"), name="V15 calibration threshold"
+    )
+    v16_threshold = _require_finite_nonnegative(
+        v16_calibration.get("threshold_value"), name="V16 calibration threshold"
+    )
+    if (
+        preflight_events.get("execution_policy")
+        != ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY
+        or preflight_events.get("selected_anchor_v4_attribute_loo_guard") is not True
+        or preflight_events.get("selected_anchor_v4_attribute_loo_maximum_risk")
+        != v16_threshold
+        or route_events.get("execution_policy")
+        != ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY
+        or route_events.get("adaptive_l1_absolute_residual_guard") is not True
+        or route_events.get("adaptive_l1_absolute_residual_maximum") != v15_threshold
+        or route_events.get("l1_anchor_semantics")
+        != ADAPTIVE_L1_15_ANCHOR_SEMANTICS
+        or route_events.get("l1_anchor_count") != 15
+        or route_events.get("compact_materialization_enabled") is not True
+    ):
+        raise RuntimeError("frozen V15/V16 thresholds did not drive the packed guard")
+    if (
+        source_trace.get("compact_materialization_execution_policy")
+        != ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY
+        or source_trace.get("compact_materialization_selected_anchor_v4_attribute_loo_guard")
+        is not True
+        or source_trace.get("compact_materialization_selected_anchor_v4_attribute_loo_maximum_risk")
+        != v16_threshold
+        or source_trace.get("route_selection_mask_sha256")
+        != plan_events.get("selection_mask_sha256")
+    ):
+        raise RuntimeError("final packed trace does not bind the frozen L1-15 guard")
+    return {
+        "source_selection_mask_sha256": _require_sha256(
+            plan_events.get("selection_mask_sha256"), name="source selection mask"
+        ),
+        "selected_output_mask_sha256": _require_sha256(
+            route_events.get("selected_output_mask_sha256"),
+            name="selected output mask",
+        ),
+        "packed_source_trace_sha256": _require_sha256(
+            getattr(final_packed, "source_trace_sha256", None),
+            name="packed source trace",
+        ),
+    }
+
+
 def _require_fixed_guard_route(
     plan_events: Mapping[str, Any], route_events: Mapping[str, Any]
 ) -> None:
@@ -585,26 +795,37 @@ def _require_fixed_guard_route(
         raise TypeError("guard distribution requires route-plan and guarded-route mappings")
     if plan_events.get("contract_version") != "saes-incremental-probe-first-plan-v1":
         raise ValueError("guard distribution route-plan contract is not fixed")
-    if route_events.get("schema_version") != "saes-guarded-selected-route-v1":
-        raise ValueError("guard distribution guarded-route schema is not fixed")
+    if route_events.get("schema_version") != "saes-compact-l0-l1-route-v1":
+        raise ValueError("guard distribution compact route schema is not fixed")
     expected_plan = {
         "tile_size": TILE_SIZE,
         "feature_threshold": FEATURE_THRESHOLD,
         "depth_threshold": DEPTH_THRESHOLD,
-        "decision_semantics": DECISION_SEMANTICS,
+        "decision_semantics": EVALUATION_DISJOINT_L1_15_DECISION_SEMANTICS,
     }
     for name, expected in expected_plan.items():
         if plan_events.get(name) != expected:
             raise ValueError(f"guard distribution route-plan {name} is not fixed")
-    if plan_events.get("l0_anchor_count") != 4 or plan_events.get("l1_anchor_count") != 12:
+    if (
+        plan_events.get("l0_anchor_count") != 4
+        or plan_events.get("l1_anchor_count") != 15
+        or plan_events.get("l1_anchor_semantics")
+        != ADAPTIVE_L1_15_ANCHOR_SEMANTICS
+    ):
         raise ValueError("guard distribution route-plan has the wrong anchor layout")
     if route_events.get("tile_size") != TILE_SIZE:
         raise ValueError("guard distribution guarded route has the wrong tile size")
     if route_events.get("materialization") != "representative":
         raise ValueError("guard distribution guarded route has the wrong materialization")
-    if route_events.get("context_safety_guard") is not True:
-        raise ValueError("guard distribution requires the context safety guard")
-    if route_events.get("l0_anchor_count") != 4 or route_events.get("l1_anchor_count") != 12:
+    if (
+        route_events.get("execution_policy")
+        != ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY
+        or route_events.get("compact_materialization_enabled") is not True
+        or route_events.get("l0_anchor_count") != 4
+        or route_events.get("l1_anchor_count") != 15
+        or route_events.get("l1_anchor_semantics")
+        != ADAPTIVE_L1_15_ANCHOR_SEMANTICS
+    ):
         raise ValueError("guard distribution guarded route has the wrong anchor layout")
     _require_sha256(
         plan_events.get("tile_trace_sha256"), name="route-plan tile trace SHA256"
@@ -692,7 +913,7 @@ def _guard_distribution_route_identity(
         "tile_size": TILE_SIZE,
         "feature_threshold": FEATURE_THRESHOLD,
         "depth_threshold": DEPTH_THRESHOLD,
-        "decision_semantics": DECISION_SEMANTICS,
+        "decision_semantics": EVALUATION_DISJOINT_L1_15_DECISION_SEMANTICS,
         "materialization": route_events["materialization"],
         "context_safety_guard": route_events["context_safety_guard"],
         "l0_anchor_count": route_events["l0_anchor_count"],
@@ -1540,10 +1761,17 @@ def _load_context_only_encoder(
     from data.context_only_audit_input import validate_context_only_audit_input
     from integration import create_model_loader, load_context_only_audit_data
     from scripts.ae_config import resolve_experiment
-    from scripts.result_record import cached_sha256_file
 
     input_identity = validate_context_only_audit_input(input_root)
     experiment = resolve_experiment(MODEL, DATASET, ROOT)
+    expected_checkpoint = ROOT / MODEL / "checkpoints" / RE10K_CHECKPOINT_NAME
+    if (
+        experiment.model != MODEL
+        or experiment.dataset != DATASET
+        or experiment.experiment != RE10K_EXPERIMENT
+        or experiment.checkpoint.resolve() != expected_checkpoint.resolve()
+    ):
+        raise RuntimeError("target-free audit must use the fixed TranSplat DL3DV Re10K checkpoint")
     loader = create_model_loader(MODEL)
     bundle = loader.load_model(
         str(experiment.checkpoint),
@@ -1568,11 +1796,17 @@ def _load_context_only_encoder(
         context,
         input_identity,
         {
-            "checkpoint_sha256": cached_sha256_file(experiment.checkpoint),
+            "checkpoint_sha256": _sha256_file(experiment.checkpoint),
+            "checkpoint_path": str(experiment.checkpoint.resolve()),
+            "checkpoint_name": RE10K_CHECKPOINT_NAME,
+            "checkpoint_experiment": RE10K_EXPERIMENT,
             "environment_profile": experiment.environment_profile,
             "encoder_only": True,
             "decoder_constructed": False,
             "native_encoder_device": str(bundle.device),
+            "target_mapping_present": False,
+            "target_rgb_accessed": False,
+            "target_camera_metadata_accessed": False,
         },
     )
 
@@ -1581,6 +1815,10 @@ def collect_incremental_selected_output_audit(
     *,
     input_root: Path,
     device: torch.device,
+    v15_calibration_record: Path,
+    v16_calibration_record: Path,
+    acid_calibration_plan: Path | None = None,
+    acid_materialization_root: Path | None = None,
     guard_distribution_output_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Run one fixed context-only selected raw-head and Adapter diagnostic."""
@@ -1589,6 +1827,16 @@ def collect_incremental_selected_output_audit(
     model, context, input_identity, execution = _load_context_only_encoder(
         input_root, device
     )
+    frozen_calibrations = _load_evaluation_disjoint_l1_calibrations(
+        checkpoint_path=Path(execution["checkpoint_path"]),
+        checkpoint_sha256=execution["checkpoint_sha256"],
+        v15_calibration_record=v15_calibration_record,
+        v16_calibration_record=v16_calibration_record,
+        acid_calibration_plan=acid_calibration_plan,
+        acid_materialization_root=acid_materialization_root,
+    )
+    v15_calibration = frozen_calibrations["v15_calibration"]
+    v16_calibration = frozen_calibrations["v16_calibration"]
     if context["image"].shape[0] != 1:
         raise RuntimeError("incremental selected-output audit requires batch size one")
     _, views, _, height, width = context["image"].shape
@@ -1603,7 +1851,8 @@ def collect_incremental_selected_output_audit(
             tile_size=TILE_SIZE,
             feature_threshold=FEATURE_THRESHOLD,
             depth_threshold=DEPTH_THRESHOLD,
-            decision_semantics=DECISION_SEMANTICS,
+            decision_semantics=EVALUATION_DISJOINT_L1_15_DECISION_SEMANTICS,
+            l1_anchor_semantics=ADAPTIVE_L1_15_ANCHOR_SEMANTICS,
         )
         if plan.selection_mask.shape != (views, height, width):
             raise RuntimeError("probe-first plan does not match the native B=1 view layout")
@@ -1611,6 +1860,16 @@ def collect_incremental_selected_output_audit(
             model,
             context,
             plan=plan,
+            compact_nonzero_materialization=True,
+            compact_execution_policy=(
+                ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY
+            ),
+            adaptive_l1_maximum_leave_one_out_residual=v15_calibration[
+                "threshold_value"
+            ],
+            selected_anchor_v4_attribute_loo_maximum_risk=v16_calibration[
+                "threshold_value"
+            ],
         )
         initial_head_events = incremental_capture["initial_head_events"]
         final_head_events = incremental_capture["final_head_events"]
@@ -1629,8 +1888,10 @@ def collect_incremental_selected_output_audit(
         packet = incremental_capture["initial_packet"]
         packed = incremental_capture["packed"]
         final_raw = incremental_capture["final_raw_head"]
+        final_packed = incremental_capture["final_packed"]
         assert isinstance(packet, SparseRawGaussianPacket)
         assert isinstance(packed, PackedGaussianAttributes)
+        assert isinstance(final_packed, PackedGaussianAttributes)
         assert torch.is_tensor(final_raw)
         body_binding = _numeric_equivalence(
             packet.raw_descriptors[:, 2:], selected_inputs.raw_body
@@ -1652,6 +1913,12 @@ def collect_incremental_selected_output_audit(
         adapter_inputs = incremental_capture["adapter_inputs"]
         adapter_attributes = _attribute_equivalence(
             packed, dense_reference, packed.dense_slots
+        )
+        route_binding = _require_frozen_l1_15_packed_guard(
+            plan=plan,
+            capture=incremental_capture,
+            v15_calibration=v15_calibration,
+            v16_calibration=v16_calibration,
         )
     equivalent = all(
         value["equivalent"]
@@ -1679,6 +1946,15 @@ def collect_incremental_selected_output_audit(
         "target_rgb_accessed": False,
         "target_camera_metadata_accessed": False,
         "target_mapping_present": False,
+        "access_evidence": {
+            "target_rgb_accessed": False,
+            "target_camera_metadata_accessed": False,
+            "target_mapping_present": False,
+            "target_index_accessed": False,
+            "frozen_calibrations_target_free": True,
+            "frozen_calibrations_verified_before_encoder_execution": True,
+            "packed_guard_executed_before_target_access": True,
+        },
         "execution_boundary": {
             "dense_context_planning_pass_executed": True,
             "incremental_context_adapter_boundary_pass_executed": True,
@@ -1686,6 +1962,9 @@ def collect_incremental_selected_output_audit(
             "incremental_dense_native_adapter_executed": False,
             "packed_native_adapter_executed_in_same_encoder_invocation": True,
             "guarded_selected_route_resolved": True,
+            "compact_nonzero_materialization_enabled": True,
+            "frozen_l1_15_packed_guard_executed": True,
+            "frozen_calibrations_verified_before_encoder_execution": True,
             "additional_full_dispatch_executed": incremental_capture["extension_event"]
             is not None,
             "appended_full_packed_adapter_executed": False,
@@ -1715,6 +1994,17 @@ def collect_incremental_selected_output_audit(
             "scope": "initial_route_attributes_used_only_to_resolve_guard",
         },
         "guarded_selected_route": guarded_route.events,
+        "v15_calibration": v15_calibration,
+        "v16_calibration": v16_calibration,
+        "frozen_l1_15_mechanism": {
+            "decision_semantics": EVALUATION_DISJOINT_L1_15_DECISION_SEMANTICS,
+            "l1_anchor_semantics": ADAPTIVE_L1_15_ANCHOR_SEMANTICS,
+            "l1_anchor_count": 15,
+            "execution_policy": (
+                ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY
+            ),
+        },
+        "route_binding": route_binding,
         "numerical_execution": numerical_execution,
         "checkpoint_sha256": execution["checkpoint_sha256"],
         "execution": execution,
@@ -1731,13 +2021,17 @@ def collect_incremental_selected_output_audit(
         record["guard_distribution"] = _write_guard_distribution(
             guard_distribution_output_dir, distribution
         )
-    return record
+    return _with_record_sha256(record)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--v15-calibration-record", type=Path, required=True)
+    parser.add_argument("--v16-calibration-record", type=Path, required=True)
+    parser.add_argument("--acid-calibration-plan", type=Path)
+    parser.add_argument("--acid-materialization-root", type=Path)
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--write-guard-distribution",
@@ -1759,6 +2053,10 @@ def main(argv: list[str] | None = None) -> int:
         record = collect_incremental_selected_output_audit(
             input_root=args.input_root,
             device=device,
+            v15_calibration_record=args.v15_calibration_record,
+            v16_calibration_record=args.v16_calibration_record,
+            acid_calibration_plan=args.acid_calibration_plan,
+            acid_materialization_root=args.acid_materialization_root,
             guard_distribution_output_dir=(
                 args.output_dir if args.write_guard_distribution else None
             ),
@@ -1784,6 +2082,7 @@ def main(argv: list[str] | None = None) -> int:
     record["command"] = portable_command(
         [sys.executable, str(Path(__file__).resolve()), *(argv or sys.argv[1:])]
     )
+    record = _with_record_sha256(record)
     write_result(record, args.output_dir / "results.json")
     print(args.output_dir / "results.json")
     return exit_code

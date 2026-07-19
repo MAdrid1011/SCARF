@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -73,18 +74,24 @@ def _guard_distribution_fixture():
         "tile_size": 4,
         "feature_threshold": 0.2,
         "depth_threshold": 0.1,
-        "decision_semantics": "probe-normalized-std-first-hit",
+        "decision_semantics": "paper-probe-normalized-feature-first-hit",
         "l0_anchor_count": 4,
-        "l1_anchor_count": 12,
+        "l1_anchor_count": 15,
+        "l1_anchor_semantics": "engineering-lightweight-15-adaptive-center-s1-loo-v1",
         "tile_trace_sha256": plan_trace_sha256,
     }
     route_events = {
-        "schema_version": "saes-guarded-selected-route-v1",
+        "schema_version": "saes-compact-l0-l1-route-v1",
         "tile_size": 4,
         "materialization": "representative",
-        "context_safety_guard": True,
+        "context_safety_guard": False,
+        "compact_materialization_enabled": True,
+        "execution_policy": (
+            "engineering-nonzero-l1-15-adaptive-absolute-residual-v4-attribute-loo-dev"
+        ),
         "l0_anchor_count": 4,
-        "l1_anchor_count": 12,
+        "l1_anchor_count": 15,
+        "l1_anchor_semantics": "engineering-lightweight-15-adaptive-center-s1-loo-v1",
         "source_tile_trace_sha256": plan_trace_sha256,
         "tile_trace_sha256": _canonical_json_sha256(trace),
         "source_selection_mask_sha256": "b" * 64,
@@ -231,15 +238,22 @@ def test_incremental_audit_cli_enables_distribution_only_with_explicit_flag(
                 str(enabled),
                 "--device",
                 "cpu",
+                "--v15-calibration-record",
+                str(tmp_path / "v15.json"),
+                "--v16-calibration-record",
+                str(tmp_path / "v16.json"),
                 "--write-guard-distribution",
             ]
         )
         == 0
     )
     assert calls[-1]["guard_distribution_output_dir"] == enabled
-    assert json.loads((enabled / "results.json").read_text(encoding="utf-8"))[
-        "guard_distribution"
-    ] == {"path": "guard-distribution.json"}
+    assert calls[-1]["v15_calibration_record"] == tmp_path / "v15.json"
+    assert calls[-1]["v16_calibration_record"] == tmp_path / "v16.json"
+    persisted = json.loads((enabled / "results.json").read_text(encoding="utf-8"))
+    assert persisted["guard_distribution"] == {"path": "guard-distribution.json"}
+    recorded_sha256 = persisted.pop("sha256")
+    assert recorded_sha256 == audit._canonical_json_sha256(persisted)
 
     disabled = tmp_path / "disabled"
     assert (
@@ -251,11 +265,279 @@ def test_incremental_audit_cli_enables_distribution_only_with_explicit_flag(
                 str(disabled),
                 "--device",
                 "cpu",
+                "--v15-calibration-record",
+                str(tmp_path / "v15.json"),
+                "--v16-calibration-record",
+                str(tmp_path / "v16.json"),
             ]
         )
         == 0
     )
     assert calls[-1]["guard_distribution_output_dir"] is None
+
+
+def _frozen_l1_calibration_record(*, checkpoint_sha256, acid_binding, threshold):
+    return {
+        "sha256": "a" * 64,
+        "threshold_value": threshold,
+        "application": {
+            "model": "transplat",
+            "dataset": "dl3dv",
+            "checkpoint_sha256": checkpoint_sha256,
+        },
+        "acid_binding": acid_binding,
+        "access": {
+            "target_mapping_present": False,
+            "target_rgb_accessed": False,
+            "target_camera_metadata_accessed": False,
+            "target_index_accessed": False,
+            "skipped_s3_attributes_accessed": False,
+        },
+    }
+
+
+def test_audit_loads_the_verified_disjoint_pair_against_the_active_re10k_checkpoint(
+    monkeypatch, tmp_path
+):
+    import saes.evaluation_disjoint_l1_calibration as calibration
+    import scripts.saes_incremental_selected_output_audit as audit
+
+    checkpoint = tmp_path / "re10k.ckpt"
+    checkpoint.write_bytes(b"checkpoint")
+    checkpoint_sha256 = "d" * 64
+    acid_binding = {"dataset": "acid", "binding": "same-24-8"}
+    v15 = _frozen_l1_calibration_record(
+        checkpoint_sha256=checkpoint_sha256, acid_binding=acid_binding, threshold=0.1
+    )
+    v16 = {
+        **_frozen_l1_calibration_record(
+            checkpoint_sha256=checkpoint_sha256, acid_binding=acid_binding, threshold=0.2
+        ),
+        "sha256": "b" * 64,
+    }
+    calls = []
+
+    def load_v15(path, **kwargs):
+        calls.append(("v15", Path(path), kwargs))
+        return v15
+
+    def load_v16(path, **kwargs):
+        calls.append(("v16", Path(path), kwargs))
+        return v16
+
+    monkeypatch.setattr(calibration, "load_frozen_v15_threshold", load_v15)
+    monkeypatch.setattr(calibration, "load_frozen_v16_threshold", load_v16)
+    v15_path = tmp_path / "v15.json"
+    v16_path = tmp_path / "v16.json"
+    evidence = audit._load_evaluation_disjoint_l1_calibrations(
+        checkpoint_path=checkpoint,
+        checkpoint_sha256=checkpoint_sha256,
+        v15_calibration_record=v15_path,
+        v16_calibration_record=v16_path,
+        acid_calibration_plan=tmp_path / "acid-plan.json",
+        acid_materialization_root=tmp_path / "acid-materialization",
+    )
+
+    assert calls[0][0] == "v15"
+    assert calls[0][2]["checkpoint_path"] == checkpoint.resolve()
+    assert calls[1][0] == "v16"
+    assert calls[1][2]["checkpoint_path"] == checkpoint.resolve()
+    assert calls[1][2]["v15_record_path"] == v15_path
+    assert evidence == {
+        "v15_calibration": {
+            "sha256": "a" * 64,
+            "threshold_value": 0.1,
+            "acid_binding": acid_binding,
+            "application": v15["application"],
+        },
+        "v16_calibration": {
+            "sha256": "b" * 64,
+            "threshold_value": 0.2,
+            "acid_binding": acid_binding,
+            "application": v16["application"],
+        },
+    }
+
+    v16["application"] = {
+        **v16["application"],
+        "checkpoint_sha256": "e" * 64,
+    }
+    with pytest.raises(RuntimeError, match="active Re10K checkpoint"):
+        audit._load_evaluation_disjoint_l1_calibrations(
+            checkpoint_path=checkpoint,
+            checkpoint_sha256=checkpoint_sha256,
+            v15_calibration_record=v15_path,
+            v16_calibration_record=v16_path,
+        )
+
+
+def test_audit_preserves_frozen_loader_rejections_for_legacy_parent_and_checkpoint(
+    monkeypatch, tmp_path
+):
+    import saes.evaluation_disjoint_l1_calibration as calibration
+    import scripts.saes_incremental_selected_output_audit as audit
+
+    checkpoint = tmp_path / "re10k.ckpt"
+    checkpoint.write_bytes(b"checkpoint")
+    kwargs = {
+        "checkpoint_path": checkpoint,
+        "checkpoint_sha256": "d" * 64,
+        "v15_calibration_record": tmp_path / "v15.json",
+        "v16_calibration_record": tmp_path / "v16.json",
+    }
+
+    def reject_legacy(*_args, **_kwargs):
+        raise ValueError("V15 record identity is invalid")
+
+    monkeypatch.setattr(calibration, "load_frozen_v15_threshold", reject_legacy)
+    with pytest.raises(ValueError, match="V15 record identity"):
+        audit._load_evaluation_disjoint_l1_calibrations(**kwargs)
+
+    acid_binding = {"dataset": "acid", "binding": "same-24-8"}
+    valid_v15 = _frozen_l1_calibration_record(
+        checkpoint_sha256="d" * 64, acid_binding=acid_binding, threshold=0.1
+    )
+    monkeypatch.setattr(
+        calibration, "load_frozen_v15_threshold", lambda *_args, **_kwargs: valid_v15
+    )
+
+    def reject_parent(*_args, **_kwargs):
+        raise ValueError("V16 record does not bind its verified V15 parent")
+
+    monkeypatch.setattr(calibration, "load_frozen_v16_threshold", reject_parent)
+    with pytest.raises(ValueError, match="verified V15 parent"):
+        audit._load_evaluation_disjoint_l1_calibrations(**kwargs)
+
+    def reject_checkpoint(*_args, **_kwargs):
+        raise ValueError("V15 record application checkpoint changed")
+
+    monkeypatch.setattr(calibration, "load_frozen_v15_threshold", reject_checkpoint)
+    with pytest.raises(ValueError, match="application checkpoint changed"):
+        audit._load_evaluation_disjoint_l1_calibrations(**kwargs)
+
+
+def test_audit_verifies_frozen_calibrations_before_any_encoder_capture(monkeypatch, tmp_path):
+    import scripts.saes_incremental_selected_output_audit as audit
+
+    checkpoint = tmp_path / "re10k.ckpt"
+    checkpoint.write_bytes(b"checkpoint")
+    calls = []
+    execution = {
+        "checkpoint_path": str(checkpoint),
+        "checkpoint_sha256": "d" * 64,
+    }
+    calibration = {
+        "v15_calibration": {"threshold_value": 0.1},
+        "v16_calibration": {"threshold_value": 0.2},
+    }
+
+    monkeypatch.setattr(
+        audit,
+        "_load_context_only_encoder",
+        lambda *_args, **_kwargs: (
+            object(),
+            {"image": torch.zeros(1, 1, 1, 4, 4)},
+            {"scene": "sample-zero", "context_indices": [1, 3], "source_sample_index": 0},
+            execution,
+        ),
+    )
+
+    def load_calibration(**kwargs):
+        calls.append("calibration")
+        assert kwargs["checkpoint_path"] == checkpoint
+        assert kwargs["checkpoint_sha256"] == "d" * 64
+        return calibration
+
+    class CaptureStopped(RuntimeError):
+        pass
+
+    def stop_at_encoder(*_args, **_kwargs):
+        calls.append("encoder")
+        assert calls == ["calibration", "encoder"]
+        raise CaptureStopped()
+
+    monkeypatch.setattr(audit, "_load_evaluation_disjoint_l1_calibrations", load_calibration)
+    monkeypatch.setattr(audit, "_capture_dense_reference", stop_at_encoder)
+    with pytest.raises(CaptureStopped):
+        audit.collect_incremental_selected_output_audit(
+            input_root=tmp_path / "context-only",
+            device=torch.device("cpu"),
+            v15_calibration_record=tmp_path / "v15.json",
+            v16_calibration_record=tmp_path / "v16.json",
+        )
+    assert calls == ["calibration", "encoder"]
+
+
+def test_frozen_l1_15_packed_guard_binds_both_thresholds_and_final_trace():
+    from types import SimpleNamespace
+
+    from scripts.saes_incremental_selected_output_audit import (
+        _require_frozen_l1_15_packed_guard,
+    )
+
+    v15 = {"threshold_value": 0.1}
+    v16 = {"threshold_value": 0.2}
+    plan = SimpleNamespace(
+        events={
+            "decision_semantics": "paper-probe-normalized-feature-first-hit",
+            "l1_anchor_semantics": "engineering-lightweight-15-adaptive-center-s1-loo-v1",
+            "l1_anchor_count": 15,
+            "selection_mask_sha256": "c" * 64,
+        }
+    )
+    policy = "engineering-nonzero-l1-15-adaptive-absolute-residual-v4-attribute-loo-dev"
+    capture = {
+        "compact_nonzero_materialization": True,
+        "compact_materialization_preflight": SimpleNamespace(
+            events={
+                "execution_policy": policy,
+                "selected_anchor_v4_attribute_loo_guard": True,
+                "selected_anchor_v4_attribute_loo_maximum_risk": 0.2,
+            }
+        ),
+        "guarded_route": SimpleNamespace(
+            events={
+                "execution_policy": policy,
+                "adaptive_l1_absolute_residual_guard": True,
+                "adaptive_l1_absolute_residual_maximum": 0.1,
+                "l1_anchor_semantics": "engineering-lightweight-15-adaptive-center-s1-loo-v1",
+                "l1_anchor_count": 15,
+                "compact_materialization_enabled": True,
+                "selected_output_mask_sha256": "e" * 64,
+            }
+        ),
+        "final_packed": SimpleNamespace(
+            source_trace={
+                "compact_materialization_execution_policy": policy,
+                "compact_materialization_selected_anchor_v4_attribute_loo_guard": True,
+                "compact_materialization_selected_anchor_v4_attribute_loo_maximum_risk": 0.2,
+                "route_selection_mask_sha256": "c" * 64,
+            },
+            source_trace_sha256="f" * 64,
+        ),
+    }
+
+    assert _require_frozen_l1_15_packed_guard(
+        plan=plan,
+        capture=capture,
+        v15_calibration=v15,
+        v16_calibration=v16,
+    ) == {
+        "source_selection_mask_sha256": "c" * 64,
+        "selected_output_mask_sha256": "e" * 64,
+        "packed_source_trace_sha256": "f" * 64,
+    }
+
+    capture["compact_materialization_preflight"].events[
+        "selected_anchor_v4_attribute_loo_maximum_risk"
+    ] = 0.3
+    with pytest.raises(RuntimeError, match="did not drive the packed guard"):
+        _require_frozen_l1_15_packed_guard(
+            plan=plan,
+            capture=capture,
+            v15_calibration=v15,
+            v16_calibration=v16,
+        )
 
 
 def test_incremental_audit_rejects_phase_trace_that_does_not_match_the_plan():
@@ -772,8 +1054,13 @@ def test_incremental_audit_intercepts_a_direct_adapter_forward_call_and_restores
 def test_guarded_packed_adapter_executes_full_extension_in_one_encoder_invocation():
     from types import SimpleNamespace
 
+    from saes.guarded_selected_route import (
+        ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
+    )
+    from saes.probe_first_schedule import ADAPTIVE_L1_15_ANCHOR_SEMANTICS
     from saes.probe_first_schedule import build_incremental_probe_first_plan
     from scripts.saes_incremental_selected_output_audit import (
+        EVALUATION_DISJOINT_L1_15_DECISION_SEMANTICS,
         _capture_guarded_incremental_packed_adapter,
     )
 
@@ -986,3 +1273,40 @@ def test_guarded_packed_adapter_executes_full_extension_in_one_encoder_invocatio
     assert selected_capture["final_packed"].dense_slots.tolist() == expected_slots.tolist()
     assert selected_capture["final_raw_head"].shape[0] == 4
     assert selected_capture["omitted_raw_head_positions_poisoned"] == 12
+
+    # The frozen audit's deployment path uses an adaptive 15-anchor plan and
+    # drives both the S1 residual and selected-anchor V4 replay guards before
+    # emitting its compact packet.
+    adaptive_plan = build_incremental_probe_first_plan(
+        features,
+        depths,
+        height=4,
+        width=4,
+        tile_size=4,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+        decision_semantics=EVALUATION_DISJOINT_L1_15_DECISION_SEMANTICS,
+        l1_anchor_semantics=ADAPTIVE_L1_15_ANCHOR_SEMANTICS,
+    )
+    compact_capture = _capture_guarded_incremental_packed_adapter(
+        SimpleNamespace(encoder=Encoder(source_opacity=0.2, reject_l1=False).eval()),
+        {"features": features},
+        plan=adaptive_plan,
+        compact_nonzero_materialization=True,
+        compact_execution_policy=(
+            ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY
+        ),
+        adaptive_l1_maximum_leave_one_out_residual=1.0,
+        selected_anchor_v4_attribute_loo_maximum_risk=1.0,
+    )
+    compact_preflight = compact_capture["compact_materialization_preflight"]
+    assert compact_capture["compact_nonzero_materialization"] is True
+    assert compact_preflight is not None
+    assert compact_preflight.events["execution_policy"] == (
+        ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY
+    )
+    assert compact_preflight.events["selected_anchor_v4_attribute_loo_guard"] is True
+    assert compact_capture["guarded_route"].events["l1_anchor_count"] == 15
+    assert compact_capture["final_packed"].source_trace[
+        "compact_materialization_execution_policy"
+    ] == ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY
