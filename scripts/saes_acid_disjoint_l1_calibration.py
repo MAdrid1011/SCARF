@@ -2,8 +2,8 @@
 """Freeze ACID-disjoint, target-free V15/V16 L1 calibration records.
 
 The calibration source is the verified ACID 24/8 context-only materialization.
-The application model is nevertheless TranSplat's DL3DV/Re10K checkpoint and
-configuration.  No ACID target tensor, native ACID dataloader, target camera,
+The application is an explicitly selected classic DL3DV/Re10K checkpoint and
+configuration. No ACID target tensor, native ACID dataloader, target camera,
 or DL3DV evaluation sample is opened by this collector.
 """
 
