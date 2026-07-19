@@ -31,6 +31,7 @@ from integration.acid_joint_context import load_acid_joint_context
 from integration.acid_joint_model_context import prepare_acid_joint_model_context
 from integration.model_loader import create_model_loader
 from saes.evaluation_disjoint_l1_calibration import (
+    CLASSIC_APPLICATION_MODELS,
     DEFAULT_MATERIALIZATION_ROOT,
     DEFAULT_PLAN_PATH,
     HOLDOUT_SPLIT,
@@ -89,6 +90,12 @@ _ACCESS = {
 
 def _context_access() -> dict[str, bool]:
     return dict(_ACCESS)
+
+
+def _application_model_name(value: Any) -> str:
+    if value not in CLASSIC_APPLICATION_MODELS:
+        raise ValueError("ACID calibration requires a supported classic application model")
+    return str(value)
 
 
 def _release_cuda_cache(device: torch.device) -> None:
@@ -291,20 +298,23 @@ def _native_dense_v16_execution_evidence(
     return initial
 
 
-def _load_application_encoder(device: torch.device) -> tuple[Any, Any, Any, str]:
+def _load_application_encoder(
+    device: torch.device, *, model_name: str = MODEL
+) -> tuple[Any, Any, Any, str]:
     """Load only the DL3DV application encoder, never the ACID checkpoint."""
 
-    experiment = resolve_experiment(MODEL, DATASET, ROOT)
+    model_name = _application_model_name(model_name)
+    experiment = resolve_experiment(model_name, DATASET, ROOT)
     if (
-        experiment.model != MODEL
+        experiment.model != model_name
         or experiment.dataset != DATASET
         or experiment.experiment != APPLICATION_EXPERIMENT
         or experiment.checkpoint.name != "re10k.ckpt"
     ):
-        raise RuntimeError("ACID calibration must use the DL3DV/Re10K TranSplat mapping")
+        raise RuntimeError("ACID calibration must use the DL3DV/Re10K classic mapping")
     checkpoint_path = Path(experiment.checkpoint)
     checkpoint_sha256 = sha256_file(checkpoint_path)
-    loader = create_model_loader(MODEL)
+    loader = create_model_loader(model_name)
     bundle = loader.load_model(
         str(checkpoint_path),
         experiment_name=experiment.experiment,
@@ -404,6 +414,7 @@ def _collect_v16_split(
     plan_path: Path,
     split: str,
     v15_threshold: float,
+    model_name: str = MODEL,
 ) -> list[dict[str, Any]]:
     if not math.isfinite(float(v15_threshold)) or float(v15_threshold) < 0.0:
         raise ValueError("verified V15 threshold is invalid")
@@ -432,6 +443,7 @@ def _collect_v16_split(
                     adaptive_l1_maximum_leave_one_out_residual=float(v15_threshold),
                     collect_selected_anchor_v4_attribute_loo_risk=True,
                     require_native_dense_head_execution=True,
+                    model_name=model_name,
                 )
                 execution = _native_dense_v16_execution_evidence(capture, plan=plan)
                 risks = _observed_v16_risks(capture)
@@ -736,6 +748,7 @@ def collect_frozen_calibration_records(
     v16_output: Path,
     materialization_root: Path = DEFAULT_MATERIALIZATION_ROOT,
     plan_path: Path = DEFAULT_PLAN_PATH,
+    model_name: str = MODEL,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Collect ACID 24/8 records and freeze V15 then V16 under one application.
 
@@ -753,10 +766,13 @@ def collect_frozen_calibration_records(
         raise ValueError("V15 and V16 calibration outputs must be different files")
     if v15_output.exists() or v16_output.exists():
         raise FileExistsError("frozen calibration outputs must not already exist")
+    model_name = _application_model_name(model_name)
     binding = resolve_acid_binding(
         plan_path=plan_path, materialization_root=materialization_root
     )
-    model, bundle, experiment, checkpoint_sha256 = _load_application_encoder(device)
+    model, bundle, experiment, checkpoint_sha256 = _load_application_encoder(
+        device, model_name=model_name
+    )
     try:
         v15_train = _collect_v15_split(
             model=model,
@@ -777,6 +793,7 @@ def collect_frozen_calibration_records(
         v15 = build_v15_record(
             binding=binding,
             application_checkpoint_sha256=checkpoint_sha256,
+            application_model=model_name,
             train_scene_records=v15_train,
             holdout_scene_records=v15_holdout,
         )
@@ -785,6 +802,7 @@ def collect_frozen_calibration_records(
         verified_v15 = load_frozen_v15_threshold(
             v15_output,
             checkpoint_path=experiment.checkpoint,
+            application_model=model_name,
             plan_path=plan_path,
             materialization_root=materialization_root,
         )
@@ -798,6 +816,7 @@ def collect_frozen_calibration_records(
             plan_path=plan_path,
             split=TRAIN_SPLIT,
             v15_threshold=verified_v15["threshold_value"],
+            model_name=model_name,
         )
         v16_holdout = _collect_v16_split(
             model=model,
@@ -807,10 +826,12 @@ def collect_frozen_calibration_records(
             plan_path=plan_path,
             split=HOLDOUT_SPLIT,
             v15_threshold=verified_v15["threshold_value"],
+            model_name=model_name,
         )
         v16 = build_v16_record(
             binding=binding,
             application_checkpoint_sha256=checkpoint_sha256,
+            application_model=model_name,
             v15_record_sha256=verified_v15["sha256"],
             train_scene_records=v16_train,
             holdout_scene_records=v16_holdout,
@@ -820,6 +841,7 @@ def collect_frozen_calibration_records(
         verified_v16 = load_frozen_v16_threshold(
             v16_output,
             checkpoint_path=experiment.checkpoint,
+            application_model=model_name,
             v15_record_path=v15_output,
             plan_path=plan_path,
             materialization_root=materialization_root,
@@ -834,6 +856,9 @@ def collect_frozen_calibration_records(
 def calibration_main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--model", choices=tuple(sorted(CLASSIC_APPLICATION_MODELS)), default=MODEL
+    )
     parser.add_argument("--materialization-root", type=Path, default=DEFAULT_MATERIALIZATION_ROOT)
     parser.add_argument("--plan", type=Path, default=DEFAULT_PLAN_PATH)
     parser.add_argument("--device", default="cuda")
@@ -851,6 +876,7 @@ def calibration_main(argv: Sequence[str] | None = None) -> int:
             v16_output=args.output_dir / "v16.json",
             materialization_root=args.materialization_root,
             plan_path=args.plan,
+            model_name=args.model,
         )
     except (OSError, RuntimeError, ValueError, TypeError) as error:
         print(f"error: {error}", file=sys.stderr)

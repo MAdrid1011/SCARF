@@ -21,6 +21,7 @@ from scripts.calibration_inputs import (
 
 INPUT_KIND = "scarf_context_only_audit_input_v1"
 RECORD_KIND = "scarf_context_only_audit_record_v1"
+CLASSIC_MODELS = frozenset(("transplat", "mvsplat"))
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _INPUT_FIELDS = frozenset(
     (
@@ -114,8 +115,14 @@ def _copy_context_image(value: Any) -> Any:
     raise ValueError("context-only audit image has an unsupported type")
 
 
+def _model_name(value: Any) -> str:
+    if value not in CLASSIC_MODELS:
+        raise ValueError("context-only audit requires a supported classic model")
+    return str(value)
+
+
 def _source_contract(
-    source_root: Path,
+    source_root: Path, *, model: str
 ) -> tuple[dict[str, Any], list[int], str, int, str]:
     source = _load_json(source_root / "audit-input.json", "source audit input")
     source_sample_index = _sample_index(
@@ -124,7 +131,7 @@ def _source_contract(
     if (
         source.get("kind") != "dl3dv_target_free_l1_primary_reference_audit_input"
         or source.get("status") != "PASS"
-        or source.get("model") != "transplat"
+        or source.get("model") != model
         or source.get("dataset") != "dl3dv"
         or source.get("target_rgb_included") is not False
     ):
@@ -165,7 +172,7 @@ def _source_contract(
 
 
 def prepare_context_only_audit_input(
-    source_root: Path, *, output_root: Path
+    source_root: Path, *, output_root: Path, model: str = "transplat"
 ) -> dict[str, Any]:
     """Compile one source-bound sidecar to only its two context camera records.
 
@@ -175,6 +182,7 @@ def prepare_context_only_audit_input(
     """
     source_root = Path(source_root).resolve()
     output_root = Path(output_root).resolve()
+    model = _model_name(model)
     if output_root.exists():
         raise FileExistsError(
             f"context-only audit output already exists: {output_root}"
@@ -186,7 +194,7 @@ def prepare_context_only_audit_input(
         scene,
         source_sample_index,
         canonical_selection_sha256,
-    ) = _source_contract(source_root)
+    ) = _source_contract(source_root, model=model)
     source_sidecar_identity = validate_target_free_input_root(
         source_root / "sidecar", "dl3dv"
     )
@@ -229,7 +237,7 @@ def prepare_context_only_audit_input(
         "kind": INPUT_KIND,
         "status": "PASS",
         "paper_result_eligible": False,
-        "model": "transplat",
+        "model": model,
         "dataset": "dl3dv",
         "source_sample_index": source_sample_index,
         "fixed_context": {"scene": scene, "context_indices": context_indices},
@@ -286,9 +294,12 @@ def _safe_chunk_path(test_root: Path, value: Any) -> Path:
     return path
 
 
-def validate_context_only_audit_input(root: Path) -> dict[str, Any]:
+def validate_context_only_audit_input(
+    root: Path, *, model: str = "transplat"
+) -> dict[str, Any]:
     """Validate a context-only input without exposing target-side fields."""
     root = Path(root).resolve()
+    model = _model_name(model)
     audit = _load_json(root / "audit-input.json", "context-only audit input")
     source_sample_index = _sample_index(
         audit.get("source_sample_index"), "source sample index"
@@ -299,7 +310,7 @@ def validate_context_only_audit_input(root: Path) -> dict[str, Any]:
         or audit.get("kind") != INPUT_KIND
         or audit.get("status") != "PASS"
         or audit.get("paper_result_eligible") is not False
-        or audit.get("model") != "transplat"
+        or audit.get("model") != model
         or audit.get("dataset") != "dl3dv"
         or audit.get("target_rgb_included") is not False
         or audit.get("target_camera_metadata_included") is not False

@@ -27,7 +27,8 @@ from scripts.calibration_inputs import materialize_target_free_inputs
 from scripts.compile_protocol import canonicalize_index
 
 
-PAIR = "transplat/dl3dv"
+CLASSIC_MODELS = ("transplat", "mvsplat")
+DEFAULT_MODEL = "transplat"
 SAMPLE_INDEX = 0
 CONTEXT_COUNT = 2
 TARGET_COUNT = 4
@@ -57,15 +58,26 @@ def _sample_index(value: Any) -> int:
     return value
 
 
+def _model_name(value: Any) -> str:
+    if value not in CLASSIC_MODELS:
+        raise AuditInputError(
+            "target-free classic audit requires one of "
+            + ", ".join(CLASSIC_MODELS)
+        )
+    return str(value)
+
+
 def _protocol_selection(
-    protocol_path: Path, *, sample_index: int
+    protocol_path: Path, *, model: str, sample_index: int
 ) -> tuple[dict[str, Any], Path, dict[str, Any], dict[str, Any]]:
+    model = _model_name(model)
     sample_index = _sample_index(sample_index)
     protocol = _load_json(protocol_path, "evaluation protocol")
     pairs = protocol.get("pairs")
-    contract = pairs.get(PAIR) if isinstance(pairs, Mapping) else None
+    pair = f"{model}/dl3dv"
+    contract = pairs.get(pair) if isinstance(pairs, Mapping) else None
     if not isinstance(contract, Mapping):
-        raise AuditInputError(f"evaluation protocol has no {PAIR} contract")
+        raise AuditInputError(f"evaluation protocol has no {pair} contract")
     index_path = contract.get("index_path")
     index_sha256 = contract.get("source_index_sha256")
     if not isinstance(index_path, str) or not isinstance(index_sha256, str):
@@ -160,6 +172,7 @@ def prepare_inputs(
     *,
     output_dir: Path,
     protocol_path: Path = DEFAULT_PROTOCOL,
+    model: str = DEFAULT_MODEL,
     sample_index: int = SAMPLE_INDEX,
 ) -> dict[str, Any]:
     """Write one source-bound sidecar without decoding target RGB."""
@@ -167,9 +180,10 @@ def prepare_inputs(
     output_dir = Path(output_dir).resolve()
     if output_dir.exists():
         raise FileExistsError(f"target-free audit output already exists: {output_dir}")
+    model = _model_name(model)
     sample_index = _sample_index(sample_index)
     contract, index_path, row, selection_summary = _protocol_selection(
-        protocol_path, sample_index=sample_index
+        protocol_path, model=model, sample_index=sample_index
     )
     scene = row["scene"]
     context_indices = list(row["context_indices"])
@@ -211,7 +225,7 @@ def prepare_inputs(
         "kind": "dl3dv_target_free_l1_primary_reference_audit_input",
         "status": "PASS",
         "paper_result_eligible": False,
-        "model": "transplat",
+        "model": model,
         "dataset": "dl3dv",
         "source_sample_index": sample_index,
         "selected_sample": {
@@ -228,7 +242,7 @@ def prepare_inputs(
             "target_indices": target_indices,
         },
         "canonical_protocol": {
-            "pair": PAIR,
+            "pair": f"{model}/dl3dv",
             "index_path": contract["index_path"],
             "source_index_sha256": contract["source_index_sha256"],
             "sample_selection_sha256": selection_summary["sample_selection_sha256"],
@@ -273,12 +287,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-root", type=Path, default=DEFAULT_RAW_ROOT)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--model", choices=CLASSIC_MODELS, default=DEFAULT_MODEL)
     parser.add_argument("--sample-index", type=int, default=SAMPLE_INDEX)
     args = parser.parse_args()
     try:
         record = prepare_inputs(
             args.raw_root,
             output_dir=args.output_dir,
+            model=args.model,
             sample_index=args.sample_index,
         )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:

@@ -33,6 +33,7 @@ ACCESS_KEYS = (
     "target_index_accessed",
     "skipped_s3_attributes_accessed",
 )
+CLASSIC_APPLICATION_MODELS = frozenset(("transplat", "mvsplat"))
 
 
 def canonical_sha256(value: Mapping[str, Any]) -> str:
@@ -246,9 +247,17 @@ def _validate_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
     return dict(binding)
 
 
-def _application(checkpoint_sha256: str) -> dict[str, Any]:
+def _application_model(value: Any) -> str:
+    if value not in CLASSIC_APPLICATION_MODELS:
+        raise ValueError("calibration application model is unsupported")
+    return str(value)
+
+
+def _application(
+    checkpoint_sha256: str, *, model: str = "transplat"
+) -> dict[str, Any]:
     return {
-        "model": "transplat",
+        "model": _application_model(model),
         "dataset": "dl3dv",
         "checkpoint_sha256": _require_sha256(
             checkpoint_sha256, "DL3DV application checkpoint"
@@ -332,6 +341,7 @@ def _base_record(
     kind: str,
     binding: Mapping[str, Any],
     application_checkpoint_sha256: str,
+    application_model: str,
     train_records: Sequence[Mapping[str, Any]],
     holdout_records: Sequence[Mapping[str, Any]],
     value_key: str,
@@ -360,7 +370,9 @@ def _base_record(
         "kind": kind,
         "status": STATUS,
         "paper_result_eligible": False,
-        "application": _application(application_checkpoint_sha256),
+        "application": _application(
+            application_checkpoint_sha256, model=application_model
+        ),
         "acid_binding": validated_binding,
         "split_policy": {
             "train_split": TRAIN_SPLIT,
@@ -387,6 +399,7 @@ def build_v15_record(
     *,
     binding: Mapping[str, Any],
     application_checkpoint_sha256: str,
+    application_model: str = "transplat",
     train_scene_records: Sequence[Mapping[str, Any]],
     holdout_scene_records: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -405,6 +418,7 @@ def build_v15_record(
         kind=V15_KIND,
         binding=validated_binding,
         application_checkpoint_sha256=application_checkpoint_sha256,
+        application_model=application_model,
         train_records=train,
         holdout_records=holdout_scene_records,
         value_key="residuals",
@@ -418,6 +432,7 @@ def build_v16_record(
     *,
     binding: Mapping[str, Any],
     application_checkpoint_sha256: str,
+    application_model: str = "transplat",
     v15_record_sha256: str,
     train_scene_records: Sequence[Mapping[str, Any]],
     holdout_scene_records: Sequence[Mapping[str, Any]],
@@ -440,6 +455,7 @@ def build_v16_record(
         kind=V16_KIND,
         binding=validated_binding,
         application_checkpoint_sha256=application_checkpoint_sha256,
+        application_model=application_model,
         train_records=train,
         holdout_records=holdout_scene_records,
         value_key="risks",
@@ -468,6 +484,7 @@ def _validate_loaded_record(
     *,
     kind: str,
     checkpoint_path: Path,
+    application_model: str,
     plan_path: Path,
     materialization_root: Path,
 ) -> dict[str, Any]:
@@ -500,7 +517,9 @@ def _validate_loaded_record(
         and record.get("raw_head_execution_contract") != RAW_HEAD_EXECUTION_CONTRACT
     ):
         raise ValueError("V16 record raw-head execution contract changed")
-    expected_application = _application(sha256_file(Path(checkpoint_path)))
+    expected_application = _application(
+        sha256_file(Path(checkpoint_path)), model=application_model
+    )
     if record.get("application") != expected_application:
         raise ValueError(f"{kind} record application checkpoint changed")
     live_binding = resolve_acid_binding(
@@ -570,6 +589,7 @@ def load_frozen_v15_threshold(
     path: Path,
     *,
     checkpoint_path: Path,
+    application_model: str = "transplat",
     plan_path: Path = DEFAULT_PLAN_PATH,
     materialization_root: Path = DEFAULT_MATERIALIZATION_ROOT,
 ) -> dict[str, Any]:
@@ -578,6 +598,7 @@ def load_frozen_v15_threshold(
         _load_record(path, kind=V15_KIND),
         kind=V15_KIND,
         checkpoint_path=checkpoint_path,
+        application_model=application_model,
         plan_path=plan_path,
         materialization_root=materialization_root,
     )
@@ -587,6 +608,7 @@ def load_frozen_v16_threshold(
     path: Path,
     *,
     checkpoint_path: Path,
+    application_model: str = "transplat",
     v15_record_path: Path,
     plan_path: Path = DEFAULT_PLAN_PATH,
     materialization_root: Path = DEFAULT_MATERIALIZATION_ROOT,
@@ -595,6 +617,7 @@ def load_frozen_v16_threshold(
     v15 = load_frozen_v15_threshold(
         v15_record_path,
         checkpoint_path=checkpoint_path,
+        application_model=application_model,
         plan_path=plan_path,
         materialization_root=materialization_root,
     )
@@ -602,6 +625,7 @@ def load_frozen_v16_threshold(
         _load_record(path, kind=V16_KIND),
         kind=V16_KIND,
         checkpoint_path=checkpoint_path,
+        application_model=application_model,
         plan_path=plan_path,
         materialization_root=materialization_root,
     )
@@ -615,6 +639,7 @@ def load_frozen_v16_threshold(
 __all__ = [
     "DEFAULT_MATERIALIZATION_ROOT",
     "DEFAULT_PLAN_PATH",
+    "CLASSIC_APPLICATION_MODELS",
     "HOLDOUT_SPLIT",
     "TRAIN_SPLIT",
     "V15_KIND",

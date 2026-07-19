@@ -141,6 +141,42 @@ def test_v15_uses_only_train_values_and_live_binding(tmp_path, monkeypatch):
     assert len(loaded["holdout_scene_records"]) == 8
 
 
+def test_application_model_is_frozen_and_fail_closed(tmp_path, monkeypatch):
+    binding = _binding()
+    train, holdout = _records(binding, value_key="residuals", offset=0.0)
+    checkpoint = tmp_path / "re10k.ckpt"
+    digest = _checkpoint(checkpoint)
+    record = calibration.build_v15_record(
+        binding=binding,
+        application_checkpoint_sha256=digest,
+        application_model="mvsplat",
+        train_scene_records=train,
+        holdout_scene_records=holdout,
+    )
+    assert record["application"] == {
+        "model": "mvsplat",
+        "dataset": "dl3dv",
+        "checkpoint_sha256": digest,
+    }
+    path = tmp_path / "mvsplat-v15.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(calibration, "resolve_acid_binding", lambda **_kwargs: binding)
+
+    assert calibration.load_frozen_v15_threshold(
+        path, checkpoint_path=checkpoint, application_model="mvsplat"
+    )["sha256"] == record["sha256"]
+    with pytest.raises(ValueError, match="application checkpoint changed"):
+        calibration.load_frozen_v15_threshold(path, checkpoint_path=checkpoint)
+    with pytest.raises(ValueError, match="application model"):
+        calibration.build_v15_record(
+            binding=binding,
+            application_checkpoint_sha256=digest,
+            application_model="depthsplat",
+            train_scene_records=train,
+            holdout_scene_records=holdout,
+        )
+
+
 def test_records_reject_reordered_or_dl3dv_sample_records(tmp_path):
     binding = _binding()
     train, holdout = _records(binding, value_key="residuals", offset=0.0)

@@ -26,6 +26,10 @@ from saes.incremental_selected_output_execution import (  # noqa: E402
     native_dense_head_execution_evidence,
     validate_native_dense_head_execution_evidence,
 )
+from saes.classic_backend import (  # noqa: E402
+    resolve_classic_backend_contract,
+    source_native_adapter_coordinates,
+)
 from saes.guarded_selected_route import (  # noqa: E402
     ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
     resolve_guarded_selected_route,
@@ -220,28 +224,16 @@ def _extract_selected_adapter_inputs(
 
 
 def _source_native_selected_coordinates_from_final_raw(
-    final_raw_descriptors: torch.Tensor, selection_mask: torch.Tensor
+    final_raw_descriptors: torch.Tensor,
+    selection_mask: torch.Tensor,
+    *,
+    model_name: str = MODEL,
 ) -> torch.Tensor:
-    """Call TranSplat's shared offset geometry for the final selected packet."""
-    positions, height, width = _selected_positions(selection_mask)
-    if (
-        not torch.is_tensor(final_raw_descriptors)
-        or final_raw_descriptors.ndim != 2
-        or final_raw_descriptors.shape[0] != positions.shape[0]
-        or final_raw_descriptors.shape[1] < 2
-    ):
-        raise ValueError("final raw descriptors do not match the selected geometry layout")
-    from transplat.src.model.encoder.encoder_trans import (
-        gaussian_adapter_coordinates_from_raw_offsets,
-    )
-
-    pixels = (positions[:, 1] * width + positions[:, 2]).to(
-        device=final_raw_descriptors.device, dtype=torch.int64
-    )
-    return gaussian_adapter_coordinates_from_raw_offsets(
-        final_raw_descriptors[:, :2].sigmoid(),
-        image_shape=(height, width),
-        pixel_indices=pixels,
+    """Rebuild final selected coordinates with the active native backend."""
+    return source_native_adapter_coordinates(
+        resolve_classic_backend_contract(model_name, ROOT),
+        final_raw_descriptors,
+        selection_mask,
     )
 
 
@@ -715,6 +707,7 @@ def _load_evaluation_disjoint_l1_calibrations(
     *,
     checkpoint_path: Path,
     checkpoint_sha256: str,
+    model_name: str = MODEL,
     v15_calibration_record: Path,
     v16_calibration_record: Path,
     acid_calibration_plan: Path | None = None,
@@ -729,8 +722,9 @@ def _load_evaluation_disjoint_l1_calibrations(
     )
 
     checkpoint_path = Path(checkpoint_path).resolve()
+    backend_contract = resolve_classic_backend_contract(model_name, ROOT)
     expected_application = {
-        "model": MODEL,
+        "model": backend_contract.model,
         "dataset": DATASET,
         "checkpoint_sha256": _require_sha256(
             checkpoint_sha256, name="active Re10K checkpoint"
@@ -749,12 +743,14 @@ def _load_evaluation_disjoint_l1_calibrations(
     v15 = load_frozen_v15_threshold(
         Path(v15_calibration_record),
         checkpoint_path=checkpoint_path,
+        application_model=backend_contract.model,
         plan_path=plan_path,
         materialization_root=materialization_root,
     )
     v16 = load_frozen_v16_threshold(
         Path(v16_calibration_record),
         checkpoint_path=checkpoint_path,
+        application_model=backend_contract.model,
         v15_record_path=Path(v15_calibration_record),
         plan_path=plan_path,
         materialization_root=materialization_root,
@@ -1483,6 +1479,7 @@ def _capture_guarded_incremental_packed_adapter(
     selected_anchor_v4_attribute_loo_maximum_risk: float | None = None,
     collect_selected_anchor_v4_attribute_loo_risk: bool = False,
     require_native_dense_head_execution: bool = False,
+    model_name: str = MODEL,
 ) -> dict[str, Any]:
     """Run guard resolution and one optional Full extension in one encoder call.
 
@@ -1494,6 +1491,7 @@ def _capture_guarded_incremental_packed_adapter(
     dense raw-head map. The final packet contains only the guard-resolved
     selected outputs and can be consumed by the variable-length renderer path.
     """
+    backend_contract = resolve_classic_backend_contract(model_name, ROOT)
     predictor = model.encoder.depth_predictor
     head = getattr(predictor, "to_gaussians", None)
     adapter = getattr(model.encoder, "gaussian_adapter", None)
@@ -1715,7 +1713,7 @@ def _capture_guarded_incremental_packed_adapter(
             extrinsics=final_inputs.extrinsics,
             intrinsics=final_inputs.intrinsics,
             coordinates=_source_native_selected_coordinates_from_final_raw(
-                final_raw_device, final_output_mask
+                final_raw_device, final_output_mask, model_name=backend_contract.model
             ),
             depths=final_inputs.depths,
             mapped_opacities=final_inputs.mapped_opacities,
@@ -1845,24 +1843,24 @@ def _capture_guarded_incremental_packed_adapter(
 
 
 def _load_context_only_encoder(
-    input_root: Path, device: torch.device
+    input_root: Path, device: torch.device, *, model_name: str = MODEL
 ) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Load only the frozen context-camera sidecar and an encoder-only TranSplat."""
+    """Load only the frozen context-camera sidecar and one classic encoder."""
     from data.context_only_audit_input import validate_context_only_audit_input
     from integration import create_model_loader, load_context_only_audit_data
     from scripts.ae_config import resolve_experiment
 
-    input_identity = validate_context_only_audit_input(input_root)
-    experiment = resolve_experiment(MODEL, DATASET, ROOT)
-    expected_checkpoint = ROOT / MODEL / "checkpoints" / RE10K_CHECKPOINT_NAME
+    backend_contract = resolve_classic_backend_contract(model_name, ROOT)
+    input_identity = validate_context_only_audit_input(input_root, model=model_name)
+    experiment = resolve_experiment(model_name, DATASET, ROOT)
     if (
-        experiment.model != MODEL
+        experiment.model != backend_contract.model
         or experiment.dataset != DATASET
-        or experiment.experiment != RE10K_EXPERIMENT
-        or experiment.checkpoint.resolve() != expected_checkpoint.resolve()
+        or experiment.experiment != backend_contract.experiment
+        or experiment.checkpoint.resolve() != backend_contract.checkpoint
     ):
-        raise RuntimeError("target-free audit must use the fixed TranSplat DL3DV Re10K checkpoint")
-    loader = create_model_loader(MODEL)
+        raise RuntimeError("target-free audit classic application identity changed")
+    loader = create_model_loader(backend_contract.model)
     bundle = loader.load_model(
         str(experiment.checkpoint),
         device=device,
@@ -1886,11 +1884,16 @@ def _load_context_only_encoder(
         context,
         input_identity,
         {
+            "model": backend_contract.model,
             "checkpoint_sha256": _sha256_file(experiment.checkpoint),
             "checkpoint_path": str(experiment.checkpoint.resolve()),
             "checkpoint_name": RE10K_CHECKPOINT_NAME,
             "checkpoint_experiment": RE10K_EXPERIMENT,
             "environment_profile": experiment.environment_profile,
+            "raw_head_module": backend_contract.raw_head_module,
+            "gaussian_adapter_module": backend_contract.gaussian_adapter_module,
+            "decoder_module": backend_contract.decoder_module,
+            "coordinate_semantics": backend_contract.coordinate_semantics,
             "encoder_only": True,
             "decoder_constructed": False,
             "native_encoder_device": str(bundle.device),
@@ -1910,16 +1913,18 @@ def collect_incremental_selected_output_audit(
     acid_calibration_plan: Path | None = None,
     acid_materialization_root: Path | None = None,
     guard_distribution_output_dir: Path | None = None,
+    model_name: str = MODEL,
 ) -> dict[str, Any]:
     """Run one fixed context-only selected raw-head and Adapter diagnostic."""
     from scripts.result_record import source_identity
 
     model, context, input_identity, execution = _load_context_only_encoder(
-        input_root, device
+        input_root, device, model_name=model_name
     )
     frozen_calibrations = _load_evaluation_disjoint_l1_calibrations(
         checkpoint_path=Path(execution["checkpoint_path"]),
         checkpoint_sha256=execution["checkpoint_sha256"],
+        model_name=model_name,
         v15_calibration_record=v15_calibration_record,
         v16_calibration_record=v16_calibration_record,
         acid_calibration_plan=acid_calibration_plan,
@@ -1961,6 +1966,7 @@ def collect_incremental_selected_output_audit(
                 "threshold_value"
             ],
             require_native_dense_head_execution=True,
+            model_name=model_name,
         )
         initial_head_events = incremental_capture["initial_head_events"]
         final_head_events = incremental_capture["final_head_events"]
@@ -2041,7 +2047,7 @@ def collect_incremental_selected_output_audit(
         "kind": "saes_incremental_selected_output_packed_adapter_audit",
         "status": "PASS" if equivalent else "FAIL",
         "paper_result_eligible": False,
-        "model": MODEL,
+        "model": model_name,
         "dataset": DATASET,
         "scene": input_identity["scene"],
         "input_identity": input_identity,
@@ -2074,6 +2080,7 @@ def collect_incremental_selected_output_audit(
             "quality_metrics_computed": False,
             "timing_claim": False,
             "whole_pipeline_s2_s3_sparse_execution_verified": False,
+            "backend_coordinate_semantics": execution["coordinate_semantics"],
             "scope": "s3_raw_gaussian_head_same_invocation_packed_adapter_and_guarded_full_extension_diagnostic_only",
         },
         "route_plan": plan.events,
@@ -2136,6 +2143,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--model", choices=("transplat", "mvsplat"), default=MODEL)
     parser.add_argument("--v15-calibration-record", type=Path, required=True)
     parser.add_argument("--v16-calibration-record", type=Path, required=True)
     parser.add_argument("--acid-calibration-plan", type=Path)
@@ -2168,6 +2176,7 @@ def main(argv: list[str] | None = None) -> int:
             guard_distribution_output_dir=(
                 args.output_dir if args.write_guard_distribution else None
             ),
+            model_name=args.model,
         )
     except Exception as exc:
         record = {
