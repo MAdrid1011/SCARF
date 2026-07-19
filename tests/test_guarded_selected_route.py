@@ -821,7 +821,8 @@ def test_l1_guard_rejection_executes_appended_full_once_without_replaying_work()
     assert extension["head_final_positions_requested"] == 4
     assert extension["head_final_positions_reused"] == 0
     assert extension["head_final_positions_executed"] == 4
-    assert extension["second_conv_positions_executed"] == 4
+    assert extension["second_conv_positions_executed"] == 0
+    assert extension["second_conv_execution_mode"] == "native_dense_closure_reuse"
     assert extension["first_conv_positions_executed"] == 0
     assert extension["full_tile_native_identity_verified"] is False
     assert sum(

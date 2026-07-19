@@ -30,6 +30,7 @@ from saes.selected_output_replay import (
 
 
 INCREMENTAL_HEAD_EXECUTION_VERSION = "saes-incremental-head-execution-v1"
+RAW_HEAD_EXECUTION_CONTRACT = "native-dense-head-closure-selected-packet-v2"
 _PHASE_ORDER = {
     "primary": 0,
     "secondary": 1,
@@ -127,7 +128,9 @@ class IncrementalSelectedOutputExecutionTrace:
         events = dict(replay.events)
         events["head_forward_invocations"] = 1
         events["head_execution_mode"] = (
-            "scoped_incremental_patch_replay_fp32_equivalence_only"
+            "scoped_native_dense_head_selected_packet_no_s3_saving"
+            if events["second_conv_native_kernel_aligned"]
+            else "scoped_incremental_patch_replay_fp32_equivalence_only"
         )
         events["deferred_full_extension_enabled"] = self.defer_full_extension
         self.replay = replay
@@ -234,6 +237,8 @@ class IncrementalSelectedOutputProducer:
         self._seen_phases: set[str] = set()
         self._last_phase = -1
         self._sealed = False
+        self._native_dense_first_closure = False
+        self._native_dense_second_values: torch.Tensor | None = None
         self._head_weight_sha256 = _sha256_module_state(head)
         self._head_input_sha256 = _sha256_tensor(head_input)
 
@@ -280,6 +285,53 @@ class IncrementalSelectedOutputProducer:
             for tile_y in range(0, self._height, self._tile_size)
             for tile_x in range(0, self._width, self._tile_size)
         ]
+
+    def _primary_closure_is_dense(self, selection_mask: torch.Tensor) -> bool:
+        """Return whether the primary final-output closure needs every hidden site."""
+        for batch_item in range(self._batch):
+            coordinates = selection_mask[batch_item].nonzero(as_tuple=False)
+            if coordinates.numel() == 0:
+                return False
+            closure = _same_conv3_closure(
+                coordinates, height=self._height, width=self._width
+            )
+            if int(closure.numel()) != self._height * self._width:
+                return False
+        return True
+
+    def _maybe_execute_native_dense_head_closure(
+        self, phase: str, selection_mask: torch.Tensor
+    ) -> int:
+        """Use the source head when the primary closure already needs it all.
+
+        The four primary probes in every T=4 tile often make the first 3x3
+        closure dense. The remaining L1 omissions are then too sparse to
+        justify a separate patch kernel whose FP32 reduction differs from the
+        source head. This branch charges both convolutions as dense work and
+        exposes only route-selected values to the packet.
+        """
+        if (
+            phase != "primary"
+            or self._native_dense_first_closure
+            or bool(self._hidden_mask.any())
+            or not self._primary_closure_is_dense(selection_mask)
+        ):
+            return 0
+        native_hidden = self._activation(self._first(self._head_input))
+        if native_hidden.shape != self._hidden_values.shape:
+            raise RuntimeError("native dense first convolution returned an invalid shape")
+        if native_hidden.dtype != self._hidden_values.dtype:
+            raise RuntimeError("native dense first convolution changed the source dtype")
+        native_values = self._second(native_hidden)
+        if native_values.shape != self._values.shape:
+            raise RuntimeError("native dense second convolution returned an invalid shape")
+        if native_values.dtype != self._values.dtype:
+            raise RuntimeError("native dense second convolution changed the source dtype")
+        self._hidden_values.copy_(native_hidden)
+        self._hidden_mask.fill_(True)
+        self._native_dense_second_values = native_values
+        self._native_dense_first_closure = True
+        return self._batch * self._height * self._width
 
     def _execute_tile(
         self,
@@ -356,12 +408,17 @@ class IncrementalSelectedOutputProducer:
             ].all()
         ):
             raise RuntimeError("incremental first-convolution closure is incomplete")
-        second_patches = _gather_padded_patches(
-            self._hidden_values[batch_item : batch_item + 1],
-            new_coordinates,
-            padding_mode=self._second.padding_mode,
-        )
-        final_values = _apply_conv_to_patches(self._second, second_patches)[0]
+        if self._native_dense_second_values is None:
+            second_patches = _gather_padded_patches(
+                self._hidden_values[batch_item : batch_item + 1],
+                new_coordinates,
+                padding_mode=self._second.padding_mode,
+            )
+            final_values = _apply_conv_to_patches(self._second, second_patches)[0]
+        else:
+            final_values = self._native_dense_second_values[
+                batch_item, :, new_coordinates[:, 0], new_coordinates[:, 1]
+            ].transpose(0, 1)
         self._values[
             batch_item, :, new_coordinates[:, 0], new_coordinates[:, 1]
         ] = final_values.transpose(0, 1)
@@ -382,6 +439,9 @@ class IncrementalSelectedOutputProducer:
         mask = self._validated_mask(selection_mask)
         if phase == "full_extension" and bool((mask & self._computed_mask).any()):
             raise ValueError("Full extension may not replay an already produced position")
+        native_dense_head_positions = self._maybe_execute_native_dense_head_closure(
+            phase, mask
+        )
         per_tile: list[dict[str, Any]] = []
         totals = {
             "head_final_positions_requested": 0,
@@ -426,11 +486,41 @@ class IncrementalSelectedOutputProducer:
             "head_final_positions_reused": totals["head_final_positions_reused"],
             "head_final_positions_executed": totals["head_final_positions_executed"],
             "first_conv_positions_reused": totals["first_conv_positions_reused"],
-            "first_conv_positions_executed": totals["first_conv_positions_executed"],
-            "second_conv_positions_executed": totals["head_final_positions_executed"],
+            "first_conv_positions_executed": (
+                totals["first_conv_positions_executed"] + native_dense_head_positions
+            ),
+            "native_dense_first_conv_positions_executed": native_dense_head_positions,
+            "first_conv_execution_mode": (
+                "native_dense_closure"
+                if native_dense_head_positions
+                else "native_dense_closure_reuse"
+                if self._native_dense_first_closure
+                else "incremental_patch_closure"
+            ),
+            "first_conv_native_kernel_aligned": self._native_dense_first_closure,
+            "native_dense_second_conv_positions_executed": native_dense_head_positions,
+            "second_conv_execution_mode": (
+                "native_dense_closure"
+                if native_dense_head_positions
+                else "native_dense_closure_reuse"
+                if self._native_dense_second_values is not None
+                else "incremental_patch_selected_outputs"
+            ),
+            "second_conv_native_kernel_aligned": self._native_dense_second_values is not None,
+            "second_conv_positions_executed": (
+                native_dense_head_positions
+                if native_dense_head_positions
+                else 0
+                if self._native_dense_second_values is not None
+                else totals["head_final_positions_executed"]
+            ),
             "full_tile_native_identity_verified": False,
             "full_execution_mode": (
-                "incremental_patch_replay_fp32_equivalence_only"
+                "native_dense_head_closure_selected_packet_no_s3_saving"
+                if phase == "full" and self._native_dense_second_values is not None
+                else "native_dense_head_closure_reuse_no_s3_saving"
+                if phase == "full_extension" and self._native_dense_second_values is not None
+                else "incremental_patch_replay_fp32_equivalence_only"
                 if phase == "full"
                 else "guard_appended_incremental_patch_replay_fp32_equivalence_only"
                 if phase == "full_extension"
@@ -460,6 +550,11 @@ class IncrementalSelectedOutputProducer:
         first_macs = _conv_macs_per_position(self._first)
         second_macs = _conv_macs_per_position(self._second)
         dense_positions = self._batch * self._height * self._width
+        second_positions = (
+            dense_positions
+            if self._native_dense_second_values is not None
+            else final_positions
+        )
         phase_events = [dict(event) for event in self._phase_events]
         per_tile = [
             dict(entry)
@@ -488,14 +583,31 @@ class IncrementalSelectedOutputProducer:
             "batch_size": self._batch,
             "dense_head_positions": dense_positions,
             "first_conv_positions_executed": first_positions,
+            "raw_head_execution_contract": RAW_HEAD_EXECUTION_CONTRACT,
+            "first_conv_execution_mode": (
+                "native_dense_closure"
+                if self._native_dense_first_closure
+                else "incremental_patch_closure"
+            ),
+            "first_conv_native_kernel_aligned": self._native_dense_first_closure,
             "head_final_positions_executed": final_positions,
-            "second_conv_positions_executed": final_positions,
+            "second_conv_positions_executed": second_positions,
+            "second_conv_execution_mode": (
+                "native_dense_closure"
+                if self._native_dense_second_values is not None
+                else "incremental_patch_selected_outputs"
+            ),
+            "second_conv_native_kernel_aligned": self._native_dense_second_values is not None,
             "dense_head_macs": dense_positions * (first_macs + second_macs),
-            "actual_head_macs": first_positions * first_macs + final_positions * second_macs,
+            "actual_head_macs": first_positions * first_macs + second_positions * second_macs,
             "head_mac_delta": dense_positions * (first_macs + second_macs)
-            - (first_positions * first_macs + final_positions * second_macs),
+            - (first_positions * first_macs + second_positions * second_macs),
             "full_tile_native_identity_verified": False,
-            "full_execution_mode": "incremental_patch_replay_fp32_equivalence_only",
+            "full_execution_mode": (
+                "native_dense_head_closure_selected_packet_no_s3_saving"
+                if self._native_dense_second_values is not None
+                else "incremental_patch_replay_fp32_equivalence_only"
+            ),
             "full_extension_dispatched": bool(extension_events),
             "full_extension_positions_executed": sum(
                 int(event["head_final_positions_executed"])
@@ -605,7 +717,9 @@ def incremental_selected_output_head_execution(
         initial_events = dict(initial.events)
         initial_events["head_forward_invocations"] = 1
         initial_events["head_execution_mode"] = (
-            "scoped_incremental_patch_replay_initial_route_only"
+            "scoped_native_dense_head_selected_packet_no_s3_saving"
+            if initial_events["second_conv_native_kernel_aligned"]
+            else "scoped_incremental_patch_replay_initial_route_only"
             if defer_full_extension
             else "scoped_incremental_patch_replay_fp32_equivalence_only"
         )

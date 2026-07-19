@@ -72,12 +72,20 @@
   `0.0004545`. The committed route is `L0/L1/Full=0/206/7986`; it authorizes
   only the fixed V16 8-scene development gate, not a sparse-execution claim or
   metric tuning rerun.
-- [ ] Run the registered TranSplat/DL3DV fixed eight-scene V16 gate with
-  source ordinals `0..7`. Each scene must first produce its own target-free
-  source/context sidecar and packed Adapter audit, then pass the exact-audit
-  quality gate. Require every scene plus 32-view pooled and scene-macro
-  PSNR/SSIM/LPIPS gates to pass before any MVSplat, DepthSplat, 140-scene,
-  Figure 11, or cross-dataset work.
+- [x] Run the registered TranSplat/DL3DV fixed eight-scene V16 gate with
+  source ordinals `0..7`: v2 completed, but samples 1/3/5/6 were rejected by
+  the raw-head FP32 audit before quality. Samples 0/2/4/7 passed quality; this
+  is diagnostic failure evidence and does not authorize expansion.
+- [x] Repair the dense primary closure: run source-weight native first/second
+  raw-head convolutions when the route already requires dense S3 work, expose
+  only selected outputs to the packet, record zero S3 head saving, and pass a
+  target-free sample-1 exact-equality diagnostic.
+- [ ] Freeze a new ACID 24/8 V16 record bound to the native dense raw-head
+  closure contract; do not reuse the superseded V16 SHA.
+- [ ] Re-run one DL3DV sample-0 target-free audit and one exact-audit quality
+  gate under the new V16 record. Only then re-run the fixed 8-scene gate and
+  require every scene plus the pooled and macro quality thresholds before any
+  MVSplat, DepthSplat, 140-scene, Figure 11, or cross-dataset work.
 - [x] Preserve `transplat_dl3dv_l1_15_v16_acid_disjoint_8scene_v1` as an
   invalid CPU-only preflight: the driver used the preparation record instead
   of the validated context identity, so all eight scenes failed before an

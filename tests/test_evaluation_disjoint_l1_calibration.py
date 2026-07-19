@@ -191,6 +191,19 @@ def test_v16_requires_the_verified_v15_parent_and_same_live_binding(tmp_path, mo
     )
     assert loaded["threshold_value"] == v16["threshold"]["value"]
 
+    legacy = copy.deepcopy(v16)
+    legacy.pop("raw_head_execution_contract")
+    unsigned = dict(legacy)
+    unsigned.pop("sha256")
+    legacy["sha256"] = calibration.canonical_sha256(unsigned)
+    v16_path.write_text(json.dumps(legacy), encoding="utf-8")
+    with pytest.raises(ValueError, match="unexpected fields"):
+        calibration.load_frozen_v16_threshold(
+            v16_path, checkpoint_path=checkpoint, v15_record_path=v15_path
+        )
+
+    v16_path.write_text(json.dumps(v16), encoding="utf-8")
+
     v16["base_v15_sha256"] = _sha("1")
     v16_path.write_text(json.dumps(v16), encoding="utf-8")
     with pytest.raises(ValueError, match="SHA256"):

@@ -38,6 +38,7 @@ from saes.evaluation_disjoint_l1_calibration import (
     load_frozen_v15_threshold,
     load_frozen_v16_threshold,
 )
+from saes.incremental_selected_output_execution import RAW_HEAD_EXECUTION_CONTRACT
 from saes.guarded_selected_route import (
     ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
 )
@@ -350,6 +351,7 @@ def _paper_identity(
             "engineering-legacy12-plus-three-center-anchors-not-specified-by-paper"
         ),
         "nonzero_policy": ENGINEERING_L1_15_ADAPTIVE_ABSOLUTE_RESIDUAL_V4_LOO_DEV_POLICY,
+        "raw_head_execution_contract": RAW_HEAD_EXECUTION_CONTRACT,
         "adaptive_l1_absolute_residual_calibration_sha256": v15_calibration["sha256"],
         "adaptive_l1_absolute_residual_maximum": v15_calibration["threshold_value"],
         "aggregation": COMPACT_AGGREGATION,

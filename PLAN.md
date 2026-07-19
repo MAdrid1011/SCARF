@@ -18,9 +18,11 @@
 
 ### Active Execution Priority (2026-07-19)
 
-1. The V16 ACID 24/8 context-only freeze and the one valid DL3DV sample-0
-   gate are complete. Their thresholds, checkpoint, route semantics, and
-   target-free audit identity are immutable inputs to the next gate.
+1. The historical V16 ACID 24/8 freeze and one valid DL3DV sample-0 gate are
+   complete, but are superseded for future runs by the native dense raw-head
+   closure repair. The repair changes V16's selected-anchor attributes, so a
+   new ACID 24/8 V16 record is required before any new DL3DV audit or quality
+   result may be accepted.
 2. Execute the dedicated TranSplat/DL3DV fixed eight-scene V16 gate. It must
    bind stable source ordinals `0..7` separately from prepared-dataloader
    execution ordinals, build one context-only sidecar and target-free audit
@@ -195,6 +197,20 @@
   eight scene verdicts plus both the 32-view pooled and scene-macro quality
   gates to pass; it records route totals and keeps
   `whole_pipeline_s2_s3_sparse_execution_verified=false`.
+- Fixed eight-scene v2 outcome: the real GPU gate completed with four quality
+  passes (source indices 0, 2, 4, and 7) and four pre-quality audit failures
+  (1, 3, 5, and 6). Every failure was the same raw-head dense-versus-patch
+  FP32 comparison; target-free access, context identity, route, Adapter inputs,
+  and packed attributes passed. It is failure evidence, not a Table 1 result.
+- Native raw-head closure repair: when primary probes already make the first
+  convolution closure dense, the simulator now executes the source-weight
+  dense two-convolution head and exposes only route-selected outputs to the
+  packet. It records both S3 convolutions as dense, has `head_mac_delta=0`,
+  and makes no sparse execution or timing claim. A sample-1 target-free
+  diagnostic reached exact raw-head equality and retained target-free packed
+  Adapter equivalence. The V16 calibration loader now binds this execution
+  contract, so the prior V16 record is intentionally rejected pending a fresh
+  ACID 24/8 freeze.
 
 ## 2. Baseline And Comparability
 

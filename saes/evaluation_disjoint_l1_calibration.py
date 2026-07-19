@@ -8,6 +8,8 @@ import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from saes.incremental_selected_output_execution import RAW_HEAD_EXECUTION_CONTRACT
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SPLIT = "calibration_train"
@@ -423,6 +425,7 @@ def build_v16_record(
         threshold_rule="train-minimum-per-scene-q25",
     )
     record["base_v15_sha256"] = _require_sha256(v15_record_sha256, "V15 record")
+    record["raw_head_execution_contract"] = RAW_HEAD_EXECUTION_CONTRACT
     record["threshold"]["per_scene_q25"] = per_scene_q25
     return {**record, "sha256": canonical_sha256(record)}
 
@@ -462,13 +465,18 @@ def _validate_loaded_record(
         "sha256",
     }
     if kind == V16_KIND:
-        required |= {"base_v15_sha256"}
+        required |= {"base_v15_sha256", "raw_head_execution_contract"}
     if set(record) != required:
         raise ValueError(f"{kind} record has unexpected fields")
     if record.get("status") != STATUS or record.get("paper_result_eligible") is not False:
         raise ValueError(f"{kind} record is not a frozen disjoint calibration")
     if record.get("access") != _access_record():
         raise ValueError(f"{kind} record is not target-free")
+    if (
+        kind == V16_KIND
+        and record.get("raw_head_execution_contract") != RAW_HEAD_EXECUTION_CONTRACT
+    ):
+        raise ValueError("V16 record raw-head execution contract changed")
     expected_application = _application(sha256_file(Path(checkpoint_path)))
     if record.get("application") != expected_application:
         raise ValueError(f"{kind} record application checkpoint changed")
