@@ -786,6 +786,9 @@ def replay_depthsplat_selected_head(
                 event = {"batch_item": view, **replay.events}
         event.update(
             {
+                # This is the full requested output set for the view. Compact
+                # replay and native Full passthrough counts stay separate.
+                "selected_final_output_positions": selected,
                 "source_native_full_passthrough_positions": full_count,
                 "selected_compact_requested_positions": compact_count,
                 "compact_replay_candidate_positions": candidate_count,

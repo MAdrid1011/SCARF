@@ -190,6 +190,7 @@ def test_selected_head_replay_preserves_declared_full_outputs_bitwise():
     assert replay.equivalence["equivalent"] is True
     assert replay.events["native_full_passthrough_positions"] == 1
     assert replay.events["native_full_passthrough_bitwise"] is True
+    assert replay.events["per_view"][0]["selected_final_output_positions"] == 3
     assert replay.events["selected_compact_requested_positions"] == 2
     assert replay.events["compact_replay_candidate_positions"] == 2
     assert replay.events["selected_compact_replay_positions"] == 2
