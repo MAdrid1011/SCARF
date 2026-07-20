@@ -32,8 +32,14 @@ DEFAULT_MODEL = "transplat"
 SAMPLE_INDEX = 0
 CONTEXT_COUNT = 2
 TARGET_COUNT = 4
-SOURCE_KEY = "re10k"
-TARGET_SHAPE = (360, 640)
+# The fixed protocols share view indices, but not their image representation.
+# DepthSplat is evaluated at its native 270x480 resolution; classic backends
+# retain the existing Re10K-compatible 360x640 preprocessing route.
+MODEL_IMAGE_SPECS = {
+    "transplat": ("re10k", (360, 640), True),
+    "mvsplat": ("re10k", (360, 640), True),
+    "depthsplat": ("native", (270, 480), False),
+}
 DEFAULT_RAW_ROOT = ROOT / "downloads" / "dl3dv-benchmark"
 DEFAULT_PROTOCOL = ROOT / "artifact" / "evaluation_protocol.json"
 
@@ -110,10 +116,13 @@ def _image_sources(
     *,
     scene: str,
     context_indices: list[int],
+    source_key: str,
+    target_shape: tuple[int, int],
+    allow_resize: bool,
 ) -> tuple[dict[str, Any], dict[str, Any], list[Any], list[dict[str, str]]]:
     source_path = raw_root / ".scarf-dl3dv-source.json"
     source = _load_json(source_path, "DL3DV benchmark source record")
-    source_plans = load_scene_image_sources(source_path, SOURCE_KEY)
+    source_plans = load_scene_image_sources(source_path, source_key)
     try:
         image_subdir, source_shape = source_plans[scene]
     except KeyError as exc:
@@ -152,8 +161,8 @@ def _image_sources(
             raise AuditInputError(f"fixed DL3DV context frame is missing: {frame}")
         serialized_images[index] = _encode_image(
             path,
-            TARGET_SHAPE,
-            allow_resize=True,
+            target_shape,
+            allow_resize=allow_resize,
             accepted_source_shapes=(source_shape,),
         )
         opened.append(
@@ -181,6 +190,7 @@ def prepare_inputs(
         raise FileExistsError(f"target-free audit output already exists: {output_dir}")
     model = _model_name(model)
     sample_index = _sample_index(sample_index)
+    source_key, target_shape, allow_resize = MODEL_IMAGE_SPECS[model]
     contract, index_path, row, selection_summary = _protocol_selection(
         protocol_path, model=model, sample_index=sample_index
     )
@@ -188,7 +198,12 @@ def prepare_inputs(
     context_indices = list(row["context_indices"])
     target_indices = list(row["target_indices"])
     source, metadata, serialized_images, opened_source_files = _image_sources(
-        raw_root, scene=scene, context_indices=context_indices
+        raw_root,
+        scene=scene,
+        context_indices=context_indices,
+        source_key=source_key,
+        target_shape=target_shape,
+        allow_resize=allow_resize,
     )
     source_record_path = raw_root / ".scarf-dl3dv-source.json"
     source_record_sha256 = _sha256_file(source_record_path)

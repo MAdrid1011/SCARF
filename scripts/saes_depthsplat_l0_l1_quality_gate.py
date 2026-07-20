@@ -2,10 +2,10 @@
 """Run the fixed DepthSplat DL3DV sample-0 target-RGB quality gate.
 
 The gate first reloads the frozen literal T=4 V16 record and a successful
-formal context-only audit.  It reconstructs the exact packet from the audited
-sidecar before it allows the native loader to construct any target mapping.
-Target cameras are used only for the two committed decoder renders, and target
-RGB is transferred only afterwards for PSNR, SSIM, and LPIPS measurement.
+formal context-only audit. It reconstructs the exact packet from the audited
+sidecar before it reads the isolated sample-zero target frames. Target cameras
+are used only for the two committed decoder renders, and target RGB is
+transferred only afterwards for PSNR, SSIM, and LPIPS measurement.
 """
 
 # ruff: noqa: E402
@@ -95,6 +95,15 @@ from scripts.saes_selected_output_replay_audit import strict_fp32_convolution_ex
 QUALITY_GATE_KIND = "depthsplat-formal-l0-l1-target-rgb-quality-gate"
 QUALITY_GATE_SCHEMA_VERSION = "1.0"
 QUALITY_GATE_SEED = 0
+DEFAULT_SOURCE_AUDIT_ROOT = (
+    ROOT
+    / "outputs"
+    / "ae_dl3dv_repair_diagnostics"
+    / "depthsplat_sample0_l0_l1_source_target_free_v1"
+)
+DEFAULT_RAW_ROOT = ROOT / "downloads" / "dl3dv-benchmark"
+NATIVE_TARGET_IMAGE_SHAPE = (270, 480)
+ISOLATED_TARGET_READER = "depthsplat-isolated-sample0-raw-target-reader-v1"
 
 
 def _require_sha256(value: Any, label: str) -> str:
@@ -113,6 +122,30 @@ def _portable_path(path: Path) -> str:
         return path.relative_to(ROOT).as_posix()
     except ValueError:
         return str(path)
+
+
+def _read_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"DepthSplat quality gate {label} is unavailable or invalid") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"DepthSplat quality gate {label} must be an object")
+    return value
+
+
+def _require_indices(value: Any, label: str) -> list[int]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0
+            for index in value
+        )
+        or len(value) != len(set(value))
+    ):
+        raise ValueError(f"DepthSplat quality gate has invalid {label}")
+    return list(value)
 
 
 def _read_formal_audit(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -516,58 +549,330 @@ def _require_rebuilt_trace_matches_audit(
             )
 
 
-def _load_native_target_batch_after_packet_commit(
+def _load_isolated_source_target_record(
+    *,
+    source_audit_root: Path,
+    scene: str,
+    context_indices: list[int],
+    input_identity: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Load only the target-free sample-zero selection and camera sidecar."""
+
+    from scripts.calibration_inputs import (
+        load_target_free_record,
+        validate_target_free_input_root,
+    )
+    from data.verify_prepared_dataset import verify_tree_manifest
+
+    source_audit_root = Path(source_audit_root).resolve()
+    source_audit_path = source_audit_root / "audit-input.json"
+    source_binding = input_identity.get("source_binding")
+    if not isinstance(source_binding, Mapping):
+        raise RuntimeError("DepthSplat quality gate context input has no source binding")
+    expected_audit_sha256 = _require_sha256(
+        source_binding.get("source_audit_input_sha256"), "source audit input"
+    )
+    expected_audit_tree_sha256 = _require_sha256(
+        source_binding.get("source_audit_tree_sha256"), "source audit tree"
+    )
+    expected_sidecar_tree_sha256 = _require_sha256(
+        source_binding.get("source_sidecar_tree_sha256"), "source audit sidecar tree"
+    )
+    if sha256_file(source_audit_path) != expected_audit_sha256:
+        raise RuntimeError("DepthSplat isolated target source audit differs from context audit")
+    source_tree = verify_tree_manifest(
+        source_audit_root, source_audit_root / ".scarf-manifest.json"
+    )
+    if source_tree.get("tree_sha256") != expected_audit_tree_sha256:
+        raise RuntimeError("DepthSplat isolated target source tree differs from context audit")
+
+    source_audit = _read_json_object(source_audit_path, "source target-free audit")
+    expected_selection = {
+        "source_sample_index": SOURCE_SAMPLE_INDEX,
+        "scene": scene,
+        "context_indices": list(context_indices),
+    }
+    selected = source_audit.get("selected_sample")
+    canonical_selection = source_audit.get("canonical_selection")
+    canonical_protocol = source_audit.get("canonical_protocol")
+    if (
+        source_audit.get("schema_version") != "1.0"
+        or source_audit.get("kind")
+        != "dl3dv_target_free_l1_primary_reference_audit_input"
+        or source_audit.get("status") != "PASS"
+        or source_audit.get("paper_result_eligible") is not False
+        or source_audit.get("model") != MODEL
+        or source_audit.get("dataset") != DATASET
+        or source_audit.get("source_sample_index") != SOURCE_SAMPLE_INDEX
+        or source_audit.get("target_rgb_included") is not False
+        or source_audit.get("target_rgb_opened") is not False
+        or source_audit.get("target_rgb_paths_passed_to_encoder") is not False
+        or not isinstance(selected, Mapping)
+        or not isinstance(canonical_selection, Mapping)
+        or not isinstance(canonical_protocol, Mapping)
+    ):
+        raise RuntimeError("DepthSplat isolated target source audit is not target-free")
+
+    target_indices = _require_indices(selected.get("target_indices"), "target indices")
+    selection = {**expected_selection, "target_indices": target_indices}
+    if (
+        dict(canonical_selection) != selection
+        or selected.get("scene") != scene
+        or selected.get("context_indices") != list(context_indices)
+        or canonical_json_sha256(selection)
+        != source_binding.get("canonical_selection_sha256")
+        or canonical_protocol.get("source_index_sha256")
+        != source_binding.get("canonical_index_sha256")
+        or canonical_protocol.get("sample_selection_sha256")
+        != source_binding.get("canonical_sample_selection_sha256")
+    ):
+        raise RuntimeError("DepthSplat isolated target selection differs from context audit")
+
+    source = source_audit.get("source")
+    if not isinstance(source, Mapping):
+        raise RuntimeError("DepthSplat isolated target source has no raw provenance")
+    for key in (
+        "benchmark_metadata_sha256",
+        "filelist_sha256",
+        "scene_source_plans_sha256",
+        "source_record_sha256",
+    ):
+        _require_sha256(source.get(key), f"isolated target source {key}")
+    if not isinstance(source.get("revision"), str) or not source["revision"]:
+        raise RuntimeError("DepthSplat isolated target source has an invalid revision")
+
+    sidecar_identity = validate_target_free_input_root(source_audit_root / "sidecar", DATASET)
+    if (
+        sidecar_identity.get("target_rgb_accessed") is not False
+        or sidecar_identity.get("target_rgb_included") is not False
+        or sidecar_identity.get("selected_scene_count") != 1
+        or sidecar_identity.get("selection_sha256")
+        != selected.get("audit_selection_sha256")
+        or sidecar_identity.get("tree_sha256") != expected_sidecar_tree_sha256
+    ):
+        raise RuntimeError("DepthSplat isolated target sidecar is not target-free")
+    source_record = load_target_free_record(source_audit_root / "sidecar", scene)
+    if (
+        source_record.get("key") != scene
+        or source_record.get("context_indices") != list(context_indices)
+        or source_record.get("target_indices") != target_indices
+        or not torch.is_tensor(source_record.get("cameras"))
+    ):
+        raise RuntimeError("DepthSplat isolated target camera record differs from audit")
+    return source_record, dict(source), dict(sidecar_identity), {
+        "path": _portable_path(source_audit_path),
+        "sha256": expected_audit_sha256,
+    }
+
+
+def _load_isolated_sample0_target_data(
+    *,
+    raw_root: Path,
+    scene: str,
+    target_indices: list[int],
+    source_record: Mapping[str, Any],
+    source: Mapping[str, Any],
+) -> tuple[torch.Tensor, list[bytes], list[dict[str, str]], dict[str, Any]]:
+    """Read only the fixed sample-zero target frames from the raw benchmark."""
+
+    from data.convert_dl3dv import (
+        IMAGE_SUFFIXES,
+        _frame_id,
+        _load_metadata,
+        load_scene_image_sources,
+    )
+
+    raw_root = Path(raw_root).resolve()
+    raw_source_path = raw_root / ".scarf-dl3dv-source.json"
+    expected_source_sha256 = _require_sha256(
+        source.get("source_record_sha256"), "isolated target raw source"
+    )
+    if sha256_file(raw_source_path) != expected_source_sha256:
+        raise RuntimeError("DepthSplat isolated target raw source differs from audit")
+    raw_source = _read_json_object(raw_source_path, "raw target source")
+    if (
+        raw_source.get("revision") != source.get("revision")
+        or raw_source.get("benchmark_metadata_sha256")
+        != source.get("benchmark_metadata_sha256")
+        or raw_source.get("filelist_sha256") != source.get("filelist_sha256")
+        or raw_source.get("scene_source_plans_sha256")
+        != source.get("scene_source_plans_sha256")
+    ):
+        raise RuntimeError("DepthSplat isolated target raw provenance differs from audit")
+    native_sources = load_scene_image_sources(raw_source_path, "native")
+    try:
+        image_subdir, source_shape = native_sources[scene]
+    except KeyError as error:
+        raise RuntimeError("DepthSplat isolated target source has no audited scene") from error
+    if source_shape != NATIVE_TARGET_IMAGE_SHAPE:
+        raise RuntimeError("DepthSplat isolated target source has the wrong native shape")
+
+    scene_root = raw_root / scene / "nerfstudio"
+    transforms_path = scene_root / "transforms.json"
+    metadata, timestamps = _load_metadata(transforms_path)
+    cameras = source_record["cameras"]
+    if (
+        not torch.is_tensor(cameras)
+        or not torch.equal(cameras.detach().cpu(), metadata["cameras"].cpu())
+        or max(target_indices) >= len(timestamps)
+    ):
+        raise RuntimeError("DepthSplat isolated target camera geometry differs from source")
+
+    image_root = scene_root / image_subdir
+    images: dict[int, Path] = {}
+    for path in image_root.iterdir():
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
+            frame = _frame_id(path)
+            if frame in images:
+                raise RuntimeError("DepthSplat isolated target source has duplicate frames")
+            images[frame] = path
+
+    opened = [
+        {
+            "path": _portable_path(raw_source_path),
+            "role": "source_plan",
+            "sha256": expected_source_sha256,
+        },
+        {
+            "path": _portable_path(transforms_path),
+            "role": "target_camera_geometry",
+            "sha256": sha256_file(transforms_path),
+        },
+    ]
+    target_images: list[bytes] = []
+    for index in target_indices:
+        image_path = images.get(timestamps[index])
+        if image_path is None:
+            raise RuntimeError("DepthSplat isolated target source is missing a target frame")
+        target_images.append(image_path.read_bytes())
+        opened.append(
+            {
+                "path": _portable_path(image_path),
+                "role": "target_rgb",
+                "sha256": sha256_file(image_path),
+            }
+        )
+    return cameras, target_images, opened, {
+        "path": _portable_path(raw_source_path),
+        "sha256": expected_source_sha256,
+        "revision": source["revision"],
+        "native_image_subdir": image_subdir,
+        "native_image_shape": list(source_shape),
+    }
+
+
+def _load_isolated_target_batch_after_packet_commit(
     loader: Any,
     bundle: Any,
     *,
     scene: str,
     context_indices: list[int],
     input_identity: Mapping[str, Any],
-) -> tuple[dict[str, Any], list[int]]:
-    """Construct target tensors only after target-free packet acceptance."""
+    native_preprocessing: Mapping[str, Any],
+    source_audit_root: Path = DEFAULT_SOURCE_AUDIT_ROOT,
+    raw_root: Path = DEFAULT_RAW_ROOT,
+) -> tuple[dict[str, Any], list[int], dict[str, Any]]:
+    """Build the audited target mapping without opening a native DL3DV chunk."""
 
-    data = loader.load_data(
-        bundle,
-        dataset_name=DATASET,
-        num_samples=1,
-        sample_index=SOURCE_SAMPLE_INDEX,
+    from integration.model_loader import (
+        _calibration_camera_geometry,
+        _decode_calibration_context_images,
     )
-    batch = data.batch
-    if not isinstance(batch, dict) or batch.get("scene") != [scene]:
-        raise RuntimeError("DepthSplat native target batch scene differs from the audit")
-    native_context = batch.pop("context", None)
-    if not isinstance(native_context, Mapping) or not torch.is_tensor(
-        native_context.get("index")
+
+    source_record, source, sidecar_identity, source_audit_identity = (
+        _load_isolated_source_target_record(
+            source_audit_root=source_audit_root,
+            scene=scene,
+            context_indices=context_indices,
+            input_identity=input_identity,
+        )
+    )
+    target_indices = _require_indices(source_record["target_indices"], "target indices")
+    cameras, target_image_bytes, opened_source_files, raw_source_identity = (
+        _load_isolated_sample0_target_data(
+            raw_root=raw_root,
+            scene=scene,
+            target_indices=target_indices,
+            source_record=source_record,
+            source=source,
+        )
+    )
+    target_images = _decode_calibration_context_images(target_image_bytes)
+    if tuple(target_images.shape) != (
+        len(target_indices),
+        3,
+        *NATIVE_TARGET_IMAGE_SHAPE,
     ):
-        raise RuntimeError("DepthSplat native target batch has no discardable context")
-    native_context_indices = [
-        int(value)
-        for value in native_context["index"][0].detach().to(device="cpu").tolist()
-    ]
-    if native_context_indices != context_indices:
-        raise RuntimeError("DepthSplat native target context differs from the audit")
-    target = batch.get("target")
+        raise RuntimeError("DepthSplat isolated target RGB has the wrong native shape")
+    extrinsics, intrinsics = _calibration_camera_geometry(cameras)
+    if max([*context_indices, *target_indices]) >= extrinsics.shape[0]:
+        raise RuntimeError("DepthSplat isolated target camera index exceeds source geometry")
+
+    loader._setup_imports()
+    try:
+        from src.dataset.shims.crop_shim import apply_crop_shim_to_views
+        from src.dataset.shims.patch_shim import apply_patch_shim_to_views
+
+        dataset_cfg = bundle.config.dataset
+        context_extrinsics = extrinsics[context_indices]
+        scale: torch.Tensor | float = 1.0
+        if len(context_indices) == 2 and bool(
+            getattr(dataset_cfg, "make_baseline_1", False)
+        ):
+            scale = (context_extrinsics[0, :3, 3] - context_extrinsics[1, :3, 3]).norm()
+            if float(scale) < float(getattr(dataset_cfg, "baseline_epsilon", 0.0)):
+                raise RuntimeError("DepthSplat isolated target has an insufficient baseline")
+            extrinsics = extrinsics.clone()
+            extrinsics[:, :3, 3] /= scale
+        near_value = float(getattr(dataset_cfg, "near", -1.0))
+        far_value = float(getattr(dataset_cfg, "far", -1.0))
+        near_value = 0.1 if near_value == -1.0 else near_value
+        far_value = 1000.0 if far_value == -1.0 else far_value
+        nf_scale: torch.Tensor | float = (
+            scale if bool(getattr(dataset_cfg, "baseline_scale_bounds", True)) else 1.0
+        )
+        target = {
+            "extrinsics": extrinsics[target_indices].unsqueeze(0),
+            "intrinsics": intrinsics[target_indices].unsqueeze(0),
+            "image": target_images.unsqueeze(0),
+            "near": torch.full((1, len(target_indices)), near_value) / nf_scale,
+            "far": torch.full((1, len(target_indices)), far_value) / nf_scale,
+            "index": torch.tensor(target_indices, dtype=torch.long).unsqueeze(0),
+        }
+        image_shape = tuple(bundle.config.dataset.image_shape)
+        if tuple(target["image"].shape[-2:]) != image_shape:
+            target = apply_crop_shim_to_views(target, image_shape)
+        patch_size = int(getattr(bundle.encoder.cfg, "shim_patch_size", 1)) * int(
+            getattr(bundle.encoder.cfg, "downscale_factor", 1)
+        )
+        if patch_size < 1:
+            raise RuntimeError("DepthSplat isolated target has an invalid patch size")
+        target = apply_patch_shim_to_views(target, patch_size)
+    finally:
+        loader._restore_cwd()
+
+    expected_shape = native_preprocessing.get("prepared_image_shape")
     if (
-        not isinstance(target, dict)
-        or not torch.is_tensor(target.get("index"))
-        or not torch.is_tensor(target.get("image"))
+        not isinstance(expected_shape, list)
+        or len(expected_shape) != 2
+        or [int(value) for value in target["image"].shape[-2:]] != expected_shape
     ):
-        raise RuntimeError("DepthSplat quality gate requires native target RGB")
-    target_indices = [int(value) for value in target["index"][0].tolist()]
-    selection = {
-        "source_sample_index": SOURCE_SAMPLE_INDEX,
-        "scene": scene,
-        "context_indices": context_indices,
-        "target_indices": target_indices,
+        raise RuntimeError("DepthSplat isolated target preprocessing differs from context audit")
+    return target, target_indices, {
+        "reader": ISOLATED_TARGET_READER,
+        "source_audit_input": source_audit_identity,
+        "source_sidecar": {
+            "tree_sha256": sidecar_identity["tree_sha256"],
+            "manifest_sha256": sidecar_identity["manifest_sha256"],
+            "input_provenance_sha256": sidecar_identity["input_provenance_sha256"],
+            "selection_sha256": sidecar_identity["selection_sha256"],
+        },
+        "raw_source": raw_source_identity,
+        "opened_source_files": opened_source_files,
+        "native_dl3dv_chunk_loader_used": False,
+        "data_module_used": False,
+        "nonselected_dl3dv_sample_data_opened": False,
     }
-    source_binding = input_identity.get("source_binding")
-    if (
-        not isinstance(source_binding, Mapping)
-        or canonical_json_sha256(selection)
-        != source_binding.get("canonical_selection_sha256")
-    ):
-        raise RuntimeError("DepthSplat native target selection differs from the audit")
-    return target, target_indices
 
 
 def _target_cameras(target: Mapping[str, Any], device: torch.device) -> dict[str, torch.Tensor]:
@@ -617,6 +922,7 @@ def collect_depthsplat_l0_l1_quality_gate(
     device: torch.device,
     literal_t4_acid_plan_path: Path = DEFAULT_PLAN_PATH,
     literal_t4_acid_materialization_root: Path = DEFAULT_MATERIALIZATION_ROOT,
+    source_audit_root: Path = DEFAULT_SOURCE_AUDIT_ROOT,
 ) -> dict[str, Any]:
     """Run the fixed quality gate after all target-free invariants pass."""
 
@@ -685,13 +991,18 @@ def collect_depthsplat_l0_l1_quality_gate(
         _require_rebuilt_trace_matches_audit(formal_audit, rebuilt["evidence"])
 
         # Packet and audit bindings are complete. This is the first target-side
-        # operation in the gate; its context payload is discarded immediately.
-        target_mapping, target_indices = _load_native_target_batch_after_packet_commit(
-            loader,
-            bundle,
-            scene=input_identity["scene"],
-            context_indices=list(input_identity["context_indices"]),
-            input_identity=input_identity,
+        # operation in the gate; it bypasses the chunked native test loader so
+        # sample-one and sample-two payloads cannot enter this process.
+        target_mapping, target_indices, isolated_target_provenance = (
+            _load_isolated_target_batch_after_packet_commit(
+                loader,
+                bundle,
+                scene=input_identity["scene"],
+                context_indices=list(input_identity["context_indices"]),
+                input_identity=input_identity,
+                native_preprocessing=loaded_calibration["native_preprocessing"],
+                source_audit_root=source_audit_root,
+            )
         )
         target_cameras = _target_cameras(target_mapping, bundle.device)
         materialized_gaussians = rebuilt["materialized"].as_single_batch(
@@ -747,7 +1058,7 @@ def collect_depthsplat_l0_l1_quality_gate(
             literal_guard=literal_guard_projection, literal_profile=literal_profile
         ),
         "target_rgb_provenance": {
-            "loaded_by_native_dataloader": True,
+            "loaded_by_native_dataloader": False,
             "target_mapping_constructed_after_formal_audit_and_packet_commit": True,
             "target_camera_metadata_accessed_before_packet_commit": False,
             "target_camera_metadata_accessed_after_packet_commit": True,
@@ -755,6 +1066,8 @@ def collect_depthsplat_l0_l1_quality_gate(
             "target_index_accessed_after_packet_commit": True,
             "target_rgb_passed_to_encoder_or_route": False,
             "first_target_rgb_transfer_after_packet_and_baseline_outputs": True,
+            "isolated_sample0_raw_reader": True,
+            **isolated_target_provenance,
         },
         "execution_boundary": {
             "formal_target_free_audit_revalidated_before_target_mapping": True,
@@ -802,6 +1115,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-root", type=Path, default=DEFAULT_INPUT_ROOT)
     parser.add_argument("--formal-audit", type=Path, required=True)
     parser.add_argument("--literal-t4-v16-record", type=Path, required=True)
+    parser.add_argument("--source-audit-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     return parser
@@ -826,6 +1140,7 @@ def main(argv: list[str] | None = None) -> int:
             formal_audit_path=args.formal_audit,
             literal_t4_v16_record=args.literal_t4_v16_record,
             device=device,
+            source_audit_root=args.source_audit_root,
         )
         exit_code = 0 if record["status"] == "PASS" else 1
     except Exception as error:

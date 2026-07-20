@@ -1,4 +1,5 @@
 import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 
@@ -17,13 +18,19 @@ def _write_raw_scene(root: Path, scene: str) -> None:
     nerfstudio = root / scene / "nerfstudio"
     frames = []
     for view in range(6):
-        name = f"frame_{view:05d}.jpg"
-        image_path = nerfstudio / "images_4" / name
-        image_path.parent.mkdir(parents=True, exist_ok=True)
-        Image.new("RGB", (960, 540), (view, 17, 31)).save(image_path, format="JPEG")
+        classic_name = f"frame_{view:05d}.jpg"
+        classic_path = nerfstudio / "images_4" / classic_name
+        classic_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (960, 540), (view, 17, 31)).save(
+            classic_path, format="JPEG"
+        )
+        native_name = f"frame_{view:05d}.png"
+        native_path = nerfstudio / "images_8" / native_name
+        native_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (480, 270), (view, 47, 61)).save(native_path, format="PNG")
         frames.append(
             {
-                "file_path": f"images_4/{name}",
+                "file_path": f"images/{classic_name}",
                 "transform_matrix": [
                     [1.0, 0.0, 0.0, float(view)],
                     [0.0, 1.0, 0.0, 0.0],
@@ -63,7 +70,11 @@ def _fixture(tmp_path: Path, *, sample_count: int = 1) -> tuple[Path, Path]:
             "re10k": {
                 "image_subdir": "images_4",
                 "source_image_shape": [540, 960],
-            }
+            },
+            "native": {
+                "image_subdir": "images_8",
+                "source_image_shape": [270, 480],
+            },
         }
         for scene in scenes
     }
@@ -101,13 +112,18 @@ def _fixture(tmp_path: Path, *, sample_count: int = 1) -> tuple[Path, Path]:
         json.dumps(
             {
                 "pairs": {
-                    "transplat/dl3dv": {
+                    pair: {
                         "index_path": str(index),
                         "source_index_sha256": index_sha256,
                         "sample_selection_sha256": summary["sample_selection_sha256"],
                         "sample_count": sample_count,
                         "dataset_tree_sha256": "d" * 64,
                     }
+                    for pair in (
+                        "transplat/dl3dv",
+                        "mvsplat/dl3dv",
+                        "depthsplat/dl3dv",
+                    )
                 }
             }
         ),
@@ -116,8 +132,9 @@ def _fixture(tmp_path: Path, *, sample_count: int = 1) -> tuple[Path, Path]:
     return raw_root, protocol
 
 
-def test_target_free_audit_preparation_opens_only_context_rgb(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("model", ("transplat", "mvsplat"))
+def test_classic_target_free_audit_preparation_keeps_re10k_resize_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str
 ):
     from data import convert_dl3dv
     from data.prepare_dl3dv_target_free_audit_inputs import prepare_inputs
@@ -126,18 +143,23 @@ def test_target_free_audit_preparation_opens_only_context_rgb(
 
     raw_root, protocol = _fixture(tmp_path)
     original_open = convert_dl3dv.Image.open
-    opened: list[str] = []
+    opened: list[Path] = []
 
     def tracked_open(path, *args, **kwargs):
         if isinstance(path, (str, Path)):
-            opened.append(Path(path).name)
+            opened.append(Path(path))
         return original_open(path, *args, **kwargs)
 
     monkeypatch.setattr(convert_dl3dv.Image, "open", tracked_open)
-    output = tmp_path / "audit-input"
-    record = prepare_inputs(raw_root, output_dir=output, protocol_path=protocol)
+    output = tmp_path / f"{model}-audit-input"
+    record = prepare_inputs(
+        raw_root, output_dir=output, protocol_path=protocol, model=model
+    )
 
-    assert sorted(opened) == ["frame_00000.jpg", "frame_00005.jpg"]
+    assert [(path.parent.name, path.name) for path in opened] == [
+        ("images_4", "frame_00000.jpg"),
+        ("images_4", "frame_00005.jpg"),
+    ]
     assert record["target_rgb_included"] is False
     assert record["target_rgb_opened"] is False
     assert record["target_rgb_paths_passed_to_encoder"] is False
@@ -158,8 +180,58 @@ def test_target_free_audit_preparation_opens_only_context_rgb(
     sidecar = load_target_free_record(output / "sidecar", "scene-fixed")
     assert len(sidecar["context_images"]) == 2
     assert all(key not in sidecar for key in ("images", "target_images", "target_rgb"))
+    for image in sidecar["context_images"]:
+        with Image.open(BytesIO(image.numpy().tobytes())) as decoded:
+            assert decoded.size == (640, 360)
     tree = verify_tree_manifest(output, output / ".scarf-manifest.json")
     assert tree["tree_sha256"] == record["output_tree_sha256"]
+
+
+def test_depthsplat_target_free_audit_uses_native_images8_without_reencoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from data import convert_dl3dv
+    from data.prepare_dl3dv_target_free_audit_inputs import prepare_inputs
+    from scripts.calibration_inputs import load_target_free_record
+
+    raw_root, protocol = _fixture(tmp_path)
+    original_open = convert_dl3dv.Image.open
+    opened: list[Path] = []
+
+    def tracked_open(path, *args, **kwargs):
+        if isinstance(path, (str, Path)):
+            opened.append(Path(path))
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(convert_dl3dv.Image, "open", tracked_open)
+    output = tmp_path / "depthsplat-audit-input"
+    record = prepare_inputs(
+        raw_root, output_dir=output, protocol_path=protocol, model="depthsplat"
+    )
+
+    assert [(path.parent.name, path.name) for path in opened] == [
+        ("images_8", "frame_00000.png"),
+        ("images_8", "frame_00005.png"),
+    ]
+    assert [entry["path"] for entry in record["opened_source_files"][1:]] == [
+        "scene-fixed/nerfstudio/images_8/frame_00000.png",
+        "scene-fixed/nerfstudio/images_8/frame_00005.png",
+    ]
+    sidecar = load_target_free_record(output / "sidecar", "scene-fixed")
+    raw_images = [
+        (
+            raw_root
+            / "scene-fixed"
+            / "nerfstudio"
+            / "images_8"
+            / f"frame_{index:05d}.png"
+        ).read_bytes()
+        for index in (0, 5)
+    ]
+    assert [image.numpy().tobytes() for image in sidecar["context_images"]] == raw_images
+    for image in sidecar["context_images"]:
+        with Image.open(BytesIO(image.numpy().tobytes())) as decoded:
+            assert decoded.size == (480, 270)
 
 
 def test_target_free_audit_preparation_binds_nonzero_sample_to_context_only_identity(
