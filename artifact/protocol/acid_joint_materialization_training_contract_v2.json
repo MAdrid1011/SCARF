@@ -1,0 +1,747 @@
+{
+  "author_side_prerequisite": true,
+  "checkpoint_binding": {
+    "checkpoint_manifest_path": "artifact/manifests/checkpoints.json",
+    "checkpoint_manifest_sha256": "6cdf94d84f09abdef339c8edd35c3af149826705d0fee22587264ede35371097",
+    "model_order": [
+      "transplat",
+      "mvsplat",
+      "depthsplat"
+    ],
+    "models": {
+      "depthsplat": {
+        "checkpoint_dataset": "re10k",
+        "checkpoint_path": "depthsplat/checkpoints/re10k.ckpt",
+        "checkpoint_sha256": "e0f0f27a1213e69b0bfd7758e2408b2bcb2ce0928b3559a78c2ba2b934939c4b",
+        "checkpoint_size": 1417795172
+      },
+      "mvsplat": {
+        "checkpoint_dataset": "acid",
+        "checkpoint_path": "mvsplat/checkpoints/acid.ckpt",
+        "checkpoint_sha256": "253785dee0804e6d7f312bd5b927a47454ba55c32735c0a2685b5d07594e142f",
+        "checkpoint_size": 48018760
+      },
+      "transplat": {
+        "checkpoint_dataset": "acid",
+        "checkpoint_path": "transplat/checkpoints/acid.ckpt",
+        "checkpoint_sha256": "ee230bf84d7c0bf527bff54b856f269f221d56b2256ecd753df7b94b1b5c2555",
+        "checkpoint_size": 546690188
+      }
+    },
+    "shared_asset_model_independent": true
+  },
+  "context_only_inputs": {
+    "materialization_root": "outputs/calibration/acid_joint_calibration_v1_context_only",
+    "materialization_sha256": "431e858ae567416b54a1ab62c996416989511408f84609f43f768cba7cbee1ba",
+    "outer_manifest_sha256": "3b41d9d3bf08a9c39b24fad52639f73577be108191f5b15ca7a29b9ff967f7d6",
+    "outer_tree_sha256": "863c6f5b221e6ef5f6141a27d3a2e1370b106433595806848c0e0c1b57e9596a",
+    "splits": {
+      "calibration_holdout": {
+        "expected_results_accessed": false,
+        "input_provenance_sha256": "22d0d950b2c4c9a84f18538388a9725168b52531acd9592b44a4222abb8504f0",
+        "manifest_sha256": "0028ef63f563dcbfb163097e3caff99e2148973d952e5ae414113be5f634744e",
+        "scene_count": 8,
+        "selection_sha256": "e8a19c80cbb0bcba16418d9d1f003a60dfc461359c8fb93811486ca933a82b58",
+        "split": "calibration_holdout",
+        "target_camera_metadata_accessed": false,
+        "target_index_accessed": false,
+        "target_rgb_accessed": false,
+        "teacher_artifact_accessed": false,
+        "tree_sha256": "32c499104ba62bc54d90edc1594ab40032163481e84c6f7edef1eeb239db916e"
+      },
+      "calibration_train": {
+        "expected_results_accessed": false,
+        "input_provenance_sha256": "090b37539bb11b6bddaa6d305fca46c8c9ba7da9a4cac92fa153ba5baf83dfd5",
+        "manifest_sha256": "661721d7fc5081445fcb0f968cc24b4c4b29553ea3c00c6ce448b77a132862fa",
+        "scene_count": 24,
+        "selection_sha256": "49daa6988cdb40e70dd65253209b2787ce78f37646e9d4f494593be63a739a55",
+        "split": "calibration_train",
+        "target_camera_metadata_accessed": false,
+        "target_index_accessed": false,
+        "target_rgb_accessed": false,
+        "teacher_artifact_accessed": false,
+        "tree_sha256": "7dc40eed6db6ad767a00a9e29dfd8496758c751bd84f1ac54d7aef9be91da259"
+      }
+    }
+  },
+  "contract_id": "saes-joint-materialization-calibration-acid-v1-training-v2",
+  "contract_sha256": "1d944bbe7678fd254153029f8d36d255378a2322f7908fb6d8076fd154af50dd",
+  "dl3dv_quality_gate_authorized": false,
+  "holdout_policy": {
+    "asset_update_allowed": false,
+    "frozen_train_asset_required": true,
+    "optimizer_allowed": false,
+    "partition_reshuffle_allowed": false,
+    "rerank_allowed": false,
+    "threshold_or_budget_change_allowed": false
+  },
+  "implementation_binding": {
+    "files": [
+      {
+        "path": "data/acid_joint_training_contract.py",
+        "sha256": "df2c84d7400b83571af4640ccf762f9321667f78eed320deb88edc287561f47f"
+      },
+      {
+        "path": "data/frozen_audit_contract.py",
+        "sha256": "eb1855a5ff4b963c9f4c4cda12bb38cfbc8af8ad6462305a1517441302ca9cf2"
+      },
+      {
+        "path": "data/build_manifest.py",
+        "sha256": "7b2554a7762aa124cd1cb07fc7d441eaf063922b9f74b2d59aa7d48a15ea8d22"
+      },
+      {
+        "path": "data/verify_prepared_dataset.py",
+        "sha256": "a043de90da7d212868ba5b28dbbb534fafc5b6246e3ed96392887b46d2b37bd1"
+      },
+      {
+        "path": "data/plan_acid_joint_calibration.py",
+        "sha256": "3a3f4519aecb02ad3b7909749804f8d677dc67dc43cea8e2d3044f6eeff48c77"
+      },
+      {
+        "path": "integration/acid_joint_context.py",
+        "sha256": "24d258c86758b2c28bd95d79513aa7551b5bab0fe834f49e370004ea5c6debf0"
+      },
+      {
+        "path": "integration/acid_joint_model_context.py",
+        "sha256": "db0416c9f6457cfee6c85ce68c9900e887202f0a616671c6d7e6ff306e81daf5"
+      },
+      {
+        "path": "integration/model_loader.py",
+        "sha256": "1bedba872b69242a02ecf75914fe5fa4a2785d169e00173a4f1e43141f9460d6"
+      },
+      {
+        "path": "saes/probe_layout.py",
+        "sha256": "7d315f5291ea9be781e0d0e60b5e5259178ab315c96851a11800f1ac4eea5d67"
+      },
+      {
+        "path": "saes/progressive_saes.py",
+        "sha256": "5d519028f07879d8297822812502c0867e3dda914e0ed8b7ab85e3eaac076580"
+      },
+      {
+        "path": "saes/guard_policy.py",
+        "sha256": "987ea1c9b001b45498672b188b6c3a49aad59f449dae4cb41495c119dbe0df85"
+      },
+      {
+        "path": "saes/joint_materialization_calibrator.py",
+        "sha256": "c696110703d31059e467e9e5592e07e42b3af5fba1689f0828b5852700d43ddb"
+      },
+      {
+        "path": "saes/joint_materialization_teacher.py",
+        "sha256": "604beed9348a11b62b5c8d609d9c0db926f2abbd3a58f328bb0951b2b5432996"
+      },
+      {
+        "path": "saes/selected_output_replay.py",
+        "sha256": "c8ae8eed04b09a2a2017e35c3fbf051599eb5b831310fa1de9fba3af7e70ecae"
+      },
+      {
+        "path": "saes/selected_output_execution.py",
+        "sha256": "b6f8c8d8a25b886136efcb7bfae5c83b04a26d14f3a5b2aecbc437c06638347e"
+      },
+      {
+        "path": "saes/probe_first_schedule.py",
+        "sha256": "843980850ea0f1b8caf9b50f5dc89af4aa818d448f84be1b3964f301abd2c9ae"
+      },
+      {
+        "path": "saes/depthsplat_s3_footprint.py",
+        "sha256": "4e6e655d2776a0817ab71762e7634dcd2810be052fc8d49ad1597233fb57fe12"
+      },
+      {
+        "path": "saes/hardware_accounting.py",
+        "sha256": "b7f441758348db365398721f373036e4cf6184a2ee2d6cfb26e2ef1452365481"
+      },
+      {
+        "path": "scripts/ae_config.py",
+        "sha256": "d221ed56ff660eb41f90b910a58f4b801ab7b7c5a6e86bcdd8ceb8d7284dfed2"
+      },
+      {
+        "path": "scripts/calibration_contract.py",
+        "sha256": "94d7afba19b82d62cd65bbf2a9e655afc867ccaab7fff8f7c8bcac6e2c2777fb"
+      },
+      {
+        "path": "scripts/saes_execution_identity.py",
+        "sha256": "d2dafd6bb45f22a37c89abff5ed212e8f633d4fc5a9f85240b5bbb64484755e4"
+      },
+      {
+        "path": "scripts/compile_calibration.py",
+        "sha256": "e38f06bf3eb52d4c0df3262ca447fb477015478dfbdcd6464bce88d562d75aed"
+      },
+      {
+        "path": "scripts/compile_protocol.py",
+        "sha256": "172865059cc7c33f4a0cf92ed41dd6a71644a82730a978f4c5feb748e3e69a0e"
+      },
+      {
+        "path": "scripts/acid_joint_teacher_cache_worker.py",
+        "sha256": "cc072c083497576ab00c41d0e162493a689cc00f60ccc6817f07b44d82ff1028"
+      },
+      {
+        "path": "scripts/acid_joint_calibration_runner.py",
+        "sha256": "c9f8fef78f6baac30152cd209135589c37647b1c9f97fcc4c8601844ffb6d4df"
+      },
+      {
+        "path": "scripts/acid_joint_runtime_control_evidence.py",
+        "sha256": "19ff9874619caee77f81919e88a73b5c890bc7936091dbda8c2c7907139b999e"
+      }
+    ],
+    "implementation_tree_sha256": "1f9f930586ff848b56778d77b7661563bf29cca188b3a08c078fd130664c987b"
+  },
+  "kind": "acid_joint_materialization_training_contract",
+  "mechanism_config_write_allowed": false,
+  "model_config_binding": {
+    "depthsplat": {
+      "entrypoint_path": "depthsplat/config/experiment/re10k.yaml",
+      "entrypoint_sha256": "24e4c792904e099415ff5fed29784a73b70603bd16311afde72fe391be954ffc",
+      "hydra_overrides": [
+        "model.encoder.num_scales=2",
+        "model.encoder.upsample_factor=2",
+        "model.encoder.lowest_feature_resolution=4",
+        "model.encoder.monodepth_vit_type=vitl"
+      ],
+      "resolved_config_sha256_required": true,
+      "source_files": [
+        {
+          "path": "depthsplat/config/main.yaml",
+          "sha256": "e4ff1f9d945b748f183a1bf14ff78511987f2e8e7e4fcb06eb5d1e99c5080116"
+        },
+        {
+          "path": "depthsplat/config/experiment/re10k.yaml",
+          "sha256": "24e4c792904e099415ff5fed29784a73b70603bd16311afde72fe391be954ffc"
+        },
+        {
+          "path": "depthsplat/config/dataset/re10k.yaml",
+          "sha256": "de9cb5d8cfa1181e159201bb0222f5f99e3d6dd2114261af7ab00a9aee18a43c"
+        },
+        {
+          "path": "depthsplat/config/dataset/view_sampler/bounded.yaml",
+          "sha256": "495e6da0064912dca904358247ab6fea4bba48942ec294390d0a4e61b42f6126"
+        },
+        {
+          "path": "depthsplat/config/dataset/view_sampler_dataset_specific_config/bounded_re10k.yaml",
+          "sha256": "f92361384f0bc6986a51c2885db1998ead6b1ce1c3e50d371cd967eade06e6d6"
+        },
+        {
+          "path": "depthsplat/config/model/encoder/depthsplat.yaml",
+          "sha256": "4b531f49c135b83f9e371b1676842b3522c808873ca0f17c537d8fb0acaccdf9"
+        },
+        {
+          "path": "depthsplat/config/model/decoder/splatting_cuda.yaml",
+          "sha256": "372adce67f98ddd4a8218c1b40ba3ff6dfa49ece902e7711ac161e35871373b6"
+        },
+        {
+          "path": "depthsplat/config/loss/mse.yaml",
+          "sha256": "81e4c606729b5f30ce87f2f7dea509e0e60845f6c9a75682372d678add1380bb"
+        },
+        {
+          "path": "depthsplat/config/loss/lpips.yaml",
+          "sha256": "c62c7438f19c8da3f0d72ebcb1716c2d65c7f66ad904b2f33a5ff3a0c8ccc57b"
+        }
+      ],
+      "source_manifest_sha256": "2728e45f4e33a885ee4ee68625fa3e95004b1924f38bae709967f104e768e8cf"
+    },
+    "mvsplat": {
+      "entrypoint_path": "mvsplat/config/experiment/acid.yaml",
+      "entrypoint_sha256": "599b378f86c7cc68832a2e19fcc7f229204b551fbb48d42023800f004a4bede9",
+      "hydra_overrides": [],
+      "resolved_config_sha256_required": true,
+      "source_files": [
+        {
+          "path": "mvsplat/config/main.yaml",
+          "sha256": "9773f8970ea3ed71c91eac32919fd2f12b28809a82694dd59c4275eb0d9e8ae6"
+        },
+        {
+          "path": "mvsplat/config/experiment/acid.yaml",
+          "sha256": "599b378f86c7cc68832a2e19fcc7f229204b551fbb48d42023800f004a4bede9"
+        },
+        {
+          "path": "mvsplat/config/dataset/re10k.yaml",
+          "sha256": "829c1608320c46be1c630cb0c323d4030f0af1772f04af42e842d49bd108b6a7"
+        },
+        {
+          "path": "mvsplat/config/dataset/view_sampler/bounded.yaml",
+          "sha256": "495e6da0064912dca904358247ab6fea4bba48942ec294390d0a4e61b42f6126"
+        },
+        {
+          "path": "mvsplat/config/dataset/view_sampler_dataset_specific_config/bounded_re10k.yaml",
+          "sha256": "5ffa2d58b735d88986362eca98dd90c5a2ad51c9ea4827985597053ebb97d048"
+        },
+        {
+          "path": "mvsplat/config/model/encoder/costvolume.yaml",
+          "sha256": "bdb7d8e7842dc85d9713ce5fb0e32a9163397d235ce25eec2b0209cf36f70199"
+        },
+        {
+          "path": "mvsplat/config/model/decoder/splatting_cuda.yaml",
+          "sha256": "372adce67f98ddd4a8218c1b40ba3ff6dfa49ece902e7711ac161e35871373b6"
+        },
+        {
+          "path": "mvsplat/config/loss/mse.yaml",
+          "sha256": "81e4c606729b5f30ce87f2f7dea509e0e60845f6c9a75682372d678add1380bb"
+        },
+        {
+          "path": "mvsplat/config/loss/lpips.yaml",
+          "sha256": "c62c7438f19c8da3f0d72ebcb1716c2d65c7f66ad904b2f33a5ff3a0c8ccc57b"
+        }
+      ],
+      "source_manifest_sha256": "d93b4f69be25d45ae2b0baf0616959a98deba8f5196ae721953f4aa2bfc4a36b"
+    },
+    "transplat": {
+      "entrypoint_path": "transplat/config/experiment/acid.yaml",
+      "entrypoint_sha256": "d2917532622d940b943494cdc19a99492c9183d1f4b73d57c62eb7952380aa28",
+      "hydra_overrides": [],
+      "resolved_config_sha256_required": true,
+      "source_files": [
+        {
+          "path": "transplat/config/main.yaml",
+          "sha256": "2376e724a00437e19ea74768056084f0c91eecf7c2917d1247e7e39f545ec09a"
+        },
+        {
+          "path": "transplat/config/experiment/acid.yaml",
+          "sha256": "d2917532622d940b943494cdc19a99492c9183d1f4b73d57c62eb7952380aa28"
+        },
+        {
+          "path": "transplat/config/dataset/re10k.yaml",
+          "sha256": "829c1608320c46be1c630cb0c323d4030f0af1772f04af42e842d49bd108b6a7"
+        },
+        {
+          "path": "transplat/config/dataset/view_sampler/bounded.yaml",
+          "sha256": "495e6da0064912dca904358247ab6fea4bba48942ec294390d0a4e61b42f6126"
+        },
+        {
+          "path": "transplat/config/dataset/view_sampler_dataset_specific_config/bounded_re10k.yaml",
+          "sha256": "5ffa2d58b735d88986362eca98dd90c5a2ad51c9ea4827985597053ebb97d048"
+        },
+        {
+          "path": "transplat/config/model/encoder/trans.yaml",
+          "sha256": "8dbc033a30add0069fe3cf1f9c78abdebc189d7c7f2685f1217af66dbaeb7acc"
+        },
+        {
+          "path": "transplat/config/model/decoder/splatting_cuda.yaml",
+          "sha256": "372adce67f98ddd4a8218c1b40ba3ff6dfa49ece902e7711ac161e35871373b6"
+        },
+        {
+          "path": "transplat/config/loss/mse.yaml",
+          "sha256": "81e4c606729b5f30ce87f2f7dea509e0e60845f6c9a75682372d678add1380bb"
+        },
+        {
+          "path": "transplat/config/loss/lpips.yaml",
+          "sha256": "c62c7438f19c8da3f0d72ebcb1716c2d65c7f66ad904b2f33a5ff3a0c8ccc57b"
+        }
+      ],
+      "source_manifest_sha256": "1e78c5c230df5ceb6a70c86e03d93c58fef1aa7d1e0fb5cb57c705ff02322ab4"
+    }
+  },
+  "optimization_recipe": {
+    "anchor_order": "stable_retained_anchor_index_ascending",
+    "batch_size": 256,
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "deterministic_algorithms_required": true,
+    "early_stopping_allowed": false,
+    "epsilon": 1e-08,
+    "final_learning_rate": 1e-05,
+    "gradient_clip_norm": 1.0,
+    "hyperparameter_search_allowed": false,
+    "learning_rate": 0.001,
+    "model_cache_execution": "one-model-per-subprocess",
+    "model_sampling": "round_robin_transplat_mvsplat_depthsplat",
+    "optimizer": "AdamW",
+    "resume_allowed": false,
+    "scene_order": "sidecar_ordinal_ascending",
+    "schedule": "linear_warmup_then_cosine_decay",
+    "seed": 20260718,
+    "total_updates": 12000,
+    "training_dtype": "float32",
+    "warmup_updates": 500,
+    "weight_decay": 1e-05
+  },
+  "paper_result_eligible": false,
+  "preprocessing": {
+    "crop_rule": "center_crop_after_rescale",
+    "crop_shim_paths": {
+      "depthsplat": "depthsplat/src/dataset/shims/crop_shim.py",
+      "mvsplat": "mvsplat/src/dataset/shims/crop_shim.py",
+      "transplat": "transplat/src/dataset/shims/crop_shim.py"
+    },
+    "crop_shim_sha256": {
+      "depthsplat": "235843b0b9c2be3e645462ad0848691f4c11bf0406d886e6b0f807d6e212d9bf",
+      "mvsplat": "549fc820c836aecd7e4651eceb89e82e1e347a97010d268aa4e8b92528350783",
+      "transplat": "c6ab5f3a6929871c2ace579cea449eaeede872b0364099480efb249033b46321"
+    },
+    "identifier": "upstream_lanczos_rescale_center_crop_intrinsics_v1",
+    "interpolation": "Pillow.Image.LANCZOS_uint8_roundtrip",
+    "intrinsics_rule": "upstream_normalized_fx_fy_scale_by_precrop_width_height_over_target",
+    "patch_alignment_rule": "upstream_center_crop_to_encoder_patch_multiple_with_intrinsics_scale",
+    "patch_shim_paths": {
+      "depthsplat": "depthsplat/src/dataset/shims/patch_shim.py",
+      "mvsplat": "mvsplat/src/dataset/shims/patch_shim.py",
+      "transplat": "transplat/src/dataset/shims/patch_shim.py"
+    },
+    "patch_shim_sha256": {
+      "depthsplat": "61db2781840585eddbffe427d625c66620b2bb5c5138b49debf301ebfd2a0708",
+      "mvsplat": "61db2781840585eddbffe427d625c66620b2bb5c5138b49debf301ebfd2a0708",
+      "transplat": "61db2781840585eddbffe427d625c66620b2bb5c5138b49debf301ebfd2a0708"
+    },
+    "per_model_patch_size": {
+      "depthsplat": 16,
+      "mvsplat": 16,
+      "transplat": 16
+    },
+    "rescale_rule": "scale=max(target_h/source_h,target_w/source_w); rounded_scaled_shape",
+    "source_image_shape": [
+      360,
+      640
+    ],
+    "target_image_shape": [
+      256,
+      256
+    ],
+    "target_rgb_or_camera_access": false
+  },
+  "protocol_id": "saes-joint-materialization-calibration-acid-v1",
+  "result_records": {
+    "calibration_holdout": "outputs/calibration/acid_joint_materialization_training_v2/holdout_teacher_fidelity.json",
+    "calibration_train": "outputs/calibration/acid_joint_materialization_training_v2/train_teacher_fidelity.json"
+  },
+  "runtime_evidence_records": {
+    "calibration_holdout": {
+      "depthsplat": "outputs/calibration/acid_joint_materialization_training_v2/runtime_controls/calibration_holdout/depthsplat.json",
+      "mvsplat": "outputs/calibration/acid_joint_materialization_training_v2/runtime_controls/calibration_holdout/mvsplat.json",
+      "transplat": "outputs/calibration/acid_joint_materialization_training_v2/runtime_controls/calibration_holdout/transplat.json"
+    },
+    "calibration_train": {
+      "depthsplat": "outputs/calibration/acid_joint_materialization_training_v2/runtime_controls/calibration_train/depthsplat.json",
+      "mvsplat": "outputs/calibration/acid_joint_materialization_training_v2/runtime_controls/calibration_train/mvsplat.json",
+      "transplat": "outputs/calibration/acid_joint_materialization_training_v2/runtime_controls/calibration_train/transplat.json"
+    }
+  },
+  "saes_routing": {
+    "execution_identity": {
+      "context_guard_max_center_mahalanobis": 2.0,
+      "context_guard_max_footprint_ratio": 16.0,
+      "context_guard_max_relative_depth_span": 0.25,
+      "context_guard_policy": "projected-anchor-coverage-occlusion-v3",
+      "context_safety_guard": true,
+      "cross_check_threshold": 0.015,
+      "decision_semantics": "probe-normalized-std-first-hit",
+      "depth_routing_semantics": "metric-depth-standard-deviation",
+      "depth_threshold": 0.1,
+      "feature_threshold": 0.2,
+      "full_tile_mode": "dense_passthrough",
+      "l0_anchor_count": 4,
+      "l0_anchor_layout": "t4-corners-v1",
+      "l0_anchor_positions": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          3,
+          3
+        ]
+      ],
+      "l1_anchor_count": 12,
+      "l1_anchor_layout": "t4-corners-plus-boundary-v1",
+      "l1_anchor_positions": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          3,
+          3
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          3,
+          1
+        ],
+        [
+          3,
+          2
+        ]
+      ],
+      "l1_depth_reference": "primary-routing-probes-v1",
+      "materialization": "representative",
+      "materialization_guard": true,
+      "materialization_guard_max_opacity_distance": 0.2,
+      "materialization_guard_min_covariance_cosine": 0.7,
+      "materialization_guard_min_harmonic_cosine": 0.7,
+      "materialization_guard_policy": "anchor-attribute-consistency-v1",
+      "moment_geometry": "c2w-probe-depth-ray-v1",
+      "route_order": "feature_L0_then_primary_probe_depth_L1_then_Full",
+      "route_sha256": "fa2e79efbe89f54ed63ab9b6f083fa2a9af09a4d72cefa8218c9611911da0cbd",
+      "schema_version": "saes-execution-identity-v1",
+      "tile_size": 4
+    },
+    "execution_route_sha256": "fa2e79efbe89f54ed63ab9b6f083fa2a9af09a4d72cefa8218c9611911da0cbd",
+    "implementation_path": "saes/progressive_saes.py",
+    "implementation_sha256": "5d519028f07879d8297822812502c0867e3dda914e0ed8b7ab85e3eaac076580",
+    "mechanism_config_path": "artifact/mechanism_config.json",
+    "mechanism_config_sha256": "87ec86186ebb3fb735d9d9c15c07d17983e8a95278e39e7efc7ca13a400725b3",
+    "parameters": {
+      "beta_d": 1.0,
+      "beta_f": 0.1,
+      "beta_x": 0.5,
+      "context_guard_max_center_mahalanobis": 2.0,
+      "context_guard_max_footprint_ratio": 16.0,
+      "context_guard_max_relative_depth_span": 0.25,
+      "context_guard_policy": "projected-anchor-coverage-occlusion-v3",
+      "context_safety_guard": true,
+      "cross_check_threshold": 0.015,
+      "decision_semantics": "probe-normalized-std-first-hit",
+      "depth_routing_semantics": "metric-depth-standard-deviation",
+      "depth_threshold_tau_d": 0.1,
+      "feature_threshold_tau_f": 0.2,
+      "full_budget": "dense_passthrough",
+      "guard_nonprobe_s3_attribute_reads_must_equal": 0,
+      "joint_calibrator_during_cache_capture": false,
+      "l0_anchor_layout": "t4-corners-v1",
+      "l0_anchor_positions": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          3,
+          3
+        ]
+      ],
+      "l0_budget": "K(T)",
+      "l0_retained_positions": 4,
+      "l1_anchor_layout": "t4-corners-plus-boundary-v1",
+      "l1_anchor_positions": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          3,
+          3
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          3,
+          1
+        ],
+        [
+          3,
+          2
+        ]
+      ],
+      "l1_budget": "fixed-12-anchor-boundary",
+      "l1_depth_reference": "primary-routing-probes-v1",
+      "l1_retained_positions": 12,
+      "materialization": "representative",
+      "materialization_guard": true,
+      "materialization_guard_max_opacity_distance": 0.2,
+      "materialization_guard_min_covariance_cosine": 0.7,
+      "materialization_guard_min_harmonic_cosine": 0.7,
+      "materialization_guard_policy": "anchor-attribute-consistency-v1",
+      "moment_geometry": "c2w-probe-depth-ray-v1",
+      "offline_capture_only": true,
+      "route_order": "feature_L0_then_primary_probe_depth_L1_then_Full",
+      "tile_size": 4
+    },
+    "per_model": {
+      "depthsplat": {
+        "gpp": 1,
+        "num_depth_candidates": 128,
+        "ray_depth_mode": "z"
+      },
+      "mvsplat": {
+        "gpp": 1,
+        "num_depth_candidates": 128,
+        "ray_depth_mode": "euclidean"
+      },
+      "transplat": {
+        "gpp": 1,
+        "num_depth_candidates": 128,
+        "ray_depth_mode": "euclidean"
+      }
+    },
+    "routing_sha256": "3a95c1b2bb3b2451ed48f74b517e849231c634fc8147e888814c04a3d0f5f12c"
+  },
+  "schema_version": "2.0",
+  "shared_asset": {
+    "architecture": {
+      "bottleneck_dim": 8,
+      "descriptor_dim": 32,
+      "joint_output_dim": 40,
+      "kind": "saes-joint-materialization-calibrator-state-dict",
+      "network_macs_per_descriptor": 576,
+      "parameter_count": 624,
+      "schema_version": "saes-joint-materialization-calibrator-v1",
+      "shared_across_models_and_datasets": true
+    },
+    "asset_path": "outputs/calibration/acid_joint_materialization_training_v2/frozen_joint_materialization_calibrator.pt",
+    "per_model_or_dataset_assets_forbidden": true,
+    "runtime_hash_pinning_required": true,
+    "single_global_asset_required": true
+  },
+  "source_plan": {
+    "file_sha256": "844710cd845ff65382f176ac1b936e770128bf021676a4ccc3ecf5368521143c",
+    "path": "artifact/protocol/acid_joint_calibration_plan.json",
+    "plan_sha256": "ad8f551652429a11512f80d516a36cac2ebc6537b461def81148af9a4584eeb5",
+    "protocol_id": "saes-joint-materialization-calibration-acid-v1"
+  },
+  "status": "FROZEN_PENDING_EXECUTION",
+  "teacher_fidelity_gates": {
+    "all_components_nonworsening_max_relative_mse": 1.0,
+    "all_models_required": true,
+    "covariance_psd_required": true,
+    "finite_required": true,
+    "holdout_joint_relative_mse_max": 0.95,
+    "runtime_preconditions": {
+      "all_three_models_required": true,
+      "cost_ledger_required": true,
+      "full_passthrough_required": true,
+      "retained_counts_unchanged_required": true,
+      "route_mask_unchanged_required": true,
+      "selected_head_event_contract_required": true,
+      "selected_only_s3_required": true,
+      "two_finite_skipped_s3_sentinels_required": true
+    },
+    "train_joint_relative_mse_max": 0.9
+  },
+  "teacher_objective": {
+    "allowed_inputs": [
+      "context_only_sidecar_records",
+      "frozen_model_checkpoint",
+      "probe_attributes",
+      "context_feature_statistics",
+      "context_depth_statistics",
+      "assignment_statistics",
+      "context_camera_geometry",
+      "dense_adaptor_output"
+    ],
+    "dense_nonprobe_attributes_persisted": false,
+    "descriptor_forbidden_inputs": [
+      "model_id",
+      "dataset_id",
+      "target_rgb",
+      "target_camera_metadata",
+      "target_indices",
+      "skipped_s3_descriptors",
+      "teacher_files",
+      "expected_results.json",
+      "evaluation_scenes"
+    ],
+    "forbidden_inputs": [
+      "target_rgb",
+      "target_camera_metadata",
+      "target_indices",
+      "ground_truth_metrics",
+      "artifact/expected_results.json",
+      "paper_tables",
+      "evaluation_scenes"
+    ],
+    "loss": {
+      "aggregate": "unweighted_mean_of_component_relative_mse",
+      "component_weights": {
+        "covariance": 1.0,
+        "mean": 1.0,
+        "opacity": 1.0,
+        "sh": 1.0
+      },
+      "identity_baseline": "selected_only_ordinary_representative_reconstruction_zero_correction",
+      "name": "identity_normalized_joint_packet_mse",
+      "normalizer": "per_model_per_component_identity_mse",
+      "normalizer_floor": 1e-08
+    },
+    "offline_teacher_dense_nonprobe_attributes_allowed": true,
+    "offline_teacher_only": true,
+    "route_and_assignments_frozen_before_teacher_access": true,
+    "runtime_teacher_access_allowed": false,
+    "target_camera_or_render_allowed": false,
+    "target_rgb_or_ground_truth_allowed": false,
+    "teacher_cache_generation": "one-model-per-subprocess_from_context_only_sidecars",
+    "teacher_cache_root": "outputs/calibration/acid_joint_materialization_training_v2/teacher_cache",
+    "teacher_components": [
+      "mean",
+      "covariance",
+      "opacity",
+      "sh"
+    ],
+    "teacher_source": "dense_adaptor_output",
+    "teacher_storage_scope": "author_training_only",
+    "teacher_target": "assignment_aligned_dense_adaptor_correction_packet"
+  }
+}

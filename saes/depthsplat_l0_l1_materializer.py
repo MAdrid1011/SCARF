@@ -44,17 +44,35 @@ from saes.depthsplat_support_basis_coverage import (
     SUPPORT_BASIS_POLICY as DEPTHSPLAT_SUPPORT_BASIS_POLICY,
     audit_depthsplat_tile_support_basis,
 )
+from saes.depthsplat_soft_mixture_certificate import (
+    KIND as DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_KIND,
+    POLICY as DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_POLICY,
+    SCHEMA_VERSION as DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_SCHEMA_VERSION,
+    certify_depthsplat_tile_soft_mixture,
+)
+from saes.depthsplat_mixture_kernel_guard import (
+    KIND as DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_KIND,
+    POLICY as DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_POLICY,
+    SCHEMA_VERSION as DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_SCHEMA_VERSION,
+    assess_depthsplat_tile_kernel_closure,
+)
 from saes.probe_first_schedule import (
     ADAPTIVE_L1_15_ANCHOR_SEMANTICS,
     BALANCED_L1_ANCHOR_SEMANTICS,
     COVERAGE_ENRICHED_T4_L0_SECONDARY_PREFETCH_POLICY,
     DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT,
+    DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_PLAN_CONTRACT,
+    DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_PLAN_CONTRACT,
+    DEPTHSPLAT_SOFT_MIXTURE_T4_PLAN_CONTRACT,
     DEPTHSPLAT_SUPPORT_BASIS_T4_PLAN_CONTRACT,
     LEGACY_L1_ANCHOR_SEMANTICS,
     LITERAL_PAPER_T4_PLAN_CONTRACT,
     PAPER_KP_ANCHOR_SEMANTICS,
     IncrementalProbeFirstPlan,
     build_depthsplat_coverage_enriched_t4_probe_first_plan,
+    build_depthsplat_soft_mixture_kernel_closure_t4_probe_first_plan,
+    build_depthsplat_soft_mixture_normalized_t4_probe_first_plan,
+    build_depthsplat_soft_mixture_t4_probe_first_plan,
     build_literal_paper_t4_probe_first_plan,
     build_incremental_probe_first_plan,
     coverage_enriched_t4_route_config_sha256,
@@ -62,10 +80,21 @@ from saes.probe_first_schedule import (
     l1_local_positions_for_tile,
     build_depthsplat_support_basis_t4_probe_first_plan,
     support_basis_t4_route_config_sha256,
+    soft_mixture_t4_route_config_sha256,
+    soft_mixture_normalized_t4_route_config_sha256,
+    soft_mixture_kernel_closure_t4_route_config_sha256,
     SUPPORT_BASIS_T4_L0_SECONDARY_PREFETCH_POLICY,
+    SOFT_MIXTURE_NORMALIZED_T4_L0_SECONDARY_PREFETCH_POLICY,
+    SOFT_MIXTURE_KERNEL_CLOSURE_GUARD_POLICY,
+    SOFT_MIXTURE_KERNEL_CLOSURE_T4_L0_SECONDARY_PREFETCH_POLICY,
+    SOFT_MIXTURE_T4_L0_SECONDARY_PREFETCH_POLICY,
 )
 from saes.probe_layout import compute_probe_positions
-from saes.progressive_saes import ProgressiveSAES, paper_assignment_weights
+from saes.progressive_saes import (
+    PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS,
+    ProgressiveSAES,
+    paper_assignment_weights,
+)
 
 
 DEPTHSPLAT_MATERIALIZER_SCHEMA_VERSION = "saes-depthsplat-l0-l1-materializer-v1"
@@ -84,6 +113,9 @@ DEPTHSPLAT_COVERAGE_ENRICHED_T4_MOMENT_CERTIFICATE = (
 DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE = (
     "depthsplat-support-basis-t4-composed-soft-ledger-projected-2sigma-fixed-scale-v1"
 )
+DEPTHSPLAT_SOFT_MIXTURE_T4_MOMENT_CERTIFICATE = (
+    "depthsplat-soft-mixture-t4-source-only-moment-replay-fixed-scale-v1"
+)
 DEPTHSPLAT_COMPACT_COVERAGE_MAX_COVARIANCE_SCALE = 16.0
 DEPTHSPLAT_FEATURE_INTERPOLATION_MAX_RELATIVE_RESIDUAL = 1.0
 DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE = (
@@ -97,6 +129,15 @@ DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE = (
 )
 DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE = (
     "depthsplat-support-basis-t4-balanced-l1-cooperative-v1"
+)
+DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE = (
+    "depthsplat-soft-mixture-t4-balanced-l1-source-only-moment-replay-v1"
+)
+DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE = (
+    "depthsplat-soft-mixture-normalized-t4-balanced-l1-source-only-moment-replay-v2"
+)
+DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE = (
+    "depthsplat-soft-mixture-kernel-closure-t4-balanced-l1-source-only-v3"
 )
 DEPTHSPLAT_LITERAL_PAPER_T4_DECISION_SEMANTICS = (
     "paper-probe-feature-variance-first-hit"
@@ -123,6 +164,41 @@ DEPTHSPLAT_SELECTED_ANCHOR_ATTRIBUTE_LOO_RISK_METRIC = (
 DEPTHSPLAT_SELECTED_ANCHOR_ATTRIBUTE_LOO_ENDPOINT_UNSCORABLE = (
     "native-opacity-endpoint-promoted-full-v1"
 )
+DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_AGGREGATE_SCHEMA = (
+    "depthsplat-mixture-kernel-closure-aggregate-v1"
+)
+_MIXTURE_KERNEL_CLOSURE_HISTOGRAM_UPPER_BOUNDS = (
+    1.0e-6,
+    1.0e-4,
+    1.0e-3,
+    1.0e-2,
+    1.0e-1,
+    1.0,
+)
+
+
+class _DepthSplatTileRejection(ValueError):
+    """An expected source-only guard decision that promotes one tile to Full."""
+
+
+_SOFT_MIXTURE_EXECUTION_PROFILES = frozenset(
+    (
+        DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+    )
+)
+
+
+def _is_soft_mixture_profile(execution_profile: Any) -> bool:
+    return execution_profile in _SOFT_MIXTURE_EXECUTION_PROFILES
+
+
+def _is_kernel_closure_profile(execution_profile: Any) -> bool:
+    return (
+        execution_profile
+        == DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE
+    )
 
 
 @dataclass(frozen=True)
@@ -250,6 +326,9 @@ def _require_plan(plan: IncrementalProbeFirstPlan) -> tuple[int, int, int, str]:
         LITERAL_PAPER_T4_PLAN_CONTRACT,
         DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT,
         DEPTHSPLAT_SUPPORT_BASIS_T4_PLAN_CONTRACT,
+        DEPTHSPLAT_SOFT_MIXTURE_T4_PLAN_CONTRACT,
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_PLAN_CONTRACT,
+        DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_PLAN_CONTRACT,
     }:
         raise ValueError("DepthSplat materializer plan contract changed")
     tile_size = events.get("tile_size")
@@ -294,6 +373,15 @@ def _validate_execution_profile_plan_binding(
         ),
         DEPTHSPLAT_SUPPORT_BASIS_T4_PLAN_CONTRACT: (
             DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE
+        ),
+        DEPTHSPLAT_SOFT_MIXTURE_T4_PLAN_CONTRACT: (
+            DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE
+        ),
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_PLAN_CONTRACT: (
+            DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE
+        ),
+        DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_PLAN_CONTRACT: (
+            DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE
         ),
     }.get(plan.events.get("contract_version"))
     if expected_profile is None or execution_profile != expected_profile:
@@ -460,6 +548,175 @@ def _validate_support_basis_t4_plan(
         )
         if record.get("secondary_local_positions") != expected_secondary:
             raise ValueError("DepthSplat support-basis L1 prefetch changed")
+
+
+def _validate_soft_mixture_t4_plan(
+    plan: IncrementalProbeFirstPlan,
+    *,
+    views: int,
+    height: int,
+    width: int,
+    semantics: str,
+) -> None:
+    """Validate the separate source-only soft-mixture L0-to-L1 route."""
+
+    events = plan.events
+    if (
+        events.get("contract_version") != DEPTHSPLAT_SOFT_MIXTURE_T4_PLAN_CONTRACT
+        or events.get("formal_paper_kp4") is not False
+        or events.get("decision_semantics")
+        != DEPTHSPLAT_LITERAL_PAPER_T4_DECISION_SEMANTICS
+        or events.get("feature_statistic") != "raw-probe-mean-channel-variance"
+        or semantics != BALANCED_L1_ANCHOR_SEMANTICS
+        or events.get("l0_anchor_count") != 4
+        or events.get("l1_anchor_count") != 12
+        or events.get("depth_checked_after_l0_miss_only") is not False
+        or events.get("soft_mixture_l0_secondary_prefetch_policy")
+        != SOFT_MIXTURE_T4_L0_SECONDARY_PREFETCH_POLICY
+        or events.get("soft_mixture_t4_route_config_sha256")
+        != soft_mixture_t4_route_config_sha256(events)
+    ):
+        raise ValueError("DepthSplat soft-mixture T=4 routing contract changed")
+    corners = [list(position) for position in compute_probe_positions(4)]
+    balanced = [
+        list(position)
+        for position in l1_local_positions_for_tile(
+            {}, tile_size=4, l1_anchor_semantics=BALANCED_L1_ANCHOR_SEMANTICS
+        )
+    ]
+    secondary = balanced[len(corners) :]
+    if len(plan.tile_trace) != views * (height // 4) * (width // 4):
+        raise ValueError("DepthSplat soft-mixture T=4 tile trace is incomplete")
+    for record in plan.tile_trace:
+        route = record.get("pre_guard_route")
+        depth_uniform = record.get("depth_uniform")
+        if (
+            route not in {"L0", "L1", "Full"}
+            or record.get("primary_local_positions") != corners
+            or not isinstance(depth_uniform, bool)
+        ):
+            raise ValueError("DepthSplat soft-mixture T=4 tile trace is invalid")
+        expected_secondary = (
+            secondary if route == "L1" or (route == "L0" and depth_uniform) else []
+        )
+        if record.get("secondary_local_positions") != expected_secondary:
+            raise ValueError("DepthSplat soft-mixture L1 prefetch changed")
+
+
+def _validate_soft_mixture_normalized_t4_plan(
+    plan: IncrementalProbeFirstPlan,
+    *,
+    views: int,
+    height: int,
+    width: int,
+    semantics: str,
+) -> None:
+    """Validate the scale-invariant paper-feature soft-mixture route."""
+
+    events = plan.events
+    if (
+        events.get("contract_version")
+        != DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_PLAN_CONTRACT
+        or events.get("formal_paper_kp4") is not False
+        or events.get("decision_semantics")
+        != PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS
+        or events.get("feature_statistic")
+        != "normalized-probe-vector-standard-deviation"
+        or semantics != BALANCED_L1_ANCHOR_SEMANTICS
+        or events.get("l0_anchor_count") != 4
+        or events.get("l1_anchor_count") != 12
+        or events.get("depth_checked_after_l0_miss_only") is not False
+        or events.get("assignment_feature_semantics")
+        != "unit-normalized-bilinear-s1-v1"
+        or events.get("soft_mixture_normalized_l0_secondary_prefetch_policy")
+        != SOFT_MIXTURE_NORMALIZED_T4_L0_SECONDARY_PREFETCH_POLICY
+        or events.get("soft_mixture_normalized_t4_route_config_sha256")
+        != soft_mixture_normalized_t4_route_config_sha256(events)
+    ):
+        raise ValueError("DepthSplat soft-mixture normalized T=4 routing contract changed")
+    corners = [list(position) for position in compute_probe_positions(4)]
+    balanced = [
+        list(position)
+        for position in l1_local_positions_for_tile(
+            {}, tile_size=4, l1_anchor_semantics=BALANCED_L1_ANCHOR_SEMANTICS
+        )
+    ]
+    secondary = balanced[len(corners) :]
+    if len(plan.tile_trace) != views * (height // 4) * (width // 4):
+        raise ValueError("DepthSplat soft-mixture normalized T=4 tile trace is incomplete")
+    for record in plan.tile_trace:
+        route = record.get("pre_guard_route")
+        depth_uniform = record.get("depth_uniform")
+        if (
+            route not in {"L0", "L1", "Full"}
+            or record.get("primary_local_positions") != corners
+            or not isinstance(depth_uniform, bool)
+        ):
+            raise ValueError("DepthSplat soft-mixture normalized T=4 tile trace is invalid")
+        expected_secondary = (
+            secondary if route == "L1" or (route == "L0" and depth_uniform) else []
+        )
+        if record.get("secondary_local_positions") != expected_secondary:
+            raise ValueError("DepthSplat soft-mixture normalized L1 prefetch changed")
+
+
+def _validate_soft_mixture_kernel_closure_t4_plan(
+    plan: IncrementalProbeFirstPlan,
+    *,
+    views: int,
+    height: int,
+    width: int,
+    semantics: str,
+) -> None:
+    """Validate the normalized route and its strict closure-guard binding."""
+
+    events = plan.events
+    if (
+        events.get("contract_version")
+        != DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_PLAN_CONTRACT
+        or events.get("formal_paper_kp4") is not False
+        or events.get("decision_semantics")
+        != PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS
+        or events.get("feature_statistic")
+        != "normalized-probe-vector-standard-deviation"
+        or events.get("assignment_feature_semantics")
+        != "unit-normalized-bilinear-s1-v1"
+        or semantics != BALANCED_L1_ANCHOR_SEMANTICS
+        or events.get("l0_anchor_count") != 4
+        or events.get("l1_anchor_count") != 12
+        or events.get("depth_checked_after_l0_miss_only") is not False
+        or events.get("soft_mixture_kernel_closure_l0_secondary_prefetch_policy")
+        != SOFT_MIXTURE_KERNEL_CLOSURE_T4_L0_SECONDARY_PREFETCH_POLICY
+        or events.get("kernel_closure_guard_policy")
+        != SOFT_MIXTURE_KERNEL_CLOSURE_GUARD_POLICY
+        or events.get("soft_mixture_kernel_closure_t4_route_config_sha256")
+        != soft_mixture_kernel_closure_t4_route_config_sha256(events)
+    ):
+        raise ValueError("DepthSplat soft-mixture kernel-closure routing contract changed")
+    corners = [list(position) for position in compute_probe_positions(4)]
+    balanced = [
+        list(position)
+        for position in l1_local_positions_for_tile(
+            {}, tile_size=4, l1_anchor_semantics=BALANCED_L1_ANCHOR_SEMANTICS
+        )
+    ]
+    secondary = balanced[len(corners) :]
+    if len(plan.tile_trace) != views * (height // 4) * (width // 4):
+        raise ValueError("DepthSplat soft-mixture kernel-closure tile trace is incomplete")
+    for record in plan.tile_trace:
+        route = record.get("pre_guard_route")
+        depth_uniform = record.get("depth_uniform")
+        if (
+            route not in {"L0", "L1", "Full"}
+            or record.get("primary_local_positions") != corners
+            or not isinstance(depth_uniform, bool)
+        ):
+            raise ValueError("DepthSplat soft-mixture kernel-closure tile trace is invalid")
+        expected_secondary = (
+            secondary if route == "L1" or (route == "L0" and depth_uniform) else []
+        )
+        if record.get("secondary_local_positions") != expected_secondary:
+            raise ValueError("DepthSplat soft-mixture kernel-closure L1 prefetch changed")
 
 
 def _validate_source(
@@ -705,6 +962,33 @@ def _validate_routing_inputs(
             feature_threshold=float(plan.events["feature_threshold"]),
             depth_threshold=float(plan.events["depth_threshold"]),
         )
+    elif execution_profile == DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE:
+        rebuilt = build_depthsplat_soft_mixture_t4_probe_first_plan(
+            routing_features,
+            routing_z_depths,
+            height=height,
+            width=width,
+            feature_threshold=float(plan.events["feature_threshold"]),
+            depth_threshold=float(plan.events["depth_threshold"]),
+        )
+    elif execution_profile == DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE:
+        rebuilt = build_depthsplat_soft_mixture_normalized_t4_probe_first_plan(
+            routing_features,
+            routing_z_depths,
+            height=height,
+            width=width,
+            feature_threshold=float(plan.events["feature_threshold"]),
+            depth_threshold=float(plan.events["depth_threshold"]),
+        )
+    elif execution_profile == DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE:
+        rebuilt = build_depthsplat_soft_mixture_kernel_closure_t4_probe_first_plan(
+            routing_features,
+            routing_z_depths,
+            height=height,
+            width=width,
+            feature_threshold=float(plan.events["feature_threshold"]),
+            depth_threshold=float(plan.events["depth_threshold"]),
+        )
     elif execution_profile == DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE:
         rebuilt = build_incremental_probe_first_plan(
             routing_features,
@@ -761,10 +1045,11 @@ def _validate_routing_inputs(
         DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
         DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
         DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
     }:
-        # Both fixed-scale profiles measure raw probe variance.  Their
-        # bilateral assignments therefore use raw bilinear S1, not the
-        # unit-normalized diagnostic map.
+        # The literal/raw profiles measure raw probe variance. Their bilateral
+        # assignments therefore use raw bilinear S1; the normalized soft
+        # mixture profile intentionally falls through to ``feature_norm``.
         raw_assignment_features = torch.nn.functional.interpolate(
             routing_features[0], size=(height, width), mode="bilinear", align_corners=False
         )
@@ -775,6 +1060,16 @@ def _validate_routing_inputs(
         ):
             raise RuntimeError("DepthSplat materializer could not upsample raw S1 features")
         return raw_assignment_features, "raw-bilinear-s1-v1"
+    if (
+        execution_profile
+        in {
+            DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+        }
+        and plan.events.get("assignment_feature_semantics")
+        != "unit-normalized-bilinear-s1-v1"
+    ):
+        raise ValueError("DepthSplat normalized soft-mixture assignment semantics changed")
     return feature_norm, "unit-normalized-bilinear-s1-v1"
 
 
@@ -973,6 +1268,9 @@ def _selected_anchor_attribute_loo_frozen_guard(
             DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
         }
         or not isinstance(value.get("route_plan_contract"), str)
         or not value["route_plan_contract"]
@@ -1010,6 +1308,100 @@ def _selected_anchor_attribute_loo_frozen_guard(
         "materialization_profile": value["materialization_profile"],
         "route_plan_contract": value["route_plan_contract"],
         "route_plan_config_sha256": value["route_plan_config_sha256"],
+        "acid_binding_sha256": value["acid_binding_sha256"],
+        "application_sha256": value["application_sha256"],
+    }
+
+
+def _mixture_kernel_closure_frozen_guard(
+    value: Any | None,
+    *,
+    require_authenticated: bool = False,
+    allow_serialized_projection: bool = False,
+) -> dict[str, Any] | None:
+    """Validate the ACID-issued kernel-risk capability for the v3 profile.
+
+    A positive closure threshold may enter initial materialization only through
+    the opaque capability produced by the live ACID 24/8 record loader.  The
+    serialized projection is accepted solely when replaying an already sealed
+    preflight/final-route trace.
+    """
+
+    if value is None:
+        return None
+    if require_authenticated and allow_serialized_projection:
+        raise ValueError("DepthSplat kernel-risk guard validation mode is inconsistent")
+    from saes.depthsplat_mixture_kernel_acid_calibration import (
+        KERNEL_RISK_GUARD_SCHEMA,
+        KERNEL_RISK_KIND,
+        KERNEL_RISK_METRIC,
+        KERNEL_RISK_THRESHOLD_RULE,
+        verified_mixture_kernel_risk_guard_projection,
+    )
+
+    if require_authenticated:
+        value = verified_mixture_kernel_risk_guard_projection(value)
+    required = {
+        "schema_version",
+        "frozen_record_kind",
+        "frozen_record_sha256",
+        "threshold_value",
+        "threshold_rule",
+        "risk_metric",
+        "materialization_profile",
+        "route_plan_contract",
+        "route_plan_config_sha256",
+        "kernel_closure_schema_version",
+        "kernel_closure_kind",
+        "kernel_closure_policy",
+        "acid_binding_sha256",
+        "application_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("DepthSplat kernel-risk frozen guard is invalid")
+    threshold = value.get("threshold_value")
+    if (
+        value.get("schema_version") != KERNEL_RISK_GUARD_SCHEMA
+        or value.get("frozen_record_kind") != KERNEL_RISK_KIND
+        or value.get("threshold_rule") != KERNEL_RISK_THRESHOLD_RULE
+        or value.get("risk_metric") != KERNEL_RISK_METRIC
+        or value.get("materialization_profile")
+        != DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE
+        or value.get("route_plan_contract")
+        != DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_PLAN_CONTRACT
+        or value.get("kernel_closure_schema_version")
+        != DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_SCHEMA_VERSION
+        or value.get("kernel_closure_kind") != DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_KIND
+        or value.get("kernel_closure_policy")
+        != DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_POLICY
+        or isinstance(threshold, bool)
+        or not isinstance(threshold, (int, float))
+        or not torch.isfinite(torch.tensor(float(threshold)))
+        or float(threshold) <= 0.0
+    ):
+        raise ValueError("DepthSplat kernel-risk frozen guard changed")
+    for name in (
+        "frozen_record_sha256",
+        "route_plan_config_sha256",
+        "acid_binding_sha256",
+        "application_sha256",
+    ):
+        _require_sha256(value.get(name), label=f"kernel-risk guard {name}")
+    return {
+        "schema_version": KERNEL_RISK_GUARD_SCHEMA,
+        "frozen_record_kind": KERNEL_RISK_KIND,
+        "frozen_record_sha256": value["frozen_record_sha256"],
+        "threshold_value": float(threshold),
+        "threshold_rule": KERNEL_RISK_THRESHOLD_RULE,
+        "risk_metric": KERNEL_RISK_METRIC,
+        "materialization_profile": (
+            DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE
+        ),
+        "route_plan_contract": DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_PLAN_CONTRACT,
+        "route_plan_config_sha256": value["route_plan_config_sha256"],
+        "kernel_closure_schema_version": DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_SCHEMA_VERSION,
+        "kernel_closure_kind": DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_KIND,
+        "kernel_closure_policy": DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_POLICY,
         "acid_binding_sha256": value["acid_binding_sha256"],
         "application_sha256": value["application_sha256"],
     }
@@ -2145,6 +2537,191 @@ def _support_basis_moment_certificate_payload(
     }
 
 
+def _soft_mixture_moment_certificate_payload(
+    *,
+    update_slots: torch.Tensor,
+    update_binding: Mapping[str, str],
+    update_means: torch.Tensor,
+    update_covariances: torch.Tensor,
+    per_update: list[dict[str, Any]],
+    tile_trace: Any,
+    tile_trace_sha256: str,
+) -> dict[str, Any]:
+    """Bind source-only soft S/R replay certificates to accepted updates."""
+
+    if (
+        not torch.is_tensor(update_slots)
+        or update_slots.ndim != 1
+        or update_slots.dtype != torch.int64
+        or not isinstance(update_binding, Mapping)
+        or not torch.is_tensor(update_means)
+        or update_means.shape != (int(update_slots.numel()), 3)
+        or not torch.is_tensor(update_covariances)
+        or update_covariances.shape != (int(update_slots.numel()), 3, 3)
+        or not isinstance(tile_trace_sha256, str)
+        or not isinstance(tile_trace, (list, tuple))
+    ):
+        raise ValueError("DepthSplat soft-mixture certificate inputs are invalid")
+    if (
+        not bool(torch.isfinite(update_means).all())
+        or not bool(torch.isfinite(update_covariances).all())
+        or bool(
+            (
+                torch.linalg.eigvalsh(
+                    (update_covariances + update_covariances.mT) * 0.5
+                )
+                < -1e-6
+            ).any()
+        )
+    ):
+        raise ValueError("DepthSplat soft-mixture certificate is not finite PSD")
+    slots = update_slots.detach().to(device="cpu", dtype=torch.int64).tolist()
+    if len(per_update) != len(slots):
+        raise ValueError("DepthSplat soft-mixture certificate update count is incomplete")
+
+    evidence_by_slot: dict[int, tuple[Mapping[str, Any], str]] = {}
+    for tile_record in tile_trace:
+        if not isinstance(tile_record, Mapping):
+            raise ValueError("DepthSplat soft-mixture trace record is invalid")
+        coverage = tile_record.get("coverage")
+        certificate = tile_record.get("soft_mixture_certificate")
+        certificate_sha256 = tile_record.get("soft_mixture_certificate_sha256")
+        certificate_passed = tile_record.get("soft_mixture_certificate_passed")
+        if certificate is None and certificate_sha256 is None and certificate_passed is None:
+            continue
+        if (
+            not isinstance(coverage, Mapping)
+            or not isinstance(certificate, Mapping)
+            or not isinstance(certificate_sha256, str)
+            or certificate_sha256 != _canonical_sha256(certificate)
+            or certificate_passed is not True
+            or certificate.get("schema_version")
+            != DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_SCHEMA_VERSION
+            or certificate.get("kind") != DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_KIND
+            or certificate.get("policy") != DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_POLICY
+            or certificate.get("passed") is not True
+            or coverage.get("projected_support_guard") is not False
+            or coverage.get("support_containment_guard") is not False
+            or not isinstance(coverage.get("per_update"), list)
+        ):
+            raise ValueError("DepthSplat soft-mixture trace evidence is invalid")
+        for row in coverage["per_update"]:
+            if not isinstance(row, Mapping):
+                raise ValueError("DepthSplat soft-mixture trace row is invalid")
+            slot = row.get("update_dense_slot")
+            if (
+                isinstance(slot, bool)
+                or not isinstance(slot, int)
+                or slot in evidence_by_slot
+            ):
+                raise ValueError("DepthSplat soft-mixture trace slot is invalid")
+            evidence_by_slot[slot] = (certificate, certificate_sha256)
+
+    normalized_rows: list[dict[str, Any]] = []
+    for update_index, (slot, row) in enumerate(zip(slots, per_update)):
+        if not isinstance(row, Mapping):
+            raise ValueError("DepthSplat soft-mixture certificate row is invalid")
+        evidence = evidence_by_slot.pop(int(slot), None)
+        if evidence is None:
+            raise ValueError("DepthSplat soft-mixture evidence is missing an accepted update")
+        certificate, certificate_sha256 = evidence
+        summary = certificate.get("summary")
+        source_only = certificate.get("source_only")
+        binding = certificate.get("binding")
+        virtual_count = row.get("virtual_count")
+        if (
+            row.get("update_dense_slot") != int(slot)
+            or row.get("update_index") != update_index
+            or isinstance(virtual_count, bool)
+            or not isinstance(virtual_count, int)
+            or virtual_count < 1
+            or row.get("finite_psd_moment_merge") is not True
+            or row.get("moment_covariance_scale") != 1.0
+            or row.get("support_containment_guard") is not False
+            or row.get("projected_support_guard") is not False
+            or row.get("soft_mixture_certificate_schema_version")
+            != DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_SCHEMA_VERSION
+            or row.get("soft_mixture_certificate_kind")
+            != DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_KIND
+            or row.get("soft_mixture_certificate_policy")
+            != DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_POLICY
+            or row.get("soft_mixture_certificate_sha256") != certificate_sha256
+            or row.get("soft_mixture_certificate_passed") is not True
+            or not isinstance(summary, Mapping)
+            or not isinstance(source_only, Mapping)
+            or not isinstance(binding, Mapping)
+            or summary.get("input_valid") is not True
+            or summary.get("reason") is not None
+            or source_only.get("source_camera_only") is not True
+            or source_only.get("target_mapping_present") is not False
+            or source_only.get("target_rgb_accessed") is not False
+            or source_only.get("target_camera_metadata_accessed") is not False
+            or source_only.get("target_index_accessed") is not False
+            or source_only.get("omitted_s3_attributes_accessed") is not False
+            or source_only.get("input_covariances_mutated") is not False
+            or source_only.get("fixed_covariance_scale") is not True
+            or source_only.get("boolean_owner_assignment_used") is not False
+            or source_only.get("projected_domain_guard_used") is not False
+        ):
+            raise ValueError("DepthSplat soft-mixture certificate binding changed")
+        for key in (
+            "tile_key_sha256",
+            "anchor_dense_slots_sha256",
+            "virtual_origin_slots_sha256",
+            "spatial_weights_sha256",
+            "bilateral_assignment_weights_sha256",
+            "anchor_source_means_sha256",
+            "anchor_source_covariances_sha256",
+            "anchor_source_harmonics_sha256",
+            "anchor_source_opacities_sha256",
+            "virtual_means_sha256",
+            "virtual_covariances_sha256",
+            "virtual_harmonics_sha256",
+            "virtual_opacities_sha256",
+            "merged_means_sha256",
+            "merged_covariances_sha256",
+            "merged_harmonics_sha256",
+            "merged_opacities_sha256",
+            "context_extrinsics_sha256",
+            "context_intrinsics_sha256",
+        ):
+            _require_sha256(binding.get(key), label=f"soft-mixture {key}")
+        normalized_rows.append(
+            {
+                "update_dense_slot": int(slot),
+                "update_index": update_index,
+                "virtual_count": virtual_count,
+                "finite_psd_moment_merge": True,
+                "moment_covariance_scale": 1.0,
+                "support_containment_guard": False,
+                "projected_support_guard": False,
+                "soft_mixture_certificate_schema_version": (
+                    DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_SCHEMA_VERSION
+                ),
+                "soft_mixture_certificate_kind": DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_KIND,
+                "soft_mixture_certificate_policy": (
+                    DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_POLICY
+                ),
+                "soft_mixture_certificate_sha256": certificate_sha256,
+                "soft_mixture_certificate_passed": True,
+            }
+        )
+    if evidence_by_slot:
+        raise ValueError("DepthSplat soft-mixture trace has an unbound update")
+    return {
+        "schema": DEPTHSPLAT_SOFT_MIXTURE_T4_MOMENT_CERTIFICATE,
+        "geometry": "source-only-spatial-s-bilateral-r-first-second-moment-replay-v1",
+        "finite_psd_moment_merge": True,
+        "fixed_moment_covariance_scale": 1.0,
+        "support_containment_guard": False,
+        "projected_support_guard": False,
+        "tile_trace_sha256": tile_trace_sha256,
+        "update_binding": dict(update_binding),
+        "update_slots": [int(slot) for slot in slots],
+        "per_update": normalized_rows,
+    }
+
+
 def _ordered_coverage_rows_from_trace(
     *, tile_trace: Any, update_slots: torch.Tensor
 ) -> list[dict[str, Any]]:
@@ -2262,6 +2839,23 @@ def _validate_coverage_certificate(
             tile_trace=preflight.tile_trace,
             tile_trace_sha256=trace_sha256,
         )
+    elif _is_soft_mixture_profile(profile):
+        if (
+            isinstance(maximum_scale, bool)
+            or not isinstance(maximum_scale, (int, float))
+            or float(maximum_scale) != 1.0
+        ):
+            raise ValueError("DepthSplat soft-mixture certificate scale changed")
+        expected_certificate = DEPTHSPLAT_SOFT_MIXTURE_T4_MOMENT_CERTIFICATE
+        expected = _soft_mixture_moment_certificate_payload(
+            update_slots=preflight.update_dense_slots,
+            update_binding=update_binding,
+            update_means=preflight.means,
+            update_covariances=preflight.covariances,
+            per_update=trace_rows,
+            tile_trace=preflight.tile_trace,
+            tile_trace_sha256=trace_sha256,
+        )
     elif profile == DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE:
         if (
             isinstance(maximum_scale, bool)
@@ -2323,7 +2917,7 @@ def _build_tile_updates(
         raise ValueError("DepthSplat materializer tile lacks a selected anchor")
     anchor_indices = [slot_to_index[slot] for slot in anchor_slots]
     if bool((packed.opacities[anchor_indices] >= 1.0).any()):
-        raise ValueError(NATIVE_OPACITY_ENDPOINT_FULL_REASON)
+        raise _DepthSplatTileRejection(NATIVE_OPACITY_ENDPOINT_FULL_REASON)
     source_positions = [(tile_y * 4 + row, tile_x * 4 + column) for row, column in anchors]
     all_positions = _full_positions(4)
     target_local = [position for position in all_positions if position not in set(anchors)]
@@ -2940,6 +3534,560 @@ def _validate_support_basis_evidence(
     }
 
 
+_SOFT_MIXTURE_RESIDUAL_FIELDS = (
+    "virtual_means",
+    "virtual_covariances",
+    "virtual_harmonics",
+    "virtual_opacities",
+    "merged_means",
+    "merged_covariances",
+    "merged_harmonics",
+    "merged_opacities",
+)
+
+
+def _validate_soft_mixture_evidence(
+    soft_mixture: Any,
+    *,
+    tile_key: tuple[int, int, int],
+    anchor_dense_slots: torch.Tensor,
+    virtual_origin_slots: torch.Tensor,
+    spatial_weights: torch.Tensor,
+    bilateral_assignment_weights: torch.Tensor,
+    anchor_source_means: torch.Tensor,
+    anchor_source_covariances: torch.Tensor,
+    anchor_source_harmonics: torch.Tensor,
+    anchor_source_opacities: torch.Tensor,
+    virtual_means: torch.Tensor,
+    virtual_covariances: torch.Tensor,
+    virtual_harmonics: torch.Tensor,
+    virtual_opacities: torch.Tensor,
+    merged_means: torch.Tensor,
+    merged_covariances: torch.Tensor,
+    merged_harmonics: torch.Tensor,
+    merged_opacities: torch.Tensor,
+    context_extrinsics: torch.Tensor,
+    context_intrinsics: torch.Tensor,
+) -> dict[str, Any]:
+    """Rebuild a soft S/R certificate from live source-only tile tensors."""
+
+    expected = certify_depthsplat_tile_soft_mixture(
+        tile_key=tile_key,
+        anchor_dense_slots=anchor_dense_slots,
+        virtual_origin_slots=virtual_origin_slots,
+        spatial_weights=spatial_weights,
+        bilateral_assignment_weights=bilateral_assignment_weights,
+        anchor_source_means=anchor_source_means,
+        anchor_source_covariances=anchor_source_covariances,
+        anchor_source_harmonics=anchor_source_harmonics,
+        anchor_source_opacities=anchor_source_opacities,
+        virtual_means=virtual_means,
+        virtual_covariances=virtual_covariances,
+        virtual_harmonics=virtual_harmonics,
+        virtual_opacities=virtual_opacities,
+        merged_means=merged_means,
+        merged_covariances=merged_covariances,
+        merged_harmonics=merged_harmonics,
+        merged_opacities=merged_opacities,
+        context_extrinsics=context_extrinsics,
+        context_intrinsics=context_intrinsics,
+    )
+    if not isinstance(soft_mixture, Mapping) or dict(soft_mixture) != expected:
+        raise ValueError("DepthSplat soft-mixture certificate binding changed")
+    source_only = expected.get("source_only")
+    summary = expected.get("summary")
+    binding = expected.get("binding")
+    if (
+        expected.get("schema_version") != DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_SCHEMA_VERSION
+        or expected.get("kind") != DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_KIND
+        or expected.get("policy") != DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_POLICY
+        or expected.get("tile_key") != list(tile_key)
+        or not isinstance(source_only, Mapping)
+        or source_only.get("source_camera_only") is not True
+        or source_only.get("target_mapping_present") is not False
+        or source_only.get("target_rgb_accessed") is not False
+        or source_only.get("target_camera_metadata_accessed") is not False
+        or source_only.get("target_index_accessed") is not False
+        or source_only.get("omitted_s3_attributes_accessed") is not False
+        or source_only.get("input_covariances_mutated") is not False
+        or source_only.get("fixed_covariance_scale") is not True
+        or source_only.get("boolean_owner_assignment_used") is not False
+        or source_only.get("projected_domain_guard_used") is not False
+        or not isinstance(summary, Mapping)
+        or not isinstance(binding, Mapping)
+    ):
+        raise ValueError("DepthSplat soft-mixture source-only contract changed")
+    for key in (
+        "tile_key_sha256",
+        "anchor_dense_slots_sha256",
+        "virtual_origin_slots_sha256",
+        "spatial_weights_sha256",
+        "bilateral_assignment_weights_sha256",
+        "anchor_source_means_sha256",
+        "anchor_source_covariances_sha256",
+        "anchor_source_harmonics_sha256",
+        "anchor_source_opacities_sha256",
+        "virtual_means_sha256",
+        "virtual_covariances_sha256",
+        "virtual_harmonics_sha256",
+        "virtual_opacities_sha256",
+        "merged_means_sha256",
+        "merged_covariances_sha256",
+        "merged_harmonics_sha256",
+        "merged_opacities_sha256",
+        "context_extrinsics_sha256",
+        "context_intrinsics_sha256",
+    ):
+        _require_sha256(binding.get(key), label=f"soft-mixture {key}")
+    return expected
+
+
+def _validate_mixture_kernel_closure_evidence(
+    kernel_closure: Any,
+    *,
+    tile_key: tuple[int, int, int],
+    anchor_dense_slots: torch.Tensor,
+    virtual_origin_slots: torch.Tensor,
+    bilateral_assignment_weights: torch.Tensor,
+    anchor_source_means: torch.Tensor,
+    anchor_source_covariances: torch.Tensor,
+    anchor_source_opacities: torch.Tensor,
+    virtual_means: torch.Tensor,
+    virtual_covariances: torch.Tensor,
+    virtual_opacities: torch.Tensor,
+    merged_means: torch.Tensor,
+    merged_covariances: torch.Tensor,
+    merged_opacities: torch.Tensor,
+    context_extrinsics: torch.Tensor,
+    context_intrinsics: torch.Tensor,
+    strict_maximum_relative_risk: float | None = None,
+) -> dict[str, Any]:
+    """Rebuild the strict source-only closure guard from live tile tensors."""
+
+    expected = assess_depthsplat_tile_kernel_closure(
+        tile_key=tile_key,
+        anchor_dense_slots=anchor_dense_slots,
+        virtual_origin_slots=virtual_origin_slots,
+        bilateral_assignment_weights=bilateral_assignment_weights,
+        anchor_source_means=anchor_source_means,
+        anchor_source_covariances=anchor_source_covariances,
+        anchor_source_opacities=anchor_source_opacities,
+        virtual_means=virtual_means,
+        virtual_covariances=virtual_covariances,
+        virtual_opacities=virtual_opacities,
+        merged_means=merged_means,
+        merged_covariances=merged_covariances,
+        merged_opacities=merged_opacities,
+        context_extrinsics=context_extrinsics,
+        context_intrinsics=context_intrinsics,
+        strict_maximum_relative_risk=strict_maximum_relative_risk,
+    )
+    if not isinstance(kernel_closure, Mapping) or dict(kernel_closure) != expected:
+        raise ValueError("DepthSplat mixture kernel-closure binding changed")
+    source_only = expected.get("source_only")
+    summary = expected.get("summary")
+    binding = expected.get("binding")
+    if (
+        expected.get("schema_version") != DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_SCHEMA_VERSION
+        or expected.get("kind") != DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_KIND
+        or expected.get("policy") != DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_POLICY
+        or expected.get("tile_key") != list(tile_key)
+        or not isinstance(expected.get("passed"), bool)
+        or not isinstance(source_only, Mapping)
+        or source_only.get("source_camera_only") is not True
+        or source_only.get("target_mapping_present") is not False
+        or source_only.get("target_rgb_accessed") is not False
+        or source_only.get("target_camera_metadata_accessed") is not False
+        or source_only.get("target_index_accessed") is not False
+        or source_only.get("omitted_s3_attributes_accessed") is not False
+        or source_only.get("boolean_owner_assignment_used") is not False
+        or source_only.get("projected_domain_guard_used") is not False
+        or source_only.get("covariance_expansion_used") is not False
+        or source_only.get("alpha_union_used") is not False
+        or not isinstance(summary, Mapping)
+    ):
+        raise ValueError("DepthSplat mixture kernel-closure source-only contract changed")
+    input_valid = summary.get("input_valid")
+    if not isinstance(input_valid, bool):
+        raise ValueError("DepthSplat mixture kernel-closure validity changed")
+    if not input_valid:
+        if expected.get("passed") is not False or binding is not None:
+            raise ValueError("DepthSplat invalid mixture kernel-closure changed")
+        return expected
+    if not isinstance(binding, Mapping):
+        raise ValueError("DepthSplat mixture kernel-closure binding is missing")
+    for key in (
+        "tile_key_sha256",
+        "anchor_dense_slots_sha256",
+        "virtual_origin_slots_sha256",
+        "bilateral_assignment_weights_sha256",
+        "anchor_source_means_sha256",
+        "anchor_source_covariances_sha256",
+        "anchor_source_opacities_sha256",
+        "virtual_means_sha256",
+        "virtual_covariances_sha256",
+        "virtual_opacities_sha256",
+        "merged_means_sha256",
+        "merged_covariances_sha256",
+        "merged_opacities_sha256",
+        "context_extrinsics_sha256",
+        "context_intrinsics_sha256",
+    ):
+        _require_sha256(binding.get(key), label=f"mixture kernel-closure {key}")
+    return expected
+
+
+def _soft_mixture_certificate_aggregate_from_trace(
+    tile_trace: Any,
+) -> dict[str, Any]:
+    """Summarize replay certificates without retaining a target-side audit."""
+
+    if not isinstance(tile_trace, (list, tuple)):
+        raise ValueError("DepthSplat soft-mixture aggregate trace is invalid")
+    maximum_absolute = {name: 0.0 for name in _SOFT_MIXTURE_RESIDUAL_FIELDS}
+    maximum_tolerance = {name: 0.0 for name in _SOFT_MIXTURE_RESIDUAL_FIELDS}
+    minima: dict[str, float | None] = {
+        "minimum_source_covariance_eigenvalue": None,
+        "minimum_virtual_covariance_eigenvalue": None,
+        "minimum_merged_covariance_eigenvalue": None,
+    }
+    source_only: dict[str, bool] | None = None
+    attempts = 0
+    passed = 0
+    for record in tile_trace:
+        if not isinstance(record, Mapping):
+            raise ValueError("DepthSplat soft-mixture aggregate tile is invalid")
+        seen_certificate_sha256: set[str] = set()
+        for certificate_key, sha256_key, passed_key in (
+            (
+                "soft_mixture_certificate",
+                "soft_mixture_certificate_sha256",
+                "soft_mixture_certificate_passed",
+            ),
+            (
+                "l0_soft_mixture_failure",
+                "l0_soft_mixture_failure_sha256",
+                None,
+            ),
+            (
+                "l1_soft_mixture_failure",
+                "l1_soft_mixture_failure_sha256",
+                None,
+            ),
+            (
+                "l0_soft_mixture_certificate_before_kernel_closure",
+                "l0_soft_mixture_certificate_before_kernel_closure_sha256",
+                None,
+            ),
+            (
+                "l1_soft_mixture_certificate_before_kernel_closure",
+                "l1_soft_mixture_certificate_before_kernel_closure_sha256",
+                None,
+            ),
+        ):
+            certificate = record.get(certificate_key)
+            certificate_sha256 = record.get(sha256_key)
+            certificate_passed = (
+                record.get(passed_key)
+                if passed_key is not None
+                else certificate.get("passed")
+                if isinstance(certificate, Mapping)
+                else None
+            )
+            if (
+                certificate is None
+                and certificate_sha256 is None
+                and certificate_passed is None
+            ):
+                continue
+            if (
+                not isinstance(certificate, Mapping)
+                or not isinstance(certificate_sha256, str)
+                or certificate_sha256 != _canonical_sha256(certificate)
+                or not isinstance(certificate_passed, bool)
+                or certificate.get("schema_version")
+                != DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_SCHEMA_VERSION
+                or certificate.get("kind") != DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_KIND
+                or certificate.get("policy") != DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_POLICY
+                or certificate.get("passed") is not certificate_passed
+                or not isinstance(certificate.get("source_only"), Mapping)
+                or not isinstance(certificate.get("summary"), Mapping)
+            ):
+                raise ValueError("DepthSplat soft-mixture aggregate certificate changed")
+            current_source_only = dict(certificate["source_only"])
+            if source_only is None:
+                source_only = current_source_only
+            elif source_only != current_source_only:
+                raise ValueError(
+                    "DepthSplat soft-mixture aggregate source-only flags drifted"
+                )
+            summary = certificate["summary"]
+            residuals = summary.get("residuals")
+            if not isinstance(residuals, Mapping):
+                raise ValueError("DepthSplat soft-mixture aggregate residuals are invalid")
+            for name in _SOFT_MIXTURE_RESIDUAL_FIELDS:
+                residual = residuals.get(name)
+                if (
+                    not isinstance(residual, Mapping)
+                    or isinstance(residual.get("maximum_absolute"), bool)
+                    or not isinstance(residual.get("maximum_absolute"), (int, float))
+                    or isinstance(residual.get("tolerance"), bool)
+                    or not isinstance(residual.get("tolerance"), (int, float))
+                ):
+                    raise ValueError("DepthSplat soft-mixture aggregate residual changed")
+                maximum_absolute[name] = max(
+                    maximum_absolute[name], float(residual["maximum_absolute"])
+                )
+                maximum_tolerance[name] = max(
+                    maximum_tolerance[name], float(residual["tolerance"])
+                )
+            for name in minima:
+                value = summary.get(name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError(
+                        "DepthSplat soft-mixture aggregate covariance summary changed"
+                    )
+                minimum = float(value)
+                minima[name] = (
+                    minimum if minima[name] is None else min(minima[name], minimum)
+                )
+            # A passed kernel attempt retains its S/R certificate both before
+            # closure and as accepted tile evidence. They are one attempt.
+            if certificate_sha256 in seen_certificate_sha256:
+                continue
+            seen_certificate_sha256.add(certificate_sha256)
+            attempts += 1
+            passed += int(certificate_passed)
+    return {
+        "schema": "depthsplat-soft-mixture-tile-certificate-aggregate-v1",
+        "certificate": DEPTHSPLAT_SOFT_MIXTURE_T4_MOMENT_CERTIFICATE,
+        "kind": DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_KIND,
+        "policy": DEPTHSPLAT_SOFT_MIXTURE_CERTIFICATE_POLICY,
+        "source_only": source_only,
+        "tile_certificate_attempt_count": attempts,
+        "passed_tile_certificate_count": passed,
+        "failed_tile_certificate_count": attempts - passed,
+        "maximum_absolute_residual_by_field": maximum_absolute,
+        "maximum_tolerance_by_field": maximum_tolerance,
+        **minima,
+    }
+
+
+def _validate_soft_mixture_certificate_aggregate(
+    *, events: Mapping[str, Any], tile_trace: Any
+) -> dict[str, Any]:
+    """Require the compact soft-mixture summary to rebuild from the trace."""
+
+    expected = _soft_mixture_certificate_aggregate_from_trace(tile_trace)
+    aggregate = events.get("soft_mixture_certificate_aggregate")
+    if (
+        not isinstance(aggregate, Mapping)
+        or dict(aggregate) != expected
+        or events.get("soft_mixture_certificate_aggregate_sha256")
+        != _canonical_sha256(expected)
+    ):
+        raise ValueError("DepthSplat soft-mixture aggregate binding changed")
+    return expected
+
+
+def _mixture_kernel_closure_aggregate_from_trace(tile_trace: Any) -> dict[str, Any]:
+    """Summarize strict kernel-closure decisions from the committed tile trace."""
+
+    if not isinstance(tile_trace, (list, tuple)):
+        raise ValueError("DepthSplat mixture kernel-closure aggregate trace is invalid")
+    source_only: dict[str, bool] | None = None
+    strict_risk: float | None = None
+    maximum_world: float | None = None
+    maximum_source: float | None = None
+    maximum_kernel: float | None = None
+    maximum_log_depth_rms: float | None = None
+    finite_risks: list[float] = []
+    reasons: dict[str, int] = {}
+    attempts = 0
+    passed = 0
+    unscorable = 0
+
+    for record in tile_trace:
+        if not isinstance(record, Mapping):
+            raise ValueError("DepthSplat mixture kernel-closure aggregate tile is invalid")
+        for closure_key, sha256_key, passed_key in (
+            (
+                "mixture_kernel_closure",
+                "mixture_kernel_closure_sha256",
+                "mixture_kernel_closure_passed",
+            ),
+            (
+                "l0_mixture_kernel_closure_failure",
+                "l0_mixture_kernel_closure_failure_sha256",
+                None,
+            ),
+            (
+                "l1_mixture_kernel_closure_failure",
+                "l1_mixture_kernel_closure_failure_sha256",
+                None,
+            ),
+        ):
+            closure = record.get(closure_key)
+            closure_sha256 = record.get(sha256_key)
+            closure_passed = (
+                record.get(passed_key)
+                if passed_key is not None
+                else closure.get("passed")
+                if isinstance(closure, Mapping)
+                else None
+            )
+            if closure is None and closure_sha256 is None and closure_passed is None:
+                continue
+            if (
+                not isinstance(closure, Mapping)
+                or not isinstance(closure_sha256, str)
+                or closure_sha256 != _canonical_sha256(closure)
+                or not isinstance(closure_passed, bool)
+                or closure.get("schema_version")
+                != DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_SCHEMA_VERSION
+                or closure.get("kind") != DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_KIND
+                or closure.get("policy") != DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_POLICY
+                or closure.get("passed") is not closure_passed
+                or not isinstance(closure.get("source_only"), Mapping)
+                or not isinstance(closure.get("summary"), Mapping)
+            ):
+                raise ValueError("DepthSplat mixture kernel-closure aggregate evidence changed")
+            current_source_only = dict(closure["source_only"])
+            if (
+                current_source_only.get("source_camera_only") is not True
+                or current_source_only.get("target_mapping_present") is not False
+                or current_source_only.get("target_rgb_accessed") is not False
+                or current_source_only.get("target_camera_metadata_accessed") is not False
+                or current_source_only.get("target_index_accessed") is not False
+                or current_source_only.get("omitted_s3_attributes_accessed") is not False
+                or current_source_only.get("boolean_owner_assignment_used") is not False
+                or current_source_only.get("projected_domain_guard_used") is not False
+                or current_source_only.get("covariance_expansion_used") is not False
+                or current_source_only.get("alpha_union_used") is not False
+            ):
+                raise ValueError("DepthSplat mixture kernel-closure source-only flags changed")
+            if source_only is None:
+                source_only = current_source_only
+            elif source_only != current_source_only:
+                raise ValueError("DepthSplat mixture kernel-closure source-only flags drifted")
+            summary = closure["summary"]
+            input_valid = summary.get("input_valid")
+            current_strict_risk = summary.get("strict_maximum_relative_risk")
+            reason = summary.get("reason")
+            if (
+                not isinstance(input_valid, bool)
+                or isinstance(current_strict_risk, bool)
+                or not isinstance(current_strict_risk, (int, float))
+                or not torch.isfinite(torch.tensor(float(current_strict_risk)))
+                or float(current_strict_risk) < 0.0
+                or reason is not None and not isinstance(reason, str)
+            ):
+                raise ValueError("DepthSplat mixture kernel-closure summary changed")
+            binding = closure.get("binding")
+            if input_valid and not isinstance(binding, Mapping):
+                raise ValueError("DepthSplat mixture kernel-closure binding is missing")
+            if not input_valid and binding is not None:
+                raise ValueError("DepthSplat invalid kernel-closure binding changed")
+            current_strict_risk = float(current_strict_risk)
+            if strict_risk is None:
+                strict_risk = current_strict_risk
+            elif strict_risk != current_strict_risk:
+                raise ValueError("DepthSplat mixture kernel-closure threshold drifted")
+            if input_valid:
+                values = {
+                    "maximum_world_kernel_risk": summary.get("maximum_world_kernel_risk"),
+                    "maximum_source_kernel_risk": summary.get("maximum_source_kernel_risk"),
+                    "maximum_kernel_risk": summary.get("maximum_kernel_risk"),
+                    "maximum_source_log_depth_rms": summary.get("maximum_source_log_depth_rms"),
+                }
+                if any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not torch.isfinite(torch.tensor(float(value)))
+                    or float(value) < 0.0
+                    for value in values.values()
+                ):
+                    raise ValueError("DepthSplat mixture kernel-closure risks changed")
+                world = float(values["maximum_world_kernel_risk"])
+                source = float(values["maximum_source_kernel_risk"])
+                kernel = float(values["maximum_kernel_risk"])
+                depth_rms = float(values["maximum_source_log_depth_rms"])
+                if kernel != max(world, source) or closure_passed != (kernel <= current_strict_risk):
+                    raise ValueError("DepthSplat mixture kernel-closure decision changed")
+                maximum_world = world if maximum_world is None else max(maximum_world, world)
+                maximum_source = source if maximum_source is None else max(maximum_source, source)
+                maximum_kernel = kernel if maximum_kernel is None else max(maximum_kernel, kernel)
+                maximum_log_depth_rms = (
+                    depth_rms
+                    if maximum_log_depth_rms is None
+                    else max(maximum_log_depth_rms, depth_rms)
+                )
+                finite_risks.append(kernel)
+            elif closure_passed:
+                raise ValueError("DepthSplat invalid kernel-closure evidence passed")
+            else:
+                unscorable += 1
+            attempts += 1
+            passed += int(closure_passed)
+            reason_name = "accepted" if closure_passed else str(reason or "unscorable")
+            reasons[reason_name] = reasons.get(reason_name, 0) + 1
+
+    histogram_counts: list[int] = []
+    lower = float("-inf")
+    for upper in _MIXTURE_KERNEL_CLOSURE_HISTOGRAM_UPPER_BOUNDS:
+        histogram_counts.append(sum(lower < value <= upper for value in finite_risks))
+        lower = upper
+    return {
+        "schema": DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_AGGREGATE_SCHEMA,
+        "kind": DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_KIND,
+        "policy": DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_POLICY,
+        "source_only": source_only,
+        "strict_maximum_relative_risk": strict_risk,
+        "tile_kernel_closure_attempt_count": attempts,
+        "passed_tile_kernel_closure_count": passed,
+        "failed_tile_kernel_closure_count": attempts - passed,
+        "maximum_world_kernel_risk": maximum_world,
+        "maximum_source_kernel_risk": maximum_source,
+        "maximum_kernel_risk": maximum_kernel,
+        "maximum_source_log_depth_rms": maximum_log_depth_rms,
+        "maximum_kernel_risk_distribution": {
+            "finite_tile_risk_count": len(finite_risks),
+            "unscorable_tile_count": unscorable,
+            "minimum_kernel_risk": min(finite_risks) if finite_risks else None,
+            "histogram_upper_bounds": list(_MIXTURE_KERNEL_CLOSURE_HISTOGRAM_UPPER_BOUNDS),
+            "histogram_counts": histogram_counts,
+            "above_largest_histogram_bin_count": sum(
+                value > _MIXTURE_KERNEL_CLOSURE_HISTOGRAM_UPPER_BOUNDS[-1]
+                for value in finite_risks
+            ),
+        },
+        "reason_counts": dict(sorted(reasons.items())),
+    }
+
+
+def _validate_mixture_kernel_closure_aggregate(
+    *, events: Mapping[str, Any], tile_trace: Any
+) -> dict[str, Any]:
+    """Require the strict closure telemetry to rebuild from the tile trace."""
+
+    expected = _mixture_kernel_closure_aggregate_from_trace(tile_trace)
+    aggregate = events.get("mixture_kernel_closure_aggregate")
+    if (
+        not isinstance(aggregate, Mapping)
+        or dict(aggregate) != expected
+        or events.get("mixture_kernel_closure_aggregate_sha256")
+        != _canonical_sha256(expected)
+        or events.get("mixture_kernel_closure_guard_policy")
+        != SOFT_MIXTURE_KERNEL_CLOSURE_GUARD_POLICY
+        or events.get("mixture_kernel_closure_evidence_policy")
+        != DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_POLICY
+        or events.get("mixture_kernel_closure_strict_maximum_relative_risk")
+        != expected["strict_maximum_relative_risk"]
+    ):
+        raise ValueError("DepthSplat mixture kernel-closure aggregate binding changed")
+    return expected
+
+
 def _build_fixed_scale_selected_only_tile_updates(
     *,
     packet: DepthSplatSparseRawPacket,
@@ -2955,19 +4103,51 @@ def _build_fixed_scale_selected_only_tile_updates(
     height: int,
     width: int,
     feature_statistic: str,
+    assignment_feature_semantics: str,
     coverage_enriched: bool,
     support_basis_profile: bool = False,
+    soft_mixture_profile: bool = False,
+    kernel_closure_profile: bool = False,
+    kernel_closure_maximum_relative_risk: float | None = None,
 ) -> tuple[list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]], dict[str, Any]]:
     """Build selected-only fixed-scale moment updates for one compact tile."""
 
     if (
         level not in {"L0", "L1"}
-        or feature_statistic != "raw-probe-mean-channel-variance"
-        or (coverage_enriched and support_basis_profile)
+        or feature_statistic
+        not in {
+            "raw-probe-mean-channel-variance",
+            "normalized-probe-vector-standard-deviation",
+        }
+        or assignment_feature_semantics
+        not in {"raw-bilinear-s1-v1", "unit-normalized-bilinear-s1-v1"}
+        or (kernel_closure_profile and not soft_mixture_profile)
+        or (
+            kernel_closure_maximum_relative_risk is not None
+            and (
+                isinstance(kernel_closure_maximum_relative_risk, bool)
+                or not isinstance(kernel_closure_maximum_relative_risk, (int, float))
+                or not torch.isfinite(
+                    torch.tensor(float(kernel_closure_maximum_relative_risk))
+                )
+                or float(kernel_closure_maximum_relative_risk) <= 0.0
+            )
+        )
+        or sum(
+            bool(value)
+            for value in (
+                coverage_enriched,
+                support_basis_profile,
+                soft_mixture_profile,
+            )
+        ) > 1
     ):
         raise ValueError("DepthSplat fixed-scale tile does not have the required route")
     anchors = _route_anchor_positions(record, level=level, semantics=semantics)
-    engineering_profile = coverage_enriched or support_basis_profile
+    engineering_profile = (
+        coverage_enriched or support_basis_profile or soft_mixture_profile
+    )
+    projected_support_guard = coverage_enriched or support_basis_profile
     source_label = "selected-anchor" if engineering_profile else "selected-probe"
     if not engineering_profile and (
         semantics != PAPER_KP_ANCHOR_SEMANTICS
@@ -3003,7 +4183,7 @@ def _build_fixed_scale_selected_only_tile_updates(
     source_harmonics = packed.harmonics[anchor_indices]
     source_opacities = packed.opacities[anchor_indices]
     if bool((source_opacities >= 1.0).any()):
-        raise ValueError(NATIVE_OPACITY_ENDPOINT_FULL_REASON)
+        raise _DepthSplatTileRejection(NATIVE_OPACITY_ENDPOINT_FULL_REASON)
     source_positions = [(tile_y * 4 + row, tile_x * 4 + column) for row, column in anchors]
     target_local = [
         position for position in _full_positions(4) if position not in set(anchors)
@@ -3015,12 +4195,15 @@ def _build_fixed_scale_selected_only_tile_updates(
                 "certificate": (
                     DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE
                     if support_basis_profile
+                    else DEPTHSPLAT_SOFT_MIXTURE_T4_MOMENT_CERTIFICATE
+                    if soft_mixture_profile
                     else DEPTHSPLAT_COVERAGE_ENRICHED_T4_MOMENT_CERTIFICATE
                     if coverage_enriched
                     else DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE
                 ),
                 "finite_psd_moment_merge": True,
-                "support_containment_guard": engineering_profile,
+                "support_containment_guard": projected_support_guard,
+                "projected_support_guard": projected_support_guard,
                 "moment_covariance_scale_max": 1.0,
                 "per_update": [],
             },
@@ -3182,12 +4365,17 @@ def _build_fixed_scale_selected_only_tile_updates(
                 "update_dense_slot": int(slot),
                 "virtual_count": len(target_local),
                 **coverage,
-                "support_containment_guard": engineering_profile,
+                "support_containment_guard": projected_support_guard,
+                "projected_support_guard": projected_support_guard,
             }
         )
     owner_support: dict[str, Any] | None = None
     tile_support_basis: dict[str, Any] | None = None
     support_basis_sha256: str | None = None
+    tile_soft_mixture: dict[str, Any] | None = None
+    soft_mixture_sha256: str | None = None
+    tile_kernel_closure: dict[str, Any] | None = None
+    kernel_closure_sha256: str | None = None
     if coverage_enriched:
         virtual_owner_indices = assignment.argmax(dim=1).to(dtype=torch.int64)
         owner_support = audit_depthsplat_owner_coverage(
@@ -3295,18 +4483,144 @@ def _build_fixed_scale_selected_only_tile_updates(
             }
             for row in coverage_updates
         ]
+    elif soft_mixture_profile:
+        virtual_origin_slots = _tile_slots(
+            view=view,
+            tile_y=tile_y,
+            tile_x=tile_x,
+            height=height,
+            width=width,
+            tile_size=4,
+            positions=target_local,
+        )
+        tile_soft_mixture = certify_depthsplat_tile_soft_mixture(
+            tile_key=(view, tile_y, tile_x),
+            anchor_dense_slots=torch.tensor(
+                anchor_slots, device=packed.means.device, dtype=torch.int64
+            ),
+            virtual_origin_slots=torch.tensor(
+                virtual_origin_slots, device=packed.means.device, dtype=torch.int64
+            ),
+            spatial_weights=spatial,
+            bilateral_assignment_weights=assignment,
+            anchor_source_means=source_means,
+            anchor_source_covariances=source_covariances,
+            anchor_source_harmonics=source_harmonics,
+            anchor_source_opacities=source_opacities,
+            virtual_means=virtual_means,
+            virtual_covariances=virtual_covariances,
+            virtual_harmonics=virtual_harmonics,
+            virtual_opacities=virtual_opacities,
+            merged_means=torch.stack([item[1] for item in updates]),
+            merged_covariances=torch.stack([item[2] for item in updates]),
+            merged_harmonics=torch.stack([item[3] for item in updates]),
+            merged_opacities=torch.stack([item[4] for item in updates]),
+            context_extrinsics=packet.extrinsics[anchor_indices],
+            context_intrinsics=packet.intrinsics[anchor_indices],
+        )
+        tile_soft_mixture = _validate_soft_mixture_evidence(
+            tile_soft_mixture,
+            tile_key=(view, tile_y, tile_x),
+            anchor_dense_slots=torch.tensor(
+                anchor_slots, device=packed.means.device, dtype=torch.int64
+            ),
+            virtual_origin_slots=torch.tensor(
+                virtual_origin_slots, device=packed.means.device, dtype=torch.int64
+            ),
+            spatial_weights=spatial,
+            bilateral_assignment_weights=assignment,
+            anchor_source_means=source_means,
+            anchor_source_covariances=source_covariances,
+            anchor_source_harmonics=source_harmonics,
+            anchor_source_opacities=source_opacities,
+            virtual_means=virtual_means,
+            virtual_covariances=virtual_covariances,
+            virtual_harmonics=virtual_harmonics,
+            virtual_opacities=virtual_opacities,
+            merged_means=torch.stack([item[1] for item in updates]),
+            merged_covariances=torch.stack([item[2] for item in updates]),
+            merged_harmonics=torch.stack([item[3] for item in updates]),
+            merged_opacities=torch.stack([item[4] for item in updates]),
+            context_extrinsics=packet.extrinsics[anchor_indices],
+            context_intrinsics=packet.intrinsics[anchor_indices],
+        )
+        soft_mixture_sha256 = _canonical_sha256(tile_soft_mixture)
+        if kernel_closure_profile and tile_soft_mixture["passed"] is True:
+            tile_kernel_closure = assess_depthsplat_tile_kernel_closure(
+                tile_key=(view, tile_y, tile_x),
+                anchor_dense_slots=torch.tensor(
+                    anchor_slots, device=packed.means.device, dtype=torch.int64
+                ),
+                virtual_origin_slots=torch.tensor(
+                    virtual_origin_slots, device=packed.means.device, dtype=torch.int64
+                ),
+                bilateral_assignment_weights=assignment,
+                anchor_source_means=source_means,
+                anchor_source_covariances=source_covariances,
+                anchor_source_opacities=source_opacities,
+                virtual_means=virtual_means,
+                virtual_covariances=virtual_covariances,
+                virtual_opacities=virtual_opacities,
+                merged_means=torch.stack([item[1] for item in updates]),
+                merged_covariances=torch.stack([item[2] for item in updates]),
+                merged_opacities=torch.stack([item[4] for item in updates]),
+                context_extrinsics=packet.extrinsics[anchor_indices],
+                context_intrinsics=packet.intrinsics[anchor_indices],
+                strict_maximum_relative_risk=kernel_closure_maximum_relative_risk,
+            )
+            tile_kernel_closure = _validate_mixture_kernel_closure_evidence(
+                tile_kernel_closure,
+                tile_key=(view, tile_y, tile_x),
+                anchor_dense_slots=torch.tensor(
+                    anchor_slots, device=packed.means.device, dtype=torch.int64
+                ),
+                virtual_origin_slots=torch.tensor(
+                    virtual_origin_slots, device=packed.means.device, dtype=torch.int64
+                ),
+                bilateral_assignment_weights=assignment,
+                anchor_source_means=source_means,
+                anchor_source_covariances=source_covariances,
+                anchor_source_opacities=source_opacities,
+                virtual_means=virtual_means,
+                virtual_covariances=virtual_covariances,
+                virtual_opacities=virtual_opacities,
+                merged_means=torch.stack([item[1] for item in updates]),
+                merged_covariances=torch.stack([item[2] for item in updates]),
+                merged_opacities=torch.stack([item[4] for item in updates]),
+                context_extrinsics=packet.extrinsics[anchor_indices],
+                context_intrinsics=packet.intrinsics[anchor_indices],
+                strict_maximum_relative_risk=kernel_closure_maximum_relative_risk,
+            )
+            kernel_closure_sha256 = _canonical_sha256(tile_kernel_closure)
+        coverage_updates = [
+            {
+                **row,
+                "soft_mixture_certificate_schema_version": tile_soft_mixture[
+                    "schema_version"
+                ],
+                "soft_mixture_certificate_kind": tile_soft_mixture["kind"],
+                "soft_mixture_certificate_policy": tile_soft_mixture["policy"],
+                "soft_mixture_certificate_sha256": soft_mixture_sha256,
+                "soft_mixture_certificate_passed": tile_soft_mixture["passed"],
+                "projected_support_guard": False,
+            }
+            for row in coverage_updates
+        ]
     return updates, {
         "virtual_count": len(target_local),
         "coverage": {
             "certificate": (
                 DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE
                 if support_basis_profile
+                else DEPTHSPLAT_SOFT_MIXTURE_T4_MOMENT_CERTIFICATE
+                if soft_mixture_profile
                 else DEPTHSPLAT_COVERAGE_ENRICHED_T4_MOMENT_CERTIFICATE
                 if coverage_enriched
                 else DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE
             ),
             "finite_psd_moment_merge": True,
-            "support_containment_guard": engineering_profile,
+            "support_containment_guard": projected_support_guard,
+            "projected_support_guard": projected_support_guard,
             "moment_covariance_scale_max": 1.0,
             "minimum_merged_covariance_eigenvalue": min(
                 minimum_merged_eigenvalues, default=0.0
@@ -3330,7 +4644,17 @@ def _build_fixed_scale_selected_only_tile_updates(
             ): len(anchor_indices)
         },
         "opacity_compositing_order": "literal-weighted-average-no-alpha-union-v1",
-        "assignment_feature_semantics": "raw-bilinear-s1-v1",
+        "assignment_feature_semantics": assignment_feature_semantics,
+        "soft_mixture_certificate": tile_soft_mixture,
+        "soft_mixture_certificate_sha256": soft_mixture_sha256,
+        "soft_mixture_certificate_passed": (
+            tile_soft_mixture["passed"] if tile_soft_mixture is not None else None
+        ),
+        "mixture_kernel_closure": tile_kernel_closure,
+        "mixture_kernel_closure_sha256": kernel_closure_sha256,
+        "mixture_kernel_closure_passed": (
+            tile_kernel_closure["passed"] if tile_kernel_closure is not None else None
+        ),
     }
 
 
@@ -3349,6 +4673,7 @@ def preflight_depthsplat_l0_l1_materialization(
     selected_anchor_attribute_loo_frozen_guard: Any | None = None,
     selected_anchor_attribute_loo_maximum_risk: float | None = None,
     collect_selected_anchor_attribute_loo_risk: bool = False,
+    mixture_kernel_closure_frozen_guard: Any | None = None,
 ) -> DepthSplatCompactMaterializationPreflight:
     """Construct all nonzero L0/L1 updates without reading skipped attributes.
 
@@ -3371,6 +4696,9 @@ def preflight_depthsplat_l0_l1_materialization(
             DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
         }
     ):
         raise ValueError("DepthSplat materializer safety thresholds are invalid")
@@ -3384,6 +4712,20 @@ def preflight_depthsplat_l0_l1_materialization(
             execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE
         ),
     )
+    frozen_kernel_guard = _mixture_kernel_closure_frozen_guard(
+        mixture_kernel_closure_frozen_guard,
+        require_authenticated=(
+            execution_profile
+            == DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE
+            and mixture_kernel_closure_frozen_guard is not None
+        ),
+    )
+    if (
+        frozen_kernel_guard is not None
+        and execution_profile
+        != DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE
+    ):
+        raise ValueError("DepthSplat kernel-risk guard requires the v3 profile")
     collect_loo = collect_selected_anchor_attribute_loo_risk or frozen_loo_guard is not None
     views, height, width, semantics = _require_plan(plan)
     _validate_execution_profile_plan_binding(
@@ -3393,6 +4735,9 @@ def preflight_depthsplat_l0_l1_materialization(
         DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
         DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
         DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
     }:
         if float(maximum_coverage_covariance_scale) != 1.0:
             raise ValueError(
@@ -3422,6 +4767,44 @@ def preflight_depthsplat_l0_l1_materialization(
             width=width,
             semantics=semantics,
         )
+    elif execution_profile == DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE:
+        _validate_soft_mixture_t4_plan(
+            plan,
+            views=views,
+            height=height,
+            width=width,
+            semantics=semantics,
+        )
+    elif execution_profile == DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE:
+        _validate_soft_mixture_normalized_t4_plan(
+            plan,
+            views=views,
+            height=height,
+            width=width,
+            semantics=semantics,
+        )
+    elif execution_profile == DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE:
+        _validate_soft_mixture_kernel_closure_t4_plan(
+            plan,
+            views=views,
+            height=height,
+            width=width,
+            semantics=semantics,
+        )
+        if frozen_kernel_guard is not None:
+            expected_route_config_sha256 = soft_mixture_kernel_closure_t4_route_config_sha256(
+                plan.events
+            )
+            if (
+                frozen_kernel_guard["materialization_profile"] != execution_profile
+                or frozen_kernel_guard["route_plan_contract"]
+                != plan.events.get("contract_version")
+                or frozen_kernel_guard["route_plan_config_sha256"]
+                != expected_route_config_sha256
+                or plan.events.get("soft_mixture_kernel_closure_t4_route_config_sha256")
+                != expected_route_config_sha256
+            ):
+                raise ValueError("DepthSplat kernel-risk guard route binding changed")
     if frozen_loo_guard is not None:
         if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE:
             expected_route_config_sha256 = literal_paper_t4_route_config_sha256(
@@ -3488,6 +4871,9 @@ def preflight_depthsplat_l0_l1_materialization(
         in {
             DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
         }
         and collect_loo
     ):
@@ -3510,6 +4896,9 @@ def preflight_depthsplat_l0_l1_materialization(
             DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
         }:
             return _build_fixed_scale_selected_only_tile_updates(
                 packet=initial_packet,
@@ -3525,6 +4914,7 @@ def preflight_depthsplat_l0_l1_materialization(
                 height=height,
                 width=width,
                 feature_statistic=feature_statistic,
+                assignment_feature_semantics=assignment_feature_semantics,
                 coverage_enriched=(
                     execution_profile
                     == DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE
@@ -3532,6 +4922,13 @@ def preflight_depthsplat_l0_l1_materialization(
                 support_basis_profile=(
                     execution_profile
                     == DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE
+                ),
+                soft_mixture_profile=_is_soft_mixture_profile(execution_profile),
+                kernel_closure_profile=_is_kernel_closure_profile(execution_profile),
+                kernel_closure_maximum_relative_risk=(
+                    frozen_kernel_guard["threshold_value"]
+                    if frozen_kernel_guard is not None
+                    else None
                 ),
             )
         if source_grid is None:
@@ -3571,6 +4968,50 @@ def preflight_depthsplat_l0_l1_materialization(
             positions=positions,
         )
         return all(slot in slot_to_index for slot in slots)
+
+    def soft_mixture_candidate_failure(
+        evidence: Mapping[str, Any], *, level: str, entry: dict[str, Any]
+    ) -> str | None:
+        """Record the first source-only compact guard that rejected one level."""
+
+        prefix = level.lower()
+        certificate = evidence.get("soft_mixture_certificate")
+        certificate_sha256 = evidence.get("soft_mixture_certificate_sha256")
+        certificate_passed = evidence.get("soft_mixture_certificate_passed")
+        if (
+            not isinstance(certificate, Mapping)
+            or not isinstance(certificate_sha256, str)
+            or certificate_sha256 != _canonical_sha256(certificate)
+            or not isinstance(certificate_passed, bool)
+            or certificate.get("passed") is not certificate_passed
+        ):
+            raise ValueError("DepthSplat soft-mixture certificate trace binding changed")
+        if certificate_passed is False:
+            entry[f"{prefix}_soft_mixture_failure"] = certificate
+            entry[f"{prefix}_soft_mixture_failure_sha256"] = certificate_sha256
+            return "soft-mixture replay"
+        if not _is_kernel_closure_profile(execution_profile):
+            return None
+        entry[f"{prefix}_soft_mixture_certificate_before_kernel_closure"] = certificate
+        entry[f"{prefix}_soft_mixture_certificate_before_kernel_closure_sha256"] = (
+            certificate_sha256
+        )
+        closure = evidence.get("mixture_kernel_closure")
+        closure_sha256 = evidence.get("mixture_kernel_closure_sha256")
+        closure_passed = evidence.get("mixture_kernel_closure_passed")
+        if (
+            not isinstance(closure, Mapping)
+            or not isinstance(closure_sha256, str)
+            or closure_sha256 != _canonical_sha256(closure)
+            or not isinstance(closure_passed, bool)
+            or closure.get("passed") is not closure_passed
+        ):
+            raise ValueError("DepthSplat mixture kernel-closure trace binding changed")
+        if closure_passed is False:
+            entry[f"{prefix}_mixture_kernel_closure_failure"] = closure
+            entry[f"{prefix}_mixture_kernel_closure_failure_sha256"] = closure_sha256
+            return "mixture kernel-closure"
+        return None
 
     for view in range(views):
         for tile_y in range(height // 4):
@@ -3625,7 +5066,9 @@ def preflight_depthsplat_l0_l1_materialization(
                                 "passed": None,
                                 "action": "promote_full_unscorable",
                             }
-                            raise ValueError(NATIVE_OPACITY_ENDPOINT_FULL_REASON)
+                            raise _DepthSplatTileRejection(
+                                NATIVE_OPACITY_ENDPOINT_FULL_REASON
+                            )
                         loo = depthsplat_selected_anchor_attribute_loo_certificate(
                             packed=initial_packed,
                             slot_to_index=slot_to_index,
@@ -3662,7 +5105,7 @@ def preflight_depthsplat_l0_l1_materialization(
                         }
                         entry["selected_anchor_attribute_loo"] = loo
                         if passed is False:
-                            raise ValueError(
+                            raise _DepthSplatTileRejection(
                                 "DepthSplat selected-anchor LOO rejected tile"
                             )
                     tile_updates, evidence = build_compact_tile(
@@ -3673,9 +5116,47 @@ def preflight_depthsplat_l0_l1_materialization(
                         tile_x=tile_x,
                     )
                     accepted_level = str(level)
-                    if execution_profile in {
+                    if _is_soft_mixture_profile(execution_profile):
+                        failure = soft_mixture_candidate_failure(
+                            evidence, level=str(level), entry=entry
+                        )
+                        if failure is not None:
+                            can_enrich = (
+                                level == "L0"
+                                and record.get("depth_uniform") is True
+                                and l1_prefetch_is_available(
+                                    record=record,
+                                    view=view,
+                                    tile_y=tile_y,
+                                    tile_x=tile_x,
+                                )
+                            )
+                            if not can_enrich:
+                                raise _DepthSplatTileRejection(
+                                    f"DepthSplat {failure} rejected tile"
+                                )
+                            l1_updates, l1_evidence = build_compact_tile(
+                                record=record,
+                                level="L1",
+                                view=view,
+                                tile_y=tile_y,
+                                tile_x=tile_x,
+                            )
+                            l1_failure = soft_mixture_candidate_failure(
+                                l1_evidence, level="L1", entry=entry
+                            )
+                            if l1_failure is not None:
+                                raise _DepthSplatTileRejection(
+                                    f"DepthSplat L1 {l1_failure} rejected tile"
+                                )
+                            tile_updates = l1_updates
+                            evidence = l1_evidence
+                            accepted_level = "L1"
+                            entry["l1_enrichment_prefetched"] = True
+                    elif execution_profile in {
                         DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
                         DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+                        DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
                     }:
                         support_key = (
                             "owner_support"
@@ -3710,7 +5191,7 @@ def preflight_depthsplat_l0_l1_materialization(
                                 )
                             )
                             if not can_enrich:
-                                raise ValueError(
+                                raise _DepthSplatTileRejection(
                                     f"{profile_label} {support_label} rejected tile"
                                 )
                             l1_updates, l1_evidence = build_compact_tile(
@@ -3728,14 +5209,21 @@ def preflight_depthsplat_l0_l1_materialization(
                                 or l1_support.get("passed") is not True
                             ):
                                 entry[f"l1_{support_key}_failure"] = l1_support
-                                raise ValueError(
+                                raise _DepthSplatTileRejection(
                                     f"{profile_label} L1 {support_label} rejected tile"
                                 )
                             tile_updates = l1_updates
                             evidence = l1_evidence
                             accepted_level = "L1"
                             entry["l1_enrichment_prefetched"] = True
+                except _DepthSplatTileRejection as error:
+                    reason = str(error) or type(error).__name__
+                    _mark_tile(promote, view=view, tile_y=tile_y, tile_x=tile_x, tile_size=4)
+                    entry.update({"accepted": False, "reason": reason})
+                    rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
                 except (RuntimeError, ValueError) as error:
+                    if _is_kernel_closure_profile(execution_profile):
+                        raise
                     reason = str(error) or type(error).__name__
                     _mark_tile(promote, view=view, tile_y=tile_y, tile_x=tile_x, tile_size=4)
                     entry.update({"accepted": False, "reason": reason})
@@ -3867,6 +5355,17 @@ def preflight_depthsplat_l0_l1_materialization(
             tile_trace=trace,
             tile_trace_sha256=trace_sha256,
         )
+    elif _is_soft_mixture_profile(execution_profile):
+        coverage_certificate = DEPTHSPLAT_SOFT_MIXTURE_T4_MOMENT_CERTIFICATE
+        coverage_certificate_payload = _soft_mixture_moment_certificate_payload(
+            update_slots=update_slots,
+            update_binding=update_binding,
+            update_means=means,
+            update_covariances=covariances,
+            per_update=ordered_coverage_rows,
+            tile_trace=trace,
+            tile_trace_sha256=trace_sha256,
+        )
     else:
         coverage_certificate = DEPTHSPLAT_COVERAGE_CERTIFICATE
         coverage_certificate_payload = _coverage_certificate_payload(
@@ -3877,6 +5376,44 @@ def preflight_depthsplat_l0_l1_materialization(
             maximum_covariance_scale=float(maximum_coverage_covariance_scale),
         )
     coverage_certificate_sha256 = _canonical_sha256(coverage_certificate_payload)
+    soft_mixture_certificate_aggregate = (
+        _soft_mixture_certificate_aggregate_from_trace(trace)
+        if _is_soft_mixture_profile(execution_profile)
+        else None
+    )
+    soft_mixture_certificate_aggregate_sha256 = (
+        _canonical_sha256(soft_mixture_certificate_aggregate)
+        if soft_mixture_certificate_aggregate is not None
+        else None
+    )
+    mixture_kernel_closure_aggregate = (
+        _mixture_kernel_closure_aggregate_from_trace(trace)
+        if _is_kernel_closure_profile(execution_profile)
+        else None
+    )
+    mixture_kernel_closure_aggregate_sha256 = (
+        _canonical_sha256(mixture_kernel_closure_aggregate)
+        if mixture_kernel_closure_aggregate is not None
+        else None
+    )
+    mixture_kernel_closure_l0_to_l1_tile_count = sum(
+        record.get("planned_route") == "L0"
+        and record.get("accepted_level") == "L1"
+        and isinstance(record.get("l0_mixture_kernel_closure_failure"), Mapping)
+        for record in trace
+    )
+    mixture_kernel_closure_full_promotion_tile_count = sum(
+        bool(record.get("attempted"))
+        and record.get("accepted") is False
+        and any(
+            isinstance(record.get(key), Mapping)
+            for key in (
+                "l0_mixture_kernel_closure_failure",
+                "l1_mixture_kernel_closure_failure",
+            )
+        )
+        for record in trace
+    )
     materialization_session_sha256 = _canonical_sha256(
         {
             "schema_version": DEPTHSPLAT_MATERIALIZER_SCHEMA_VERSION,
@@ -3892,6 +5429,13 @@ def preflight_depthsplat_l0_l1_materialization(
             "selected_anchor_attribute_loo_frozen_guard": frozen_loo_guard,
             "selected_anchor_attribute_loo_aggregate_sha256": loo_aggregate_sha256,
             "coverage_certificate_sha256": coverage_certificate_sha256,
+            "soft_mixture_certificate_aggregate_sha256": (
+                soft_mixture_certificate_aggregate_sha256
+            ),
+            "mixture_kernel_closure_aggregate_sha256": (
+                mixture_kernel_closure_aggregate_sha256
+            ),
+            "mixture_kernel_closure_frozen_guard": frozen_kernel_guard,
         }
     )
     events = {
@@ -3900,6 +5444,39 @@ def preflight_depthsplat_l0_l1_materialization(
         "coverage_certificate": coverage_certificate,
         "coverage_certificate_payload": coverage_certificate_payload,
         "coverage_certificate_sha256": coverage_certificate_sha256,
+        "soft_mixture_certificate_aggregate": soft_mixture_certificate_aggregate,
+        "soft_mixture_certificate_aggregate_sha256": (
+            soft_mixture_certificate_aggregate_sha256
+        ),
+        "mixture_kernel_closure_aggregate": mixture_kernel_closure_aggregate,
+        "mixture_kernel_closure_aggregate_sha256": (
+            mixture_kernel_closure_aggregate_sha256
+        ),
+        "mixture_kernel_closure_guard_policy": (
+            SOFT_MIXTURE_KERNEL_CLOSURE_GUARD_POLICY
+            if _is_kernel_closure_profile(execution_profile)
+            else None
+        ),
+        "mixture_kernel_closure_evidence_policy": (
+            DEPTHSPLAT_MIXTURE_KERNEL_CLOSURE_POLICY
+            if _is_kernel_closure_profile(execution_profile)
+            else None
+        ),
+        "mixture_kernel_closure_strict_maximum_relative_risk": (
+            mixture_kernel_closure_aggregate["strict_maximum_relative_risk"]
+            if mixture_kernel_closure_aggregate is not None
+            else None
+        ),
+        "mixture_kernel_closure_frozen_guard": (
+            frozen_kernel_guard
+            if _is_kernel_closure_profile(execution_profile)
+            else None
+        ),
+        "mixture_kernel_closure_calibrated_threshold": (
+            frozen_kernel_guard is not None
+            if _is_kernel_closure_profile(execution_profile)
+            else None
+        ),
         "maximum_coverage_covariance_scale": float(maximum_coverage_covariance_scale),
         "execution_profile": execution_profile,
         "formal_paper_selected_probe_only": (
@@ -3937,6 +5514,9 @@ def preflight_depthsplat_l0_l1_materialization(
                 DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
                 DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
                 DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
             }
             else None
         ),
@@ -3953,6 +5533,9 @@ def preflight_depthsplat_l0_l1_materialization(
                 DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
                 DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
                 DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
             }
             else max(
                 (
@@ -3985,6 +5568,16 @@ def preflight_depthsplat_l0_l1_materialization(
             if execution_profile == DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE
             else None
         ),
+        "soft_mixture_guard": (
+            True
+            if _is_soft_mixture_profile(execution_profile)
+            else None
+        ),
+        "soft_mixture_projected_domain_guard_used": (
+            False
+            if _is_soft_mixture_profile(execution_profile)
+            else None
+        ),
         "coverage_enriched_l0_to_l1_tile_count": sum(
             record.get("accepted_level") == "L1"
             and record.get("planned_route") == "L0"
@@ -3997,6 +5590,22 @@ def preflight_depthsplat_l0_l1_materialization(
             and record.get("planned_route") == "L0"
             and execution_profile == DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE
             for record in trace
+        ),
+        "soft_mixture_l0_to_l1_tile_count": sum(
+            record.get("accepted_level") == "L1"
+            and record.get("planned_route") == "L0"
+            and _is_soft_mixture_profile(execution_profile)
+            for record in trace
+        ),
+        "mixture_kernel_closure_l0_to_l1_tile_count": (
+            mixture_kernel_closure_l0_to_l1_tile_count
+            if _is_kernel_closure_profile(execution_profile)
+            else None
+        ),
+        "mixture_kernel_closure_full_promotion_tile_count": (
+            mixture_kernel_closure_full_promotion_tile_count
+            if _is_kernel_closure_profile(execution_profile)
+            else None
         ),
         "selected_anchor_attribute_loo_certificate": (
             DEPTHSPLAT_SELECTED_ANCHOR_ATTRIBUTE_LOO_CERTIFICATE
@@ -4055,6 +5664,9 @@ def resolve_depthsplat_compact_final_route(
         DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
         DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
         DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
     }:
         raise ValueError("DepthSplat final route materialization profile is invalid")
     _validate_execution_profile_plan_binding(
@@ -4072,6 +5684,18 @@ def resolve_depthsplat_compact_final_route(
         _validate_support_basis_t4_plan(
             plan, views=views, height=height, width=width, semantics=semantics
         )
+    elif execution_profile == DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE:
+        _validate_soft_mixture_t4_plan(
+            plan, views=views, height=height, width=width, semantics=semantics
+        )
+    elif execution_profile == DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE:
+        _validate_soft_mixture_normalized_t4_plan(
+            plan, views=views, height=height, width=width, semantics=semantics
+        )
+    elif execution_profile == DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE:
+        _validate_soft_mixture_kernel_closure_t4_plan(
+            plan, views=views, height=height, width=width, semantics=semantics
+        )
     initial_binding = preflight.events.get("initial_binding")
     update_binding = preflight.events.get("update_binding")
     session = preflight.events.get("materialization_session_sha256")
@@ -4083,6 +5707,19 @@ def resolve_depthsplat_compact_final_route(
         or initial_binding.get("plan_selection_mask_sha256") != _mask_sha256(plan.selection_mask)
         or initial_binding.get("plan_tile_trace_sha256") != plan_trace_sha256
         or initial_binding.get("execution_profile") != execution_profile
+        or initial_binding.get("assignment_feature_map_sha256")
+        != preflight.events.get("assignment_feature_map_sha256")
+        or initial_binding.get("assignment_feature_semantics")
+        != preflight.events.get("assignment_feature_semantics")
+        or (
+            execution_profile
+            in {
+                DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+            }
+            and preflight.events.get("assignment_feature_semantics")
+            != "unit-normalized-bilinear-s1-v1"
+        )
         or update_binding
         != _update_binding(
             preflight.update_dense_slots,
@@ -4094,6 +5731,33 @@ def resolve_depthsplat_compact_final_route(
     ):
         raise ValueError("DepthSplat final route preflight binding changed")
     coverage_certificate = _validate_coverage_certificate(preflight)
+    soft_mixture_aggregate = (
+        _validate_soft_mixture_certificate_aggregate(
+            events=preflight.events, tile_trace=preflight.tile_trace
+        )
+        if _is_soft_mixture_profile(execution_profile)
+        else None
+    )
+    mixture_kernel_closure_aggregate = (
+        _validate_mixture_kernel_closure_aggregate(
+            events=preflight.events, tile_trace=preflight.tile_trace
+        )
+        if _is_kernel_closure_profile(execution_profile)
+        else None
+    )
+    frozen_kernel_guard = (
+        _mixture_kernel_closure_frozen_guard(
+            preflight.events.get("mixture_kernel_closure_frozen_guard"),
+            allow_serialized_projection=True,
+        )
+        if _is_kernel_closure_profile(execution_profile)
+        else None
+    )
+    if (
+        preflight.events.get("mixture_kernel_closure_calibrated_threshold")
+        != (frozen_kernel_guard is not None if _is_kernel_closure_profile(execution_profile) else None)
+    ):
+        raise ValueError("DepthSplat final route kernel-risk guard changed")
     coverage_certificate_sha256 = _require_sha256(
         preflight.events.get("coverage_certificate_sha256"),
         label="coverage certificate",
@@ -4123,6 +5787,17 @@ def resolve_depthsplat_compact_final_route(
                 "selected_anchor_attribute_loo_aggregate_sha256"
             ),
             "coverage_certificate_sha256": coverage_certificate_sha256,
+            "soft_mixture_certificate_aggregate_sha256": (
+                _canonical_sha256(soft_mixture_aggregate)
+                if soft_mixture_aggregate is not None
+                else None
+            ),
+            "mixture_kernel_closure_aggregate_sha256": (
+                _canonical_sha256(mixture_kernel_closure_aggregate)
+                if mixture_kernel_closure_aggregate is not None
+                else None
+            ),
+            "mixture_kernel_closure_frozen_guard": frozen_kernel_guard,
         }
     )
     if session != expected_session:
@@ -4139,6 +5814,20 @@ def resolve_depthsplat_compact_final_route(
     }
     if len(preflight_records) != len(plan.tile_trace):
         raise ValueError("DepthSplat final route preflight trace is incomplete")
+    if (
+        execution_profile
+        in {
+            DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+        }
+        and any(
+            record.get("assignment_feature_semantics")
+            != "unit-normalized-bilinear-s1-v1"
+            for record in preflight.tile_trace
+            if record.get("accepted_level") in {"L0", "L1"}
+        )
+    ):
+        raise ValueError("DepthSplat final route normalized assignment trace changed")
     update_slots = {
         int(slot)
         for slot in preflight.update_dense_slots.detach().to(
@@ -4172,7 +5861,15 @@ def resolve_depthsplat_compact_final_route(
         ):
             raise ValueError("DepthSplat final route preflight tile decision diverged")
         accepted_level = record.get("accepted_level")
-        if promoted:
+        if planned == "Full":
+            if (
+                record.get("accepted") is not True
+                or accepted_level != "Full"
+                or record.get("reason") != "source_full_passthrough"
+            ):
+                raise ValueError("DepthSplat final route native Full decision changed")
+            final = "Full"
+        elif promoted:
             final = "Full"
         else:
             if accepted_level not in {"L0", "L1"}:
@@ -4184,6 +5881,9 @@ def resolve_depthsplat_compact_final_route(
                     in {
                         DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
                         DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+                        DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+                        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+                        DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
                     }
                     and planned == "L0"
                     and accepted_level == "L1"
@@ -4257,6 +5957,18 @@ def resolve_depthsplat_compact_final_route(
             "raw_head_request_mask_sha256": _mask_sha256(raw_request),
             "full_passthrough_mask_sha256": _mask_sha256(full_passthrough),
             "tile_trace_sha256": trace_sha256,
+            "assignment_feature_map_sha256": preflight.events.get(
+                "assignment_feature_map_sha256"
+            ),
+            "assignment_feature_semantics": preflight.events.get(
+                "assignment_feature_semantics"
+            ),
+            "mixture_kernel_closure_aggregate_sha256": (
+                _canonical_sha256(mixture_kernel_closure_aggregate)
+                if mixture_kernel_closure_aggregate is not None
+                else None
+            ),
+            "mixture_kernel_closure_frozen_guard": frozen_kernel_guard,
         }
     )
     events = {
@@ -4282,12 +5994,54 @@ def resolve_depthsplat_compact_final_route(
         "requires_incremental_full_dispatch": bool(additional.any()),
         "route_counts": route_counts,
         "l1_anchor_semantics": semantics,
+        "assignment_feature_map_sha256": preflight.events.get(
+            "assignment_feature_map_sha256"
+        ),
+        "assignment_feature_semantics": preflight.events.get(
+            "assignment_feature_semantics"
+        ),
         "preflight_trace_sha256": preflight.events.get("tile_trace_sha256"),
         "preflight_materialization_session_sha256": session,
         "coverage_certificate_sha256": preflight.events[
             "coverage_certificate_sha256"
         ],
         "coverage_certificate_geometry": coverage_certificate["geometry"],
+        "soft_mixture_certificate_aggregate_sha256": (
+            _canonical_sha256(soft_mixture_aggregate)
+            if soft_mixture_aggregate is not None
+            else None
+        ),
+        "soft_mixture_projected_domain_guard_used": (
+            False
+            if _is_soft_mixture_profile(execution_profile)
+            else None
+        ),
+        "mixture_kernel_closure_aggregate_sha256": (
+            _canonical_sha256(mixture_kernel_closure_aggregate)
+            if mixture_kernel_closure_aggregate is not None
+            else None
+        ),
+        "mixture_kernel_closure_guard_policy": preflight.events.get(
+            "mixture_kernel_closure_guard_policy"
+        ),
+        "mixture_kernel_closure_evidence_policy": preflight.events.get(
+            "mixture_kernel_closure_evidence_policy"
+        ),
+        "mixture_kernel_closure_strict_maximum_relative_risk": preflight.events.get(
+            "mixture_kernel_closure_strict_maximum_relative_risk"
+        ),
+        "mixture_kernel_closure_frozen_guard": frozen_kernel_guard,
+        "mixture_kernel_closure_calibrated_threshold": (
+            frozen_kernel_guard is not None
+            if _is_kernel_closure_profile(execution_profile)
+            else None
+        ),
+        "mixture_kernel_closure_l0_to_l1_tile_count": preflight.events.get(
+            "mixture_kernel_closure_l0_to_l1_tile_count"
+        ),
+        "mixture_kernel_closure_full_promotion_tile_count": preflight.events.get(
+            "mixture_kernel_closure_full_promotion_tile_count"
+        ),
         "selected_anchor_attribute_loo_aggregate_sha256": (
             _canonical_sha256(loo_aggregate) if loo_aggregate is not None else None
         ),
@@ -4349,6 +6103,22 @@ def apply_depthsplat_compact_l0_l1_materialization(
     )
     preflight_session = preflight.events.get("materialization_session_sha256")
     update_binding = preflight.events.get("update_binding")
+    kernel_closure_profile = _is_kernel_closure_profile(
+        preflight.events.get("execution_profile")
+    )
+    frozen_kernel_guard = (
+        _mixture_kernel_closure_frozen_guard(
+            preflight.events.get("mixture_kernel_closure_frozen_guard"),
+            allow_serialized_projection=True,
+        )
+        if kernel_closure_profile
+        else None
+    )
+    if (
+        preflight.events.get("mixture_kernel_closure_calibrated_threshold")
+        != (frozen_kernel_guard is not None if kernel_closure_profile else None)
+    ):
+        raise ValueError("DepthSplat final packet kernel-risk guard changed")
     expected_update_binding = _update_binding(
         preflight.update_dense_slots,
         preflight.means,
@@ -4364,6 +6134,16 @@ def apply_depthsplat_compact_l0_l1_materialization(
             "raw_head_request_mask_sha256": _mask_sha256(final_route.raw_head_request_mask),
             "full_passthrough_mask_sha256": _mask_sha256(final_route.full_passthrough_mask),
             "tile_trace_sha256": final_route_trace_sha256,
+            "assignment_feature_map_sha256": preflight.events.get(
+                "assignment_feature_map_sha256"
+            ),
+            "assignment_feature_semantics": preflight.events.get(
+                "assignment_feature_semantics"
+            ),
+            "mixture_kernel_closure_aggregate_sha256": preflight.events.get(
+                "mixture_kernel_closure_aggregate_sha256"
+            ),
+            "mixture_kernel_closure_frozen_guard": frozen_kernel_guard,
         }
     )
     if (
@@ -4377,11 +6157,42 @@ def apply_depthsplat_compact_l0_l1_materialization(
     ):
         raise ValueError("DepthSplat final packet route binding changed")
     coverage_certificate = _validate_coverage_certificate(preflight)
+    soft_mixture_aggregate = (
+        _validate_soft_mixture_certificate_aggregate(
+            events=preflight.events, tile_trace=preflight.tile_trace
+        )
+        if _is_soft_mixture_profile(preflight.events.get("execution_profile"))
+        else None
+    )
+    mixture_kernel_closure_aggregate = (
+        _validate_mixture_kernel_closure_aggregate(
+            events=preflight.events, tile_trace=preflight.tile_trace
+        )
+        if kernel_closure_profile
+        else None
+    )
     loo_aggregate = _validate_selected_anchor_attribute_loo_aggregate(
         events=preflight.events,
         tile_trace=preflight.tile_trace,
     )
     initial_binding = preflight.events.get("initial_binding")
+    if (
+        not isinstance(initial_binding, Mapping)
+        or initial_binding.get("assignment_feature_map_sha256")
+        != preflight.events.get("assignment_feature_map_sha256")
+        or initial_binding.get("assignment_feature_semantics")
+        != preflight.events.get("assignment_feature_semantics")
+        or (
+            preflight.events.get("execution_profile")
+            in {
+                DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+            }
+            and preflight.events.get("assignment_feature_semantics")
+            != "unit-normalized-bilinear-s1-v1"
+        )
+    ):
+        raise ValueError("DepthSplat final packet assignment feature binding changed")
     coverage_certificate_sha256 = _require_sha256(
         preflight.events.get("coverage_certificate_sha256"),
         label="coverage certificate",
@@ -4411,6 +6222,17 @@ def apply_depthsplat_compact_l0_l1_materialization(
                 "selected_anchor_attribute_loo_aggregate_sha256"
             ),
             "coverage_certificate_sha256": coverage_certificate_sha256,
+            "soft_mixture_certificate_aggregate_sha256": (
+                _canonical_sha256(soft_mixture_aggregate)
+                if soft_mixture_aggregate is not None
+                else None
+            ),
+            "mixture_kernel_closure_aggregate_sha256": (
+                _canonical_sha256(mixture_kernel_closure_aggregate)
+                if mixture_kernel_closure_aggregate is not None
+                else None
+            ),
+            "mixture_kernel_closure_frozen_guard": frozen_kernel_guard,
         }
     )
     if preflight_session != expected_preflight_session:
@@ -4420,6 +6242,38 @@ def apply_depthsplat_compact_l0_l1_materialization(
         != preflight.events.get("coverage_certificate_sha256")
         or final_route.events.get("coverage_certificate_geometry")
         != coverage_certificate["geometry"]
+        or final_route.events.get("soft_mixture_certificate_aggregate_sha256")
+        != (
+            _canonical_sha256(soft_mixture_aggregate)
+            if soft_mixture_aggregate is not None
+            else None
+        )
+        or final_route.events.get("soft_mixture_projected_domain_guard_used")
+        != (
+            False
+            if soft_mixture_aggregate is not None
+            else None
+        )
+        or final_route.events.get("mixture_kernel_closure_aggregate_sha256")
+        != (
+            _canonical_sha256(mixture_kernel_closure_aggregate)
+            if mixture_kernel_closure_aggregate is not None
+            else None
+        )
+        or final_route.events.get("mixture_kernel_closure_guard_policy")
+        != preflight.events.get("mixture_kernel_closure_guard_policy")
+        or final_route.events.get("mixture_kernel_closure_evidence_policy")
+        != preflight.events.get("mixture_kernel_closure_evidence_policy")
+        or final_route.events.get("mixture_kernel_closure_strict_maximum_relative_risk")
+        != preflight.events.get("mixture_kernel_closure_strict_maximum_relative_risk")
+        or final_route.events.get("mixture_kernel_closure_frozen_guard")
+        != frozen_kernel_guard
+        or final_route.events.get("mixture_kernel_closure_calibrated_threshold")
+        != (frozen_kernel_guard is not None if kernel_closure_profile else None)
+        or final_route.events.get("mixture_kernel_closure_l0_to_l1_tile_count")
+        != preflight.events.get("mixture_kernel_closure_l0_to_l1_tile_count")
+        or final_route.events.get("mixture_kernel_closure_full_promotion_tile_count")
+        != preflight.events.get("mixture_kernel_closure_full_promotion_tile_count")
         or final_route.events.get("selected_anchor_attribute_loo_aggregate_sha256")
         != (_canonical_sha256(loo_aggregate) if loo_aggregate is not None else None)
         or final_route.events.get("selected_anchor_attribute_loo_frozen_guard")
@@ -4551,6 +6405,28 @@ def apply_depthsplat_compact_l0_l1_materialization(
             "depthsplat_compact_coverage_certificate_sha256": preflight.events[
                 "coverage_certificate_sha256"
             ],
+            "depthsplat_compact_soft_mixture_certificate_aggregate_sha256": (
+                _canonical_sha256(soft_mixture_aggregate)
+                if soft_mixture_aggregate is not None
+                else None
+            ),
+            "depthsplat_compact_soft_mixture_projected_domain_guard_used": (
+                False if soft_mixture_aggregate is not None else None
+            ),
+            "depthsplat_compact_mixture_kernel_closure_aggregate_sha256": (
+                _canonical_sha256(mixture_kernel_closure_aggregate)
+                if mixture_kernel_closure_aggregate is not None
+                else None
+            ),
+            "depthsplat_compact_mixture_kernel_closure_guard_policy": preflight.events.get(
+                "mixture_kernel_closure_guard_policy"
+            ),
+            "depthsplat_compact_mixture_kernel_closure_evidence_policy": preflight.events.get(
+                "mixture_kernel_closure_evidence_policy"
+            ),
+            "depthsplat_compact_mixture_kernel_closure_strict_maximum_relative_risk": preflight.events.get(
+                "mixture_kernel_closure_strict_maximum_relative_risk"
+            ),
             "depthsplat_compact_execution_profile": preflight.events[
                 "execution_profile"
             ],
@@ -4607,6 +6483,10 @@ __all__ = [
     "DEPTHSPLAT_COVERAGE_ENRICHED_T4_MOMENT_CERTIFICATE",
     "DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE",
     "DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE",
+    "DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE",
+    "DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE",
+    "DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE",
+    "DEPTHSPLAT_SOFT_MIXTURE_T4_MOMENT_CERTIFICATE",
     "DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE",
     "DEPTHSPLAT_MATERIALIZER_SCHEMA_VERSION",
     "DepthSplatCompactFinalRoute",

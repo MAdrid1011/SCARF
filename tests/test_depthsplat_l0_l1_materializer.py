@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 
@@ -27,11 +28,17 @@ def _plan(
     literal_paper_t4=False,
     coverage_enriched_t4=False,
     support_basis_t4=False,
+    soft_mixture_t4=False,
+    soft_mixture_normalized_t4=False,
+    soft_mixture_kernel_closure_t4=False,
     feature_threshold=0.1,
     depth_threshold=0.1,
 ):
     from saes.probe_first_schedule import (
         build_depthsplat_coverage_enriched_t4_probe_first_plan,
+        build_depthsplat_soft_mixture_kernel_closure_t4_probe_first_plan,
+        build_depthsplat_soft_mixture_normalized_t4_probe_first_plan,
+        build_depthsplat_soft_mixture_t4_probe_first_plan,
         build_depthsplat_support_basis_t4_probe_first_plan,
         build_incremental_probe_first_plan,
         build_literal_paper_t4_probe_first_plan,
@@ -64,6 +71,33 @@ def _plan(
             feature_threshold=feature_threshold,
             depth_threshold=depth_threshold,
         )
+    if soft_mixture_t4:
+        return build_depthsplat_soft_mixture_t4_probe_first_plan(
+            features,
+            z_depths,
+            height=4,
+            width=4,
+            feature_threshold=feature_threshold,
+            depth_threshold=depth_threshold,
+        )
+    if soft_mixture_normalized_t4:
+        return build_depthsplat_soft_mixture_normalized_t4_probe_first_plan(
+            features,
+            z_depths,
+            height=4,
+            width=4,
+            feature_threshold=feature_threshold,
+            depth_threshold=depth_threshold,
+        )
+    if soft_mixture_kernel_closure_t4:
+        return build_depthsplat_soft_mixture_kernel_closure_t4_probe_first_plan(
+            features,
+            z_depths,
+            height=4,
+            width=4,
+            feature_threshold=feature_threshold,
+            depth_threshold=depth_threshold,
+        )
 
     return build_incremental_probe_first_plan(
         features,
@@ -82,6 +116,7 @@ def _selected_packet_and_packed(
     z_depths,
     *,
     routing_features,
+    native_full_mask=None,
     opacity_logit=-1.0,
     harmonic_delta=0.0,
     covariance_scale=1.0,
@@ -97,6 +132,14 @@ def _selected_packet_and_packed(
         depthsplat_attribute_binding_sha256,
     )
 
+    if native_full_mask is None:
+        native_full_mask = torch.zeros_like(mask)
+    if (
+        native_full_mask.shape != mask.shape
+        or native_full_mask.dtype != torch.bool
+        or bool((native_full_mask & ~mask).any())
+    ):
+        raise ValueError("test packet native Full mask is invalid")
     positions = mask.nonzero(as_tuple=False)
     count = positions.shape[0]
     raw = torch.zeros(count, 7, dtype=torch.float32)
@@ -132,6 +175,10 @@ def _selected_packet_and_packed(
     height, width = mask.shape[-2:]
     pixels = positions[:, 1] * width + positions[:, 2]
     slots = (positions[:, 0] * (height * width) + pixels).to(dtype=torch.int64)
+    selected_full = native_full_mask[
+        positions[:, 0], positions[:, 1], positions[:, 2]
+    ]
+    full_slots = slots[selected_full]
     keys = torch.stack(
         (torch.zeros_like(pixels), positions[:, 0], pixels, torch.zeros_like(pixels)), dim=1
     ).to(dtype=torch.int64)
@@ -153,8 +200,8 @@ def _selected_packet_and_packed(
         "source_image_shape": [int(mask.shape[1]), int(mask.shape[2])],
         "routing_features_sha256": _tensor_sha256(routing_features),
         "routing_z_depths_sha256": _tensor_sha256(z_depths),
-        "native_full_passthrough_mask_sha256": _mask_sha256(torch.zeros_like(mask)),
-        "native_full_passthrough_positions": 0,
+        "native_full_passthrough_mask_sha256": _mask_sha256(native_full_mask),
+        "native_full_passthrough_positions": int(full_slots.numel()),
     }
     packet = DepthSplatSparseRawPacket(
         descriptor_keys=keys,
@@ -179,13 +226,12 @@ def _selected_packet_and_packed(
         harmonics=harmonics,
         opacities=opacities,
     )
-    empty_slots = slots[:0]
-    empty_attribute_binding = depthsplat_attribute_binding_sha256(
-        dense_slots=empty_slots,
-        means=means[:0],
-        covariances=torch.eye(3, dtype=torch.float32).reshape(1, 3, 3)[:0],
-        harmonics=harmonics[:0],
-        opacities=opacities[:0],
+    full_attribute_binding = depthsplat_attribute_binding_sha256(
+        dense_slots=full_slots,
+        means=means[selected_full],
+        covariances=covariances[selected_full],
+        harmonics=harmonics[selected_full],
+        opacities=opacities[selected_full],
     )
     packed_trace = {
         **trace,
@@ -194,10 +240,10 @@ def _selected_packet_and_packed(
         "native_full_adapter_attribute_passthrough_mask_sha256": trace[
             "native_full_passthrough_mask_sha256"
         ],
-        "native_full_adapter_attribute_binding_sha256": empty_attribute_binding,
-        "native_full_adapter_attribute_passthrough_count": 0,
-        "selected_native_rgb_adapter_compact_count": count,
-        "selected_native_rgb_adapter_executed": True,
+        "native_full_adapter_attribute_binding_sha256": full_attribute_binding,
+        "native_full_adapter_attribute_passthrough_count": int(full_slots.numel()),
+        "selected_native_rgb_adapter_compact_count": count - int(full_slots.numel()),
+        "selected_native_rgb_adapter_executed": count > int(full_slots.numel()),
     }
     packed = DepthSplatPackedGaussianAttributes(
         dense_slots=slots.clone(),
@@ -222,11 +268,15 @@ def _preflight(
     literal_paper_t4=False,
     coverage_enriched_t4=False,
     support_basis_t4=False,
+    soft_mixture_t4=False,
+    soft_mixture_normalized_t4=False,
+    soft_mixture_kernel_closure_t4=False,
     feature_threshold=0.1,
     depth_threshold=0.1,
     collect_selected_anchor_attribute_loo_risk=False,
     selected_anchor_attribute_loo_frozen_guard=None,
     selected_anchor_attribute_loo_maximum_risk=None,
+    mixture_kernel_closure_frozen_guard=None,
     preflight_source_sample_image_grid=None,
     maximum_coverage_covariance_scale=None,
     execution_profile=None,
@@ -240,6 +290,9 @@ def _preflight(
         literal_paper_t4=literal_paper_t4,
         coverage_enriched_t4=coverage_enriched_t4,
         support_basis_t4=support_basis_t4,
+        soft_mixture_t4=soft_mixture_t4,
+        soft_mixture_normalized_t4=soft_mixture_normalized_t4,
+        soft_mixture_kernel_closure_t4=soft_mixture_kernel_closure_t4,
         feature_threshold=feature_threshold,
         depth_threshold=depth_threshold,
     )
@@ -247,6 +300,7 @@ def _preflight(
         plan.selection_mask,
         z_depths,
         routing_features=features,
+        native_full_mask=plan.full_mask,
         opacity_logit=opacity_logit,
         harmonic_delta=harmonic_delta,
         covariance_scale=covariance_scale,
@@ -258,6 +312,12 @@ def _preflight(
         if coverage_enriched_t4
         else "depthsplat-support-basis-t4-balanced-l1-cooperative-v1"
         if support_basis_t4
+        else "depthsplat-soft-mixture-t4-balanced-l1-source-only-moment-replay-v1"
+        if soft_mixture_t4
+        else "depthsplat-soft-mixture-normalized-t4-balanced-l1-source-only-moment-replay-v2"
+        if soft_mixture_normalized_t4
+        else "depthsplat-soft-mixture-kernel-closure-t4-balanced-l1-source-only-v3"
+        if soft_mixture_kernel_closure_t4
         else "depthsplat-development-omitted-z-alpha-union-v1"
     )
     if execution_profile is not None:
@@ -288,6 +348,9 @@ def _preflight(
         ),
         selected_anchor_attribute_loo_maximum_risk=(
             selected_anchor_attribute_loo_maximum_risk
+        ),
+        mixture_kernel_closure_frozen_guard=(
+            mixture_kernel_closure_frozen_guard
         ),
     )
     return plan, packet, packed, preflight
@@ -323,6 +386,48 @@ def _authenticated_literal_frozen_guard(plan, *, threshold_value=30.0):
 
     return calibration._issue_verified_literal_t4_materializer_guard(
         _literal_frozen_guard(plan, threshold_value=threshold_value)
+    )
+
+
+def _kernel_risk_frozen_guard(plan, *, threshold_value=0.1):
+    from saes.depthsplat_mixture_kernel_acid_calibration import (
+        KERNEL_RISK_GUARD_SCHEMA,
+        KERNEL_RISK_KIND,
+        KERNEL_RISK_METRIC,
+        KERNEL_RISK_THRESHOLD_RULE,
+    )
+    from saes.depthsplat_mixture_kernel_guard import KIND, POLICY, SCHEMA_VERSION
+    from saes.depthsplat_l0_l1_materializer import (
+        DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+    )
+
+    return {
+        "schema_version": KERNEL_RISK_GUARD_SCHEMA,
+        "frozen_record_kind": KERNEL_RISK_KIND,
+        "frozen_record_sha256": "a" * 64,
+        "threshold_value": threshold_value,
+        "threshold_rule": KERNEL_RISK_THRESHOLD_RULE,
+        "risk_metric": KERNEL_RISK_METRIC,
+        "materialization_profile": (
+            DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE
+        ),
+        "route_plan_contract": plan.events["contract_version"],
+        "route_plan_config_sha256": plan.events[
+            "soft_mixture_kernel_closure_t4_route_config_sha256"
+        ],
+        "kernel_closure_schema_version": SCHEMA_VERSION,
+        "kernel_closure_kind": KIND,
+        "kernel_closure_policy": POLICY,
+        "acid_binding_sha256": "b" * 64,
+        "application_sha256": "c" * 64,
+    }
+
+
+def _authenticated_kernel_risk_frozen_guard(plan, *, threshold_value=0.1):
+    import saes.depthsplat_mixture_kernel_acid_calibration as calibration
+
+    return calibration._issue_verified_mixture_kernel_risk_guard(
+        _kernel_risk_frozen_guard(plan, threshold_value=threshold_value)
     )
 
 
@@ -835,6 +940,570 @@ def test_support_basis_plan_cannot_run_under_the_owner_profile():
             z_depths,
             support_basis_t4=True,
             execution_profile=DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+        )
+
+
+def test_soft_mixture_normalized_profile_rebuilds_its_own_normalized_plan(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import (
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+        resolve_depthsplat_compact_final_route,
+    )
+
+    raw_builder_calls = []
+    normalized_builder_calls = []
+    original_normalized_builder = (
+        materializer.build_depthsplat_soft_mixture_normalized_t4_probe_first_plan
+    )
+
+    def unexpected_raw_builder(*args, **kwargs):
+        raw_builder_calls.append((args, kwargs))
+        raise AssertionError("normalized-v2 profile must not rebuild with raw-v1")
+
+    def tracking_normalized_builder(*args, **kwargs):
+        normalized_builder_calls.append((args, kwargs))
+        return original_normalized_builder(*args, **kwargs)
+
+    monkeypatch.setattr(
+        materializer,
+        "build_depthsplat_soft_mixture_t4_probe_first_plan",
+        unexpected_raw_builder,
+    )
+    monkeypatch.setattr(
+        materializer,
+        "build_depthsplat_soft_mixture_normalized_t4_probe_first_plan",
+        tracking_normalized_builder,
+    )
+    features = torch.zeros(1, 1, 2, 4, 4)
+    for position, vector in {
+        (0, 0): (1.0, 0.0),
+        (0, 3): (3.0, 0.0),
+        (3, 0): (1.0, 0.0),
+        (3, 3): (3.0, 0.0),
+    }.items():
+        features[0, 0, :, position[0], position[1]] = torch.tensor(vector)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+
+    plan, _packet, _packed, preflight = _preflight(
+        features,
+        z_depths,
+        soft_mixture_normalized_t4=True,
+        feature_threshold=0.2,
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    assert raw_builder_calls == []
+    assert len(normalized_builder_calls) == 1
+    assert plan.tile_trace[0]["pre_guard_route"] == "L0"
+    assert preflight.events["execution_profile"] == (
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE
+    )
+    assert preflight.events["assignment_feature_semantics"] == (
+        "unit-normalized-bilinear-s1-v1"
+    )
+    assert preflight.tile_trace[0]["assignment_feature_semantics"] == (
+        "unit-normalized-bilinear-s1-v1"
+    )
+    assert preflight.events["soft_mixture_guard"] is True
+    assert route.events["route_counts"] == {"L0": 1, "L1": 0, "Full": 0}
+    assert route.events["assignment_feature_semantics"] == (
+        "unit-normalized-bilinear-s1-v1"
+    )
+    assert route.events["assignment_feature_map_sha256"] == (
+        preflight.events["assignment_feature_map_sha256"]
+    )
+
+
+def test_soft_mixture_normalized_plan_cannot_bind_the_raw_v1_profile():
+    from saes.depthsplat_l0_l1_materializer import (
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+    )
+
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+
+    with pytest.raises(ValueError, match="execution profile does not match plan contract"):
+        _preflight(
+            features,
+            z_depths,
+            soft_mixture_normalized_t4=True,
+            execution_profile=DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+        )
+    with pytest.raises(ValueError, match="execution profile does not match plan contract"):
+        _preflight(
+            features,
+            z_depths,
+            soft_mixture_t4=True,
+            execution_profile=(
+                DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE
+            ),
+        )
+
+
+def test_soft_mixture_normalized_native_full_tile_stays_passthrough():
+    from saes.depthsplat_l0_l1_materializer import (
+        resolve_depthsplat_compact_final_route,
+    )
+
+    features = torch.zeros(1, 1, 3, 4, 4)
+    features[0, 0, :, 0, 0] = torch.tensor((1.0, 0.0, 0.0))
+    features[0, 0, :, 0, 3] = torch.tensor((0.0, 1.0, 0.0))
+    features[0, 0, :, 3, 0] = torch.tensor((1.0, 0.0, 0.0))
+    features[0, 0, :, 3, 3] = torch.tensor((0.0, 1.0, 0.0))
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    z_depths[0, 0, 0, 0] = 1.0
+    z_depths[0, 0, 0, 3] = 3.0
+    z_depths[0, 0, 3, 0] = 1.0
+    z_depths[0, 0, 3, 3] = 3.0
+
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, soft_mixture_normalized_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    assert plan.tile_trace[0]["pre_guard_route"] == "Full"
+    assert preflight.tile_trace[0]["accepted_level"] == "Full"
+    assert route.events["route_counts"] == {"L0": 0, "L1": 0, "Full": 1}
+    assert route.tile_trace[0]["final_route"] == "Full"
+    assert bool(route.full_passthrough_mask.all())
+
+
+def test_soft_mixture_normalized_assignment_binding_cannot_drift():
+    from saes.depthsplat_l0_l1_materializer import (
+        resolve_depthsplat_compact_final_route,
+    )
+
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, soft_mixture_normalized_t4=True
+    )
+    preflight.events["initial_binding"]["assignment_feature_semantics"] = (
+        "raw-bilinear-s1-v1"
+    )
+
+    with pytest.raises(ValueError, match="preflight binding changed"):
+        resolve_depthsplat_compact_final_route(plan, preflight)
+
+
+def test_soft_mixture_profile_replays_s_r_without_projected_support_routing(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import (
+        DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SOFT_MIXTURE_T4_MOMENT_CERTIFICATE,
+        resolve_depthsplat_compact_final_route,
+    )
+
+    def unexpected_projected_guard(**_kwargs):
+        raise AssertionError("soft-mixture profile must not invoke projected coverage")
+
+    monkeypatch.setattr(
+        materializer, "audit_depthsplat_owner_coverage", unexpected_projected_guard
+    )
+    monkeypatch.setattr(
+        materializer, "audit_depthsplat_tile_support_basis", unexpected_projected_guard
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, soft_mixture_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    assert plan.events["contract_version"] == (
+        "saes-depthsplat-soft-mixture-t4-probe-first-plan-v1"
+    )
+    assert preflight.events["execution_profile"] == (
+        DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE
+    )
+    assert preflight.events["coverage_certificate"] == (
+        DEPTHSPLAT_SOFT_MIXTURE_T4_MOMENT_CERTIFICATE
+    )
+    assert preflight.events["soft_mixture_guard"] is True
+    assert preflight.events["soft_mixture_projected_domain_guard_used"] is False
+    assert preflight.events["coverage_max_containment_lhs_after_scale"] is None
+    certificate = preflight.tile_trace[0]["soft_mixture_certificate"]
+    assert certificate["passed"] is True
+    assert certificate["source_only"]["projected_domain_guard_used"] is False
+    assert certificate["source_only"]["boolean_owner_assignment_used"] is False
+    aggregate = preflight.events["soft_mixture_certificate_aggregate"]
+    assert aggregate["tile_certificate_attempt_count"] == 1
+    assert aggregate["passed_tile_certificate_count"] == 1
+    assert aggregate["failed_tile_certificate_count"] == 0
+    assert route.events["route_counts"] == {"L0": 1, "L1": 0, "Full": 0}
+    assert route.events["coverage_certificate_geometry"] == (
+        "source-only-spatial-s-bilateral-r-first-second-moment-replay-v1"
+    )
+
+
+def test_soft_mixture_l0_replay_failure_retries_prefetched_l1(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    original_certificate = materializer.certify_depthsplat_tile_soft_mixture
+
+    def l1_only_certificate(**kwargs):
+        result = original_certificate(**kwargs)
+        if int(kwargs["anchor_source_means"].shape[0]) == 4:
+            result["passed"] = False
+            result["summary"] = {
+                **result["summary"],
+                "reason": "synthetic-l0-replay-failure",
+            }
+        return result
+
+    monkeypatch.setattr(
+        materializer, "certify_depthsplat_tile_soft_mixture", l1_only_certificate
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, soft_mixture_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    assert preflight.tile_trace[0]["accepted_level"] == "L1"
+    assert preflight.tile_trace[0]["l1_enrichment_prefetched"] is True
+    assert preflight.events["soft_mixture_l0_to_l1_tile_count"] == 1
+    assert preflight.update_dense_slots.numel() == 12
+    assert route.events["route_counts"] == {"L0": 0, "L1": 1, "Full": 0}
+    aggregate = preflight.events["soft_mixture_certificate_aggregate"]
+    assert aggregate["tile_certificate_attempt_count"] == 2
+    assert aggregate["passed_tile_certificate_count"] == 1
+    assert aggregate["failed_tile_certificate_count"] == 1
+
+
+def _forced_kernel_closure_result(result, *, passed):
+    """Keep a source-only guard fixture internally self-consistent."""
+
+    forced = copy.deepcopy(result)
+    risk = 0.0 if passed else 1.0
+    summary = dict(forced["summary"])
+    summary.update(
+        {
+            "input_valid": True,
+            "reason": None if passed else "kernel-closure-risk-exceeds-strict-limit",
+            "strict_maximum_relative_risk": 0.1,
+            "maximum_world_kernel_risk": risk,
+            "maximum_source_kernel_risk": risk,
+            "maximum_kernel_risk": risk,
+            "maximum_source_log_depth_rms": 0.0,
+            "per_output": [
+                {
+                    **dict(row),
+                    "world_kernel_risk": risk,
+                    "source_kernel_risk": risk,
+                    "maximum_kernel_risk": risk,
+                    "source_log_depth_rms": 0.0,
+                    "passed": passed,
+                }
+                for row in summary["per_output"]
+            ],
+        }
+    )
+    forced["summary"] = summary
+    forced["passed"] = passed
+    return forced
+
+
+def test_soft_mixture_kernel_closure_default_is_strict_fp32_abstention():
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, soft_mixture_kernel_closure_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    aggregate = preflight.events["mixture_kernel_closure_aggregate"]
+    assert aggregate["strict_maximum_relative_risk"] == pytest.approx(
+        1024.0 * torch.finfo(torch.float32).eps
+    )
+    assert aggregate["tile_kernel_closure_attempt_count"] == 2
+    assert aggregate["passed_tile_kernel_closure_count"] == 0
+    assert aggregate["failed_tile_kernel_closure_count"] == 2
+    s_r_aggregate = preflight.events["soft_mixture_certificate_aggregate"]
+    assert s_r_aggregate["tile_certificate_attempt_count"] == 2
+    assert s_r_aggregate["passed_tile_certificate_count"] == 2
+    assert s_r_aggregate["failed_tile_certificate_count"] == 0
+    assert preflight.update_dense_slots.numel() == 0
+    assert bool(preflight.promote_full_mask.all())
+    assert route.events["route_counts"] == {"L0": 0, "L1": 0, "Full": 1}
+
+
+def test_soft_mixture_kernel_closure_retries_l0_on_existing_l1_prefetch(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    original_guard = materializer.assess_depthsplat_tile_kernel_closure
+
+    def l1_only_kernel_closure(**kwargs):
+        result = original_guard(**kwargs)
+        return _forced_kernel_closure_result(
+            result,
+            passed=int(kwargs["anchor_source_means"].shape[0]) == 12,
+        )
+
+    monkeypatch.setattr(
+        materializer, "assess_depthsplat_tile_kernel_closure", l1_only_kernel_closure
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, soft_mixture_kernel_closure_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    record = preflight.tile_trace[0]
+    assert plan.tile_trace[0]["pre_guard_route"] == "L0"
+    assert record["accepted_level"] == "L1"
+    assert record["l1_enrichment_prefetched"] is True
+    assert record["l0_mixture_kernel_closure_failure"]["passed"] is False
+    assert record["mixture_kernel_closure"]["passed"] is True
+    assert preflight.events["mixture_kernel_closure_l0_to_l1_tile_count"] == 1
+    assert preflight.events["mixture_kernel_closure_full_promotion_tile_count"] == 0
+    aggregate = preflight.events["mixture_kernel_closure_aggregate"]
+    assert aggregate["tile_kernel_closure_attempt_count"] == 2
+    assert aggregate["passed_tile_kernel_closure_count"] == 1
+    assert aggregate["failed_tile_kernel_closure_count"] == 1
+    assert route.events["route_counts"] == {"L0": 0, "L1": 1, "Full": 0}
+    assert route.events["mixture_kernel_closure_aggregate_sha256"] == (
+        preflight.events["mixture_kernel_closure_aggregate_sha256"]
+    )
+
+
+def test_kernel_risk_guard_is_authenticated_and_binds_the_calibrated_threshold(
+    monkeypatch,
+):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+    from scripts.saes_depthsplat_soft_mixture_sample0_quality_gate import (
+        _source_summary,
+        soft_mixture_kernel_closure_t4_profile,
+    )
+
+    original_guard = materializer.assess_depthsplat_tile_kernel_closure
+
+    def accepting_kernel_closure(**kwargs):
+        assert kwargs["strict_maximum_relative_risk"] == pytest.approx(0.1)
+        return _forced_kernel_closure_result(
+            original_guard(**kwargs), passed=True
+        )
+
+    monkeypatch.setattr(
+        materializer, "assess_depthsplat_tile_kernel_closure", accepting_kernel_closure
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan = _plan(
+        features,
+        z_depths,
+        soft_mixture_kernel_closure_t4=True,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+    )
+    guard = _authenticated_kernel_risk_frozen_guard(plan, threshold_value=0.1)
+    _plan_value, _packet, _packed, preflight = _preflight(
+        features,
+        z_depths,
+        soft_mixture_kernel_closure_t4=True,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+        mixture_kernel_closure_frozen_guard=guard,
+    )
+    route = resolve_depthsplat_compact_final_route(_plan_value, preflight)
+    profile = soft_mixture_kernel_closure_t4_profile(kernel_risk_guard=guard)
+    summary = _source_summary(
+        plan=_plan_value,
+        preflight=preflight,
+        final_route=route,
+        profile=profile,
+    )
+
+    assert preflight.events["mixture_kernel_closure_calibrated_threshold"] is True
+    assert preflight.events["mixture_kernel_closure_frozen_guard"] == dict(guard)
+    assert route.events["mixture_kernel_closure_frozen_guard"] == dict(guard)
+    assert summary["kernel_closure"]["calibrated_threshold"] is True
+    assert summary["kernel_closure"]["strict_maximum_relative_risk"] == pytest.approx(
+        0.1
+    )
+
+    with pytest.raises(TypeError, match="authenticated ACID guard"):
+        _preflight(
+            features,
+            z_depths,
+            soft_mixture_kernel_closure_t4=True,
+            feature_threshold=0.2,
+            depth_threshold=0.1,
+            mixture_kernel_closure_frozen_guard=dict(guard),
+        )
+
+
+def test_soft_mixture_kernel_closure_promotes_l1_failure_to_full(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    original_guard = materializer.assess_depthsplat_tile_kernel_closure
+
+    def rejecting_kernel_closure(**kwargs):
+        return _forced_kernel_closure_result(original_guard(**kwargs), passed=False)
+
+    monkeypatch.setattr(
+        materializer, "assess_depthsplat_tile_kernel_closure", rejecting_kernel_closure
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, soft_mixture_kernel_closure_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    record = preflight.tile_trace[0]
+    assert record["accepted"] is False
+    assert record["l0_mixture_kernel_closure_failure"]["passed"] is False
+    assert record["l1_mixture_kernel_closure_failure"]["passed"] is False
+    for level in ("l0", "l1"):
+        certificate = record[f"{level}_soft_mixture_certificate_before_kernel_closure"]
+        assert certificate["passed"] is True
+        assert record[
+            f"{level}_soft_mixture_certificate_before_kernel_closure_sha256"
+        ] == materializer._canonical_sha256(certificate)
+    assert preflight.update_dense_slots.numel() == 0
+    assert bool(preflight.promote_full_mask.all())
+    assert preflight.events["mixture_kernel_closure_l0_to_l1_tile_count"] == 0
+    assert preflight.events["mixture_kernel_closure_full_promotion_tile_count"] == 1
+    aggregate = preflight.events["mixture_kernel_closure_aggregate"]
+    assert aggregate["tile_kernel_closure_attempt_count"] == 2
+    assert aggregate["passed_tile_kernel_closure_count"] == 0
+    assert aggregate["failed_tile_kernel_closure_count"] == 2
+    s_r_aggregate = preflight.events["soft_mixture_certificate_aggregate"]
+    assert s_r_aggregate["tile_certificate_attempt_count"] == 2
+    assert s_r_aggregate["passed_tile_certificate_count"] == 2
+    assert s_r_aggregate["failed_tile_certificate_count"] == 0
+    assert route.events["route_counts"] == {"L0": 0, "L1": 0, "Full": 1}
+
+    preflight.events["mixture_kernel_closure_aggregate"]["maximum_kernel_risk"] = 0.0
+    with pytest.raises(ValueError, match="kernel-closure aggregate binding changed"):
+        resolve_depthsplat_compact_final_route(plan, preflight)
+
+
+@pytest.mark.parametrize(
+    "validator_name",
+    (
+        "_validate_soft_mixture_evidence",
+        "_validate_mixture_kernel_closure_evidence",
+    ),
+)
+def test_soft_mixture_kernel_contract_failures_abort_instead_of_promoting_full(
+    monkeypatch, validator_name
+):
+    import saes.depthsplat_l0_l1_materializer as materializer
+
+    def forced_contract_failure(*_args, **_kwargs):
+        raise ValueError("forced-kernel-contract-failure")
+
+    monkeypatch.setattr(materializer, validator_name, forced_contract_failure)
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+
+    with pytest.raises(ValueError, match="forced-kernel-contract-failure"):
+        _preflight(features, z_depths, soft_mixture_kernel_closure_t4=True)
+
+
+def test_kernel_closure_runner_binds_each_closure_to_a_passed_s_r_certificate():
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+    from scripts.saes_depthsplat_soft_mixture_sample0_quality_gate import (
+        _source_summary,
+        soft_mixture_kernel_closure_t4_profile,
+    )
+
+    profile = soft_mixture_kernel_closure_t4_profile()
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features,
+        z_depths,
+        soft_mixture_kernel_closure_t4=True,
+        feature_threshold=profile["feature_threshold"],
+        depth_threshold=profile["depth_threshold"],
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    summary = _source_summary(
+        plan=plan,
+        preflight=preflight,
+        final_route=route,
+        profile=profile,
+    )
+    assert summary["certificate"]["summary"]["passed_tile_certificate_count"] == (
+        summary["kernel_closure"]["summary"]["tile_kernel_closure_attempt_count"]
+    )
+
+    corrupted = copy.deepcopy(preflight.events["soft_mixture_certificate_aggregate"])
+    corrupted["passed_tile_certificate_count"] -= 1
+    corrupted["failed_tile_certificate_count"] += 1
+    preflight.events["soft_mixture_certificate_aggregate"] = corrupted
+    preflight.events["soft_mixture_certificate_aggregate_sha256"] = (
+        materializer._canonical_sha256(corrupted)
+    )
+
+    with pytest.raises(RuntimeError, match="lack matching passed S/R certificates"):
+        _source_summary(
+            plan=plan,
+            preflight=preflight,
+            final_route=route,
+            profile=profile,
+        )
+
+
+def test_kernel_closure_runner_distinguishes_identity_fallback_from_compact_pass():
+    from scripts.saes_depthsplat_soft_mixture_sample0_quality_gate import _quality_status
+
+    assert _quality_status(verdict={"pass": True}, update_count=0) == (
+        "PASS_IDENTITY_FALLBACK"
+    )
+    assert _quality_status(verdict={"pass": True}, update_count=1) == "PASS"
+    assert _quality_status(verdict={"pass": False}, update_count=0) == "QUALITY_FAILED"
+
+
+def test_soft_mixture_kernel_closure_records_unscorable_integrals_and_promotes_full(
+    monkeypatch,
+):
+    import saes.depthsplat_mixture_kernel_guard as kernel_guard
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    monkeypatch.setattr(
+        kernel_guard, "_relative_kernel_risk", lambda **_kwargs: float("inf")
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, soft_mixture_kernel_closure_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    aggregate = preflight.events["mixture_kernel_closure_aggregate"]
+    assert aggregate["tile_kernel_closure_attempt_count"] == 2
+    assert aggregate["failed_tile_kernel_closure_count"] == 2
+    assert aggregate["maximum_kernel_risk_distribution"]["finite_tile_risk_count"] == 0
+    assert aggregate["maximum_kernel_risk_distribution"]["unscorable_tile_count"] == 2
+    assert aggregate["reason_counts"] == {"kernel-integral": 2}
+    assert route.events["route_counts"] == {"L0": 0, "L1": 0, "Full": 1}
+
+
+def test_soft_mixture_kernel_closure_forbids_covariance_expansion():
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+
+    with pytest.raises(ValueError, match="fixed-scale profile forbids covariance expansion"):
+        _preflight(
+            features,
+            z_depths,
+            soft_mixture_kernel_closure_t4=True,
+            maximum_coverage_covariance_scale=2.0,
         )
 
 

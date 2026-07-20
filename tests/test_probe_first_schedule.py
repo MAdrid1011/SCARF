@@ -113,6 +113,82 @@ def test_paper_normalized_feature_mode_records_tau_f_in_its_normalized_unit():
     assert literal.events["potential_l1_tiles"] == 1
 
 
+def test_soft_mixture_normalized_t4_uses_paper_normalized_route_contract():
+    from saes.probe_first_schedule import (
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_PLAN_CONTRACT,
+        DEPTHSPLAT_SOFT_MIXTURE_T4_PLAN_CONTRACT,
+        SOFT_MIXTURE_NORMALIZED_T4_L0_SECONDARY_PREFETCH_POLICY,
+        build_depthsplat_soft_mixture_normalized_t4_probe_first_plan,
+        build_depthsplat_soft_mixture_t4_probe_first_plan,
+        soft_mixture_normalized_t4_route_config_sha256,
+    )
+    from saes.progressive_saes import PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS
+
+    # The raw S1 channels vary in magnitude across the four probes, but all
+    # probe vectors point in the same direction.  The normalized paper route
+    # must therefore keep this tile at L0, while the legacy raw-v1 route misses.
+    features = torch.zeros(1, 1, 2, 4, 4)
+    for position, vector in {
+        (0, 0): (1.0, 0.0),
+        (0, 3): (3.0, 0.0),
+        (3, 0): (1.0, 0.0),
+        (3, 3): (3.0, 0.0),
+    }.items():
+        features[0, 0, :, position[0], position[1]] = torch.tensor(vector)
+    depths = torch.ones(1, 1, 4, 4)
+
+    raw_v1 = build_depthsplat_soft_mixture_t4_probe_first_plan(
+        features,
+        depths,
+        height=4,
+        width=4,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+    )
+    normalized_v2 = build_depthsplat_soft_mixture_normalized_t4_probe_first_plan(
+        features,
+        depths,
+        height=4,
+        width=4,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+    )
+
+    assert raw_v1.events["contract_version"] == (
+        DEPTHSPLAT_SOFT_MIXTURE_T4_PLAN_CONTRACT
+    )
+    assert raw_v1.tile_trace[0]["pre_guard_route"] == "L1"
+    assert normalized_v2.events["contract_version"] == (
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_PLAN_CONTRACT
+    )
+    assert normalized_v2.events["decision_semantics"] == (
+        PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS
+    )
+    assert (
+        normalized_v2.events["feature_statistic"]
+        == "normalized-probe-vector-standard-deviation"
+    )
+    assert normalized_v2.events[
+        "soft_mixture_normalized_l0_secondary_prefetch_policy"
+    ] == SOFT_MIXTURE_NORMALIZED_T4_L0_SECONDARY_PREFETCH_POLICY
+    assert normalized_v2.events[
+        "soft_mixture_normalized_t4_route_config_sha256"
+    ] == soft_mixture_normalized_t4_route_config_sha256(normalized_v2.events)
+    assert normalized_v2.events["assignment_feature_semantics"] == (
+        "unit-normalized-bilinear-s1-v1"
+    )
+    tampered_events = dict(normalized_v2.events)
+    tampered_events["assignment_feature_semantics"] = "raw-bilinear-s1-v1"
+    with pytest.raises(ValueError, match="route configuration changed"):
+        soft_mixture_normalized_t4_route_config_sha256(tampered_events)
+    assert normalized_v2.tile_trace[0]["feature_score"] == pytest.approx(0.0)
+    assert normalized_v2.tile_trace[0]["pre_guard_route"] == "L0"
+    assert normalized_v2.tile_trace[0]["depth_uniform"] is True
+    assert int(normalized_v2.primary_mask.sum()) == 4
+    assert int(normalized_v2.secondary_mask.sum()) == 8
+    assert int(normalized_v2.selection_mask.sum()) == 12
+
+
 def test_literal_t4_l0_does_not_inspect_depth_or_stage_secondary_requests():
     from saes.probe_first_schedule import build_literal_paper_t4_probe_first_plan
 

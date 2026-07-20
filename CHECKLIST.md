@@ -160,9 +160,52 @@
   `delta + S^T R` or `R`. Bind every geometry family, ledger, camera, slot,
   update packet, and trace; preserve fixed scale, no target/S3 access, and the
   L0(4) -> L1(12) -> Full ladder.
-- [ ] Run exactly one new sample-0 target-free structural audit for
-  `support-basis-v1`. Only if it has nonzero compact acceptance, freeze its
-  separate ACID 24/8 record and run one fixed quality gate.
+- [x] Run one real DL3DV sample-0 target-free `support-basis-v1` structural
+  pass. It is cleanly isolated but all `14,336` tiles promote Full, so its
+  one-output projected-ellipse rule is rejected as a simulator guard.
+- [x] Implement `soft-mixture-v1` fixed-scale S/R moment replay and run the
+  fused real sample-0 quality gate. Source evidence passed for all `14,336`
+  L0 tiles, but the valid target result failed: PSNR loss `8.0355 dB`, SSIM
+  loss `0.1281`, and LPIPS increase `0.3152`. This rejects raw S1 variance as
+  the coordinate system for the paper's fixed `tau_f=0.20`; it is not an
+  eight-scene or Table 1 result.
+- [x] Implement `soft-mixture-normalized-v2`: use unit-normalized probe
+  feature consistency and its matching bilateral S1 map under the same fixed
+  paper thresholds. Validate normalized builder reconstruction, Full
+  passthrough, S/R replay, profile binding, and assignment-map provenance with
+  the focused CPU suite (`69 passed`).
+- [x] Preserve `depthsplat_sample0_soft_mixture_normalized_fused_quality_v3`
+  as configuration-invalid before target access: native Full handling rejected
+  its own `accepted_level=Full`. It is neither an audit nor a quality result.
+- [x] Run the valid fused `soft-mixture-normalized-v2` sample-0 gate at
+  `depthsplat_sample0_soft_mixture_normalized_fused_quality_v4`. It measured
+  source route/certificates and four real target views in one process, but
+  failed with PSNR loss `1.5739 dB`, SSIM loss `0.01963`, and LPIPS increase
+  `0.08726`; do not repeat this unchanged mechanism.
+- [x] Implement `mixture-kernel-closure-v1` after S/R replay. Its strict
+  source-only analytic kernel guard promotes L0 to already-prefetched L1 or
+  Full, binds the aggregate through preflight/final-route/apply, and emits
+  source route, certificate, risk distribution, and promotion telemetry inline.
+  Focused planner/materializer/certificate/kernel tests pass (`80 passed`).
+- [x] Preserve `depthsplat_sample0_soft_mixture_kernel_closure_fused_quality_v1`
+  as source-phase configuration-invalid: an analytic underflow emitted `+inf`
+  rather than an `unscorable` Full promotion, so the runner stopped before
+  target mapping, camera, RGB, rendering, or quality metrics. It is not a
+  structural audit or a quality result.
+- [x] Run the v3 DL3DV sample-0 fused quality gate at
+  `depthsplat_sample0_soft_mixture_kernel_closure_fused_quality_v2`. The packet
+  committed before target access and four target views passed with exact Full
+  quality (`35.5881329 dB`, PSNR/SSIM/LPIPS deltas all `0`). Its strict
+  numerical closure rule promoted all `6,051` compact candidates, yielding
+  `L0/L1/Full=0/0/14,336`; it proves quality closure, not nonzero filtering.
+- [ ] Freeze a positive kernel-risk threshold from a profile-bound ACID 24/8
+  source-only record, then run one new fused DL3DV quality gate with inline
+  route/certificate/kernel telemetry. Do not tune the threshold on DL3DV
+  sample 0 or run a standalone DL3DV structural audit.
+  The source-only collector, immutable record reload, authenticated guard,
+  materializer binding, and runner argument are implemented and CPU-validated;
+  this checkbox remains open until the real 24/8 ACID collection and its one
+  subsequent fused DL3DV gate complete.
 - [ ] Run the DepthSplat fixed eight-scene quality gate before any three-model
   140-scene expansion or Table 1 claim.
 - [x] Preserve `transplat_dl3dv_l1_15_v16_acid_disjoint_8scene_v1` as an

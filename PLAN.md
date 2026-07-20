@@ -105,6 +105,108 @@
   extra anchor is allowed. The certificate binds both descriptor families,
   both ledgers, camera, slots, trace, and update packet before one new
   target-free sample-0 audit.
+- That one real sample-0 `support-basis-v1` pass completed cleanly but rejects
+  every tile: `L0/L1/Full=0/0/14,336`. Its L0 source-anchor checks pass at
+  `89.5%`, while virtual checks pass at only `0.70%`; L1 reduces total
+  projected holes by about `79%` but still has zero accepted tiles. The
+  residual blocker is therefore the non-paper requirement that one merged
+  output must enclose a source ellipse, not L1 cardinality or a missing
+  candidate.
+- The next independent repair is `soft-mixture-v1`. It preserves the same
+  selected anchors, spatial field `S`, bilateral assignment `R`, fixed scale,
+  and moment/attribute formulas, but certifies that the committed virtual and
+  merged attributes exactly replay those soft-mixture equations. Projected
+  2-sigma coverage remains source-only telemetry only; it cannot route a tile
+  because the paper defines moment matching rather than a one-output support
+  enclosure test. Its first real run is a single fused DL3DV sample-0 quality
+  gate: source route and packet are sealed before target access, then the same
+  process records route/support summaries plus per-view PSNR/SSIM/LPIPS. No
+  separate follow-up audit is authorized.
+- The fused `soft-mixture-v1` sample-0 quality gate completed with all source
+  bindings intact but failed its quality limit: every `14,336` tile took L0,
+  yielding `57,344` nonzero updates and `35.5881 -> 27.5526 dB` (loss
+  `8.0355 dB`), SSIM loss `0.1281`, and LPIPS increase `0.3152`. Exact S/R
+  replay is necessary but not sufficient to establish representative quality.
+  The route used raw S1 mean-channel variance, whose observed maximum was
+  `0.119 < tau_f=0.20`, so it incorrectly classified every tile as feature
+  consistent in the threshold's wrong coordinate system.
+- The next repair is a distinct `soft-mixture-normalized-v2` profile. It keeps
+  the paper's frozen `tau_f=0.20`, `tau_d=0.10`, balanced L1-12, fixed-scale
+  S/R moment replay, and target-free packet sealing, but evaluates the paper's
+  feature-consistency condition on unit-normalized probe vectors and uses the
+  matching normalized S1 map in the bilateral assignment. This restores a
+  scale-invariant interpretation of the paper's local feature variance rather
+  than tuning a DL3DV threshold. Its first evaluation remains one fused
+  sample-0 quality gate with inline route/certificate summaries only.
+- The first `soft-mixture-normalized-v2` invocation at
+  `depthsplat_sample0_soft_mixture_normalized_fused_quality_v3` is retained as
+  configuration-invalid, not as a quality result: a native pre-route `Full`
+  tile reached a final-route branch that incorrectly demanded an accepted
+  compact level. It stopped before target mapping, target camera, target RGB,
+  renderer, or metric access. The repaired branch preserves native Full
+  passthrough, binds normalized assignment-map provenance through final route
+  and apply, and has CPU coverage for both native Full and semantic drift.
+- The repaired fused run at
+  `depthsplat_sample0_soft_mixture_normalized_fused_quality_v4` is valid but
+  fails the quality gate. Its same-process source telemetry records
+  `L0/L1/Full=471/5,580/8,285`, `68,844` nonzero updates, and exact S/R replay
+  for all `6,051` compact tiles; only after packet commit did it render the
+  four target views. Quality improves substantially over raw-v1 but remains
+  `35.5881 -> 34.0142 dB` (loss `1.5739 dB`), with SSIM loss `0.01963` and
+  LPIPS increase `0.08726`. This rejects another route-only retry: preserving
+  a mixture's first two moments does not preserve its multimodal raster-kernel
+  shape. The next repair is a source-only kernel-closure abstention guard that
+  promotes high mixture-shape risk to existing L1 or Full; it will be measured
+  only inside the next fused real-data quality run.
+- `mixture-kernel-closure-v1` is an engineering abstention guard, not a claim
+  that the paper specified a new routing statistic. After the existing S/R
+  replay succeeds, each output compares the actual current pre-merge field
+  `[anchor_a, virtual_1, ..., virtual_n]` with masses
+  `[1, R[:,a]] / (1 + sum R[:,a])` against its committed merged Gaussian by
+  the closed-form normalized L2 error of their Gaussian kernels in the source
+  camera and world space. It uses no owner mask, 2-sigma containment, target
+  state, omitted S3, alpha union, or covariance expansion. Until a new
+  profile-bound ACID 24/8 record freezes a positive risk threshold, only
+  machine-precision kernel closure is admissible; otherwise L0 retries the
+  prefetched L1 route when legal and L1 promotes Full. The next DL3DV run will
+  render and report quality even if this conservative rule chooses all Full,
+  with risk distribution and route telemetry written in that same result.
+- The v3 route is now implemented and unit-validated: S/R replay precedes the
+  analytic kernel decision, L0 closure failures use only the existing L1
+  prefetch, and a subsequent failure promotes Full. The aggregate is bound to
+  preflight, final route, apply, and the materialized source trace. The only
+  remaining immediate action is one fused DL3DV sample-0 quality run; a
+  standalone DL3DV audit is explicitly out of scope.
+- The first v3 invocation
+  `depthsplat_sample0_soft_mixture_kernel_closure_fused_quality_v1` is
+  configuration-invalid before target access: an underflowed analytic Gram
+  ratio returned `+inf`, which the aggregate initially treated as malformed
+  rather than an unscorable fail-closed Full decision. The repair records that
+  condition in the same source trace, promotes Full, and is covered by the
+  focused suite. The invalid invocation supplies no PSNR/SSIM/LPIPS result and
+  is not a standalone audit.
+- The repaired v3 fused gate at
+  `depthsplat_sample0_soft_mixture_kernel_closure_fused_quality_v2` is valid:
+  it commits the source route and packet before opening the isolated four target
+  views, then reaches exact Full quality (`35.5881329 -> 35.5881329 dB`, zero
+  PSNR/SSIM/LPIPS delta). Its strict machine-precision guard is deliberately
+  too conservative for a sparse claim: all `6,051` compact candidates promote
+  Full, with `4,296` finite kernel risks in `[0.5586, 7.1916]` and `2,001`
+  unscorable integrals. The next move is a separate ACID 24/8 source-only
+  calibration record for a positive, profile-bound risk threshold, not DL3DV
+  target-side threshold tuning or another standalone audit.
+- The calibration implementation is now concrete but has not yet consumed
+  ACID data: `depthsplat_mixture_kernel_acid_calibration.py` freezes only
+  finite, S/R-certified analytic risks as `min(per-scene q25)` across the 24
+  training scenes, rejects a nonpositive threshold, and checks the eight
+  holdout scenes without updating it. The CUDA collector persists 32
+  self-hashed source-only traces and immediately reloads the record against
+  live ACID/backend/collector-source identities. The sample-0 quality runner
+  accepts only that opaque record projection, binds it through materialization
+  and final routing, and emits it with the inline target-view metrics. Focused
+  CPU contracts currently pass (`93 passed`); the next operation is the one
+  real ACID 24/8 calibration, followed directly by one fused DL3DV quality
+  gate rather than a separate DL3DV audit.
 
 ### Current L0/L1 Repair Contract (2026-07-19)
 

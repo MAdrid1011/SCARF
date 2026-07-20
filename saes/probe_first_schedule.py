@@ -29,11 +29,32 @@ DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT = (
 DEPTHSPLAT_SUPPORT_BASIS_T4_PLAN_CONTRACT = (
     "saes-depthsplat-support-basis-t4-probe-first-plan-v1"
 )
+DEPTHSPLAT_SOFT_MIXTURE_T4_PLAN_CONTRACT = (
+    "saes-depthsplat-soft-mixture-t4-probe-first-plan-v1"
+)
+DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_PLAN_CONTRACT = (
+    "saes-depthsplat-soft-mixture-normalized-t4-probe-first-plan-v2"
+)
+DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_PLAN_CONTRACT = (
+    "saes-depthsplat-soft-mixture-kernel-closure-t4-probe-first-plan-v3"
+)
 COVERAGE_ENRICHED_T4_L0_SECONDARY_PREFETCH_POLICY = (
     "source-depth-probe-uniform-only-v1"
 )
 SUPPORT_BASIS_T4_L0_SECONDARY_PREFETCH_POLICY = (
     "source-depth-probe-uniform-only-v1"
+)
+SOFT_MIXTURE_T4_L0_SECONDARY_PREFETCH_POLICY = (
+    "source-depth-probe-uniform-only-v1"
+)
+SOFT_MIXTURE_NORMALIZED_T4_L0_SECONDARY_PREFETCH_POLICY = (
+    "source-depth-probe-uniform-only-v1"
+)
+SOFT_MIXTURE_KERNEL_CLOSURE_T4_L0_SECONDARY_PREFETCH_POLICY = (
+    "source-depth-probe-uniform-only-v1"
+)
+SOFT_MIXTURE_KERNEL_CLOSURE_GUARD_POLICY = (
+    "actual-anchor-virtual-numerical-kernel-closure-only-v1"
 )
 LEGACY_L1_ANCHOR_SEMANTICS = "legacy-lightweight-12-dev"
 BALANCED_L1_ANCHOR_SEMANTICS = "engineering-lightweight-12-balanced-v1"
@@ -1004,6 +1025,336 @@ def support_basis_t4_route_config_sha256(events: Mapping[str, Any]) -> str:
             or float(value) < 0.0
         ):
             raise ValueError("support-basis T=4 route threshold is invalid")
+    return _canonical_sha256(config)
+
+
+def build_depthsplat_soft_mixture_t4_probe_first_plan(
+    features: torch.Tensor,
+    depths: torch.Tensor,
+    *,
+    height: int,
+    width: int,
+    feature_threshold: float,
+    depth_threshold: float,
+) -> IncrementalProbeFirstPlan:
+    """Build the source-only soft-mixture T=4 probe plan.
+
+    The plan retains the fixed raw-feature L0 decision and balanced L1
+    prefetch from the engineering T=4 route.  Its independent contract makes
+    clear that later compact acceptance is governed by exact S/R replay, not
+    a projected-domain support predicate.
+    """
+
+    plan = build_depthsplat_coverage_enriched_t4_probe_first_plan(
+        features,
+        depths,
+        height=height,
+        width=width,
+        feature_threshold=feature_threshold,
+        depth_threshold=depth_threshold,
+    )
+    events = dict(plan.events)
+    events["contract_version"] = DEPTHSPLAT_SOFT_MIXTURE_T4_PLAN_CONTRACT
+    events.pop("coverage_enriched_t4_route_config_sha256", None)
+    events.pop("coverage_enriched_l0_secondary_prefetch_policy", None)
+    events["soft_mixture_l0_secondary_prefetch_policy"] = (
+        SOFT_MIXTURE_T4_L0_SECONDARY_PREFETCH_POLICY
+    )
+    events["soft_mixture_t4_route_config_sha256"] = (
+        soft_mixture_t4_route_config_sha256(events)
+    )
+    return IncrementalProbeFirstPlan(
+        primary_mask=plan.primary_mask,
+        secondary_mask=plan.secondary_mask,
+        full_mask=plan.full_mask,
+        selection_mask=plan.selection_mask,
+        tile_trace=plan.tile_trace,
+        events=events,
+    )
+
+
+def soft_mixture_t4_route_config_sha256(events: Mapping[str, Any]) -> str:
+    """Hash the immutable source-only soft-mixture planner configuration."""
+
+    if not isinstance(events, Mapping):
+        raise TypeError("soft-mixture T=4 route events must be a mapping")
+    config = {
+        "contract_version": events.get("contract_version"),
+        "tile_size": events.get("tile_size"),
+        "feature_threshold": events.get("feature_threshold"),
+        "depth_threshold": events.get("depth_threshold"),
+        "decision_semantics": events.get("decision_semantics"),
+        "feature_statistic": events.get("feature_statistic"),
+        "l1_anchor_semantics": events.get("l1_anchor_semantics"),
+        "l0_anchor_count": events.get("l0_anchor_count"),
+        "l1_anchor_count": events.get("l1_anchor_count"),
+        "formal_paper_kp4": events.get("formal_paper_kp4"),
+        "depth_checked_after_l0_miss_only": events.get(
+            "depth_checked_after_l0_miss_only"
+        ),
+        "soft_mixture_l0_secondary_prefetch_policy": events.get(
+            "soft_mixture_l0_secondary_prefetch_policy"
+        ),
+    }
+    if config != {
+        "contract_version": DEPTHSPLAT_SOFT_MIXTURE_T4_PLAN_CONTRACT,
+        "tile_size": 4,
+        "feature_threshold": config["feature_threshold"],
+        "depth_threshold": config["depth_threshold"],
+        "decision_semantics": "paper-probe-feature-variance-first-hit",
+        "feature_statistic": "raw-probe-mean-channel-variance",
+        "l1_anchor_semantics": BALANCED_L1_ANCHOR_SEMANTICS,
+        "l0_anchor_count": 4,
+        "l1_anchor_count": 12,
+        "formal_paper_kp4": False,
+        "depth_checked_after_l0_miss_only": False,
+        "soft_mixture_l0_secondary_prefetch_policy": (
+            SOFT_MIXTURE_T4_L0_SECONDARY_PREFETCH_POLICY
+        ),
+    }:
+        raise ValueError("soft-mixture T=4 route configuration changed")
+    for name in ("feature_threshold", "depth_threshold"):
+        value = config[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+        ):
+            raise ValueError("soft-mixture T=4 route threshold is invalid")
+    return _canonical_sha256(config)
+
+
+def build_depthsplat_soft_mixture_normalized_t4_probe_first_plan(
+    features: torch.Tensor,
+    depths: torch.Tensor,
+    *,
+    height: int,
+    width: int,
+    feature_threshold: float,
+    depth_threshold: float,
+) -> IncrementalProbeFirstPlan:
+    """Build the scale-invariant source-only soft-mixture T=4 plan.
+
+    Section 3 fixes the local consistency threshold but does not attach it to
+    one model's raw S1 magnitude.  This profile therefore compares the same
+    threshold against unit-normalized probe vectors, then keeps the matching
+    normalized S1 field for the bilateral assignment.
+    """
+
+    plan = build_incremental_probe_first_plan(
+        features,
+        depths,
+        height=height,
+        width=width,
+        tile_size=4,
+        feature_threshold=feature_threshold,
+        depth_threshold=depth_threshold,
+        decision_semantics=PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS,
+        l1_anchor_semantics=BALANCED_L1_ANCHOR_SEMANTICS,
+        formal_paper_kp4=False,
+    )
+    events = dict(plan.events)
+    events["contract_version"] = DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_PLAN_CONTRACT
+    events["soft_mixture_normalized_l0_secondary_prefetch_policy"] = (
+        SOFT_MIXTURE_NORMALIZED_T4_L0_SECONDARY_PREFETCH_POLICY
+    )
+    events["assignment_feature_semantics"] = "unit-normalized-bilinear-s1-v1"
+    if (
+        events.get("feature_statistic")
+        != "normalized-probe-vector-standard-deviation"
+        or events.get("decision_semantics")
+        != PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS
+        or events.get("l0_anchor_count") != 4
+        or events.get("l1_anchor_count") != 12
+        or events.get("l1_anchor_semantics") != BALANCED_L1_ANCHOR_SEMANTICS
+        or events.get("formal_paper_kp4") is not False
+        or events.get("depth_checked_after_l0_miss_only") is not False
+        or events.get("assignment_feature_semantics")
+        != "unit-normalized-bilinear-s1-v1"
+        or events.get("target_rgb_accessed") is not False
+        or events.get("gaussian_attributes_accessed") is not False
+    ):
+        raise RuntimeError("soft-mixture normalized T=4 planner contract changed")
+    corners = [list(position) for position in compute_probe_positions(4)]
+    balanced = [list(position) for position in compute_balanced_lightweight_positions(4)]
+    secondary = balanced[len(corners) :]
+    for record in plan.tile_trace:
+        route = record.get("pre_guard_route")
+        depth_uniform = record.get("depth_uniform")
+        if (
+            route not in {"L0", "L1", "Full"}
+            or record.get("primary_local_positions") != corners
+            or not isinstance(depth_uniform, bool)
+            or (route == "L1" and not depth_uniform)
+            or (route == "Full" and depth_uniform)
+        ):
+            raise RuntimeError("soft-mixture normalized T=4 tile trace is invalid")
+        expected_secondary = secondary if route == "L1" or (route == "L0" and depth_uniform) else []
+        if record.get("secondary_local_positions") != expected_secondary:
+            raise RuntimeError("soft-mixture normalized T=4 L1 prefetch changed")
+    events["soft_mixture_normalized_t4_route_config_sha256"] = (
+        soft_mixture_normalized_t4_route_config_sha256(events)
+    )
+    return IncrementalProbeFirstPlan(
+        primary_mask=plan.primary_mask,
+        secondary_mask=plan.secondary_mask,
+        full_mask=plan.full_mask,
+        selection_mask=plan.selection_mask,
+        tile_trace=plan.tile_trace,
+        events=events,
+    )
+
+
+def soft_mixture_normalized_t4_route_config_sha256(events: Mapping[str, Any]) -> str:
+    """Hash the immutable normalized soft-mixture planner configuration."""
+
+    if not isinstance(events, Mapping):
+        raise TypeError("soft-mixture normalized T=4 route events must be a mapping")
+    config = {
+        "contract_version": events.get("contract_version"),
+        "tile_size": events.get("tile_size"),
+        "feature_threshold": events.get("feature_threshold"),
+        "depth_threshold": events.get("depth_threshold"),
+        "decision_semantics": events.get("decision_semantics"),
+        "feature_statistic": events.get("feature_statistic"),
+        "l1_anchor_semantics": events.get("l1_anchor_semantics"),
+        "l0_anchor_count": events.get("l0_anchor_count"),
+        "l1_anchor_count": events.get("l1_anchor_count"),
+        "formal_paper_kp4": events.get("formal_paper_kp4"),
+        "depth_checked_after_l0_miss_only": events.get(
+            "depth_checked_after_l0_miss_only"
+        ),
+        "assignment_feature_semantics": events.get("assignment_feature_semantics"),
+        "soft_mixture_normalized_l0_secondary_prefetch_policy": events.get(
+            "soft_mixture_normalized_l0_secondary_prefetch_policy"
+        ),
+    }
+    if config != {
+        "contract_version": DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_PLAN_CONTRACT,
+        "tile_size": 4,
+        "feature_threshold": config["feature_threshold"],
+        "depth_threshold": config["depth_threshold"],
+        "decision_semantics": PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS,
+        "feature_statistic": "normalized-probe-vector-standard-deviation",
+        "l1_anchor_semantics": BALANCED_L1_ANCHOR_SEMANTICS,
+        "l0_anchor_count": 4,
+        "l1_anchor_count": 12,
+        "formal_paper_kp4": False,
+        "depth_checked_after_l0_miss_only": False,
+        "assignment_feature_semantics": "unit-normalized-bilinear-s1-v1",
+        "soft_mixture_normalized_l0_secondary_prefetch_policy": (
+            SOFT_MIXTURE_NORMALIZED_T4_L0_SECONDARY_PREFETCH_POLICY
+        ),
+    }:
+        raise ValueError("soft-mixture normalized T=4 route configuration changed")
+    for name in ("feature_threshold", "depth_threshold"):
+        value = config[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+        ):
+            raise ValueError("soft-mixture normalized T=4 route threshold is invalid")
+    return _canonical_sha256(config)
+
+
+def build_depthsplat_soft_mixture_kernel_closure_t4_probe_first_plan(
+    features: torch.Tensor,
+    depths: torch.Tensor,
+    *,
+    height: int,
+    width: int,
+    feature_threshold: float,
+    depth_threshold: float,
+) -> IncrementalProbeFirstPlan:
+    """Build the normalized route with a separately bound closure guard."""
+
+    plan = build_depthsplat_soft_mixture_normalized_t4_probe_first_plan(
+        features,
+        depths,
+        height=height,
+        width=width,
+        feature_threshold=feature_threshold,
+        depth_threshold=depth_threshold,
+    )
+    events = dict(plan.events)
+    events["contract_version"] = DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_PLAN_CONTRACT
+    events.pop("soft_mixture_normalized_t4_route_config_sha256", None)
+    events.pop("soft_mixture_normalized_l0_secondary_prefetch_policy", None)
+    events["soft_mixture_kernel_closure_l0_secondary_prefetch_policy"] = (
+        SOFT_MIXTURE_KERNEL_CLOSURE_T4_L0_SECONDARY_PREFETCH_POLICY
+    )
+    events["kernel_closure_guard_policy"] = SOFT_MIXTURE_KERNEL_CLOSURE_GUARD_POLICY
+    events["soft_mixture_kernel_closure_t4_route_config_sha256"] = (
+        soft_mixture_kernel_closure_t4_route_config_sha256(events)
+    )
+    return IncrementalProbeFirstPlan(
+        primary_mask=plan.primary_mask,
+        secondary_mask=plan.secondary_mask,
+        full_mask=plan.full_mask,
+        selection_mask=plan.selection_mask,
+        tile_trace=plan.tile_trace,
+        events=events,
+    )
+
+
+def soft_mixture_kernel_closure_t4_route_config_sha256(
+    events: Mapping[str, Any],
+) -> str:
+    """Hash the immutable normalized route and strict closure policy."""
+
+    if not isinstance(events, Mapping):
+        raise TypeError("soft-mixture kernel-closure T=4 route events must be a mapping")
+    config = {
+        "contract_version": events.get("contract_version"),
+        "tile_size": events.get("tile_size"),
+        "feature_threshold": events.get("feature_threshold"),
+        "depth_threshold": events.get("depth_threshold"),
+        "decision_semantics": events.get("decision_semantics"),
+        "feature_statistic": events.get("feature_statistic"),
+        "assignment_feature_semantics": events.get("assignment_feature_semantics"),
+        "l1_anchor_semantics": events.get("l1_anchor_semantics"),
+        "l0_anchor_count": events.get("l0_anchor_count"),
+        "l1_anchor_count": events.get("l1_anchor_count"),
+        "formal_paper_kp4": events.get("formal_paper_kp4"),
+        "depth_checked_after_l0_miss_only": events.get(
+            "depth_checked_after_l0_miss_only"
+        ),
+        "soft_mixture_kernel_closure_l0_secondary_prefetch_policy": events.get(
+            "soft_mixture_kernel_closure_l0_secondary_prefetch_policy"
+        ),
+        "kernel_closure_guard_policy": events.get("kernel_closure_guard_policy"),
+    }
+    if config != {
+        "contract_version": DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_PLAN_CONTRACT,
+        "tile_size": 4,
+        "feature_threshold": config["feature_threshold"],
+        "depth_threshold": config["depth_threshold"],
+        "decision_semantics": PAPER_NORMALIZED_FEATURE_DECISION_SEMANTICS,
+        "feature_statistic": "normalized-probe-vector-standard-deviation",
+        "assignment_feature_semantics": "unit-normalized-bilinear-s1-v1",
+        "l1_anchor_semantics": BALANCED_L1_ANCHOR_SEMANTICS,
+        "l0_anchor_count": 4,
+        "l1_anchor_count": 12,
+        "formal_paper_kp4": False,
+        "depth_checked_after_l0_miss_only": False,
+        "soft_mixture_kernel_closure_l0_secondary_prefetch_policy": (
+            SOFT_MIXTURE_KERNEL_CLOSURE_T4_L0_SECONDARY_PREFETCH_POLICY
+        ),
+        "kernel_closure_guard_policy": SOFT_MIXTURE_KERNEL_CLOSURE_GUARD_POLICY,
+    }:
+        raise ValueError("soft-mixture kernel-closure T=4 route configuration changed")
+    for name in ("feature_threshold", "depth_threshold"):
+        value = config[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+        ):
+            raise ValueError("soft-mixture kernel-closure T=4 route threshold is invalid")
     return _canonical_sha256(config)
 
 
