@@ -64,6 +64,12 @@ _SOURCE_BINDING_FIELDS = frozenset(
 )
 _OPTIONAL_SOURCE_BINDING_FIELDS = frozenset(("canonical_selection_sha256",))
 _SIDECAR_FIELDS = frozenset(("index_sha256", "record_sha256"))
+# These attestations were added after the first frozen classic-model audit
+# records. They describe the validated loader boundary, not bytes in the
+# sidecar. A legacy record may omit either one, but no record may claim it.
+_LEGACY_FALSE_IDENTITY_FIELDS = frozenset(
+    ("target_mapping_present", "target_index_accessed")
+)
 
 
 def _load_json(path: Path, label: str) -> dict[str, Any]:
@@ -106,6 +112,37 @@ def _canonical_sha256(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def context_only_audit_identity_matches(
+    expected: Mapping[str, Any], observed: Mapping[str, Any]
+) -> bool:
+    """Compare frozen identities across additive false-only attestations.
+
+    Historic target-free audits predate two explicit loader-boundary fields.
+    Their absence is equivalent only to an explicit ``False``; a true or
+    non-boolean value remains a hard mismatch.
+    """
+
+    if not isinstance(expected, Mapping) or not isinstance(observed, Mapping):
+        return False
+
+    def normalize(identity: Mapping[str, Any]) -> dict[str, Any] | None:
+        normalized = dict(identity)
+        for field in _LEGACY_FALSE_IDENTITY_FIELDS:
+            value = normalized.get(field, False)
+            if value is not False:
+                return None
+            normalized[field] = False
+        return normalized
+
+    expected_normalized = normalize(expected)
+    observed_normalized = normalize(observed)
+    return (
+        expected_normalized is not None
+        and observed_normalized is not None
+        and expected_normalized == observed_normalized
+    )
 
 
 def _copy_context_image(value: Any) -> Any:
@@ -396,8 +433,10 @@ def validate_context_only_audit_input(
         "source_sample_index": source_sample_index,
         "source_binding": dict(source_binding),
         "sidecar": dict(sidecar),
+        "target_mapping_present": False,
         "target_rgb_accessed": False,
         "target_camera_metadata_accessed": False,
+        "target_index_accessed": False,
     }
 
 

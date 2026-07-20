@@ -28,6 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from data.context_only_audit_input import context_only_audit_identity_matches
+
 from saes.probe_first_schedule import (
     ADAPTIVE_L1_15_ANCHOR_SEMANTICS,
     build_incremental_probe_first_plan,
@@ -277,7 +279,7 @@ def _require_exact_audited_context_input_identity(
 ) -> dict[str, Any]:
     """Fail closed unless the route input is exactly the audited sidecar."""
     expected = audit.get("input_identity")
-    if not isinstance(expected, Mapping) or dict(expected) != dict(input_identity):
+    if not context_only_audit_identity_matches(expected, input_identity):
         raise ValueError("target-free quality audit input identity changed")
     return dict(input_identity)
 

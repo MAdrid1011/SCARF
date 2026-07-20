@@ -532,6 +532,7 @@ def load_context_only_audit_data(
                 "target_rgb_accessed": False,
                 "target_camera_metadata_accessed": False,
                 "target_mapping_present": False,
+                "target_index_accessed": False,
                 "source_image_shape": [int(source_height), int(source_width)],
                 "native_preprocessing": {
                     "crop_image_shape": [

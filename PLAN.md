@@ -52,6 +52,60 @@
   global-saving claim, and do not expand to Re10K, Table 1, or eight scenes
   before the one frozen sample-0 audit and quality gate pass.
 
+### DepthSplat Coverage-Enriched Repair (2026-07-20)
+
+- The literal V16T4 ACID 24/8 record and one sample-0 quality gate are now
+  complete but failed quality: the native Full baseline is `35.5881 dB` and
+  the literal compact packet is `32.5046 dB` (loss `3.0835 dB`). This is a
+  failed simulator route, not a reproduction claim.
+- A source-only, encoder-only virtual-support audit binds to that exact
+  packet and finds `11,251/11,264` merged anchors with projected 2-sigma
+  holes; all `2,816` accepted L0 tiles have at least one broken anchor. It
+  reads no target metadata/RGB/index and emits no render or quality metric.
+- The replacement is a separate engineering profile, not a mutation of the
+  literal route: four-corner L0 first, then a balanced 12-anchor L1
+  enrichment only when L0's owned virtual-support certificate fails, then
+  bitwise-native Full when L1 also fails. L1 keeps the primary corner prefix
+  and adds four centers plus four distributed edge anchors.
+- The certificate is source-only and fail-closed. Each virtual is assigned to
+  its maximum bilateral-weight owner and its projected two-sigma support must
+  fit that owner's merged Gaussian. The route must not post-scale covariance,
+  inspect omitted S3 attributes, or use DL3DV target data to select a tile.
+- This profile is paper-compatible only at the mechanism level: it preserves
+  L0/L1 aggregation and L1's lower-compression role, but the paper does not
+  specify the 12-anchor layout or ownership certificate. Report it separately
+  from source-literal V16T4. Any code change invalidates the old V16T4 record,
+  so a new evaluation-disjoint ACID 24/8 freeze is mandatory before one new
+  sample-0 quality gate.
+- The engineering profile is now hardened before data collection: every owner
+  certificate includes the pre-merge source anchor as well as its assigned
+  virtuals; its ownership vector, source-only metadata, and per-owner counts
+  are bound into the fixed-scale certificate. Plan, preflight, and final-route
+  traces are rehashed at each consumer, and a compact tile's update slots must
+  exactly match its accepted L0 or L1 anchor set. A coverage plan cannot run
+  under the development profile, so it cannot bypass the owner guard or use
+  covariance expansion.
+- The one fixed sample-0 pre-calibration source-only audit completed with all
+  target/renderer/quality flags false and all live trace bindings valid. It
+  rejects this *single-owner* certificate as an acceptance mechanism: all
+  `14,336` feature-L0 tiles promoted Full (`8,510` depth-nonuniform L0
+  failures, `5,826` uniform L0-to-L1 retries that also failed). L1's 12 native
+  anchors reduce failures to roughly one virtual per failing owner, but that
+  virtual still cannot be enclosed by its one fixed-scale merged owner. This
+  is a source-only structural rejection, not an ACID, quality, or reproduction
+  result.
+- The next repair is a separate `support-basis-v1` profile, not a threshold
+  change and not a mutation of V16T4 or the rejected owner profile. It keeps
+  the actual selected-only `S` spatial virtual construction and `R` bilateral
+  moment merge, but certifies each source-anchor or virtual ellipse against
+  the same-tile committed anchors reachable through
+  `delta + S^T R` (anchors) or `R` (virtuals). Every ellipse still requires
+  full containment by one reachable merged Gaussian; no arbitrary union,
+  cross-tile masking, covariance expansion, target data, omitted S3 read, or
+  extra anchor is allowed. The certificate binds both descriptor families,
+  both ledgers, camera, slots, trace, and update packet before one new
+  target-free sample-0 audit.
+
 ### Current L0/L1 Repair Contract (2026-07-19)
 
 - Source rule: Section 3 of `micro59-submit/build/SCARF.pdf` defines L0/L1 as

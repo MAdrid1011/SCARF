@@ -135,10 +135,34 @@
   moment aggregation, bitwise-native Full fallback, and selected-anchor LOO
   Full promotion. Focused schedule/materializer/calibration tests pass; this
   is not yet GPU collection, audit, or quality evidence.
-- [ ] Freeze the independent literal `V16T4` ACID 24/8 calibration with
+- [x] Freeze the independent literal `V16T4` ACID 24/8 calibration with
   persisted selected-anchor trace artifacts, then run exactly one DL3DV
-  sample-0 target-free audit and quality gate. Do not reuse 12/15-anchor
-  V15/V16 records or thresholds.
+  sample-0 target-free audit and quality gate. The audit passed but the gate
+  failed at `35.5881 -> 32.5046 dB`; do not reuse it as a reproduction claim.
+- [x] Run a source-only per-anchor virtual-support audit bound to the failed
+  V16T4 packet. All `2,816` compact L0 tiles have a projected support break,
+  so finite PSD cannot serve as a render-domain continuity certificate.
+- [x] Implement the separate coverage-enriched DepthSplat profile:
+  `L0(4 corners) -> balanced L1-12 -> Full`, with owned source-camera
+  two-sigma support certificates over both owner anchors and assigned virtuals,
+  no covariance post-scale, and profile isolation from development materialization.
+- [x] Add CPU contracts for L0-to-L1 enrichment, L0/L1-to-Full promotion,
+  no secondary-anchor leakage into accepted L0 packets, and target/S3 access
+  rejection. Rehash live plan/preflight/final traces, bind owner assignments,
+  and keep literal V16T4 contracts unchanged.
+- [x] Run one fixed sample-0 *pre-calibration* source-only audit for the
+  coverage-enriched profile. It passes isolation and trace binding but rejects
+  all compact tiles under the single-owner fixed-scale certificate; it does
+  not authorize ACID collection or a quality gate.
+- [x] Implement the separate source-only `support-basis-v1` repair: retain the
+  existing selected-only spatial (`S`) and bilateral (`R`) moment merge, but
+  certify each anchor/virtual against a same-tile output basis reachable by
+  `delta + S^T R` or `R`. Bind every geometry family, ledger, camera, slot,
+  update packet, and trace; preserve fixed scale, no target/S3 access, and the
+  L0(4) -> L1(12) -> Full ladder.
+- [ ] Run exactly one new sample-0 target-free structural audit for
+  `support-basis-v1`. Only if it has nonzero compact acceptance, freeze its
+  separate ACID 24/8 record and run one fixed quality gate.
 - [ ] Run the DepthSplat fixed eight-scene quality gate before any three-model
   140-scene expansion or Table 1 claim.
 - [x] Preserve `transplat_dl3dv_l1_15_v16_acid_disjoint_8scene_v1` as an

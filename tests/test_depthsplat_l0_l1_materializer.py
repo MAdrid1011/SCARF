@@ -25,16 +25,38 @@ def _plan(
     z_depths,
     *,
     literal_paper_t4=False,
+    coverage_enriched_t4=False,
+    support_basis_t4=False,
     feature_threshold=0.1,
     depth_threshold=0.1,
 ):
     from saes.probe_first_schedule import (
+        build_depthsplat_coverage_enriched_t4_probe_first_plan,
+        build_depthsplat_support_basis_t4_probe_first_plan,
         build_incremental_probe_first_plan,
         build_literal_paper_t4_probe_first_plan,
     )
 
     if literal_paper_t4:
         return build_literal_paper_t4_probe_first_plan(
+            features,
+            z_depths,
+            height=4,
+            width=4,
+            feature_threshold=feature_threshold,
+            depth_threshold=depth_threshold,
+        )
+    if coverage_enriched_t4:
+        return build_depthsplat_coverage_enriched_t4_probe_first_plan(
+            features,
+            z_depths,
+            height=4,
+            width=4,
+            feature_threshold=feature_threshold,
+            depth_threshold=depth_threshold,
+        )
+    if support_basis_t4:
+        return build_depthsplat_support_basis_t4_probe_first_plan(
             features,
             z_depths,
             height=4,
@@ -198,6 +220,8 @@ def _preflight(
     harmonic_delta=0.0,
     covariance_scale=1.0,
     literal_paper_t4=False,
+    coverage_enriched_t4=False,
+    support_basis_t4=False,
     feature_threshold=0.1,
     depth_threshold=0.1,
     collect_selected_anchor_attribute_loo_risk=False,
@@ -205,6 +229,7 @@ def _preflight(
     selected_anchor_attribute_loo_maximum_risk=None,
     preflight_source_sample_image_grid=None,
     maximum_coverage_covariance_scale=None,
+    execution_profile=None,
 ):
     from depthsplat.src.geometry.projection import get_world_rays, sample_image_grid
     from saes.depthsplat_l0_l1_materializer import preflight_depthsplat_l0_l1_materialization
@@ -213,6 +238,8 @@ def _preflight(
         features,
         z_depths,
         literal_paper_t4=literal_paper_t4,
+        coverage_enriched_t4=coverage_enriched_t4,
+        support_basis_t4=support_basis_t4,
         feature_threshold=feature_threshold,
         depth_threshold=depth_threshold,
     )
@@ -224,6 +251,17 @@ def _preflight(
         harmonic_delta=harmonic_delta,
         covariance_scale=covariance_scale,
     )
+    profile = (
+        "depthsplat-literal-paper-t4-selected-probe-moment-v1"
+        if literal_paper_t4
+        else "depthsplat-coverage-enriched-t4-balanced-l1-owner-support-v1"
+        if coverage_enriched_t4
+        else "depthsplat-support-basis-t4-balanced-l1-cooperative-v1"
+        if support_basis_t4
+        else "depthsplat-development-omitted-z-alpha-union-v1"
+    )
+    if execution_profile is not None:
+        profile = execution_profile
     preflight = preflight_depthsplat_l0_l1_materialization(
         packet,
         packed,
@@ -237,15 +275,11 @@ def _preflight(
         ),
         source_get_world_rays=get_world_rays,
         maximum_coverage_covariance_scale=(
-            (1.0 if literal_paper_t4 else 16.0)
+            (1.0 if profile != "depthsplat-development-omitted-z-alpha-union-v1" else 16.0)
             if maximum_coverage_covariance_scale is None
             else maximum_coverage_covariance_scale
         ),
-        execution_profile=(
-            "depthsplat-literal-paper-t4-selected-probe-moment-v1"
-            if literal_paper_t4
-            else "depthsplat-development-omitted-z-alpha-union-v1"
-        ),
+        execution_profile=profile,
         collect_selected_anchor_attribute_loo_risk=(
             collect_selected_anchor_attribute_loo_risk
         ),
@@ -374,6 +408,500 @@ def test_l0_preflight_merges_nonzero_virtual_domain_and_discards_prefetched_l1_r
     assert int(route.selected_output_mask.sum()) == 4
     assert int(route.raw_head_request_mask.sum()) == 12
     assert route.events["producer_only_prefetch_descriptor_count"] == 8
+
+
+def _owner_support_result(*, owner_count, virtual_owner_indices, passed):
+    from saes.depthsplat_l0_l1_materializer import _tensor_sha256
+    from saes.depthsplat_owner_coverage import (
+        AUDIT_KIND,
+        AUDIT_SCHEMA_VERSION,
+        OWNER_ASSIGNMENT_POLICY,
+    )
+
+    owner_assignment_counts = [
+        int((virtual_owner_indices == owner_index).sum().item())
+        for owner_index in range(owner_count)
+    ]
+    owners = []
+    for owner_index in range(owner_count):
+        assigned = owner_assignment_counts[owner_index]
+        owners.append(
+            {
+                "owner_index": owner_index,
+                "source_anchor_count": 1,
+                "source_anchor_support_included": True,
+                "source_anchor_support_passed": passed,
+                "assigned_virtual_count": assigned,
+                "dense_descriptor_count": assigned + 1,
+                "active_virtual_count": assigned,
+                "active_source_anchor_count": 1,
+                "active_dense_descriptor_count": assigned + 1,
+                "checked": True,
+                "audit_valid": True,
+                "passed": passed,
+                "reason": None if passed else "uncontained-assigned-virtuals",
+                "coverage": {
+                    "valid": True,
+                    "dense_descriptor_count": assigned + 1,
+                    "active_dense_descriptor_count": assigned + 1,
+                    "hole_count": 0 if passed else 1,
+                },
+            }
+        )
+    return {
+        "schema_version": AUDIT_SCHEMA_VERSION,
+        "kind": AUDIT_KIND,
+        "sigma": 2.0,
+        "passed": passed,
+        "source_only": {
+            "target_mapping_present": False,
+            "target_rgb_accessed": False,
+            "target_camera_metadata_accessed": False,
+            "target_index_accessed": False,
+            "source_camera_only": True,
+            "input_covariances_mutated": False,
+            "owner_source_anchor_support_included": True,
+        },
+        "ownership": {
+            "policy": OWNER_ASSIGNMENT_POLICY,
+            "virtual_owner_indices_sha256": _tensor_sha256(virtual_owner_indices),
+            "owner_assignment_counts": owner_assignment_counts,
+        },
+        "summary": {
+            "input_valid": True,
+            "owner_count": owner_count,
+            "source_anchor_count": owner_count,
+            "virtual_primitive_count": int(virtual_owner_indices.numel()),
+            "assigned_owner_count": sum(count > 0 for count in owner_assignment_counts),
+            "empty_owner_count": sum(count == 0 for count in owner_assignment_counts),
+            "checked_owner_count": owner_count,
+            "invalid_owner_assignment_count": 0,
+            "failed_owner_count": 0 if passed else owner_count,
+            "all_active_virtual_2sigma_supports_contained": passed,
+            "all_active_owner_anchor_and_virtual_2sigma_supports_contained": passed,
+            "hole_count": 0 if passed else owner_count,
+        },
+        "owners": owners,
+    }
+
+
+def _constructed_support_basis_coverage(*, candidate_means, hole_count=0, **_kwargs):
+    """Supply only the geometric verdict for a route-binding contract test."""
+
+    from saes.projected_domain_coverage_audit import (
+        AUDIT_SCHEMA_VERSION,
+        FIXED_SIGMA,
+        ProjectedDomainCoverage,
+    )
+
+    candidate_count = int(candidate_means.shape[0])
+    contained = 0.0 if hole_count else 1.0
+    return ProjectedDomainCoverage(
+        valid=True,
+        reason=None,
+        schema_version=AUDIT_SCHEMA_VERSION,
+        sigma=FIXED_SIGMA,
+        dense_descriptor_count=1,
+        active_dense_descriptor_count=1,
+        candidate_descriptor_count=candidate_count,
+        active_candidate_descriptor_count=candidate_count,
+        dense_optical_mass=1.0,
+        contained_optical_mass=contained,
+        mass_weighted_recall=contained,
+        count_recall=contained,
+        hole_count=hole_count,
+        dense_offscreen_count=0,
+        candidate_offscreen_count=0,
+    )
+
+
+def test_coverage_enriched_l0_pass_discards_balanced_l1_prefetch(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    monkeypatch.setattr(
+        materializer,
+        "audit_depthsplat_owner_coverage",
+        lambda **kwargs: _owner_support_result(
+            owner_count=int(kwargs["merged_means"].shape[0]),
+            virtual_owner_indices=kwargs["virtual_owner_indices"],
+            passed=True,
+        ),
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, coverage_enriched_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    assert plan.tile_trace[0]["pre_guard_route"] == "L0"
+    assert int(plan.selection_mask.sum()) == 12
+    assert preflight.tile_trace[0]["accepted_level"] == "L0"
+    assert preflight.events["coverage_enriched_l0_to_l1_tile_count"] == 0
+    assert route.events["route_counts"] == {"L0": 1, "L1": 0, "Full": 0}
+    assert int(route.selected_output_mask.sum()) == 4
+    assert int(route.raw_head_request_mask.sum()) == 12
+    assert route.events["producer_only_prefetch_descriptor_count"] == 8
+    assert preflight.events["skipped_s3_attributes_accessed"] is False
+    assert preflight.events["target_rgb_accessed"] is False
+
+
+def test_coverage_enriched_l0_failure_retries_prefetched_balanced_l1(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    monkeypatch.setattr(
+        materializer,
+        "audit_depthsplat_owner_coverage",
+        lambda **kwargs: _owner_support_result(
+            owner_count=int(kwargs["merged_means"].shape[0]),
+            virtual_owner_indices=kwargs["virtual_owner_indices"],
+            passed=int(kwargs["merged_means"].shape[0]) == 12,
+        ),
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, coverage_enriched_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    assert preflight.tile_trace[0]["planned_route"] == "L0"
+    assert preflight.tile_trace[0]["accepted_level"] == "L1"
+    assert preflight.tile_trace[0]["l1_enrichment_prefetched"] is True
+    assert preflight.events["coverage_enriched_l0_to_l1_tile_count"] == 1
+    assert preflight.update_dense_slots.numel() == 12
+    assert route.events["route_counts"] == {"L0": 0, "L1": 1, "Full": 0}
+    assert int(route.selected_output_mask.sum()) == 12
+    assert int(route.raw_head_request_mask.sum()) == 12
+    assert int(route.additional_full_mask.sum()) == 0
+    assert route.events["producer_only_prefetch_descriptor_count"] == 0
+
+
+def test_coverage_enriched_l1_failure_promotes_the_entire_tile_full(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    monkeypatch.setattr(
+        materializer,
+        "audit_depthsplat_owner_coverage",
+        lambda **kwargs: _owner_support_result(
+            owner_count=int(kwargs["merged_means"].shape[0]),
+            virtual_owner_indices=kwargs["virtual_owner_indices"],
+            passed=False,
+        ),
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, coverage_enriched_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    assert preflight.tile_trace[0]["accepted"] is False
+    assert preflight.tile_trace[0]["accepted_level"] is None
+    assert int(preflight.promote_full_mask.sum()) == 16
+    assert preflight.update_dense_slots.numel() == 0
+    assert route.events["route_counts"] == {"L0": 0, "L1": 0, "Full": 1}
+    assert int(route.selected_output_mask.sum()) == 16
+    assert int(route.additional_full_mask.sum()) == 4
+
+
+def test_coverage_enriched_rejects_incomplete_owner_assignment_evidence(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    def incomplete_owner_audit(**kwargs):
+        result = _owner_support_result(
+            owner_count=int(kwargs["merged_means"].shape[0]),
+            virtual_owner_indices=kwargs["virtual_owner_indices"],
+            passed=True,
+        )
+        result["ownership"]["owner_assignment_counts"][0] += 1
+        return result
+
+    monkeypatch.setattr(
+        materializer, "audit_depthsplat_owner_coverage", incomplete_owner_audit
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, coverage_enriched_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    assert preflight.tile_trace[0]["accepted"] is False
+    assert "owner evidence binding changed" in preflight.tile_trace[0]["reason"]
+    assert route.events["route_counts"] == {"L0": 0, "L1": 0, "Full": 1}
+
+
+def test_coverage_enriched_route_rebuilds_owner_certificate_from_live_trace(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_backend import canonical_json_sha256
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    monkeypatch.setattr(
+        materializer,
+        "audit_depthsplat_owner_coverage",
+        lambda **kwargs: _owner_support_result(
+            owner_count=int(kwargs["merged_means"].shape[0]),
+            virtual_owner_indices=kwargs["virtual_owner_indices"],
+            passed=True,
+        ),
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, coverage_enriched_t4=True
+    )
+    payload = preflight.events["coverage_certificate_payload"]
+    payload["per_update"][0]["owner_index"] = 12345
+    preflight.events["coverage_certificate_sha256"] = canonical_json_sha256(payload)
+
+    with pytest.raises(ValueError, match="certificate binding changed"):
+        resolve_depthsplat_compact_final_route(plan, preflight)
+
+
+def test_coverage_enriched_route_rejects_post_preflight_plan_contract_drift(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    monkeypatch.setattr(
+        materializer,
+        "audit_depthsplat_owner_coverage",
+        lambda **kwargs: _owner_support_result(
+            owner_count=int(kwargs["merged_means"].shape[0]),
+            virtual_owner_indices=kwargs["virtual_owner_indices"],
+            passed=True,
+        ),
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, coverage_enriched_t4=True
+    )
+    plan.events["contract_version"] = "saes-incremental-probe-first-plan-v1"
+
+    with pytest.raises(ValueError, match="execution profile does not match plan contract"):
+        resolve_depthsplat_compact_final_route(plan, preflight)
+
+
+def test_coverage_enriched_plan_cannot_use_development_materialization_profile():
+    from saes.depthsplat_l0_l1_materializer import (
+        DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE,
+    )
+
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+
+    with pytest.raises(ValueError, match="execution profile does not match plan contract"):
+        _preflight(
+            features,
+            z_depths,
+            coverage_enriched_t4=True,
+            execution_profile=DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE,
+        )
+
+
+def test_support_basis_profile_has_its_own_plan_and_fixed_scale_certificate():
+    from saes.depthsplat_l0_l1_materializer import (
+        DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE,
+        resolve_depthsplat_compact_final_route,
+    )
+
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, support_basis_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    assert plan.events["contract_version"] == (
+        "saes-depthsplat-support-basis-t4-probe-first-plan-v1"
+    )
+    assert preflight.events["execution_profile"] == (
+        DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE
+    )
+    assert preflight.events["coverage_certificate"] == (
+        DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE
+    )
+    assert preflight.events["maximum_coverage_covariance_scale"] == pytest.approx(1.0)
+    assert preflight.events["support_basis_guard"] is True
+    assert preflight.events["coverage_enriched_owner_support_guard"] is None
+    assert route.events["coverage_certificate_geometry"] == (
+        "source-camera-composed-soft-ledger-same-tile-projected-2sigma-v1"
+    )
+    assert route.events["route_counts"] == {"L0": 0, "L1": 0, "Full": 1}
+
+
+def test_support_basis_l0_compact_route_binds_composed_certificate(monkeypatch):
+    import saes.depthsplat_support_basis_coverage as support_coverage
+    from saes.depthsplat_l0_l1_materializer import (
+        DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE,
+        resolve_depthsplat_compact_final_route,
+    )
+
+    monkeypatch.setattr(
+        support_coverage,
+        "audit_projected_dense_domain_coverage",
+        _constructed_support_basis_coverage,
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, support_basis_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    assert preflight.tile_trace[0]["accepted_level"] == "L0"
+    assert preflight.update_dense_slots.numel() == 4
+    assert route.events["route_counts"] == {"L0": 1, "L1": 0, "Full": 0}
+    assert int(route.selected_output_mask.sum()) == 4
+    assert int(route.raw_head_request_mask.sum()) == 12
+    certificate = preflight.events["coverage_certificate_payload"]
+    assert certificate["schema"] == DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE
+    assert len(certificate["per_update"]) == 4
+    assert all(row["support_basis_passed"] is True for row in certificate["per_update"])
+
+
+def test_support_basis_l0_failure_retries_prefetched_l1_compact_route(monkeypatch):
+    import saes.depthsplat_support_basis_coverage as support_coverage
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    def l1_only_coverage(*, candidate_means, **kwargs):
+        return _constructed_support_basis_coverage(
+            candidate_means=candidate_means,
+            hole_count=0 if int(candidate_means.shape[0]) == 12 else 1,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        support_coverage,
+        "audit_projected_dense_domain_coverage",
+        l1_only_coverage,
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, support_basis_t4=True
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    assert preflight.tile_trace[0]["planned_route"] == "L0"
+    assert preflight.tile_trace[0]["accepted_level"] == "L1"
+    assert preflight.tile_trace[0]["l1_enrichment_prefetched"] is True
+    assert preflight.events["support_basis_l0_to_l1_tile_count"] == 1
+    assert preflight.update_dense_slots.numel() == 12
+    assert route.events["route_counts"] == {"L0": 0, "L1": 1, "Full": 0}
+    assert int(route.selected_output_mask.sum()) == 12
+
+
+def test_support_basis_route_rejects_rehashed_internal_ledger_tamper(monkeypatch):
+    import saes.depthsplat_support_basis_coverage as support_coverage
+    from saes.depthsplat_backend import canonical_json_sha256
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    monkeypatch.setattr(
+        support_coverage,
+        "audit_projected_dense_domain_coverage",
+        _constructed_support_basis_coverage,
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, support_basis_t4=True
+    )
+    payload = preflight.events["coverage_certificate_payload"]
+    payload["per_update"][0]["support_basis_sha256"] = "0" * 64
+    preflight.events["coverage_certificate_sha256"] = canonical_json_sha256(payload)
+
+    with pytest.raises(ValueError, match="certificate binding changed"):
+        resolve_depthsplat_compact_final_route(plan, preflight)
+
+
+def test_support_basis_plan_cannot_run_under_the_owner_profile():
+    from saes.depthsplat_l0_l1_materializer import (
+        DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+    )
+
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+
+    with pytest.raises(ValueError, match="execution profile does not match plan contract"):
+        _preflight(
+            features,
+            z_depths,
+            support_basis_t4=True,
+            execution_profile=DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+        )
+
+
+def test_coverage_enriched_route_rejects_l0_to_l1_trace_mutation(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    monkeypatch.setattr(
+        materializer,
+        "audit_depthsplat_owner_coverage",
+        lambda **kwargs: _owner_support_result(
+            owner_count=int(kwargs["merged_means"].shape[0]),
+            virtual_owner_indices=kwargs["virtual_owner_indices"],
+            passed=True,
+        ),
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(
+        features, z_depths, coverage_enriched_t4=True
+    )
+    assert preflight.tile_trace[0]["accepted_level"] == "L0"
+    preflight.tile_trace[0]["accepted_level"] = "L1"
+
+    with pytest.raises(ValueError, match="preflight tile trace hash changed"):
+        resolve_depthsplat_compact_final_route(plan, preflight)
+
+
+def test_route_rejects_mutated_plan_trace_before_preflight_output_is_consumed():
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, _packed, preflight = _preflight(features, z_depths)
+    plan.tile_trace[0]["pre_guard_route"] = "Full"
+
+    with pytest.raises(ValueError, match="plan tile trace hash changed"):
+        resolve_depthsplat_compact_final_route(plan, preflight)
+
+
+def test_preflight_rejects_a_mutated_coverage_plan_trace():
+    from depthsplat.src.geometry.projection import get_world_rays, sample_image_grid
+    from saes.depthsplat_l0_l1_materializer import (
+        DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+        preflight_depthsplat_l0_l1_materialization,
+    )
+
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan = _plan(features, z_depths, coverage_enriched_t4=True)
+    packet, packed = _selected_packet_and_packed(
+        plan.selection_mask, z_depths, routing_features=features
+    )
+    plan.tile_trace[0]["depth_uniform"] = False
+
+    with pytest.raises(ValueError, match="plan tile trace hash changed"):
+        preflight_depthsplat_l0_l1_materialization(
+            packet,
+            packed,
+            plan,
+            features,
+            z_depths,
+            source_sample_image_grid=sample_image_grid,
+            source_get_world_rays=get_world_rays,
+            maximum_coverage_covariance_scale=1.0,
+            execution_profile=DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+        )
 
 
 def test_rgb_derived_sh_field_changes_the_nonzero_merge_update():
@@ -587,8 +1115,24 @@ def test_route_rejects_a_mutated_preflight_tile_decision():
     plan, _packet, _packed, preflight = _preflight(features, z_depths)
     preflight.tile_trace[0]["accepted"] = False
 
-    with pytest.raises(ValueError, match="tile decision diverged"):
+    with pytest.raises(ValueError, match="preflight tile trace hash changed"):
         resolve_depthsplat_compact_final_route(plan, preflight)
+
+
+def test_apply_rejects_a_mutated_final_route_trace():
+    from saes.depthsplat_l0_l1_materializer import (
+        apply_depthsplat_compact_l0_l1_materialization,
+        resolve_depthsplat_compact_final_route,
+    )
+
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+    plan, _packet, packed, preflight = _preflight(features, z_depths)
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+    route.tile_trace[0]["final_route"] = "Full"
+
+    with pytest.raises(ValueError, match="final route tile trace hash changed"):
+        apply_depthsplat_compact_l0_l1_materialization(packed, preflight, route)
 
 
 def test_literal_t4_materialization_ignores_poisoned_omitted_depths_and_source_grid():

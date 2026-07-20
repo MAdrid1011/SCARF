@@ -32,17 +32,37 @@ from saes.depthsplat_selected_output import (
     DepthSplatSparseRawPacket,
     depthsplat_attribute_binding_sha256,
 )
+from saes.depthsplat_owner_coverage import (
+    AUDIT_KIND as DEPTHSPLAT_OWNER_COVERAGE_AUDIT_KIND,
+    AUDIT_SCHEMA_VERSION as DEPTHSPLAT_OWNER_COVERAGE_AUDIT_SCHEMA_VERSION,
+    OWNER_ASSIGNMENT_POLICY as DEPTHSPLAT_OWNER_ASSIGNMENT_POLICY,
+    audit_depthsplat_owner_coverage,
+)
+from saes.depthsplat_support_basis_coverage import (
+    AUDIT_KIND as DEPTHSPLAT_SUPPORT_BASIS_AUDIT_KIND,
+    AUDIT_SCHEMA_VERSION as DEPTHSPLAT_SUPPORT_BASIS_AUDIT_SCHEMA_VERSION,
+    SUPPORT_BASIS_POLICY as DEPTHSPLAT_SUPPORT_BASIS_POLICY,
+    audit_depthsplat_tile_support_basis,
+)
 from saes.probe_first_schedule import (
     ADAPTIVE_L1_15_ANCHOR_SEMANTICS,
     BALANCED_L1_ANCHOR_SEMANTICS,
+    COVERAGE_ENRICHED_T4_L0_SECONDARY_PREFETCH_POLICY,
+    DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT,
+    DEPTHSPLAT_SUPPORT_BASIS_T4_PLAN_CONTRACT,
     LEGACY_L1_ANCHOR_SEMANTICS,
     LITERAL_PAPER_T4_PLAN_CONTRACT,
     PAPER_KP_ANCHOR_SEMANTICS,
     IncrementalProbeFirstPlan,
+    build_depthsplat_coverage_enriched_t4_probe_first_plan,
     build_literal_paper_t4_probe_first_plan,
     build_incremental_probe_first_plan,
+    coverage_enriched_t4_route_config_sha256,
     literal_paper_t4_route_config_sha256,
     l1_local_positions_for_tile,
+    build_depthsplat_support_basis_t4_probe_first_plan,
+    support_basis_t4_route_config_sha256,
+    SUPPORT_BASIS_T4_L0_SECONDARY_PREFETCH_POLICY,
 )
 from saes.probe_layout import compute_probe_positions
 from saes.progressive_saes import ProgressiveSAES, paper_assignment_weights
@@ -58,6 +78,12 @@ DEPTHSPLAT_COVERAGE_CERTIFICATE = (
 DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE = (
     "depthsplat-literal-paper-t4-finite-psd-moment-merge-fixed-scale-v1"
 )
+DEPTHSPLAT_COVERAGE_ENRICHED_T4_MOMENT_CERTIFICATE = (
+    "depthsplat-coverage-enriched-t4-owner-anchor-projected-2sigma-fixed-scale-v2"
+)
+DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE = (
+    "depthsplat-support-basis-t4-composed-soft-ledger-projected-2sigma-fixed-scale-v1"
+)
 DEPTHSPLAT_COMPACT_COVERAGE_MAX_COVARIANCE_SCALE = 16.0
 DEPTHSPLAT_FEATURE_INTERPOLATION_MAX_RELATIVE_RESIDUAL = 1.0
 DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE = (
@@ -65,6 +91,12 @@ DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE = (
 )
 DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE = (
     "depthsplat-literal-paper-t4-selected-probe-moment-v1"
+)
+DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE = (
+    "depthsplat-coverage-enriched-t4-balanced-l1-owner-support-v1"
+)
+DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE = (
+    "depthsplat-support-basis-t4-balanced-l1-cooperative-v1"
 )
 DEPTHSPLAT_LITERAL_PAPER_T4_DECISION_SEMANTICS = (
     "paper-probe-feature-variance-first-hit"
@@ -144,6 +176,22 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _require_bound_tile_trace(
+    tile_trace: Any, *, expected_sha256: Any, label: str
+) -> str:
+    """Rehash a live trace before it can influence a routing decision."""
+
+    if not isinstance(tile_trace, tuple) or not all(
+        isinstance(record, Mapping) for record in tile_trace
+    ):
+        raise ValueError(f"DepthSplat {label} is invalid")
+    expected = _require_sha256(expected_sha256, label=label)
+    actual = _canonical_sha256(tile_trace)
+    if actual != expected:
+        raise ValueError(f"DepthSplat {label} hash changed")
+    return actual
+
+
 def _require_sha256(value: Any, *, label: str) -> str:
     if (
         not isinstance(value, str)
@@ -200,6 +248,8 @@ def _require_plan(plan: IncrementalProbeFirstPlan) -> tuple[int, int, int, str]:
     if events.get("contract_version") not in {
         "saes-incremental-probe-first-plan-v1",
         LITERAL_PAPER_T4_PLAN_CONTRACT,
+        DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT,
+        DEPTHSPLAT_SUPPORT_BASIS_T4_PLAN_CONTRACT,
     }:
         raise ValueError("DepthSplat materializer plan contract changed")
     tile_size = events.get("tile_size")
@@ -223,7 +273,31 @@ def _require_plan(plan: IncrementalProbeFirstPlan) -> tuple[int, int, int, str]:
         raise ValueError("DepthSplat materializer plan L1 semantics are invalid")
     if len(plan.tile_trace) != views * (height // tile_size) * (width // tile_size):
         raise ValueError("DepthSplat materializer plan tile trace is incomplete")
+    _require_bound_tile_trace(
+        plan.tile_trace,
+        expected_sha256=events.get("tile_trace_sha256"),
+        label="plan tile trace",
+    )
     return views, height, width, str(semantics)
+
+
+def _validate_execution_profile_plan_binding(
+    plan: IncrementalProbeFirstPlan, *, execution_profile: str
+) -> None:
+    """Keep each materializer mechanism tied to its own probe-plan contract."""
+
+    expected_profile = {
+        "saes-incremental-probe-first-plan-v1": DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE,
+        LITERAL_PAPER_T4_PLAN_CONTRACT: DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT: (
+            DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE
+        ),
+        DEPTHSPLAT_SUPPORT_BASIS_T4_PLAN_CONTRACT: (
+            DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE
+        ),
+    }.get(plan.events.get("contract_version"))
+    if expected_profile is None or execution_profile != expected_profile:
+        raise ValueError("DepthSplat materializer execution profile does not match plan contract")
 
 
 def _validate_literal_paper_t4_plan(
@@ -274,6 +348,118 @@ def _validate_literal_paper_t4_plan(
             raise ValueError("DepthSplat formal L0 route inspected depth before a miss")
         if route in {"L1", "Full"} and not isinstance(record.get("depth_uniform"), bool):
             raise ValueError("DepthSplat formal L1/Full route lacks conditional depth evidence")
+
+
+def _validate_coverage_enriched_t4_plan(
+    plan: IncrementalProbeFirstPlan,
+    *,
+    views: int,
+    height: int,
+    width: int,
+    semantics: str,
+) -> None:
+    """Validate the opt-in L0-to-balanced-L1 prefetch route.
+
+    This is intentionally separate from the literal paper contract.  It uses
+    the same raw four-corner feature decision but reads source depth probes to
+    make an L1 packet available only for a later fail-closed coverage retry.
+    """
+
+    events = plan.events
+    if (
+        events.get("contract_version")
+        != DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT
+        or events.get("formal_paper_kp4") is not False
+        or events.get("decision_semantics")
+        != DEPTHSPLAT_LITERAL_PAPER_T4_DECISION_SEMANTICS
+        or events.get("feature_statistic") != "raw-probe-mean-channel-variance"
+        or semantics != BALANCED_L1_ANCHOR_SEMANTICS
+        or events.get("l0_anchor_count") != 4
+        or events.get("l1_anchor_count") != 12
+        or events.get("depth_checked_after_l0_miss_only") is not False
+        or events.get("coverage_enriched_l0_secondary_prefetch_policy")
+        != COVERAGE_ENRICHED_T4_L0_SECONDARY_PREFETCH_POLICY
+        or events.get("coverage_enriched_t4_route_config_sha256")
+        != coverage_enriched_t4_route_config_sha256(events)
+    ):
+        raise ValueError("DepthSplat coverage-enriched T=4 routing contract changed")
+    corners = [list(position) for position in compute_probe_positions(4)]
+    balanced = [
+        list(position)
+        for position in l1_local_positions_for_tile(
+            {}, tile_size=4, l1_anchor_semantics=BALANCED_L1_ANCHOR_SEMANTICS
+        )
+    ]
+    secondary = balanced[len(corners) :]
+    if len(plan.tile_trace) != views * (height // 4) * (width // 4):
+        raise ValueError("DepthSplat coverage-enriched T=4 tile trace is incomplete")
+    for record in plan.tile_trace:
+        route = record.get("pre_guard_route")
+        depth_uniform = record.get("depth_uniform")
+        if (
+            route not in {"L0", "L1", "Full"}
+            or record.get("primary_local_positions") != corners
+            or not isinstance(depth_uniform, bool)
+        ):
+            raise ValueError("DepthSplat coverage-enriched T=4 tile trace is invalid")
+        expected_secondary = (
+            secondary if route == "L1" or (route == "L0" and depth_uniform) else []
+        )
+        if record.get("secondary_local_positions") != expected_secondary:
+            raise ValueError("DepthSplat coverage-enriched L1 prefetch changed")
+
+
+def _validate_support_basis_t4_plan(
+    plan: IncrementalProbeFirstPlan,
+    *,
+    views: int,
+    height: int,
+    width: int,
+    semantics: str,
+) -> None:
+    """Validate the separate cooperative support-basis L0-to-L1 route."""
+
+    events = plan.events
+    if (
+        events.get("contract_version") != DEPTHSPLAT_SUPPORT_BASIS_T4_PLAN_CONTRACT
+        or events.get("formal_paper_kp4") is not False
+        or events.get("decision_semantics")
+        != DEPTHSPLAT_LITERAL_PAPER_T4_DECISION_SEMANTICS
+        or events.get("feature_statistic") != "raw-probe-mean-channel-variance"
+        or semantics != BALANCED_L1_ANCHOR_SEMANTICS
+        or events.get("l0_anchor_count") != 4
+        or events.get("l1_anchor_count") != 12
+        or events.get("depth_checked_after_l0_miss_only") is not False
+        or events.get("support_basis_l0_secondary_prefetch_policy")
+        != SUPPORT_BASIS_T4_L0_SECONDARY_PREFETCH_POLICY
+        or events.get("support_basis_t4_route_config_sha256")
+        != support_basis_t4_route_config_sha256(events)
+    ):
+        raise ValueError("DepthSplat support-basis T=4 routing contract changed")
+    corners = [list(position) for position in compute_probe_positions(4)]
+    balanced = [
+        list(position)
+        for position in l1_local_positions_for_tile(
+            {}, tile_size=4, l1_anchor_semantics=BALANCED_L1_ANCHOR_SEMANTICS
+        )
+    ]
+    secondary = balanced[len(corners) :]
+    if len(plan.tile_trace) != views * (height // 4) * (width // 4):
+        raise ValueError("DepthSplat support-basis T=4 tile trace is incomplete")
+    for record in plan.tile_trace:
+        route = record.get("pre_guard_route")
+        depth_uniform = record.get("depth_uniform")
+        if (
+            route not in {"L0", "L1", "Full"}
+            or record.get("primary_local_positions") != corners
+            or not isinstance(depth_uniform, bool)
+        ):
+            raise ValueError("DepthSplat support-basis T=4 tile trace is invalid")
+        expected_secondary = (
+            secondary if route == "L1" or (route == "L0" and depth_uniform) else []
+        )
+        if record.get("secondary_local_positions") != expected_secondary:
+            raise ValueError("DepthSplat support-basis L1 prefetch changed")
 
 
 def _validate_source(
@@ -501,6 +687,24 @@ def _validate_routing_inputs(
             feature_threshold=float(plan.events["feature_threshold"]),
             depth_threshold=float(plan.events["depth_threshold"]),
         )
+    elif execution_profile == DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE:
+        rebuilt = build_depthsplat_coverage_enriched_t4_probe_first_plan(
+            routing_features,
+            routing_z_depths,
+            height=height,
+            width=width,
+            feature_threshold=float(plan.events["feature_threshold"]),
+            depth_threshold=float(plan.events["depth_threshold"]),
+        )
+    elif execution_profile == DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE:
+        rebuilt = build_depthsplat_support_basis_t4_probe_first_plan(
+            routing_features,
+            routing_z_depths,
+            height=height,
+            width=width,
+            feature_threshold=float(plan.events["feature_threshold"]),
+            depth_threshold=float(plan.events["depth_threshold"]),
+        )
     elif execution_profile == DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE:
         rebuilt = build_incremental_probe_first_plan(
             routing_features,
@@ -553,10 +757,14 @@ def _validate_routing_inputs(
         or not bool(torch.isfinite(feature_norm).all())
     ):
         raise RuntimeError("DepthSplat materializer could not normalize routing features")
-    if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE:
-        # The literal route measures raw probe variance.  The bilateral
-        # assignment must therefore use the same raw bilinear S1 map rather
-        # than ``classify_tiles_by_features``' unit-normalized diagnostic map.
+    if execution_profile in {
+        DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+    }:
+        # Both fixed-scale profiles measure raw probe variance.  Their
+        # bilateral assignments therefore use raw bilinear S1, not the
+        # unit-normalized diagnostic map.
         raw_assignment_features = torch.nn.functional.interpolate(
             routing_features[0], size=(height, width), mode="bilinear", align_corners=False
         )
@@ -763,6 +971,8 @@ def _selected_anchor_attribute_loo_frozen_guard(
         not in {
             DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
         }
         or not isinstance(value.get("route_plan_contract"), str)
         or not value["route_plan_contract"]
@@ -1618,18 +1828,385 @@ def _literal_moment_merge_certificate_payload(
     }
 
 
+def _coverage_enriched_moment_certificate_payload(
+    *,
+    update_slots: torch.Tensor,
+    update_binding: Mapping[str, str],
+    update_means: torch.Tensor,
+    update_covariances: torch.Tensor,
+    per_update: list[dict[str, Any]],
+    tile_trace_sha256: str,
+) -> dict[str, Any]:
+    """Bind fixed-scale owner-anchor projected support to accepted updates."""
+
+    if (
+        not torch.is_tensor(update_slots)
+        or update_slots.ndim != 1
+        or update_slots.dtype != torch.int64
+        or not isinstance(update_binding, Mapping)
+        or not torch.is_tensor(update_means)
+        or update_means.shape != (int(update_slots.numel()), 3)
+        or not torch.is_tensor(update_covariances)
+        or update_covariances.shape != (int(update_slots.numel()), 3, 3)
+        or not isinstance(tile_trace_sha256, str)
+    ):
+        raise ValueError("DepthSplat coverage-enriched certificate inputs are invalid")
+    if (
+        not bool(torch.isfinite(update_means).all())
+        or not bool(torch.isfinite(update_covariances).all())
+        or bool(
+            (
+                torch.linalg.eigvalsh(
+                    (update_covariances + update_covariances.mT) * 0.5
+                )
+                < -1e-6
+            ).any()
+        )
+    ):
+        raise ValueError("DepthSplat coverage-enriched certificate is not finite PSD")
+    slots = update_slots.detach().to(device="cpu", dtype=torch.int64).tolist()
+    if len(per_update) != len(slots):
+        raise ValueError("DepthSplat coverage-enriched certificate update count is incomplete")
+    normalized_rows: list[dict[str, Any]] = []
+    for update_index, (slot, row) in enumerate(zip(slots, per_update)):
+        if not isinstance(row, Mapping):
+            raise ValueError("DepthSplat coverage-enriched certificate row is invalid")
+        virtual_count = row.get("virtual_count")
+        owner = row.get("owner_support")
+        if (
+            row.get("update_dense_slot") != int(slot)
+            or row.get("update_index") != update_index
+            or isinstance(virtual_count, bool)
+            or not isinstance(virtual_count, int)
+            or virtual_count < 0
+            or row.get("finite_psd_moment_merge") is not True
+            or row.get("moment_covariance_scale") != 1.0
+            or row.get("support_containment_guard") is not True
+            or row.get("owner_support_schema_version")
+            != DEPTHSPLAT_OWNER_COVERAGE_AUDIT_SCHEMA_VERSION
+            or row.get("owner_support_kind") != DEPTHSPLAT_OWNER_COVERAGE_AUDIT_KIND
+            or row.get("owner_assignment_policy")
+            != DEPTHSPLAT_OWNER_ASSIGNMENT_POLICY
+        ):
+            raise ValueError("DepthSplat coverage-enriched certificate owner binding changed")
+        assignment_sha256 = _require_sha256(
+            row.get("virtual_owner_indices_sha256"),
+            label="coverage-enriched virtual owner assignment",
+        )
+        assignment_counts_sha256 = _require_sha256(
+            row.get("owner_assignment_counts_sha256"),
+            label="coverage-enriched owner assignment counts",
+        )
+        if isinstance(owner, Mapping):
+            owner_index = owner.get("owner_index")
+            owned_virtual_count = owner.get("assigned_virtual_count")
+            owner_passed = owner.get("passed")
+            coverage = owner.get("coverage")
+            if (
+                isinstance(owner_index, bool)
+                or not isinstance(owner_index, int)
+                or owner_index < 0
+                or isinstance(owned_virtual_count, bool)
+                or not isinstance(owned_virtual_count, int)
+                or owned_virtual_count < 0
+                or owner.get("source_anchor_count") != 1
+                or owner.get("source_anchor_support_included") is not True
+                or owner.get("source_anchor_support_passed") is not True
+                or owner_passed is not True
+                or not isinstance(coverage, Mapping)
+            ):
+                raise ValueError("DepthSplat coverage-enriched owner evidence changed")
+            if coverage.get("valid") is True:
+                if coverage.get("hole_count") != 0:
+                    raise ValueError("DepthSplat coverage-enriched owner support is incomplete")
+            elif not (
+                coverage.get("valid") is False
+                and coverage.get("reason") == "zero-dense-optical-mass"
+            ):
+                raise ValueError("DepthSplat coverage-enriched owner support is incomplete")
+        else:
+            owner_index = row.get("owner_index")
+            owned_virtual_count = row.get("owned_virtual_count")
+            if (
+                isinstance(owner_index, bool)
+                or not isinstance(owner_index, int)
+                or owner_index < 0
+                or isinstance(owned_virtual_count, bool)
+                or not isinstance(owned_virtual_count, int)
+                or owned_virtual_count < 0
+                or row.get("source_anchor_count") != 1
+                or row.get("source_anchor_support_included") is not True
+                or row.get("source_anchor_support_passed") is not True
+                or row.get("owner_support_passed") is not True
+            ):
+                raise ValueError("DepthSplat coverage-enriched owner certificate changed")
+        normalized_rows.append(
+            {
+                "update_dense_slot": int(slot),
+                "update_index": update_index,
+                "virtual_count": virtual_count,
+                "finite_psd_moment_merge": True,
+                "moment_covariance_scale": 1.0,
+                "support_containment_guard": True,
+                "owner_index": int(owner_index),
+                "owned_virtual_count": int(owned_virtual_count),
+                "source_anchor_count": 1,
+                "source_anchor_support_included": True,
+                "source_anchor_support_passed": True,
+                "owner_support_schema_version": DEPTHSPLAT_OWNER_COVERAGE_AUDIT_SCHEMA_VERSION,
+                "owner_support_kind": DEPTHSPLAT_OWNER_COVERAGE_AUDIT_KIND,
+                "owner_assignment_policy": DEPTHSPLAT_OWNER_ASSIGNMENT_POLICY,
+                "virtual_owner_indices_sha256": assignment_sha256,
+                "owner_assignment_counts_sha256": assignment_counts_sha256,
+                "owner_support_passed": True,
+            }
+        )
+    return {
+        "schema": DEPTHSPLAT_COVERAGE_ENRICHED_T4_MOMENT_CERTIFICATE,
+        "geometry": "source-camera-owner-anchor-and-virtual-projected-2sigma-v1",
+        "finite_psd_moment_merge": True,
+        "fixed_moment_covariance_scale": 1.0,
+        "support_containment_guard": True,
+        "tile_trace_sha256": tile_trace_sha256,
+        "update_binding": dict(update_binding),
+        "update_slots": [int(slot) for slot in slots],
+        "per_update": normalized_rows,
+    }
+
+
+def _support_basis_moment_certificate_payload(
+    *,
+    update_slots: torch.Tensor,
+    update_binding: Mapping[str, str],
+    update_means: torch.Tensor,
+    update_covariances: torch.Tensor,
+    per_update: list[dict[str, Any]],
+    tile_trace: Any,
+    tile_trace_sha256: str,
+) -> dict[str, Any]:
+    """Bind same-tile composed-ledger support evidence to accepted updates."""
+
+    if (
+        not torch.is_tensor(update_slots)
+        or update_slots.ndim != 1
+        or update_slots.dtype != torch.int64
+        or not isinstance(update_binding, Mapping)
+        or not torch.is_tensor(update_means)
+        or update_means.shape != (int(update_slots.numel()), 3)
+        or not torch.is_tensor(update_covariances)
+        or update_covariances.shape != (int(update_slots.numel()), 3, 3)
+        or not isinstance(tile_trace_sha256, str)
+        or not isinstance(tile_trace, (list, tuple))
+    ):
+        raise ValueError("DepthSplat support-basis certificate inputs are invalid")
+    if (
+        not bool(torch.isfinite(update_means).all())
+        or not bool(torch.isfinite(update_covariances).all())
+        or bool(
+            (
+                torch.linalg.eigvalsh(
+                    (update_covariances + update_covariances.mT) * 0.5
+                )
+                < -1e-6
+            ).any()
+        )
+    ):
+        raise ValueError("DepthSplat support-basis certificate is not finite PSD")
+    slots = update_slots.detach().to(device="cpu", dtype=torch.int64).tolist()
+    if len(per_update) != len(slots):
+        raise ValueError("DepthSplat support-basis certificate update count is incomplete")
+
+    tile_support_by_slot: dict[int, tuple[Mapping[str, Any], str]] = {}
+    for tile_record in tile_trace:
+        if not isinstance(tile_record, Mapping):
+            raise ValueError("DepthSplat support-basis trace record is invalid")
+        coverage = tile_record.get("coverage")
+        if not isinstance(coverage, Mapping):
+            continue
+        support_basis = coverage.get("support_basis")
+        support_basis_sha256 = coverage.get("support_basis_sha256")
+        coverage_rows = coverage.get("per_update")
+        if support_basis is None and support_basis_sha256 is None:
+            continue
+        if (
+            not isinstance(support_basis, Mapping)
+            or not isinstance(coverage_rows, list)
+            or not isinstance(support_basis_sha256, str)
+            or support_basis_sha256 != _canonical_sha256(support_basis)
+        ):
+            raise ValueError("DepthSplat support-basis trace evidence is invalid")
+        for row in coverage_rows:
+            if not isinstance(row, Mapping):
+                raise ValueError("DepthSplat support-basis trace row is invalid")
+            slot = row.get("update_dense_slot")
+            if (
+                isinstance(slot, bool)
+                or not isinstance(slot, int)
+                or slot in tile_support_by_slot
+            ):
+                raise ValueError("DepthSplat support-basis trace slot is invalid")
+            tile_support_by_slot[slot] = (support_basis, support_basis_sha256)
+
+    normalized_rows: list[dict[str, Any]] = []
+    for update_index, (slot, row) in enumerate(zip(slots, per_update)):
+        if not isinstance(row, Mapping):
+            raise ValueError("DepthSplat support-basis certificate row is invalid")
+        evidence = tile_support_by_slot.pop(int(slot), None)
+        if evidence is None:
+            raise ValueError("DepthSplat support-basis evidence is missing an accepted update")
+        support_basis, support_basis_sha256 = evidence
+        virtual_count = row.get("virtual_count")
+        binding = support_basis.get("binding")
+        source_only = support_basis.get("source_only")
+        summary = support_basis.get("summary")
+        if (
+            row.get("update_dense_slot") != int(slot)
+            or row.get("update_index") != update_index
+            or isinstance(virtual_count, bool)
+            or not isinstance(virtual_count, int)
+            or virtual_count < 0
+            or row.get("finite_psd_moment_merge") is not True
+            or row.get("moment_covariance_scale") != 1.0
+            or row.get("support_containment_guard") is not True
+            or row.get("support_basis_schema_version")
+            != DEPTHSPLAT_SUPPORT_BASIS_AUDIT_SCHEMA_VERSION
+            or row.get("support_basis_kind") != DEPTHSPLAT_SUPPORT_BASIS_AUDIT_KIND
+            or row.get("support_basis_policy") != DEPTHSPLAT_SUPPORT_BASIS_POLICY
+            or row.get("support_basis_sha256") != support_basis_sha256
+            or row.get("support_basis_passed") is not True
+            or support_basis.get("schema_version")
+            != DEPTHSPLAT_SUPPORT_BASIS_AUDIT_SCHEMA_VERSION
+            or support_basis.get("kind") != DEPTHSPLAT_SUPPORT_BASIS_AUDIT_KIND
+            or support_basis.get("support_basis_policy")
+            != DEPTHSPLAT_SUPPORT_BASIS_POLICY
+            or support_basis.get("passed") is not True
+            or not isinstance(binding, Mapping)
+            or not isinstance(source_only, Mapping)
+            or not isinstance(summary, Mapping)
+            or source_only.get("source_camera_only") is not True
+            or source_only.get("target_mapping_present") is not False
+            or source_only.get("target_rgb_accessed") is not False
+            or source_only.get("target_camera_metadata_accessed") is not False
+            or source_only.get("target_index_accessed") is not False
+            or source_only.get("same_tile_candidate_basis_only") is not True
+            or source_only.get("fixed_covariance_scale") is not True
+            or summary.get("hole_count") != 0
+            or summary.get("all_active_same_tile_supports_contained") is not True
+        ):
+            raise ValueError("DepthSplat support-basis certificate binding changed")
+        for key in (
+            "anchor_dense_slots_sha256",
+            "virtual_origin_slots_sha256",
+            "virtual_means_sha256",
+            "virtual_covariances_sha256",
+            "virtual_opacities_sha256",
+            "virtual_source_spatial_weights_sha256",
+            "bilateral_assignment_weights_sha256",
+            "virtual_candidate_basis_mask_sha256",
+            "anchor_candidate_basis_mask_sha256",
+            "source_to_output_ledger_sha256",
+            "anchor_source_means_sha256",
+            "anchor_source_covariances_sha256",
+            "anchor_source_opacities_sha256",
+            "merged_means_sha256",
+            "merged_covariances_sha256",
+            "merged_opacities_sha256",
+            "context_extrinsics_sha256",
+            "context_intrinsics_sha256",
+        ):
+            _require_sha256(binding.get(key), label=f"support-basis {key}")
+        normalized_rows.append(
+            {
+                "update_dense_slot": int(slot),
+                "update_index": update_index,
+                "virtual_count": virtual_count,
+                "finite_psd_moment_merge": True,
+                "moment_covariance_scale": 1.0,
+                "support_containment_guard": True,
+                "support_basis_schema_version": DEPTHSPLAT_SUPPORT_BASIS_AUDIT_SCHEMA_VERSION,
+                "support_basis_kind": DEPTHSPLAT_SUPPORT_BASIS_AUDIT_KIND,
+                "support_basis_policy": DEPTHSPLAT_SUPPORT_BASIS_POLICY,
+                "support_basis_sha256": support_basis_sha256,
+                "support_basis_passed": True,
+            }
+        )
+    if tile_support_by_slot:
+        raise ValueError("DepthSplat support-basis trace has an unbound update")
+    return {
+        "schema": DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE,
+        "geometry": "source-camera-composed-soft-ledger-same-tile-projected-2sigma-v1",
+        "finite_psd_moment_merge": True,
+        "fixed_moment_covariance_scale": 1.0,
+        "support_containment_guard": True,
+        "tile_trace_sha256": tile_trace_sha256,
+        "update_binding": dict(update_binding),
+        "update_slots": [int(slot) for slot in slots],
+        "per_update": normalized_rows,
+    }
+
+
+def _ordered_coverage_rows_from_trace(
+    *, tile_trace: Any, update_slots: torch.Tensor
+) -> list[dict[str, Any]]:
+    """Bind each committed update to the coverage evidence in its live trace."""
+
+    if not isinstance(tile_trace, (list, tuple)) or not torch.is_tensor(update_slots):
+        raise ValueError("DepthSplat coverage trace inputs are invalid")
+    coverage_by_slot: dict[int, dict[str, Any]] = {}
+    for tile_record in tile_trace:
+        if not isinstance(tile_record, Mapping):
+            raise ValueError("DepthSplat coverage tile trace is invalid")
+        coverage = tile_record.get("coverage")
+        if not isinstance(coverage, Mapping):
+            continue
+        per_update = coverage.get("per_update")
+        if not isinstance(per_update, list):
+            raise ValueError("DepthSplat coverage tile record is incomplete")
+        for row in per_update:
+            if not isinstance(row, Mapping):
+                raise ValueError("DepthSplat coverage tile row is invalid")
+            slot = row.get("update_dense_slot")
+            if (
+                isinstance(slot, bool)
+                or not isinstance(slot, int)
+                or slot in coverage_by_slot
+            ):
+                raise ValueError("DepthSplat coverage tile slot is invalid")
+            coverage_by_slot[slot] = dict(row)
+    ordered_rows: list[dict[str, Any]] = []
+    for update_index, slot in enumerate(
+        update_slots.detach().to(device="cpu", dtype=torch.int64).tolist()
+    ):
+        row = coverage_by_slot.pop(int(slot), None)
+        if row is None:
+            raise ValueError("DepthSplat coverage is missing an accepted update slot")
+        ordered_rows.append({**row, "update_index": update_index})
+    if coverage_by_slot:
+        raise ValueError("DepthSplat coverage has an unbound update slot")
+    return ordered_rows
+
+
 def _validate_coverage_certificate(
     preflight: DepthSplatCompactMaterializationPreflight,
 ) -> dict[str, Any]:
     """Revalidate the profile-specific materialization certificate."""
 
     events = preflight.events
+    trace_sha256 = _require_bound_tile_trace(
+        preflight.tile_trace,
+        expected_sha256=events.get("tile_trace_sha256"),
+        label="preflight tile trace",
+    )
     update_binding = _update_binding(
         preflight.update_dense_slots,
         preflight.means,
         preflight.covariances,
         preflight.harmonics,
         preflight.opacities,
+    )
+    trace_rows = _ordered_coverage_rows_from_trace(
+        tile_trace=preflight.tile_trace,
+        update_slots=preflight.update_dense_slots,
     )
     payload = events.get("coverage_certificate_payload")
     if not isinstance(payload, Mapping):
@@ -1649,8 +2226,41 @@ def _validate_coverage_certificate(
             update_binding=update_binding,
             update_means=preflight.means,
             update_covariances=preflight.covariances,
-            per_update=list(payload.get("per_update", [])),
-            tile_trace_sha256=str(events.get("tile_trace_sha256")),
+            per_update=trace_rows,
+            tile_trace_sha256=trace_sha256,
+        )
+    elif profile == DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE:
+        if (
+            isinstance(maximum_scale, bool)
+            or not isinstance(maximum_scale, (int, float))
+            or float(maximum_scale) != 1.0
+        ):
+            raise ValueError("DepthSplat coverage-enriched certificate scale changed")
+        expected_certificate = DEPTHSPLAT_COVERAGE_ENRICHED_T4_MOMENT_CERTIFICATE
+        expected = _coverage_enriched_moment_certificate_payload(
+            update_slots=preflight.update_dense_slots,
+            update_binding=update_binding,
+            update_means=preflight.means,
+            update_covariances=preflight.covariances,
+            per_update=trace_rows,
+            tile_trace_sha256=trace_sha256,
+        )
+    elif profile == DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE:
+        if (
+            isinstance(maximum_scale, bool)
+            or not isinstance(maximum_scale, (int, float))
+            or float(maximum_scale) != 1.0
+        ):
+            raise ValueError("DepthSplat support-basis certificate scale changed")
+        expected_certificate = DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE
+        expected = _support_basis_moment_certificate_payload(
+            update_slots=preflight.update_dense_slots,
+            update_binding=update_binding,
+            update_means=preflight.means,
+            update_covariances=preflight.covariances,
+            per_update=trace_rows,
+            tile_trace=preflight.tile_trace,
+            tile_trace_sha256=trace_sha256,
         )
     elif profile == DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE:
         if (
@@ -1663,8 +2273,8 @@ def _validate_coverage_certificate(
         expected = _coverage_certificate_payload(
             update_slots=preflight.update_dense_slots,
             update_binding=update_binding,
-            per_update=list(payload.get("per_update", [])),
-            tile_trace_sha256=str(events.get("tile_trace_sha256")),
+            per_update=trace_rows,
+            tile_trace_sha256=trace_sha256,
             maximum_covariance_scale=float(maximum_scale),
         )
     else:
@@ -1993,7 +2603,344 @@ def _literal_finite_psd_moment_merge(
     }
 
 
-def _build_literal_paper_t4_selected_only_tile_updates(
+def _validate_coverage_enriched_owner_support(
+    owner_support: Any,
+    *,
+    owner_count: int,
+    virtual_count: int,
+    virtual_owner_indices: torch.Tensor,
+) -> dict[str, Any]:
+    """Reject incomplete owner evidence before a compact tile can survive."""
+
+    if not isinstance(owner_support, Mapping):
+        raise ValueError("DepthSplat coverage-enriched owner evidence is invalid")
+    source_only = owner_support.get("source_only")
+    ownership = owner_support.get("ownership")
+    summary = owner_support.get("summary")
+    records = owner_support.get("owners")
+    expected_counts = [
+        int((virtual_owner_indices == owner_index).sum().item())
+        for owner_index in range(owner_count)
+    ]
+    if (
+        owner_support.get("schema_version")
+        != DEPTHSPLAT_OWNER_COVERAGE_AUDIT_SCHEMA_VERSION
+        or owner_support.get("kind") != DEPTHSPLAT_OWNER_COVERAGE_AUDIT_KIND
+        or owner_support.get("sigma") != 2.0
+        or not isinstance(source_only, Mapping)
+        or source_only.get("source_camera_only") is not True
+        or source_only.get("target_mapping_present") is not False
+        or source_only.get("target_rgb_accessed") is not False
+        or source_only.get("target_camera_metadata_accessed") is not False
+        or source_only.get("target_index_accessed") is not False
+        or source_only.get("input_covariances_mutated") is not False
+        or source_only.get("owner_source_anchor_support_included") is not True
+        or not isinstance(ownership, Mapping)
+        or ownership.get("policy") != DEPTHSPLAT_OWNER_ASSIGNMENT_POLICY
+        or _require_sha256(
+            ownership.get("virtual_owner_indices_sha256"),
+            label="coverage-enriched virtual owner assignment",
+        )
+        != _tensor_sha256(virtual_owner_indices)
+        or ownership.get("owner_assignment_counts") != expected_counts
+        or not isinstance(summary, Mapping)
+        or summary.get("input_valid") is not True
+        or summary.get("owner_count") != owner_count
+        or summary.get("source_anchor_count") != owner_count
+        or summary.get("virtual_primitive_count") != virtual_count
+        or summary.get("assigned_owner_count") != sum(count > 0 for count in expected_counts)
+        or summary.get("empty_owner_count") != sum(count == 0 for count in expected_counts)
+        or summary.get("checked_owner_count") != owner_count
+        or summary.get("invalid_owner_assignment_count") != 0
+        or not isinstance(records, list)
+        or len(records) != owner_count
+    ):
+        raise ValueError("DepthSplat coverage-enriched owner evidence binding changed")
+
+    normalized_records: list[dict[str, Any]] = []
+    failed_owner_count = 0
+    aggregate_hole_count = 0
+    for owner_index, record in enumerate(records):
+        if not isinstance(record, Mapping):
+            raise ValueError("DepthSplat coverage-enriched owner record is invalid")
+        coverage = record.get("coverage")
+        passed = record.get("passed")
+        audit_valid = record.get("audit_valid")
+        if (
+            record.get("owner_index") != owner_index
+            or record.get("source_anchor_count") != 1
+            or record.get("source_anchor_support_included") is not True
+            or record.get("source_anchor_support_passed") is not passed
+            or record.get("assigned_virtual_count") != expected_counts[owner_index]
+            or record.get("dense_descriptor_count") != expected_counts[owner_index] + 1
+            or record.get("checked") is not True
+            or not isinstance(passed, bool)
+            or not isinstance(audit_valid, bool)
+            or not isinstance(coverage, Mapping)
+            or coverage.get("dense_descriptor_count") != expected_counts[owner_index] + 1
+        ):
+            raise ValueError("DepthSplat coverage-enriched owner record binding changed")
+        if audit_valid:
+            hole_count = coverage.get("hole_count")
+            if (
+                coverage.get("valid") is not True
+                or isinstance(hole_count, bool)
+                or not isinstance(hole_count, int)
+                or hole_count < 0
+                or record.get("active_dense_descriptor_count")
+                != coverage.get("active_dense_descriptor_count")
+                or passed != (hole_count == 0)
+            ):
+                raise ValueError("DepthSplat coverage-enriched owner coverage changed")
+            aggregate_hole_count += hole_count
+        else:
+            if (
+                coverage.get("valid") is not False
+                or coverage.get("reason") != "zero-dense-optical-mass"
+                or passed is not True
+                or record.get("active_dense_descriptor_count") != 0
+            ):
+                raise ValueError("DepthSplat coverage-enriched inactive owner changed")
+        if not passed:
+            failed_owner_count += 1
+        normalized_records.append(dict(record))
+
+    passed = owner_support.get("passed")
+    if (
+        not isinstance(passed, bool)
+        or summary.get("failed_owner_count") != failed_owner_count
+        or summary.get("hole_count") != aggregate_hole_count
+        or summary.get("all_active_owner_anchor_and_virtual_2sigma_supports_contained")
+        is not passed
+        or passed != (failed_owner_count == 0 and aggregate_hole_count == 0)
+    ):
+        raise ValueError("DepthSplat coverage-enriched owner summary changed")
+    return {
+        **dict(owner_support),
+        "owners": normalized_records,
+        "ownership": dict(ownership),
+        "summary": dict(summary),
+        "source_only": dict(source_only),
+    }
+
+
+def _validate_support_basis_evidence(
+    support_basis: Any,
+    *,
+    anchor_slots: list[int],
+    virtual_origin_slots: list[int],
+    virtual_means: torch.Tensor,
+    virtual_covariances: torch.Tensor,
+    virtual_opacities: torch.Tensor,
+    virtual_source_spatial_weights: torch.Tensor,
+    bilateral_assignment_weights: torch.Tensor,
+    anchor_source_means: torch.Tensor,
+    anchor_source_covariances: torch.Tensor,
+    anchor_source_opacities: torch.Tensor,
+    merged_means: torch.Tensor,
+    merged_covariances: torch.Tensor,
+    merged_opacities: torch.Tensor,
+    context_extrinsics: torch.Tensor,
+    context_intrinsics: torch.Tensor,
+) -> dict[str, Any]:
+    """Validate a local soft-ledger certificate before it can retain a tile."""
+
+    anchor_count = len(anchor_slots)
+    virtual_count = len(virtual_origin_slots)
+    if not isinstance(support_basis, Mapping):
+        raise ValueError("DepthSplat support-basis evidence is invalid")
+    source_only = support_basis.get("source_only")
+    summary = support_basis.get("summary")
+    binding = support_basis.get("binding")
+    anchors = support_basis.get("anchors")
+    virtuals = support_basis.get("virtuals")
+    expected_anchor_slots = torch.tensor(
+        anchor_slots,
+        device=virtual_source_spatial_weights.device,
+        dtype=torch.int64,
+    )
+    expected_virtual_slots = torch.tensor(
+        virtual_origin_slots,
+        device=virtual_source_spatial_weights.device,
+        dtype=torch.int64,
+    )
+    virtual_masks = bilateral_assignment_weights > 0.0
+    source_to_output = (
+        virtual_source_spatial_weights.mT @ bilateral_assignment_weights
+    )
+    anchor_masks = (source_to_output > 0.0) | torch.eye(
+        anchor_count,
+        device=virtual_source_spatial_weights.device,
+        dtype=torch.bool,
+    )
+    expected_binding = {
+        "anchor_dense_slots_sha256": _tensor_sha256(expected_anchor_slots),
+        "virtual_origin_slots_sha256": _tensor_sha256(expected_virtual_slots),
+        "virtual_means_sha256": _tensor_sha256(virtual_means),
+        "virtual_covariances_sha256": _tensor_sha256(virtual_covariances),
+        "virtual_opacities_sha256": _tensor_sha256(virtual_opacities),
+        "virtual_source_spatial_weights_sha256": _tensor_sha256(
+            virtual_source_spatial_weights
+        ),
+        "bilateral_assignment_weights_sha256": _tensor_sha256(
+            bilateral_assignment_weights
+        ),
+        "virtual_candidate_basis_mask_sha256": _tensor_sha256(
+            virtual_masks.to(dtype=torch.uint8)
+        ),
+        "anchor_candidate_basis_mask_sha256": _tensor_sha256(
+            anchor_masks.to(dtype=torch.uint8)
+        ),
+        "source_to_output_ledger_sha256": _tensor_sha256(source_to_output),
+        "anchor_source_means_sha256": _tensor_sha256(anchor_source_means),
+        "anchor_source_covariances_sha256": _tensor_sha256(
+            anchor_source_covariances
+        ),
+        "anchor_source_opacities_sha256": _tensor_sha256(anchor_source_opacities),
+        "merged_means_sha256": _tensor_sha256(merged_means),
+        "merged_covariances_sha256": _tensor_sha256(merged_covariances),
+        "merged_opacities_sha256": _tensor_sha256(merged_opacities),
+        "context_extrinsics_sha256": _tensor_sha256(context_extrinsics),
+        "context_intrinsics_sha256": _tensor_sha256(context_intrinsics),
+    }
+    if (
+        support_basis.get("schema_version")
+        != DEPTHSPLAT_SUPPORT_BASIS_AUDIT_SCHEMA_VERSION
+        or support_basis.get("kind") != DEPTHSPLAT_SUPPORT_BASIS_AUDIT_KIND
+        or support_basis.get("support_basis_policy")
+        != DEPTHSPLAT_SUPPORT_BASIS_POLICY
+        or support_basis.get("sigma") != 2.0
+        or not isinstance(source_only, Mapping)
+        or source_only.get("source_camera_only") is not True
+        or source_only.get("target_mapping_present") is not False
+        or source_only.get("target_rgb_accessed") is not False
+        or source_only.get("target_camera_metadata_accessed") is not False
+        or source_only.get("target_index_accessed") is not False
+        or source_only.get("input_covariances_mutated") is not False
+        or source_only.get("same_tile_candidate_basis_only") is not True
+        or source_only.get("fixed_covariance_scale") is not True
+        or not isinstance(binding, Mapping)
+        or any(binding.get(key) != value for key, value in expected_binding.items())
+        or not isinstance(summary, Mapping)
+        or summary.get("input_valid") is not True
+        or summary.get("anchor_count") != anchor_count
+        or summary.get("source_anchor_count") != anchor_count
+        or summary.get("candidate_anchor_count") != anchor_count
+        or summary.get("virtual_primitive_count") != virtual_count
+        or summary.get("checked_source_anchor_count") != anchor_count
+        or summary.get("checked_virtual_count") != virtual_count
+        or not isinstance(anchors, list)
+        or not isinstance(virtuals, list)
+        or len(anchors) != anchor_count
+        or len(virtuals) != virtual_count
+    ):
+        raise ValueError("DepthSplat support-basis evidence binding changed")
+
+    failed_anchor_count = 0
+    failed_virtual_count = 0
+    active_anchor_count = 0
+    active_virtual_count = 0
+    hole_count = 0
+
+    def validate_records(
+        records: list[Any],
+        *,
+        source_kind: str,
+        slots: list[int],
+        masks: torch.Tensor,
+    ) -> tuple[int, int, int]:
+        failed = 0
+        active = 0
+        holes = 0
+        for source_index, record in enumerate(records):
+            expected_candidates = [
+                int(index)
+                for index in masks[source_index]
+                .nonzero(as_tuple=False)
+                .flatten()
+                .detach()
+                .cpu()
+                .tolist()
+            ]
+            if (
+                not isinstance(record, Mapping)
+                or record.get("source_kind") != source_kind
+                or record.get("source_index") != source_index
+                or record.get("source_slot") != int(slots[source_index])
+                or record.get("basis_candidate_anchor_indices") != expected_candidates
+                or record.get("checked") is not True
+                or not isinstance(record.get("passed"), bool)
+                or record.get("active") not in {True, False, None}
+            ):
+                raise ValueError("DepthSplat support-basis record binding changed")
+            coverage = record.get("coverage")
+            passed = record["passed"]
+            if record.get("active") is True:
+                if (
+                    not isinstance(coverage, Mapping)
+                    or coverage.get("valid") is not True
+                    or not isinstance(coverage.get("hole_count"), int)
+                    or coverage["hole_count"] < 0
+                    or passed != (coverage["hole_count"] == 0)
+                ):
+                    raise ValueError("DepthSplat support-basis active coverage changed")
+                active += 1
+                holes += int(coverage["hole_count"])
+            elif record.get("active") is False:
+                if (
+                    not isinstance(coverage, Mapping)
+                    or coverage.get("valid") is not False
+                    or coverage.get("reason") != "zero-dense-optical-mass"
+                    or passed is not True
+                ):
+                    raise ValueError("DepthSplat support-basis inactive coverage changed")
+            elif passed:
+                raise ValueError("DepthSplat support-basis inactive record passed")
+            failed += int(not passed)
+        return failed, active, holes
+
+    failed_anchor_count, active_anchor_count, anchor_holes = validate_records(
+        anchors,
+        source_kind="anchor",
+        slots=anchor_slots,
+        masks=anchor_masks,
+    )
+    failed_virtual_count, active_virtual_count, virtual_holes = validate_records(
+        virtuals,
+        source_kind="virtual",
+        slots=virtual_origin_slots,
+        masks=virtual_masks,
+    )
+    hole_count = anchor_holes + virtual_holes
+    passed = support_basis.get("passed")
+    if (
+        not isinstance(passed, bool)
+        or summary.get("failed_source_anchor_count") != failed_anchor_count
+        or summary.get("failed_virtual_count") != failed_virtual_count
+        or summary.get("active_source_anchor_count") != active_anchor_count
+        or summary.get("active_virtual_primitive_count") != active_virtual_count
+        or summary.get("active_dense_primitive_count")
+        != active_anchor_count + active_virtual_count
+        or summary.get("hole_count") != hole_count
+        or summary.get("all_active_same_tile_supports_contained") is not passed
+        or passed != (
+            failed_anchor_count == 0
+            and failed_virtual_count == 0
+            and hole_count == 0
+        )
+    ):
+        raise ValueError("DepthSplat support-basis summary changed")
+    return {
+        **dict(support_basis),
+        "source_only": dict(source_only),
+        "summary": dict(summary),
+        "binding": dict(binding),
+        "anchors": [dict(record) for record in anchors],
+        "virtuals": [dict(record) for record in virtuals],
+    }
+
+
+def _build_fixed_scale_selected_only_tile_updates(
     *,
     packet: DepthSplatSparseRawPacket,
     packed: DepthSplatPackedGaussianAttributes,
@@ -2008,18 +2955,37 @@ def _build_literal_paper_t4_selected_only_tile_updates(
     height: int,
     width: int,
     feature_statistic: str,
+    coverage_enriched: bool,
+    support_basis_profile: bool = False,
 ) -> tuple[list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]], dict[str, Any]]:
-    """Literal Kp=4 selected-probe moment materialization for the formal path."""
+    """Build selected-only fixed-scale moment updates for one compact tile."""
 
     if (
-        semantics != PAPER_KP_ANCHOR_SEMANTICS
-        or level not in {"L0", "L1"}
+        level not in {"L0", "L1"}
         or feature_statistic != "raw-probe-mean-channel-variance"
+        or (coverage_enriched and support_basis_profile)
     ):
-        raise ValueError("DepthSplat formal paper tile does not have the literal route")
+        raise ValueError("DepthSplat fixed-scale tile does not have the required route")
     anchors = _route_anchor_positions(record, level=level, semantics=semantics)
-    if anchors != compute_probe_positions(4):
+    engineering_profile = coverage_enriched or support_basis_profile
+    source_label = "selected-anchor" if engineering_profile else "selected-probe"
+    if not engineering_profile and (
+        semantics != PAPER_KP_ANCHOR_SEMANTICS
+        or anchors != compute_probe_positions(4)
+    ):
         raise ValueError("DepthSplat formal paper tile does not retain Kp=4 corners")
+    if engineering_profile:
+        expected = (
+            compute_probe_positions(4)
+            if level == "L0"
+            else l1_local_positions_for_tile(
+                record,
+                tile_size=4,
+                l1_anchor_semantics=BALANCED_L1_ANCHOR_SEMANTICS,
+            )
+        )
+        if semantics != BALANCED_L1_ANCHOR_SEMANTICS or anchors != expected:
+            raise ValueError("DepthSplat engineering tile anchor layout changed")
     anchor_slots = _tile_slots(
         view=view,
         tile_y=tile_y,
@@ -2030,7 +2996,7 @@ def _build_literal_paper_t4_selected_only_tile_updates(
         positions=anchors,
     )
     if any(slot not in slot_to_index for slot in anchor_slots):
-        raise ValueError("DepthSplat formal paper tile lacks a selected probe")
+        raise ValueError("DepthSplat fixed-scale tile lacks a selected anchor")
     anchor_indices = [slot_to_index[slot] for slot in anchor_slots]
     source_means = packed.means[anchor_indices]
     source_covariances = packed.covariances[anchor_indices]
@@ -2046,15 +3012,28 @@ def _build_literal_paper_t4_selected_only_tile_updates(
         return [], {
             "virtual_count": 0,
             "coverage": {
-                "certificate": DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE,
+                "certificate": (
+                    DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE
+                    if support_basis_profile
+                    else DEPTHSPLAT_COVERAGE_ENRICHED_T4_MOMENT_CERTIFICATE
+                    if coverage_enriched
+                    else DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE
+                ),
                 "finite_psd_moment_merge": True,
-                "support_containment_guard": False,
+                "support_containment_guard": engineering_profile,
                 "moment_covariance_scale_max": 1.0,
                 "per_update": [],
             },
-            "virtual_geometry_source": "selected-probe-only-none-v1",
-            "virtual_attribute_source": "selected-probe-only-none-v1",
+            "virtual_geometry_source": f"{source_label}-only-none-v1",
+            "virtual_attribute_source": f"{source_label}-only-none-v1",
             "omitted_routing_z_depth_reads": 0,
+            **{
+                (
+                    "selected_anchor_attribute_reads"
+                    if engineering_profile
+                    else "selected_probe_attribute_reads"
+                ): len(anchor_indices)
+            },
             "opacity_compositing_order": "literal-weighted-average-no-alpha-union-v1",
         }
     target_positions = [
@@ -2089,7 +3068,7 @@ def _build_literal_paper_t4_selected_only_tile_updates(
         or bool((virtual_opacities >= 1.0).any())
         or bool((torch.linalg.eigvalsh(virtual_covariances) < -1e-6).any())
     ):
-        raise ValueError("DepthSplat formal paper selected-only virtual field is invalid")
+        raise ValueError("DepthSplat fixed-scale selected-only virtual field is invalid")
     anchor_features = torch.stack(
         [raw_feature_map[:, row, column] for row, column in source_positions]
     )
@@ -2113,7 +3092,9 @@ def _build_literal_paper_t4_selected_only_tile_updates(
         if level == "L1":
             kwargs = {
                 "probe_depths": packet.depths[anchor_indices],
-                "depth_reference_depths": packet.depths[anchor_indices],
+                "depth_reference_depths": packet.depths[
+                    anchor_indices[: len(compute_probe_positions(4))]
+                ],
                 "beta_d": 1.0,
             }
         weights = paper_assignment_weights(
@@ -2131,7 +3112,7 @@ def _build_literal_paper_t4_selected_only_tile_updates(
             rtol=1e-5,
             atol=1e-5,
         ):
-            raise ValueError("DepthSplat formal paper assignment is invalid")
+            raise ValueError("DepthSplat fixed-scale assignment is invalid")
         assignments.append(weights)
     assignment = torch.stack(assignments)
     updates: list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
@@ -2149,7 +3130,7 @@ def _build_literal_paper_t4_selected_only_tile_updates(
         if not bool(torch.isfinite(mass_sum)) or bool(
             mass_sum <= torch.finfo(masses.dtype).eps
         ):
-            raise ValueError("DepthSplat formal paper moment mass is invalid")
+            raise ValueError("DepthSplat fixed-scale moment mass is invalid")
         contributors = torch.cat((source_means[anchor_offset].unsqueeze(0), virtual_means), dim=0)
         contributor_covariances = torch.cat(
             (source_covariances[anchor_offset].unsqueeze(0), virtual_covariances), dim=0
@@ -2182,7 +3163,7 @@ def _build_literal_paper_t4_selected_only_tile_updates(
             or bool((merged_harmonics < source_harmonics.amin(dim=0) - 1e-5).any())
             or bool((merged_harmonics > source_harmonics.amax(dim=0) + 1e-5).any())
         ):
-            raise ValueError("DepthSplat formal paper literal attribute average is invalid")
+            raise ValueError("DepthSplat fixed-scale attribute average is invalid")
         coverage = _literal_finite_psd_moment_merge(
             merged_covariance,
             merged_mean,
@@ -2201,14 +3182,131 @@ def _build_literal_paper_t4_selected_only_tile_updates(
                 "update_dense_slot": int(slot),
                 "virtual_count": len(target_local),
                 **coverage,
+                "support_containment_guard": engineering_profile,
             }
         )
+    owner_support: dict[str, Any] | None = None
+    tile_support_basis: dict[str, Any] | None = None
+    support_basis_sha256: str | None = None
+    if coverage_enriched:
+        virtual_owner_indices = assignment.argmax(dim=1).to(dtype=torch.int64)
+        owner_support = audit_depthsplat_owner_coverage(
+            virtual_means=virtual_means,
+            virtual_covariances=virtual_covariances,
+            virtual_opacities=virtual_opacities,
+            virtual_owner_indices=virtual_owner_indices,
+            owner_source_means=source_means,
+            owner_source_covariances=source_covariances,
+            owner_source_opacities=source_opacities,
+            merged_means=torch.stack([item[1] for item in updates]),
+            merged_covariances=torch.stack([item[2] for item in updates]),
+            merged_opacities=torch.stack([item[4] for item in updates]),
+            owner_source_extrinsics=packet.extrinsics[anchor_indices],
+            owner_source_intrinsics=packet.intrinsics[anchor_indices],
+        )
+        owner_support = _validate_coverage_enriched_owner_support(
+            owner_support,
+            owner_count=len(updates),
+            virtual_count=len(target_local),
+            virtual_owner_indices=virtual_owner_indices,
+        )
+        owner_records = owner_support["owners"]
+        if len(owner_records) != len(coverage_updates):
+            raise RuntimeError("DepthSplat coverage-enriched owner evidence is incomplete")
+        ownership = owner_support["ownership"]
+        coverage_updates = [
+            {
+                **row,
+                "owner_support": dict(owner_records[index]),
+                "owner_support_schema_version": owner_support["schema_version"],
+                "owner_support_kind": owner_support["kind"],
+                "owner_assignment_policy": ownership["policy"],
+                "virtual_owner_indices_sha256": ownership[
+                    "virtual_owner_indices_sha256"
+                ],
+                "owner_assignment_counts_sha256": _canonical_sha256(
+                    ownership["owner_assignment_counts"]
+                ),
+            }
+            for index, row in enumerate(coverage_updates)
+        ]
+    elif support_basis_profile:
+        virtual_origin_slots = _tile_slots(
+            view=view,
+            tile_y=tile_y,
+            tile_x=tile_x,
+            height=height,
+            width=width,
+            tile_size=4,
+            positions=target_local,
+        )
+        tile_support_basis = audit_depthsplat_tile_support_basis(
+            virtual_means=virtual_means,
+            virtual_covariances=virtual_covariances,
+            virtual_opacities=virtual_opacities,
+            virtual_origin_slots=torch.tensor(
+                virtual_origin_slots,
+                device=packed.means.device,
+                dtype=torch.int64,
+            ),
+            virtual_source_spatial_weights=spatial,
+            bilateral_assignment_weights=assignment,
+            anchor_source_means=source_means,
+            anchor_source_covariances=source_covariances,
+            anchor_source_opacities=source_opacities,
+            anchor_dense_slots=torch.tensor(
+                anchor_slots,
+                device=packed.means.device,
+                dtype=torch.int64,
+            ),
+            merged_means=torch.stack([item[1] for item in updates]),
+            merged_covariances=torch.stack([item[2] for item in updates]),
+            merged_opacities=torch.stack([item[4] for item in updates]),
+            context_extrinsics=packet.extrinsics[anchor_indices],
+            context_intrinsics=packet.intrinsics[anchor_indices],
+        )
+        tile_support_basis = _validate_support_basis_evidence(
+            tile_support_basis,
+            anchor_slots=anchor_slots,
+            virtual_origin_slots=virtual_origin_slots,
+            virtual_means=virtual_means,
+            virtual_covariances=virtual_covariances,
+            virtual_opacities=virtual_opacities,
+            virtual_source_spatial_weights=spatial,
+            bilateral_assignment_weights=assignment,
+            anchor_source_means=source_means,
+            anchor_source_covariances=source_covariances,
+            anchor_source_opacities=source_opacities,
+            merged_means=torch.stack([item[1] for item in updates]),
+            merged_covariances=torch.stack([item[2] for item in updates]),
+            merged_opacities=torch.stack([item[4] for item in updates]),
+            context_extrinsics=packet.extrinsics[anchor_indices],
+            context_intrinsics=packet.intrinsics[anchor_indices],
+        )
+        support_basis_sha256 = _canonical_sha256(tile_support_basis)
+        coverage_updates = [
+            {
+                **row,
+                "support_basis_schema_version": tile_support_basis["schema_version"],
+                "support_basis_kind": tile_support_basis["kind"],
+                "support_basis_policy": tile_support_basis["support_basis_policy"],
+                "support_basis_sha256": support_basis_sha256,
+                "support_basis_passed": tile_support_basis["passed"],
+            }
+            for row in coverage_updates
+        ]
     return updates, {
         "virtual_count": len(target_local),
         "coverage": {
-            "certificate": DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE,
+            "certificate": (
+                DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE
+                if support_basis_profile
+                else DEPTHSPLAT_COVERAGE_ENRICHED_T4_MOMENT_CERTIFICATE
+                if coverage_enriched
+                else DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE
+            ),
             "finite_psd_moment_merge": True,
-            "support_containment_guard": False,
+            "support_containment_guard": engineering_profile,
             "moment_covariance_scale_max": 1.0,
             "minimum_merged_covariance_eigenvalue": min(
                 minimum_merged_eigenvalues, default=0.0
@@ -2217,11 +3315,20 @@ def _build_literal_paper_t4_selected_only_tile_updates(
                 minimum_virtual_eigenvalues, default=0.0
             ),
             "per_update": coverage_updates,
+            "owner_support": owner_support,
+            "support_basis": tile_support_basis,
+            "support_basis_sha256": support_basis_sha256,
         },
-        "virtual_geometry_source": "selected-probe-gaussian-spatial-moment-v1",
-        "virtual_attribute_source": "selected-probe-gaussian-spatial-linear-v1",
+        "virtual_geometry_source": f"{source_label}-gaussian-spatial-moment-v1",
+        "virtual_attribute_source": f"{source_label}-gaussian-spatial-linear-v1",
         "omitted_routing_z_depth_reads": 0,
-        "selected_probe_attribute_reads": len(anchor_indices),
+        **{
+            (
+                "selected_anchor_attribute_reads"
+                if engineering_profile
+                else "selected_probe_attribute_reads"
+            ): len(anchor_indices)
+        },
         "opacity_compositing_order": "literal-weighted-average-no-alpha-union-v1",
         "assignment_feature_semantics": "raw-bilinear-s1-v1",
     }
@@ -2262,6 +3369,8 @@ def preflight_depthsplat_l0_l1_materialization(
         not in {
             DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
         }
     ):
         raise ValueError("DepthSplat materializer safety thresholds are invalid")
@@ -2277,12 +3386,36 @@ def preflight_depthsplat_l0_l1_materialization(
     )
     collect_loo = collect_selected_anchor_attribute_loo_risk or frozen_loo_guard is not None
     views, height, width, semantics = _require_plan(plan)
-    if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE:
+    _validate_execution_profile_plan_binding(
+        plan, execution_profile=execution_profile
+    )
+    if execution_profile in {
+        DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+    }:
         if float(maximum_coverage_covariance_scale) != 1.0:
             raise ValueError(
-                "DepthSplat formal paper profile forbids covariance expansion"
+                "DepthSplat fixed-scale profile forbids covariance expansion"
             )
+    if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE:
         _validate_literal_paper_t4_plan(
+            plan,
+            views=views,
+            height=height,
+            width=width,
+            semantics=semantics,
+        )
+    elif execution_profile == DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE:
+        _validate_coverage_enriched_t4_plan(
+            plan,
+            views=views,
+            height=height,
+            width=width,
+            semantics=semantics,
+        )
+    elif execution_profile == DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE:
+        _validate_support_basis_t4_plan(
             plan,
             views=views,
             height=height,
@@ -2349,6 +3482,96 @@ def preflight_depthsplat_l0_l1_materialization(
     trace: list[dict[str, Any]] = []
     rejection_reasons: dict[str, int] = {}
     feature_statistic = str(plan.events["feature_statistic"])
+
+    if (
+        execution_profile
+        in {
+            DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+        }
+        and collect_loo
+    ):
+        raise ValueError(
+            "DepthSplat coverage-enriched profile requires its own frozen attribute guard"
+        )
+
+    def build_compact_tile(
+        *,
+        record: Mapping[str, Any],
+        level: str,
+        view: int,
+        tile_y: int,
+        tile_x: int,
+    ) -> tuple[
+        list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+        dict[str, Any],
+    ]:
+        if execution_profile in {
+            DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+        }:
+            return _build_fixed_scale_selected_only_tile_updates(
+                packet=initial_packet,
+                packed=initial_packed,
+                slot_to_index=slot_to_index,
+                raw_feature_map=assignment_features[view],
+                record=record,
+                level=level,
+                semantics=semantics,
+                view=view,
+                tile_y=tile_y,
+                tile_x=tile_x,
+                height=height,
+                width=width,
+                feature_statistic=feature_statistic,
+                coverage_enriched=(
+                    execution_profile
+                    == DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE
+                ),
+                support_basis_profile=(
+                    execution_profile
+                    == DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE
+                ),
+            )
+        if source_grid is None:
+            raise RuntimeError("DepthSplat development source grid is missing")
+        return _build_tile_updates(
+            packet=initial_packet,
+            packed=initial_packed,
+            slot_to_index=slot_to_index,
+            feature_map=assignment_features[view],
+            z_depth_map=routing_z_depths[0, view],
+            record=record,
+            level=level,
+            semantics=semantics,
+            view=view,
+            tile_y=tile_y,
+            tile_x=tile_x,
+            height=height,
+            width=width,
+            feature_statistic=feature_statistic,
+            source_grid=source_grid,
+            source_get_world_rays=source_get_world_rays,
+            maximum_feature_relative_residual=float(maximum_feature_relative_residual),
+            maximum_coverage_covariance_scale=float(maximum_coverage_covariance_scale),
+        )
+
+    def l1_prefetch_is_available(
+        *, record: Mapping[str, Any], view: int, tile_y: int, tile_x: int
+    ) -> bool:
+        positions = _route_anchor_positions(record, level="L1", semantics=semantics)
+        slots = _tile_slots(
+            view=view,
+            tile_y=tile_y,
+            tile_x=tile_x,
+            height=height,
+            width=width,
+            tile_size=4,
+            positions=positions,
+        )
+        return all(slot in slot_to_index for slot in slots)
+
     for view in range(views):
         for tile_y in range(height // 4):
             for tile_x in range(width // 4):
@@ -2363,6 +3586,7 @@ def preflight_depthsplat_l0_l1_materialization(
                     "planned_route": level,
                     "attempted": level in {"L0", "L1"},
                     "accepted": level == "Full",
+                    "accepted_level": "Full" if level == "Full" else None,
                     "source_nonprobe_s3_attribute_reads": 0,
                     "selected_anchor_attribute_loo": None,
                 }
@@ -2441,47 +3665,76 @@ def preflight_depthsplat_l0_l1_materialization(
                             raise ValueError(
                                 "DepthSplat selected-anchor LOO rejected tile"
                             )
-                    if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE:
-                        tile_updates, evidence = (
-                            _build_literal_paper_t4_selected_only_tile_updates(
-                                packet=initial_packet,
-                                packed=initial_packed,
-                                slot_to_index=slot_to_index,
-                                raw_feature_map=assignment_features[view],
+                    tile_updates, evidence = build_compact_tile(
+                        record=record,
+                        level=str(level),
+                        view=view,
+                        tile_y=tile_y,
+                        tile_x=tile_x,
+                    )
+                    accepted_level = str(level)
+                    if execution_profile in {
+                        DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+                        DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+                    }:
+                        support_key = (
+                            "owner_support"
+                            if execution_profile
+                            == DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE
+                            else "support_basis"
+                        )
+                        support_label = (
+                            "owner support"
+                            if support_key == "owner_support"
+                            else "support basis"
+                        )
+                        profile_label = (
+                            "DepthSplat coverage-enriched"
+                            if support_key == "owner_support"
+                            else "DepthSplat support-basis"
+                        )
+                        support = evidence.get("coverage", {}).get(support_key)
+                        if (
+                            not isinstance(support, Mapping)
+                            or support.get("passed") is not True
+                        ):
+                            entry[f"l0_{support_key}_failure"] = support
+                            can_enrich = (
+                                level == "L0"
+                                and record.get("depth_uniform") is True
+                                and l1_prefetch_is_available(
+                                    record=record,
+                                    view=view,
+                                    tile_y=tile_y,
+                                    tile_x=tile_x,
+                                )
+                            )
+                            if not can_enrich:
+                                raise ValueError(
+                                    f"{profile_label} {support_label} rejected tile"
+                                )
+                            l1_updates, l1_evidence = build_compact_tile(
                                 record=record,
-                                level=level,
-                                semantics=semantics,
+                                level="L1",
                                 view=view,
                                 tile_y=tile_y,
                                 tile_x=tile_x,
-                                height=height,
-                                width=width,
-                                feature_statistic=feature_statistic,
                             )
-                        )
-                    else:
-                        if source_grid is None:
-                            raise RuntimeError("DepthSplat development source grid is missing")
-                        tile_updates, evidence = _build_tile_updates(
-                            packet=initial_packet,
-                            packed=initial_packed,
-                            slot_to_index=slot_to_index,
-                            feature_map=assignment_features[view],
-                            z_depth_map=routing_z_depths[0, view],
-                            record=record,
-                            level=level,
-                            semantics=semantics,
-                            view=view,
-                            tile_y=tile_y,
-                            tile_x=tile_x,
-                            height=height,
-                            width=width,
-                            feature_statistic=feature_statistic,
-                            source_grid=source_grid,
-                            source_get_world_rays=source_get_world_rays,
-                            maximum_feature_relative_residual=float(maximum_feature_relative_residual),
-                            maximum_coverage_covariance_scale=float(maximum_coverage_covariance_scale),
-                        )
+                            l1_support = l1_evidence.get("coverage", {}).get(
+                                support_key
+                            )
+                            if (
+                                not isinstance(l1_support, Mapping)
+                                or l1_support.get("passed") is not True
+                            ):
+                                entry[f"l1_{support_key}_failure"] = l1_support
+                                raise ValueError(
+                                    f"{profile_label} L1 {support_label} rejected tile"
+                                )
+                            tile_updates = l1_updates
+                            evidence = l1_evidence
+                            accepted_level = "L1"
+                            entry["l1_enrichment_prefetched"] = True
                 except (RuntimeError, ValueError) as error:
                     reason = str(error) or type(error).__name__
                     _mark_tile(promote, view=view, tile_y=tile_y, tile_x=tile_x, tile_size=4)
@@ -2489,7 +3742,18 @@ def preflight_depthsplat_l0_l1_materialization(
                     rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
                 else:
                     updates.extend(tile_updates)
-                    entry.update({"accepted": True, "reason": "accepted", **evidence})
+                    entry.update(
+                        {
+                            "accepted": True,
+                            "accepted_level": accepted_level,
+                            "reason": (
+                                "accepted_l1_enrichment"
+                                if accepted_level != level
+                                else "accepted"
+                            ),
+                            **evidence,
+                        }
+                    )
                 trace.append(entry)
     ordered = sorted(updates, key=lambda value: value[0])
     if len({slot for slot, *_ in ordered}) != len(ordered):
@@ -2569,29 +3833,9 @@ def preflight_depthsplat_l0_l1_materialization(
     update_binding = _update_binding(
         update_slots, means, covariances, harmonics, opacities
     )
-    coverage_by_slot: dict[int, dict[str, Any]] = {}
-    for tile_record in trace:
-        coverage = tile_record.get("coverage")
-        if not isinstance(coverage, Mapping):
-            continue
-        per_update = coverage.get("per_update")
-        if not isinstance(per_update, list):
-            raise ValueError("DepthSplat coverage tile record is incomplete")
-        for row in per_update:
-            if not isinstance(row, Mapping):
-                raise ValueError("DepthSplat coverage tile row is invalid")
-            slot = row.get("update_dense_slot")
-            if isinstance(slot, bool) or not isinstance(slot, int) or slot in coverage_by_slot:
-                raise ValueError("DepthSplat coverage tile slot is invalid")
-            coverage_by_slot[slot] = dict(row)
-    ordered_coverage_rows: list[dict[str, Any]] = []
-    for update_index, (slot, *_values) in enumerate(ordered):
-        row = coverage_by_slot.pop(int(slot), None)
-        if row is None:
-            raise ValueError("DepthSplat coverage is missing an accepted update slot")
-        ordered_coverage_rows.append({**row, "update_index": update_index})
-    if coverage_by_slot:
-        raise ValueError("DepthSplat coverage has an unbound update slot")
+    ordered_coverage_rows = _ordered_coverage_rows_from_trace(
+        tile_trace=trace, update_slots=update_slots
+    )
     if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE:
         coverage_certificate = DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE
         coverage_certificate_payload = _literal_moment_merge_certificate_payload(
@@ -2600,6 +3844,27 @@ def preflight_depthsplat_l0_l1_materialization(
             update_means=means,
             update_covariances=covariances,
             per_update=ordered_coverage_rows,
+            tile_trace_sha256=trace_sha256,
+        )
+    elif execution_profile == DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE:
+        coverage_certificate = DEPTHSPLAT_COVERAGE_ENRICHED_T4_MOMENT_CERTIFICATE
+        coverage_certificate_payload = _coverage_enriched_moment_certificate_payload(
+            update_slots=update_slots,
+            update_binding=update_binding,
+            update_means=means,
+            update_covariances=covariances,
+            per_update=ordered_coverage_rows,
+            tile_trace_sha256=trace_sha256,
+        )
+    elif execution_profile == DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE:
+        coverage_certificate = DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE
+        coverage_certificate_payload = _support_basis_moment_certificate_payload(
+            update_slots=update_slots,
+            update_binding=update_binding,
+            update_means=means,
+            update_covariances=covariances,
+            per_update=ordered_coverage_rows,
+            tile_trace=trace,
             tile_trace_sha256=trace_sha256,
         )
     else:
@@ -2626,6 +3891,7 @@ def preflight_depthsplat_l0_l1_materialization(
             "assignment_feature_semantics": assignment_feature_semantics,
             "selected_anchor_attribute_loo_frozen_guard": frozen_loo_guard,
             "selected_anchor_attribute_loo_aggregate_sha256": loo_aggregate_sha256,
+            "coverage_certificate_sha256": coverage_certificate_sha256,
         }
     )
     events = {
@@ -2666,7 +3932,12 @@ def preflight_depthsplat_l0_l1_materialization(
         ),
         "omitted_routing_z_depth_reads": (
             sum(int(record.get("omitted_routing_z_depth_reads", 0)) for record in trace)
-            if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE
+            if execution_profile
+            in {
+                DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+            }
             else None
         ),
         "l1_anchor_semantics": semantics,
@@ -2677,7 +3948,12 @@ def preflight_depthsplat_l0_l1_materialization(
         "coverage_checked_tiles": len(coverage_records),
         "coverage_max_containment_lhs_after_scale": (
             None
-            if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE
+            if execution_profile
+            in {
+                DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+            }
             else max(
                 (
                     float(record["maximum_containment_lhs_after_scale"])
@@ -2697,6 +3973,30 @@ def preflight_depthsplat_l0_l1_materialization(
             False
             if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE
             else None
+        ),
+        "coverage_enriched_owner_support_guard": (
+            True
+            if execution_profile
+            == DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE
+            else None
+        ),
+        "support_basis_guard": (
+            True
+            if execution_profile == DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE
+            else None
+        ),
+        "coverage_enriched_l0_to_l1_tile_count": sum(
+            record.get("accepted_level") == "L1"
+            and record.get("planned_route") == "L0"
+            and execution_profile
+            == DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE
+            for record in trace
+        ),
+        "support_basis_l0_to_l1_tile_count": sum(
+            record.get("accepted_level") == "L1"
+            and record.get("planned_route") == "L0"
+            and execution_profile == DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE
+            for record in trace
         ),
         "selected_anchor_attribute_loo_certificate": (
             DEPTHSPLAT_SELECTED_ANCHOR_ATTRIBUTE_LOO_CERTIFICATE
@@ -2737,8 +4037,41 @@ def resolve_depthsplat_compact_final_route(
     """Resolve final L0/L1 output slots, discarding producer-only prefetches."""
 
     views, height, width, semantics = _require_plan(plan)
+    plan_trace_sha256 = _require_bound_tile_trace(
+        plan.tile_trace,
+        expected_sha256=plan.events.get("tile_trace_sha256"),
+        label="plan tile trace",
+    )
     if not isinstance(preflight, DepthSplatCompactMaterializationPreflight):
         raise TypeError("DepthSplat final route requires a materialization preflight")
+    preflight_trace_sha256 = _require_bound_tile_trace(
+        preflight.tile_trace,
+        expected_sha256=preflight.events.get("tile_trace_sha256"),
+        label="preflight tile trace",
+    )
+    execution_profile = preflight.events.get("execution_profile")
+    if execution_profile not in {
+        DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+    }:
+        raise ValueError("DepthSplat final route materialization profile is invalid")
+    _validate_execution_profile_plan_binding(
+        plan, execution_profile=execution_profile
+    )
+    if execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE:
+        _validate_literal_paper_t4_plan(
+            plan, views=views, height=height, width=width, semantics=semantics
+        )
+    elif execution_profile == DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE:
+        _validate_coverage_enriched_t4_plan(
+            plan, views=views, height=height, width=width, semantics=semantics
+        )
+    elif execution_profile == DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE:
+        _validate_support_basis_t4_plan(
+            plan, views=views, height=height, width=width, semantics=semantics
+        )
     initial_binding = preflight.events.get("initial_binding")
     update_binding = preflight.events.get("update_binding")
     session = preflight.events.get("materialization_session_sha256")
@@ -2748,7 +4081,8 @@ def resolve_depthsplat_compact_final_route(
         or not isinstance(update_binding, Mapping)
         or not isinstance(session, str)
         or initial_binding.get("plan_selection_mask_sha256") != _mask_sha256(plan.selection_mask)
-        or initial_binding.get("plan_tile_trace_sha256") != plan.events.get("tile_trace_sha256")
+        or initial_binding.get("plan_tile_trace_sha256") != plan_trace_sha256
+        or initial_binding.get("execution_profile") != execution_profile
         or update_binding
         != _update_binding(
             preflight.update_dense_slots,
@@ -2760,6 +4094,10 @@ def resolve_depthsplat_compact_final_route(
     ):
         raise ValueError("DepthSplat final route preflight binding changed")
     coverage_certificate = _validate_coverage_certificate(preflight)
+    coverage_certificate_sha256 = _require_sha256(
+        preflight.events.get("coverage_certificate_sha256"),
+        label="coverage certificate",
+    )
     loo_aggregate = _validate_selected_anchor_attribute_loo_aggregate(
         events=preflight.events,
         tile_trace=preflight.tile_trace,
@@ -2770,8 +4108,8 @@ def resolve_depthsplat_compact_final_route(
             "initial_binding": dict(initial_binding),
             "update_binding": dict(update_binding),
             "promote_full_mask_sha256": _mask_sha256(preflight.promote_full_mask),
-            "tile_trace_sha256": preflight.events.get("tile_trace_sha256"),
-            "execution_profile": preflight.events.get("execution_profile"),
+            "tile_trace_sha256": preflight_trace_sha256,
+            "execution_profile": execution_profile,
             "assignment_feature_map_sha256": preflight.events.get(
                 "assignment_feature_map_sha256"
             ),
@@ -2784,6 +4122,7 @@ def resolve_depthsplat_compact_final_route(
             "selected_anchor_attribute_loo_aggregate_sha256": preflight.events.get(
                 "selected_anchor_attribute_loo_aggregate_sha256"
             ),
+            "coverage_certificate_sha256": coverage_certificate_sha256,
         }
     )
     if session != expected_session:
@@ -2800,6 +4139,14 @@ def resolve_depthsplat_compact_final_route(
     }
     if len(preflight_records) != len(plan.tile_trace):
         raise ValueError("DepthSplat final route preflight trace is incomplete")
+    update_slots = {
+        int(slot)
+        for slot in preflight.update_dense_slots.detach().to(
+            device="cpu", dtype=torch.int64
+        ).tolist()
+    }
+    if len(update_slots) != int(preflight.update_dense_slots.numel()):
+        raise ValueError("DepthSplat final route preflight update slots are duplicated")
     selected = torch.zeros_like(plan.selection_mask)
     full_passthrough = torch.zeros_like(plan.selection_mask)
     trace: list[dict[str, Any]] = []
@@ -2824,8 +4171,67 @@ def resolve_depthsplat_compact_final_route(
             or (not attempted and promoted)
         ):
             raise ValueError("DepthSplat final route preflight tile decision diverged")
-        final = "Full" if promoted else planned
+        accepted_level = record.get("accepted_level")
+        if promoted:
+            final = "Full"
+        else:
+            if accepted_level not in {"L0", "L1"}:
+                raise ValueError("DepthSplat final route has no accepted compact level")
+            if (
+                accepted_level != planned
+                and not (
+                    preflight.events.get("execution_profile")
+                    in {
+                        DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
+                        DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
+                    }
+                    and planned == "L0"
+                    and accepted_level == "L1"
+                )
+            ):
+                raise ValueError("DepthSplat final route compact level changed")
+            final = str(accepted_level)
         positions = _route_anchor_positions(plan_record, level=final, semantics=semantics)
+        if final == "L1" and planned == "L0":
+            prefetched = plan.selection_mask[
+                view,
+                tile_y * 4 : (tile_y + 1) * 4,
+                tile_x * 4 : (tile_x + 1) * 4,
+            ]
+            expected_prefetch = torch.zeros_like(prefetched)
+            for row, column in positions:
+                expected_prefetch[row, column] = True
+            if bool((expected_prefetch & ~prefetched).any()):
+                raise ValueError("DepthSplat final route L1 enrichment was not prefetched")
+        tile_slots = set(
+            _tile_slots(
+                view=view,
+                tile_y=tile_y,
+                tile_x=tile_x,
+                height=height,
+                width=width,
+                tile_size=4,
+                positions=_full_positions(4),
+            )
+        )
+        actual_update_slots = update_slots & tile_slots
+        expected_update_slots = (
+            set(
+                _tile_slots(
+                    view=view,
+                    tile_y=tile_y,
+                    tile_x=tile_x,
+                    height=height,
+                    width=width,
+                    tile_size=4,
+                    positions=positions,
+                )
+            )
+            if final in {"L0", "L1"}
+            else set()
+        )
+        if actual_update_slots != expected_update_slots:
+            raise ValueError("DepthSplat final route compact updates do not match accepted anchors")
         _mark_tile(selected, view=view, tile_y=tile_y, tile_x=tile_x, tile_size=4, positions=positions)
         if final == "Full":
             _mark_tile(full_passthrough, view=view, tile_y=tile_y, tile_x=tile_x, tile_size=4)
@@ -2931,6 +4337,16 @@ def apply_depthsplat_compact_l0_l1_materialization(
         final_route, DepthSplatCompactFinalRoute
     ):
         raise TypeError("DepthSplat final materialization requires preflight and route")
+    preflight_trace_sha256 = _require_bound_tile_trace(
+        preflight.tile_trace,
+        expected_sha256=preflight.events.get("tile_trace_sha256"),
+        label="preflight tile trace",
+    )
+    final_route_trace_sha256 = _require_bound_tile_trace(
+        final_route.tile_trace,
+        expected_sha256=final_route.events.get("tile_trace_sha256"),
+        label="final route tile trace",
+    )
     preflight_session = preflight.events.get("materialization_session_sha256")
     update_binding = preflight.events.get("update_binding")
     expected_update_binding = _update_binding(
@@ -2947,7 +4363,7 @@ def apply_depthsplat_compact_l0_l1_materialization(
             "additional_full_mask_sha256": _mask_sha256(final_route.additional_full_mask),
             "raw_head_request_mask_sha256": _mask_sha256(final_route.raw_head_request_mask),
             "full_passthrough_mask_sha256": _mask_sha256(final_route.full_passthrough_mask),
-            "tile_trace_sha256": final_route.events.get("tile_trace_sha256"),
+            "tile_trace_sha256": final_route_trace_sha256,
         }
     )
     if (
@@ -2956,7 +4372,7 @@ def apply_depthsplat_compact_l0_l1_materialization(
         or final_route.events.get("preflight_materialization_session_sha256")
         != preflight_session
         or final_route.events.get("preflight_trace_sha256")
-        != preflight.events.get("tile_trace_sha256")
+        != preflight_trace_sha256
         or final_route.events.get("route_session_sha256") != expected_route_session
     ):
         raise ValueError("DepthSplat final packet route binding changed")
@@ -2965,6 +4381,40 @@ def apply_depthsplat_compact_l0_l1_materialization(
         events=preflight.events,
         tile_trace=preflight.tile_trace,
     )
+    initial_binding = preflight.events.get("initial_binding")
+    coverage_certificate_sha256 = _require_sha256(
+        preflight.events.get("coverage_certificate_sha256"),
+        label="coverage certificate",
+    )
+    expected_preflight_session = _canonical_sha256(
+        {
+            "schema_version": DEPTHSPLAT_MATERIALIZER_SCHEMA_VERSION,
+            "initial_binding": dict(initial_binding)
+            if isinstance(initial_binding, Mapping)
+            else initial_binding,
+            "update_binding": dict(update_binding)
+            if isinstance(update_binding, Mapping)
+            else update_binding,
+            "promote_full_mask_sha256": _mask_sha256(preflight.promote_full_mask),
+            "tile_trace_sha256": preflight_trace_sha256,
+            "execution_profile": preflight.events.get("execution_profile"),
+            "assignment_feature_map_sha256": preflight.events.get(
+                "assignment_feature_map_sha256"
+            ),
+            "assignment_feature_semantics": preflight.events.get(
+                "assignment_feature_semantics"
+            ),
+            "selected_anchor_attribute_loo_frozen_guard": preflight.events.get(
+                "selected_anchor_attribute_loo_frozen_guard"
+            ),
+            "selected_anchor_attribute_loo_aggregate_sha256": preflight.events.get(
+                "selected_anchor_attribute_loo_aggregate_sha256"
+            ),
+            "coverage_certificate_sha256": coverage_certificate_sha256,
+        }
+    )
+    if preflight_session != expected_preflight_session:
+        raise ValueError("DepthSplat final packet preflight session changed")
     if (
         final_route.events.get("coverage_certificate_sha256")
         != preflight.events.get("coverage_certificate_sha256")
@@ -3153,6 +4603,10 @@ __all__ = [
     "DEPTHSPLAT_COMPACT_AGGREGATION",
     "DEPTHSPLAT_COMPACT_COVERAGE_MAX_COVARIANCE_SCALE",
     "DEPTHSPLAT_COVERAGE_CERTIFICATE",
+    "DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE",
+    "DEPTHSPLAT_COVERAGE_ENRICHED_T4_MOMENT_CERTIFICATE",
+    "DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE",
+    "DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE",
     "DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE",
     "DEPTHSPLAT_MATERIALIZER_SCHEMA_VERSION",
     "DepthSplatCompactFinalRoute",

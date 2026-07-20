@@ -23,6 +23,18 @@ from saes.probe_layout import (
 
 PAPER_KP_ANCHOR_SEMANTICS = "paper-kp-v1"
 LITERAL_PAPER_T4_PLAN_CONTRACT = "saes-literal-paper-t4-probe-first-plan-v1"
+DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT = (
+    "saes-depthsplat-coverage-enriched-t4-probe-first-plan-v1"
+)
+DEPTHSPLAT_SUPPORT_BASIS_T4_PLAN_CONTRACT = (
+    "saes-depthsplat-support-basis-t4-probe-first-plan-v1"
+)
+COVERAGE_ENRICHED_T4_L0_SECONDARY_PREFETCH_POLICY = (
+    "source-depth-probe-uniform-only-v1"
+)
+SUPPORT_BASIS_T4_L0_SECONDARY_PREFETCH_POLICY = (
+    "source-depth-probe-uniform-only-v1"
+)
 LEGACY_L1_ANCHOR_SEMANTICS = "legacy-lightweight-12-dev"
 BALANCED_L1_ANCHOR_SEMANTICS = "engineering-lightweight-12-balanced-v1"
 ADAPTIVE_L1_15_ANCHOR_SEMANTICS = (
@@ -753,6 +765,245 @@ def literal_paper_t4_route_config_sha256(events: Mapping[str, Any]) -> str:
             or float(value) < 0.0
         ):
             raise ValueError("literal paper T=4 route threshold is invalid")
+    return _canonical_sha256(config)
+
+
+def build_depthsplat_coverage_enriched_t4_probe_first_plan(
+    features: torch.Tensor,
+    depths: torch.Tensor,
+    *,
+    height: int,
+    width: int,
+    feature_threshold: float,
+    depth_threshold: float,
+) -> IncrementalProbeFirstPlan:
+    """Build the opt-in T=4 route with balanced L1 coverage enrichment.
+
+    This engineering profile remains separate from the literal paper route.
+    It retains the paper's raw four-corner L0 feature test, then prefetches
+    the eight balanced L1-only anchors for an L0 tile only when its source
+    depth probes are uniform.  Later support certificates may consume that
+    prepared L1 packet or promote the tile to Full; this planner does not
+    inspect Gaussian attributes or target-side data.
+    """
+
+    plan = build_incremental_probe_first_plan(
+        features,
+        depths,
+        height=height,
+        width=width,
+        tile_size=4,
+        feature_threshold=feature_threshold,
+        depth_threshold=depth_threshold,
+        decision_semantics="paper-probe-feature-variance-first-hit",
+        l1_anchor_semantics=BALANCED_L1_ANCHOR_SEMANTICS,
+        formal_paper_kp4=False,
+    )
+    events = dict(plan.events)
+    events["contract_version"] = DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT
+    events["coverage_enriched_l0_secondary_prefetch_policy"] = (
+        COVERAGE_ENRICHED_T4_L0_SECONDARY_PREFETCH_POLICY
+    )
+
+    corners = [list(position) for position in compute_probe_positions(4)]
+    balanced_l1 = [
+        list(position) for position in compute_balanced_lightweight_positions(4)
+    ]
+    balanced_secondary = balanced_l1[len(corners) :]
+    if (
+        len(corners) != 4
+        or len(balanced_l1) != 12
+        or balanced_l1[: len(corners)] != corners
+        or len(balanced_secondary) != 8
+        or events.get("feature_statistic") != "raw-probe-mean-channel-variance"
+        or events.get("l0_anchor_count") != 4
+        or events.get("l1_anchor_count") != 12
+        or events.get("l1_anchor_semantics") != BALANCED_L1_ANCHOR_SEMANTICS
+        or events.get("formal_paper_kp4") is not False
+        or events.get("depth_checked_after_l0_miss_only") is not False
+        or events.get("target_rgb_accessed") is not False
+        or events.get("gaussian_attributes_accessed") is not False
+    ):
+        raise RuntimeError("coverage-enriched DepthSplat T=4 planner contract changed")
+    for record in plan.tile_trace:
+        route = record.get("pre_guard_route")
+        depth_uniform = record.get("depth_uniform")
+        if (
+            route not in {"L0", "L1", "Full"}
+            or record.get("primary_local_positions") != corners
+            or not isinstance(depth_uniform, bool)
+            or (route == "L1" and not depth_uniform)
+            or (route == "Full" and depth_uniform)
+        ):
+            raise RuntimeError("coverage-enriched DepthSplat T=4 tile trace is invalid")
+        expected_secondary = (
+            balanced_secondary
+            if route == "L1" or (route == "L0" and depth_uniform)
+            else []
+        )
+        if record.get("secondary_local_positions") != expected_secondary:
+            raise RuntimeError(
+                "coverage-enriched DepthSplat T=4 secondary prefetch changed"
+            )
+    events["coverage_enriched_t4_route_config_sha256"] = (
+        coverage_enriched_t4_route_config_sha256(events)
+    )
+    return IncrementalProbeFirstPlan(
+        primary_mask=plan.primary_mask,
+        secondary_mask=plan.secondary_mask,
+        full_mask=plan.full_mask,
+        selection_mask=plan.selection_mask,
+        tile_trace=plan.tile_trace,
+        events=events,
+    )
+
+
+def coverage_enriched_t4_route_config_sha256(events: Mapping[str, Any]) -> str:
+    """Hash the immutable coverage-enriched T=4 planner configuration."""
+
+    if not isinstance(events, Mapping):
+        raise TypeError("coverage-enriched T=4 route events must be a mapping")
+    config = {
+        "contract_version": events.get("contract_version"),
+        "tile_size": events.get("tile_size"),
+        "feature_threshold": events.get("feature_threshold"),
+        "depth_threshold": events.get("depth_threshold"),
+        "decision_semantics": events.get("decision_semantics"),
+        "feature_statistic": events.get("feature_statistic"),
+        "l1_anchor_semantics": events.get("l1_anchor_semantics"),
+        "l0_anchor_count": events.get("l0_anchor_count"),
+        "l1_anchor_count": events.get("l1_anchor_count"),
+        "formal_paper_kp4": events.get("formal_paper_kp4"),
+        "depth_checked_after_l0_miss_only": events.get(
+            "depth_checked_after_l0_miss_only"
+        ),
+        "coverage_enriched_l0_secondary_prefetch_policy": events.get(
+            "coverage_enriched_l0_secondary_prefetch_policy"
+        ),
+    }
+    if config != {
+        "contract_version": DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT,
+        "tile_size": 4,
+        "feature_threshold": config["feature_threshold"],
+        "depth_threshold": config["depth_threshold"],
+        "decision_semantics": "paper-probe-feature-variance-first-hit",
+        "feature_statistic": "raw-probe-mean-channel-variance",
+        "l1_anchor_semantics": BALANCED_L1_ANCHOR_SEMANTICS,
+        "l0_anchor_count": 4,
+        "l1_anchor_count": 12,
+        "formal_paper_kp4": False,
+        "depth_checked_after_l0_miss_only": False,
+        "coverage_enriched_l0_secondary_prefetch_policy": (
+            COVERAGE_ENRICHED_T4_L0_SECONDARY_PREFETCH_POLICY
+        ),
+    }:
+        raise ValueError("coverage-enriched T=4 route configuration changed")
+    for name in ("feature_threshold", "depth_threshold"):
+        value = config[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+        ):
+            raise ValueError("coverage-enriched T=4 route threshold is invalid")
+    return _canonical_sha256(config)
+
+
+def build_depthsplat_support_basis_t4_probe_first_plan(
+    features: torch.Tensor,
+    depths: torch.Tensor,
+    *,
+    height: int,
+    width: int,
+    feature_threshold: float,
+    depth_threshold: float,
+) -> IncrementalProbeFirstPlan:
+    """Build the separate same-tile support-basis T=4 probe plan.
+
+    The selected L0/L1 positions and source-only prefetch rule are unchanged
+    from the rejected owner profile.  A distinct contract prevents the new
+    cooperative certificate from being mistaken for its single-owner
+    predecessor.
+    """
+
+    plan = build_depthsplat_coverage_enriched_t4_probe_first_plan(
+        features,
+        depths,
+        height=height,
+        width=width,
+        feature_threshold=feature_threshold,
+        depth_threshold=depth_threshold,
+    )
+    events = dict(plan.events)
+    events["contract_version"] = DEPTHSPLAT_SUPPORT_BASIS_T4_PLAN_CONTRACT
+    events.pop("coverage_enriched_t4_route_config_sha256", None)
+    events.pop("coverage_enriched_l0_secondary_prefetch_policy", None)
+    events["support_basis_l0_secondary_prefetch_policy"] = (
+        SUPPORT_BASIS_T4_L0_SECONDARY_PREFETCH_POLICY
+    )
+    events["support_basis_t4_route_config_sha256"] = (
+        support_basis_t4_route_config_sha256(events)
+    )
+    return IncrementalProbeFirstPlan(
+        primary_mask=plan.primary_mask,
+        secondary_mask=plan.secondary_mask,
+        full_mask=plan.full_mask,
+        selection_mask=plan.selection_mask,
+        tile_trace=plan.tile_trace,
+        events=events,
+    )
+
+
+def support_basis_t4_route_config_sha256(events: Mapping[str, Any]) -> str:
+    """Hash the immutable same-tile support-basis planner configuration."""
+
+    if not isinstance(events, Mapping):
+        raise TypeError("support-basis T=4 route events must be a mapping")
+    config = {
+        "contract_version": events.get("contract_version"),
+        "tile_size": events.get("tile_size"),
+        "feature_threshold": events.get("feature_threshold"),
+        "depth_threshold": events.get("depth_threshold"),
+        "decision_semantics": events.get("decision_semantics"),
+        "feature_statistic": events.get("feature_statistic"),
+        "l1_anchor_semantics": events.get("l1_anchor_semantics"),
+        "l0_anchor_count": events.get("l0_anchor_count"),
+        "l1_anchor_count": events.get("l1_anchor_count"),
+        "formal_paper_kp4": events.get("formal_paper_kp4"),
+        "depth_checked_after_l0_miss_only": events.get(
+            "depth_checked_after_l0_miss_only"
+        ),
+        "support_basis_l0_secondary_prefetch_policy": events.get(
+            "support_basis_l0_secondary_prefetch_policy"
+        ),
+    }
+    if config != {
+        "contract_version": DEPTHSPLAT_SUPPORT_BASIS_T4_PLAN_CONTRACT,
+        "tile_size": 4,
+        "feature_threshold": config["feature_threshold"],
+        "depth_threshold": config["depth_threshold"],
+        "decision_semantics": "paper-probe-feature-variance-first-hit",
+        "feature_statistic": "raw-probe-mean-channel-variance",
+        "l1_anchor_semantics": BALANCED_L1_ANCHOR_SEMANTICS,
+        "l0_anchor_count": 4,
+        "l1_anchor_count": 12,
+        "formal_paper_kp4": False,
+        "depth_checked_after_l0_miss_only": False,
+        "support_basis_l0_secondary_prefetch_policy": (
+            SUPPORT_BASIS_T4_L0_SECONDARY_PREFETCH_POLICY
+        ),
+    }:
+        raise ValueError("support-basis T=4 route configuration changed")
+    for name in ("feature_threshold", "depth_threshold"):
+        value = config[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+        ):
+            raise ValueError("support-basis T=4 route threshold is invalid")
     return _canonical_sha256(config)
 
 

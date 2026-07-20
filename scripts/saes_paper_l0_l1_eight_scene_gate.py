@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.context_only_audit_input import (
+    context_only_audit_identity_matches,
     prepare_context_only_audit_input,
     validate_context_only_audit_input,
 )
@@ -415,7 +416,9 @@ def _validate_target_free_audit(
             "coordinate_semantics"
         ):
             raise ValueError("target-free audit MVSplat coordinate semantics changed")
-    if audit.get("input_identity") != dict(context_identity):
+    if not context_only_audit_identity_matches(
+        audit.get("input_identity"), context_identity
+    ):
         raise ValueError("target-free audit input identity changed")
     if audit.get("target_mapping_present") is not False:
         raise ValueError("target-free audit constructed a target mapping")
@@ -507,7 +510,9 @@ def _validate_quality_record(
         raise ValueError("quality target-free gate model identity changed")
     if gate.get("sample_index") != expected["source_sample_index"]:
         raise ValueError("quality gate sample index changed")
-    if gate.get("context_input_identity") != dict(context_identity):
+    if not context_only_audit_identity_matches(
+        gate.get("context_input_identity"), context_identity
+    ):
         raise ValueError("quality gate context identity changed")
     for key in (
         "source_selection_mask_sha256",

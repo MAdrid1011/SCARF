@@ -190,6 +190,144 @@ def test_literal_t4_uses_l1_or_full_only_after_l0_feature_miss_with_four_corners
     assert int(plan.full_mask[0, :4, 4:].sum()) == 0
 
 
+def test_coverage_enriched_t4_keeps_paper_l0_and_balanced_l1_12_layout():
+    from saes.probe_first_schedule import (
+        BALANCED_L1_ANCHOR_SEMANTICS,
+        COVERAGE_ENRICHED_T4_L0_SECONDARY_PREFETCH_POLICY,
+        DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT,
+        LITERAL_PAPER_T4_PLAN_CONTRACT,
+        build_depthsplat_coverage_enriched_t4_probe_first_plan,
+        build_incremental_probe_first_plan,
+        build_literal_paper_t4_probe_first_plan,
+        coverage_enriched_t4_route_config_sha256,
+    )
+
+    features = _features({(0, 0)})
+    depths = _depths({(0, 0), (0, 1), (1, 0), (1, 1)})
+    plan = build_depthsplat_coverage_enriched_t4_probe_first_plan(
+        features,
+        depths,
+        height=8,
+        width=8,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+    )
+    literal = build_literal_paper_t4_probe_first_plan(
+        features,
+        depths,
+        height=8,
+        width=8,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+    )
+    default = build_incremental_probe_first_plan(
+        features,
+        depths,
+        height=8,
+        width=8,
+        tile_size=4,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+        decision_semantics="paper-probe-feature-variance-first-hit",
+    )
+    expected_l1 = [
+        [0, 0],
+        [0, 3],
+        [3, 0],
+        [3, 3],
+        [1, 1],
+        [1, 2],
+        [2, 1],
+        [2, 2],
+        [0, 1],
+        [1, 3],
+        [3, 2],
+        [2, 0],
+    ]
+    records = {
+        (record["tile_y"], record["tile_x"]): record for record in plan.tile_trace
+    }
+
+    l0 = records[(0, 0)]
+    l1 = records[(0, 1)]
+    assert plan.events["contract_version"] == DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT
+    assert plan.events["contract_version"] != LITERAL_PAPER_T4_PLAN_CONTRACT
+    assert plan.events["contract_version"] != default.events["contract_version"]
+    assert plan.events["feature_statistic"] == "raw-probe-mean-channel-variance"
+    assert plan.events["l0_anchor_count"] == 4
+    assert plan.events["l1_anchor_count"] == 12
+    assert plan.events["l1_anchor_semantics"] == BALANCED_L1_ANCHOR_SEMANTICS
+    assert plan.events["formal_paper_kp4"] is False
+    assert plan.events["coverage_enriched_l0_secondary_prefetch_policy"] == (
+        COVERAGE_ENRICHED_T4_L0_SECONDARY_PREFETCH_POLICY
+    )
+    assert plan.events["coverage_enriched_t4_route_config_sha256"] == (
+        coverage_enriched_t4_route_config_sha256(plan.events)
+    )
+    assert l0["pre_guard_route"] == "L0"
+    assert l1["pre_guard_route"] == "L1"
+    assert l0["primary_local_positions"] == expected_l1[:4]
+    assert l0["secondary_local_positions"] == expected_l1[4:]
+    assert l1["primary_local_positions"] == expected_l1[:4]
+    assert l1["secondary_local_positions"] == expected_l1[4:]
+    observed_l0 = {
+        tuple(position.tolist())
+        for position in plan.selection_mask[0, :4, :4].nonzero(as_tuple=False)
+    }
+    assert observed_l0 == {tuple(position) for position in expected_l1}
+    assert literal.tile_trace[0]["secondary_local_positions"] == []
+
+
+def test_coverage_enriched_t4_prefetches_l0_secondary_only_for_uniform_source_depths():
+    from saes.probe_first_schedule import (
+        build_depthsplat_coverage_enriched_t4_probe_first_plan,
+    )
+
+    plan = build_depthsplat_coverage_enriched_t4_probe_first_plan(
+        _features({(0, 0), (1, 0)}),
+        _depths({(0, 0), (0, 1)}),
+        height=8,
+        width=8,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+    )
+    records = {
+        (record["tile_y"], record["tile_x"]): record for record in plan.tile_trace
+    }
+    uniform_l0 = records[(0, 0)]
+    nonuniform_l0 = records[(1, 0)]
+
+    assert uniform_l0["pre_guard_route"] == "L0"
+    assert uniform_l0["depth_uniform"] is True
+    assert len(uniform_l0["secondary_local_positions"]) == 8
+    assert int(plan.secondary_mask[0, :4, :4].sum()) == 8
+    assert nonuniform_l0["pre_guard_route"] == "L0"
+    assert nonuniform_l0["depth_uniform"] is False
+    assert nonuniform_l0["secondary_local_positions"] == []
+    assert int(plan.secondary_mask[0, 4:, :4].sum()) == 0
+    assert nonuniform_l0["full_local_positions"] == []
+
+
+def test_coverage_enriched_t4_planner_is_target_and_attribute_free():
+    from saes.probe_first_schedule import (
+        build_depthsplat_coverage_enriched_t4_probe_first_plan,
+    )
+
+    plan = build_depthsplat_coverage_enriched_t4_probe_first_plan(
+        torch.zeros(1, 1, 2, 4, 4),
+        torch.ones(1, 1, 4, 4),
+        height=4,
+        width=4,
+        feature_threshold=0.2,
+        depth_threshold=0.1,
+    )
+
+    assert plan.events["target_rgb_accessed"] is False
+    assert plan.events["gaussian_attributes_accessed"] is False
+    assert plan.tile_trace[0]["pre_guard_route"] == "L0"
+    assert plan.tile_trace[0]["depth_uniform"] is True
+
+
 def test_incremental_probe_first_plan_partitions_primary_secondary_and_full_requests():
     from saes.probe_first_schedule import build_incremental_probe_first_plan
 

@@ -545,6 +545,21 @@ def test_quality_gate_requires_the_full_audited_context_input_identity():
         pilot._require_exact_audited_context_input_identity(audit, identity) == identity
     )
 
+    current_identity = {
+        **identity,
+        "target_mapping_present": False,
+        "target_index_accessed": False,
+    }
+    assert (
+        pilot._require_exact_audited_context_input_identity(audit, current_identity)
+        == current_identity
+    )
+
+    with pytest.raises(ValueError, match="input identity"):
+        pilot._require_exact_audited_context_input_identity(
+            audit, {**current_identity, "target_mapping_present": True}
+        )
+
     changed = {**identity, "sidecar": {"record_sha256": _sha("6")}}
     with pytest.raises(ValueError, match="input identity"):
         pilot._require_exact_audited_context_input_identity(audit, changed)

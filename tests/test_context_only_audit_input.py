@@ -101,6 +101,8 @@ def test_context_only_preparation_removes_target_rows_and_metadata(tmp_path: Pat
     assert record["source_sample_index"] == 0
     assert identity["target_rgb_accessed"] is False
     assert identity["target_camera_metadata_accessed"] is False
+    assert identity["target_mapping_present"] is False
+    assert identity["target_index_accessed"] is False
     assert identity["source_sample_index"] == 0
     assert set(payload) == {
         "schema_version",
@@ -139,6 +141,35 @@ def test_context_only_preparation_preserves_nonzero_source_sample_identity(
     assert record["target_rgb_included"] is False
     assert record["target_camera_metadata_included"] is False
     assert record["target_index_included"] is False
+
+
+def test_context_identity_matches_legacy_false_only_access_attestations():
+    from data.context_only_audit_input import context_only_audit_identity_matches
+
+    legacy = {
+        "scene": "scene-fixed",
+        "context_indices": [0, 4],
+        "tree_sha256": "a" * 64,
+        "target_rgb_accessed": False,
+        "target_camera_metadata_accessed": False,
+    }
+    current = {
+        **legacy,
+        "target_mapping_present": False,
+        "target_index_accessed": False,
+    }
+
+    assert context_only_audit_identity_matches(legacy, current)
+    assert context_only_audit_identity_matches(current, legacy)
+    assert not context_only_audit_identity_matches(
+        legacy, {**current, "target_mapping_present": True}
+    )
+    assert not context_only_audit_identity_matches(
+        legacy, {**current, "target_index_accessed": 0}
+    )
+    assert not context_only_audit_identity_matches(
+        legacy, {**current, "tree_sha256": "b" * 64}
+    )
 
 
 def test_context_only_preparation_rejects_negative_source_sample_index(tmp_path: Path):
@@ -220,6 +251,7 @@ def test_context_only_loader_never_returns_a_target_mapping(
     assert batch["context"]["extrinsics"].shape == (1, 2, 4, 4)
     assert batch["calibration"]["target_mapping_present"] is False
     assert batch["calibration"]["target_camera_metadata_accessed"] is False
+    assert batch["calibration"]["target_index_accessed"] is False
 
 
 def test_context_only_loader_binds_the_requested_model_identity(
