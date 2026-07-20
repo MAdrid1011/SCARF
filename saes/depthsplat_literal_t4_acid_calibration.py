@@ -620,10 +620,13 @@ def _validate_replay_fallback_view(value: Any, *, label: str) -> dict[str, Any]:
         )
     ):
         raise ValueError(f"literal T=4 {label} replay fallback booleans are invalid")
-    if normalized["source_native_full_passthrough_positions"] > normalized[
-        "selected_final_output_positions"
-    ]:
+    selected_positions = normalized["selected_final_output_positions"]
+    full_positions = normalized["source_native_full_passthrough_positions"]
+    requested_compact_positions = normalized["selected_compact_requested_positions"]
+    if full_positions > selected_positions:
         raise ValueError(f"literal T=4 {label} replay Full positions exceed selection")
+    if selected_positions != full_positions + requested_compact_positions:
+        raise ValueError(f"literal T=4 {label} replay selection split changed")
     if normalized["actual_head_macs"] > normalized["dense_head_macs"]:
         raise ValueError(f"literal T=4 {label} replay actual MACs exceed dense MACs")
     expected_saving = (
@@ -649,6 +652,23 @@ def _validate_replay_fallback_view(value: Any, *, label: str) -> dict[str, Any]:
             or value.get("compact_replay_candidate_mean_absolute_delta") is not None
         ):
             raise ValueError(f"literal T=4 {label} replay empty candidate ledger changed")
+        if requested_compact_positions == 0:
+            if (
+                normalized["dense_head_macs"] != 0
+                or normalized["actual_head_macs"] != 0
+                or normalized["head_mac_saving"] != 0.0
+                or normalized["source_native_dense_head_capture"]
+                is not bool(selected_positions)
+            ):
+                raise ValueError(f"literal T=4 {label} replay Full-only ledger changed")
+        elif (
+            full_positions != 0
+            or normalized["source_native_dense_head_capture"] is not True
+            or normalized["dense_head_macs"] < 1
+            or normalized["actual_head_macs"] != normalized["dense_head_macs"]
+            or normalized["head_mac_saving"] != 0.0
+        ):
+            raise ValueError(f"literal T=4 {label} replay dense shortcut ledger changed")
         maximum_delta = None
         mean_delta = None
     else:
@@ -662,7 +682,8 @@ def _validate_replay_fallback_view(value: Any, *, label: str) -> dict[str, Any]:
         )
         if (
             candidate_positions != normalized["selected_compact_requested_positions"]
-            or normalized["candidate_replay_macs"] > normalized["dense_head_macs"]
+            or normalized["candidate_replay_macs"] < 1
+            or normalized["candidate_replay_macs"] >= normalized["dense_head_macs"]
             or normalized["compact_replay_candidate_finite"] is not True
         ):
             raise ValueError(f"literal T=4 {label} replay candidate ledger changed")

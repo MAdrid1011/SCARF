@@ -411,6 +411,20 @@ def test_frozen_record_requires_consistent_selected_head_fallback_provenance(
     with pytest.raises(ValueError, match="replay"):
         _load(calibration, tmp_path, monkeypatch, record, binding)
 
+    record = _record(calibration, binding, artifact_root=tmp_path)
+    replay = record["train_scene_records"][0]["evidence"][
+        "selected_head_replay_fallback_summary"
+    ]["initial_replay"]
+    replay["per_view"][0]["selected_compact_requested_positions"] = 1
+    replay["per_view"][0]["compact_replay_candidate_positions"] = 1
+    replay["per_view"][0]["selected_compact_replay_positions"] = 1
+    replay["selected_compact_requested_positions"] = 1
+    replay["compact_replay_candidate_positions"] = 1
+    replay["selected_compact_replay_positions"] = 1
+    _rehash(calibration, record)
+    with pytest.raises(ValueError, match="selection split"):
+        _load(calibration, tmp_path, monkeypatch, record, binding)
+
 
 def test_threshold_recomputes_from_train_scene_q25_only(tmp_path: Path, monkeypatch):
     import saes.depthsplat_literal_t4_acid_calibration as calibration
