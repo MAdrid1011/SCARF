@@ -4674,6 +4674,7 @@ def preflight_depthsplat_l0_l1_materialization(
     selected_anchor_attribute_loo_maximum_risk: float | None = None,
     collect_selected_anchor_attribute_loo_risk: bool = False,
     mixture_kernel_closure_frozen_guard: Any | None = None,
+    mixture_kernel_closure_maximum_relative_risk: float | None = None,
 ) -> DepthSplatCompactMaterializationPreflight:
     """Construct all nonzero L0/L1 updates without reading skipped attributes.
 
@@ -4726,6 +4727,21 @@ def preflight_depthsplat_l0_l1_materialization(
         != DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE
     ):
         raise ValueError("DepthSplat kernel-risk guard requires the v3 profile")
+    if mixture_kernel_closure_maximum_relative_risk is not None:
+        if (
+            frozen_kernel_guard is not None
+            or execution_profile
+            != DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE
+            or isinstance(mixture_kernel_closure_maximum_relative_risk, bool)
+            or not isinstance(
+                mixture_kernel_closure_maximum_relative_risk, (int, float)
+            )
+            or not torch.isfinite(
+                torch.tensor(float(mixture_kernel_closure_maximum_relative_risk))
+            )
+            or float(mixture_kernel_closure_maximum_relative_risk) <= 0.0
+        ):
+            raise ValueError("DepthSplat direct kernel-risk threshold is invalid")
     collect_loo = collect_selected_anchor_attribute_loo_risk or frozen_loo_guard is not None
     views, height, width, semantics = _require_plan(plan)
     _validate_execution_profile_plan_binding(
@@ -4928,7 +4944,7 @@ def preflight_depthsplat_l0_l1_materialization(
                 kernel_closure_maximum_relative_risk=(
                     frozen_kernel_guard["threshold_value"]
                     if frozen_kernel_guard is not None
-                    else None
+                    else mixture_kernel_closure_maximum_relative_risk
                 ),
             )
         if source_grid is None:

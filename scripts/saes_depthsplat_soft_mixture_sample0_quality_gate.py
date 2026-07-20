@@ -149,9 +149,21 @@ def _require_live_tile_trace(
 
 
 def soft_mixture_kernel_closure_t4_profile(
-    *, kernel_risk_guard: Mapping[str, Any] | None = None
+    *,
+    kernel_risk_guard: Mapping[str, Any] | None = None,
+    direct_kernel_risk_threshold: float | None = None,
 ) -> dict[str, Any]:
     """Return the source-only S/R replay configuration with kernel closure."""
+
+    if kernel_risk_guard is not None and direct_kernel_risk_threshold is not None:
+        raise ValueError("DepthSplat kernel-risk profile cannot mix threshold sources")
+    if direct_kernel_risk_threshold is not None and (
+        isinstance(direct_kernel_risk_threshold, bool)
+        or not isinstance(direct_kernel_risk_threshold, (int, float))
+        or not math.isfinite(float(direct_kernel_risk_threshold))
+        or float(direct_kernel_risk_threshold) <= 0.0
+    ):
+        raise ValueError("DepthSplat direct kernel-risk threshold is invalid")
 
     profile: dict[str, Any] = {
         "materialization_profile": (
@@ -179,9 +191,16 @@ def soft_mixture_kernel_closure_t4_profile(
         "coverage_certificate": DEPTHSPLAT_SOFT_MIXTURE_T4_MOMENT_CERTIFICATE,
         "support_containment_guard": False,
         "projected_domain_guard": False,
-        "precalibration_only": kernel_risk_guard is None,
+        "precalibration_only": (
+            kernel_risk_guard is None and direct_kernel_risk_threshold is None
+        ),
         "kernel_risk_frozen_guard": (
             dict(kernel_risk_guard) if kernel_risk_guard is not None else None
+        ),
+        "direct_kernel_risk_threshold": (
+            float(direct_kernel_risk_threshold)
+            if direct_kernel_risk_threshold is not None
+            else None
         ),
     }
     profile["route_plan_config_sha256"] = (
@@ -578,8 +597,23 @@ def _source_summary(
     kernel_closure = _mixture_kernel_closure_summary(preflight, profile=profile)
     frozen_kernel_guard = preflight.events.get("mixture_kernel_closure_frozen_guard")
     profile_kernel_guard = profile.get("kernel_risk_frozen_guard")
+    direct_threshold = profile.get("direct_kernel_risk_threshold")
     calibrated = preflight.events.get("mixture_kernel_closure_calibrated_threshold")
-    if (
+    if direct_threshold is not None:
+        if (
+            isinstance(direct_threshold, bool)
+            or not isinstance(direct_threshold, (int, float))
+            or not math.isfinite(float(direct_threshold))
+            or float(direct_threshold) <= 0.0
+            or profile.get("precalibration_only") is not False
+            or profile_kernel_guard is not None
+            or frozen_kernel_guard is not None
+            or calibrated is not False
+            or kernel_closure["strict_maximum_relative_risk"]
+            != float(direct_threshold)
+        ):
+            raise RuntimeError("DepthSplat direct kernel-risk threshold changed")
+    elif (
         profile.get("precalibration_only") is not (profile_kernel_guard is None)
         or (profile_kernel_guard is None and frozen_kernel_guard is not None)
         or (profile_kernel_guard is not None and frozen_kernel_guard != profile_kernel_guard)
@@ -701,6 +735,7 @@ def _source_summary(
             "l0_to_l1_tile_count": l0_to_l1_kernel_tiles,
             "full_promotion_tile_count": kernel_full_promotions,
             "calibrated_threshold": calibrated,
+            "direct_threshold": direct_threshold,
             "frozen_guard": frozen_kernel_guard,
             "summary": kernel_closure,
         },
@@ -737,6 +772,7 @@ def _build_committed_packet(
     context: Mapping[str, Any],
     profile: Mapping[str, Any],
     kernel_risk_guard: Any | None = None,
+    direct_kernel_risk_threshold: float | None = None,
 ) -> dict[str, Any]:
     """Run the complete source phase and return only a sealed packet state."""
 
@@ -797,6 +833,7 @@ def _build_committed_packet(
         maximum_coverage_covariance_scale=1.0,
         execution_profile=profile["materialization_profile"],
         mixture_kernel_closure_frozen_guard=kernel_risk_guard,
+        mixture_kernel_closure_maximum_relative_risk=direct_kernel_risk_threshold,
     )
     final_route = resolve_depthsplat_compact_final_route(plan, preflight)
     source_summary = _source_summary(
@@ -879,18 +916,24 @@ def collect_depthsplat_soft_mixture_sample0_quality_gate(
     *,
     input_root: Path,
     source_audit_root: Path,
-    kernel_risk_record: Path,
+    kernel_risk_record: Path | None,
+    direct_kernel_risk_threshold: float | None,
     device: torch.device,
 ) -> dict[str, Any]:
     """Execute source telemetry and real target quality in a single process."""
 
     from data.context_only_audit_input import validate_context_only_audit_input
 
-    kernel_risk_guard = load_mixture_kernel_risk_guard(
-        Path(kernel_risk_record), root=ROOT
+    if (kernel_risk_record is None) == (direct_kernel_risk_threshold is None):
+        raise ValueError("DepthSplat quality gate requires exactly one kernel-risk source")
+    kernel_risk_guard = (
+        load_mixture_kernel_risk_guard(Path(kernel_risk_record), root=ROOT)
+        if kernel_risk_record is not None
+        else None
     )
     profile = soft_mixture_kernel_closure_t4_profile(
-        kernel_risk_guard=kernel_risk_guard
+        kernel_risk_guard=kernel_risk_guard,
+        direct_kernel_risk_threshold=direct_kernel_risk_threshold,
     )
     input_identity = _require_formal_context_identity(
         validate_context_only_audit_input(input_root, model=MODEL)
@@ -935,6 +978,7 @@ def collect_depthsplat_soft_mixture_sample0_quality_gate(
             context=context,
             profile=profile,
             kernel_risk_guard=kernel_risk_guard,
+            direct_kernel_risk_threshold=direct_kernel_risk_threshold,
         )
         source_summary = committed["source_summary"]
         common = {
@@ -947,9 +991,25 @@ def collect_depthsplat_soft_mixture_sample0_quality_gate(
             "scene": input_identity["scene"],
             "context_indices": list(input_identity["context_indices"]),
             "mechanism": SOFT_MIXTURE_MECHANISM,
-            "kernel_risk_calibration_record": {
-                "path": str(Path(kernel_risk_record)),
-                "frozen_guard": dict(kernel_risk_guard),
+            "kernel_risk_threshold_source": {
+                "mode": (
+                    "frozen_acid_record"
+                    if kernel_risk_guard is not None
+                    else "direct_dl3dv_development"
+                ),
+                "record_path": (
+                    str(Path(kernel_risk_record))
+                    if kernel_risk_record is not None
+                    else None
+                ),
+                "threshold_value": (
+                    dict(kernel_risk_guard)["threshold_value"]
+                    if kernel_risk_guard is not None
+                    else float(direct_kernel_risk_threshold)
+                ),
+                "frozen_guard": (
+                    dict(kernel_risk_guard) if kernel_risk_guard is not None else None
+                ),
             },
             "source_phase": source_summary,
             "context_only_input": {
@@ -1070,10 +1130,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-root", type=Path, default=DEFAULT_INPUT_ROOT)
     parser.add_argument("--source-audit-root", type=Path, default=DEFAULT_SOURCE_AUDIT_ROOT)
     parser.add_argument(
-        "--kernel-risk-record",
-        type=Path,
-        required=True,
-        help="frozen ACID 24/8 v3 kernel-risk record",
+        "--kernel-risk-threshold",
+        type=float,
+        default=1.0,
+        help="direct DL3DV development threshold for maximum kernel risk",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
@@ -1097,7 +1157,8 @@ def main(argv: list[str] | None = None) -> int:
         record = collect_depthsplat_soft_mixture_sample0_quality_gate(
             input_root=args.input_root,
             source_audit_root=args.source_audit_root,
-            kernel_risk_record=args.kernel_risk_record,
+            kernel_risk_record=None,
+            direct_kernel_risk_threshold=args.kernel_risk_threshold,
             device=device,
         )
         exit_code = (
