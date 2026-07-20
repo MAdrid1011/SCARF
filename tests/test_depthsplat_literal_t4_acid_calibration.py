@@ -140,6 +140,67 @@ def _write_artifact(root: Path, reference, artifact):
     return path
 
 
+def _replay_events(*, fallback: bool) -> dict:
+    dense_macs = 100
+    candidate_macs = 10
+    actual_macs = dense_macs if fallback else candidate_macs
+    actual_positions = 0 if fallback else 2
+    fallback_positions = 2 if fallback else 0
+    row = {
+        "batch_item": 0,
+        "source_native_dense_head_capture": fallback,
+        "selected_final_output_positions": 3,
+        "source_native_full_passthrough_positions": 1,
+        "selected_compact_requested_positions": 2,
+        "compact_replay_candidate_positions": 2,
+        "candidate_replay_macs": candidate_macs,
+        "selected_compact_replay_positions": actual_positions,
+        "compact_replay_candidate_finite": True,
+        "compact_replay_candidate_maximum_absolute_delta": 1.5e-5 if fallback else 0.0,
+        "compact_replay_candidate_mean_absolute_delta": 1.0e-5 if fallback else 0.0,
+        "compact_replay_strict_equivalent": not fallback,
+        "compact_replay_fallback_envelope_equivalent": True,
+        "native_dense_fallback_applied": fallback,
+        "native_dense_fallback_compact_positions": fallback_positions,
+        "native_full_passthrough_bitwise": True,
+        "dense_head_macs": dense_macs,
+        "replayed_head_macs": actual_macs,
+        "head_mac_saving": 1.0 - actual_macs / dense_macs,
+    }
+    return {
+        "contract_version": "depthsplat-native-dense-regressor-selected-head-rgb-adapter-v1",
+        "padding_mode": "replicate",
+        "batch_size": 1,
+        "head_cost_semantics": "logical-route-cost-excludes-fallback-validation-v1",
+        "selected_final_output_positions": 3,
+        "native_full_passthrough_positions": 1,
+        "native_full_passthrough_bitwise": True,
+        "dense_head_macs": dense_macs,
+        "actual_head_macs": actual_macs,
+        "head_mac_delta": dense_macs - actual_macs,
+        "head_mac_saving": 1.0 - actual_macs / dense_macs,
+        "selected_compact_requested_positions": 2,
+        "compact_replay_candidate_positions": 2,
+        "candidate_replay_macs": candidate_macs,
+        "selected_compact_replay_positions": actual_positions,
+        "compact_replay_strict_failure_view_count": int(fallback),
+        "native_dense_fallback_envelope_atol": 2.0e-5,
+        "native_dense_fallback_envelope_rtol": 1.0e-5,
+        "native_dense_fallback_view_count": int(fallback),
+        "native_dense_fallback_compact_positions": fallback_positions,
+        "per_view": [row],
+        "whole_pipeline_s2_s3_sparse_execution_verified": False,
+        "global_s2_s3_savings_claimed": False,
+    }
+
+
+def _replay_fallback_summary(module) -> dict:
+    return module.build_selected_head_replay_fallback_summary(
+        initial_events=_replay_events(fallback=False),
+        final_events=_replay_events(fallback=True),
+    )
+
+
 def _evidence(module, number: int, *, aggregate, reference):
     return {
         "profile_sha256": module.literal_t4_profile_sha256(),
@@ -149,6 +210,7 @@ def _evidence(module, number: int, *, aggregate, reference):
         "native_execution_sha256": _digest(1000 + number),
         "initial_attribute_binding_sha256": _digest(2000 + number),
         "final_selected_attribute_binding_sha256": _digest(3000 + number),
+        "selected_head_replay_fallback_summary": _replay_fallback_summary(module),
         "materialized_attribute_binding_sha256": _digest(4000 + number),
         "full_passthrough_mask_sha256": _digest(5000 + number),
         "full_attribute_binding_sha256": _digest(6000 + number),
@@ -316,6 +378,38 @@ def test_literal_profile_binds_fixed_scale_psd_moment_merge_semantics():
     assert calibration.LITERAL_T4_COVERAGE_CERTIFICATE == (
         calibration.LITERAL_T4_MOMENT_CERTIFICATE
     )
+
+
+def test_frozen_record_requires_consistent_selected_head_fallback_provenance(
+    tmp_path: Path, monkeypatch
+):
+    import saes.depthsplat_literal_t4_acid_calibration as calibration
+
+    binding = _binding(calibration)
+    record = _record(calibration, binding, artifact_root=tmp_path)
+    summary = record["train_scene_records"][0]["evidence"][
+        "selected_head_replay_fallback_summary"
+    ]
+    assert summary["schema_version"] == calibration.SELECTED_HEAD_REPLAY_FALLBACK_SUMMARY_SCHEMA
+    assert summary["initial_replay"]["native_dense_fallback_view_count"] == 0
+    assert summary["final_replay"]["native_dense_fallback_views"] == [0]
+    assert summary["final_replay"]["selected_compact_replay_positions"] == 0
+    assert summary["final_replay"]["head_mac_saving"] == 0.0
+
+    del record["train_scene_records"][0]["evidence"][
+        "selected_head_replay_fallback_summary"
+    ]
+    _rehash(calibration, record)
+    with pytest.raises(ValueError, match="scene evidence has an invalid schema"):
+        _load(calibration, tmp_path, monkeypatch, record, binding)
+
+    record = _record(calibration, binding, artifact_root=tmp_path)
+    record["train_scene_records"][0]["evidence"][
+        "selected_head_replay_fallback_summary"
+    ]["final_replay"]["per_view"][0]["native_dense_fallback_compact_positions"] = 1
+    _rehash(calibration, record)
+    with pytest.raises(ValueError, match="replay"):
+        _load(calibration, tmp_path, monkeypatch, record, binding)
 
 
 def test_threshold_recomputes_from_train_scene_q25_only(tmp_path: Path, monkeypatch):

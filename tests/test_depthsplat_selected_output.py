@@ -93,6 +93,47 @@ class _Adapter:
         )
 
 
+def _compact_replay_fixture():
+    torch.manual_seed(211)
+    head = torch.nn.Sequential(
+        torch.nn.Conv2d(4, 6, 3, 1, 1, padding_mode="replicate"),
+        torch.nn.GELU(),
+        torch.nn.Conv2d(6, 7, 3, 1, 1, padding_mode="replicate"),
+    )
+    inputs = torch.randn(1, 4, 5, 6)
+    dense = head(inputs)
+    selection = torch.zeros(1, 5, 6, dtype=torch.bool)
+    selection[0, 0, 0] = True
+    selection[0, 2, 3] = True
+    selection[0, 4, 5] = True
+    native_full = torch.zeros_like(selection)
+    native_full[0, 0, 0] = True
+    compact = selection & ~native_full
+    # The injected replay candidate below is exact apart from its declared
+    # perturbation, so envelope boundaries do not depend on random head values.
+    dense[0, :, compact[0]] = 0.0
+    return head, inputs, dense, selection, native_full
+
+
+def _inject_compact_replay_candidate(monkeypatch, *, dense, value: float):
+    import saes.depthsplat_selected_output as selected_output
+    from saes.selected_output_replay import SelectedOutputReplay
+
+    original = selected_output.replay_two_conv_selected_outputs
+
+    def replay_with_candidate(head, head_input, compact_mask):
+        observed = original(head, head_input, compact_mask)
+        values = dense[0, :, compact_mask].unsqueeze(0).clone()
+        values[0, 0, 0] = value
+        return SelectedOutputReplay(
+            coordinates=observed.coordinates,
+            values=values,
+            events=observed.events,
+        )
+
+    monkeypatch.setattr(selected_output, "replay_two_conv_selected_outputs", replay_with_candidate)
+
+
 def test_selected_head_replay_matches_replicate_padded_dense_outputs_and_keeps_omissions_zero():
     from saes.depthsplat_selected_output import replay_depthsplat_selected_head
 
@@ -119,6 +160,8 @@ def test_selected_head_replay_matches_replicate_padded_dense_outputs_and_keeps_o
     assert torch.count_nonzero(replay.values[0, :, ~mask[0]]) == 0
     torch.testing.assert_close(replay.values[1], dense[1], rtol=0.0, atol=0.0)
     assert replay.events["per_view"][1]["source_native_dense_head_capture"] is True
+    assert replay.events["native_dense_fallback_view_count"] == 0
+    assert replay.events["native_dense_fallback_compact_positions"] == 0
     assert replay.events["whole_pipeline_s2_s3_sparse_execution_verified"] is False
 
 
@@ -146,9 +189,100 @@ def test_selected_head_replay_preserves_declared_full_outputs_bitwise():
 
     assert replay.equivalence["equivalent"] is True
     assert replay.events["native_full_passthrough_positions"] == 1
+    assert replay.events["native_full_passthrough_bitwise"] is True
+    assert replay.events["selected_compact_requested_positions"] == 2
+    assert replay.events["compact_replay_candidate_positions"] == 2
     assert replay.events["selected_compact_replay_positions"] == 2
+    assert replay.events["native_dense_fallback_view_count"] == 0
+    assert replay.events["per_view"][0]["compact_replay_strict_equivalent"] is True
+    assert replay.events["per_view"][0]["native_dense_fallback_applied"] is False
     assert torch.equal(replay.values[0, :, native_full[0]], dense[0, :, native_full[0]])
     assert torch.count_nonzero(replay.values[0, :, ~selection[0]]) == 0
+
+
+def test_selected_head_replay_uses_bounded_native_dense_fallback(monkeypatch):
+    import saes.depthsplat_selected_output as selected_output
+
+    head, inputs, dense, selection, native_full = _compact_replay_fixture()
+    _inject_compact_replay_candidate(monkeypatch, dense=dense, value=1.5e-5)
+
+    replay = selected_output.replay_depthsplat_selected_head(
+        head, inputs, dense, selection, native_full_mask=native_full
+    )
+
+    event = replay.events["per_view"][0]
+    assert replay.equivalence["equivalent"] is True
+    assert replay.equivalence["finite"] is True
+    assert event["compact_replay_candidate_finite"] is True
+    assert event["compact_replay_strict_equivalent"] is False
+    assert event["compact_replay_fallback_envelope_equivalent"] is True
+    assert event["native_dense_fallback_applied"] is True
+    assert event["native_dense_fallback_compact_positions"] == 2
+    assert event["selected_compact_replay_positions"] == 0
+    assert event["candidate_replay_macs"] < event["dense_head_macs"]
+    assert event["replayed_head_macs"] == event["dense_head_macs"]
+    assert event["head_mac_saving"] == 0.0
+    assert event["second_conv_selected_only"] is False
+    assert replay.events["native_dense_fallback_envelope_atol"] == pytest.approx(2.0e-5)
+    assert replay.events["native_dense_fallback_envelope_rtol"] == pytest.approx(1.0e-5)
+    assert (
+        replay.events["head_cost_semantics"]
+        == "logical-route-cost-excludes-fallback-validation-v1"
+    )
+    assert replay.events["compact_replay_candidate_positions"] == 2
+    assert replay.events["selected_compact_replay_positions"] == 0
+    assert replay.events["native_dense_fallback_view_count"] == 1
+    assert replay.events["native_dense_fallback_compact_positions"] == 2
+    assert torch.equal(replay.values[0, :, selection[0]], dense[0, :, selection[0]])
+    assert torch.equal(replay.values[0, :, native_full[0]], dense[0, :, native_full[0]])
+
+
+def test_selected_head_replay_rejects_candidate_outside_native_dense_fallback(monkeypatch):
+    import saes.depthsplat_selected_output as selected_output
+
+    head, inputs, dense, selection, native_full = _compact_replay_fixture()
+    _inject_compact_replay_candidate(monkeypatch, dense=dense, value=3.0e-5)
+
+    replay = selected_output.replay_depthsplat_selected_head(
+        head, inputs, dense, selection, native_full_mask=native_full
+    )
+
+    event = replay.events["per_view"][0]
+    assert replay.equivalence["equivalent"] is False
+    assert replay.equivalence["finite"] is True
+    assert event["compact_replay_candidate_finite"] is True
+    assert event["compact_replay_strict_equivalent"] is False
+    assert event["compact_replay_fallback_envelope_equivalent"] is False
+    assert event["native_dense_fallback_applied"] is False
+    assert event["native_dense_fallback_compact_positions"] == 0
+    assert event["selected_compact_replay_positions"] == 2
+    assert replay.events["native_dense_fallback_view_count"] == 0
+    assert replay.events["native_dense_fallback_compact_positions"] == 0
+    assert event["compact_replay_candidate_maximum_absolute_delta"] > 2.0e-5
+    assert torch.equal(replay.values[0, :, native_full[0]], dense[0, :, native_full[0]])
+
+
+def test_selected_head_replay_rejects_nonfinite_candidate_without_fallback(monkeypatch):
+    import saes.depthsplat_selected_output as selected_output
+
+    head, inputs, dense, selection, native_full = _compact_replay_fixture()
+    _inject_compact_replay_candidate(monkeypatch, dense=dense, value=float("nan"))
+
+    replay = selected_output.replay_depthsplat_selected_head(
+        head, inputs, dense, selection, native_full_mask=native_full
+    )
+
+    event = replay.events["per_view"][0]
+    assert replay.equivalence["equivalent"] is False
+    assert replay.equivalence["finite"] is False
+    assert replay.equivalence["maximum_absolute_delta"] is None
+    assert event["compact_replay_candidate_finite"] is False
+    assert event["compact_replay_candidate_maximum_absolute_delta"] is None
+    assert event["compact_replay_strict_equivalent"] is False
+    assert event["compact_replay_fallback_envelope_equivalent"] is False
+    assert event["native_dense_fallback_applied"] is False
+    assert replay.events["native_dense_fallback_view_count"] == 0
+    assert torch.equal(replay.values[0, :, native_full[0]], dense[0, :, native_full[0]])
 
 
 def test_selected_head_replay_rejects_full_output_outside_selection():

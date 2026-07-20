@@ -52,6 +52,7 @@ from saes.depthsplat_literal_t4_acid_calibration import (
     LITERAL_T4_RISK_METRIC,
     TRAIN_SPLIT,
     build_literal_t4_application,
+    build_selected_head_replay_fallback_summary,
     build_v16t4_record,
     build_v16t4_trace_artifact,
     literal_t4_profile,
@@ -121,6 +122,7 @@ _SCENE_BASE_EVIDENCE_KEYS = {
     "native_execution_sha256",
     "initial_attribute_binding_sha256",
     "final_selected_attribute_binding_sha256",
+    "selected_head_replay_fallback_summary",
     "materialized_attribute_binding_sha256",
     "full_passthrough_mask_sha256",
     "full_attribute_binding_sha256",
@@ -566,6 +568,12 @@ def collect_literal_t4_native_scene_observation(
                     ),
                     "final_selected_attribute_binding_sha256": _require_sha256(
                         final_packed.attribute_binding_sha256, "final selected Adapter binding"
+                    ),
+                    "selected_head_replay_fallback_summary": (
+                        build_selected_head_replay_fallback_summary(
+                            initial_events=initial_replay.events,
+                            final_events=producer_replay.events,
+                        )
                     ),
                     "materialized_attribute_binding_sha256": _require_sha256(
                         materialized.attribute_binding_sha256, "materialized Adapter binding"

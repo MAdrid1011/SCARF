@@ -65,6 +65,19 @@ LITERAL_T4_LOO_POLICY = "all-retained-l0-l1-anchors-selected-labels-only-v1"
 LITERAL_T4_LOO_AGGREGATE_SCHEMA = "depthsplat-selected-anchor-attribute-loo-aggregate-v1"
 LITERAL_T4_TRACE_ARTIFACT_SCHEMA = "depthsplat-literal-t4-preflight-trace-artifact-v1"
 LITERAL_T4_TRACE_ARTIFACT_KIND = "depthsplat-literal-t4-selected-anchor-loo-trace"
+SELECTED_HEAD_REPLAY_FALLBACK_SUMMARY_SCHEMA = (
+    "depthsplat-selected-head-native-dense-fallback-summary-v1"
+)
+_SELECTED_HEAD_REPLAY_CONTRACT = (
+    "depthsplat-native-dense-regressor-selected-head-rgb-adapter-v1"
+)
+_SELECTED_HEAD_REPLAY_COST_SEMANTICS = (
+    "logical-route-cost-excludes-fallback-validation-v1"
+)
+_SELECTED_HEAD_NATIVE_DENSE_FALLBACK_ENVELOPE = {
+    "atol": 2.0e-5,
+    "rtol": 1.0e-5,
+}
 
 _ACCESS_KEYS = (
     "target_mapping_present",
@@ -504,6 +517,538 @@ def _nonnegative_int(value: Any, *, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"literal T=4 {label} is invalid")
     return int(value)
+
+
+def _nonnegative_float(value: Any, *, label: str, maximum: float | None = None) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0.0
+        or (maximum is not None and float(value) > maximum)
+    ):
+        raise ValueError(f"literal T=4 {label} is invalid")
+    return float(value)
+
+
+def _float_matches(actual: float, expected: float) -> bool:
+    return math.isclose(actual, expected, rel_tol=1.0e-12, abs_tol=1.0e-12)
+
+
+def _validate_replay_fallback_view(value: Any, *, label: str) -> dict[str, Any]:
+    """Validate one scalar replay ledger row persisted in a V16T4 record."""
+
+    required = {
+        "view",
+        "source_native_dense_head_capture",
+        "selected_final_output_positions",
+        "source_native_full_passthrough_positions",
+        "selected_compact_requested_positions",
+        "compact_replay_candidate_positions",
+        "candidate_replay_macs",
+        "selected_compact_replay_positions",
+        "compact_replay_candidate_finite",
+        "compact_replay_candidate_maximum_absolute_delta",
+        "compact_replay_candidate_mean_absolute_delta",
+        "compact_replay_strict_equivalent",
+        "compact_replay_fallback_envelope_equivalent",
+        "native_dense_fallback_applied",
+        "native_dense_fallback_compact_positions",
+        "native_full_passthrough_bitwise",
+        "dense_head_macs",
+        "actual_head_macs",
+        "head_mac_saving",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError(f"literal T=4 {label} replay fallback view has an invalid schema")
+    normalized = {
+        "view": _nonnegative_int(value.get("view"), label=f"{label} replay view"),
+        "source_native_dense_head_capture": value.get("source_native_dense_head_capture"),
+        "selected_final_output_positions": _nonnegative_int(
+            value.get("selected_final_output_positions"),
+            label=f"{label} selected final positions",
+        ),
+        "source_native_full_passthrough_positions": _nonnegative_int(
+            value.get("source_native_full_passthrough_positions"),
+            label=f"{label} native Full positions",
+        ),
+        "selected_compact_requested_positions": _nonnegative_int(
+            value.get("selected_compact_requested_positions"),
+            label=f"{label} requested compact positions",
+        ),
+        "compact_replay_candidate_positions": _nonnegative_int(
+            value.get("compact_replay_candidate_positions"),
+            label=f"{label} candidate compact positions",
+        ),
+        "candidate_replay_macs": _nonnegative_int(
+            value.get("candidate_replay_macs"), label=f"{label} candidate replay MACs"
+        ),
+        "selected_compact_replay_positions": _nonnegative_int(
+            value.get("selected_compact_replay_positions"),
+            label=f"{label} actual compact replay positions",
+        ),
+        "compact_replay_candidate_finite": value.get("compact_replay_candidate_finite"),
+        "compact_replay_strict_equivalent": value.get("compact_replay_strict_equivalent"),
+        "compact_replay_fallback_envelope_equivalent": value.get(
+            "compact_replay_fallback_envelope_equivalent"
+        ),
+        "native_dense_fallback_applied": value.get("native_dense_fallback_applied"),
+        "native_dense_fallback_compact_positions": _nonnegative_int(
+            value.get("native_dense_fallback_compact_positions"),
+            label=f"{label} fallback compact positions",
+        ),
+        "native_full_passthrough_bitwise": value.get("native_full_passthrough_bitwise"),
+        "dense_head_macs": _nonnegative_int(
+            value.get("dense_head_macs"), label=f"{label} dense head MACs"
+        ),
+        "actual_head_macs": _nonnegative_int(
+            value.get("actual_head_macs"), label=f"{label} actual head MACs"
+        ),
+        "head_mac_saving": _nonnegative_float(
+            value.get("head_mac_saving"), label=f"{label} head MAC saving", maximum=1.0
+        ),
+    }
+    if any(
+        not isinstance(normalized[name], bool)
+        for name in (
+            "source_native_dense_head_capture",
+            "compact_replay_candidate_finite",
+            "compact_replay_strict_equivalent",
+            "compact_replay_fallback_envelope_equivalent",
+            "native_dense_fallback_applied",
+            "native_full_passthrough_bitwise",
+        )
+    ):
+        raise ValueError(f"literal T=4 {label} replay fallback booleans are invalid")
+    if normalized["source_native_full_passthrough_positions"] > normalized[
+        "selected_final_output_positions"
+    ]:
+        raise ValueError(f"literal T=4 {label} replay Full positions exceed selection")
+    if normalized["actual_head_macs"] > normalized["dense_head_macs"]:
+        raise ValueError(f"literal T=4 {label} replay actual MACs exceed dense MACs")
+    expected_saving = (
+        1.0
+        - normalized["actual_head_macs"] / normalized["dense_head_macs"]
+        if normalized["dense_head_macs"]
+        else 0.0
+    )
+    if not _float_matches(normalized["head_mac_saving"], expected_saving):
+        raise ValueError(f"literal T=4 {label} replay head MAC saving changed")
+
+    candidate_positions = normalized["compact_replay_candidate_positions"]
+    if candidate_positions == 0:
+        if (
+            normalized["candidate_replay_macs"] != 0
+            or normalized["selected_compact_replay_positions"] != 0
+            or normalized["native_dense_fallback_compact_positions"] != 0
+            or normalized["native_dense_fallback_applied"] is not False
+            or normalized["compact_replay_candidate_finite"] is not True
+            or normalized["compact_replay_strict_equivalent"] is not True
+            or normalized["compact_replay_fallback_envelope_equivalent"] is not True
+            or value.get("compact_replay_candidate_maximum_absolute_delta") is not None
+            or value.get("compact_replay_candidate_mean_absolute_delta") is not None
+        ):
+            raise ValueError(f"literal T=4 {label} replay empty candidate ledger changed")
+        maximum_delta = None
+        mean_delta = None
+    else:
+        maximum_delta = _nonnegative_float(
+            value.get("compact_replay_candidate_maximum_absolute_delta"),
+            label=f"{label} replay candidate maximum delta",
+        )
+        mean_delta = _nonnegative_float(
+            value.get("compact_replay_candidate_mean_absolute_delta"),
+            label=f"{label} replay candidate mean delta",
+        )
+        if (
+            candidate_positions != normalized["selected_compact_requested_positions"]
+            or normalized["candidate_replay_macs"] > normalized["dense_head_macs"]
+            or normalized["compact_replay_candidate_finite"] is not True
+        ):
+            raise ValueError(f"literal T=4 {label} replay candidate ledger changed")
+        if normalized["compact_replay_strict_equivalent"] is True:
+            if (
+                normalized["compact_replay_fallback_envelope_equivalent"] is not True
+                or normalized["native_dense_fallback_applied"] is not False
+                or normalized["native_dense_fallback_compact_positions"] != 0
+                or normalized["selected_compact_replay_positions"] != candidate_positions
+                or normalized["actual_head_macs"] != normalized["candidate_replay_macs"]
+                or normalized["source_native_dense_head_capture"] is not False
+            ):
+                raise ValueError(f"literal T=4 {label} replay strict candidate changed")
+        elif (
+            normalized["compact_replay_fallback_envelope_equivalent"] is not True
+            or normalized["native_dense_fallback_applied"] is not True
+            or normalized["native_dense_fallback_compact_positions"] != candidate_positions
+            or normalized["selected_compact_replay_positions"] != 0
+            or normalized["actual_head_macs"] != normalized["dense_head_macs"]
+            or normalized["head_mac_saving"] != 0.0
+            or normalized["source_native_dense_head_capture"] is not True
+        ):
+            raise ValueError(f"literal T=4 {label} replay native dense fallback changed")
+    if normalized["native_full_passthrough_bitwise"] is not True:
+        raise ValueError(f"literal T=4 {label} replay Full passthrough is not bitwise")
+    return {
+        **normalized,
+        "compact_replay_candidate_maximum_absolute_delta": maximum_delta,
+        "compact_replay_candidate_mean_absolute_delta": mean_delta,
+    }
+
+
+def _validate_replay_fallback_summary(value: Any, *, label: str) -> dict[str, Any]:
+    """Require an internally consistent scalar ledger for one head replay."""
+
+    required = {
+        "selected_output_contract",
+        "padding_mode",
+        "batch_size",
+        "head_cost_semantics",
+        "selected_final_output_positions",
+        "native_full_passthrough_positions",
+        "native_full_passthrough_bitwise",
+        "dense_head_macs",
+        "actual_head_macs",
+        "head_mac_delta",
+        "head_mac_saving",
+        "selected_compact_requested_positions",
+        "compact_replay_candidate_positions",
+        "candidate_replay_macs",
+        "selected_compact_replay_positions",
+        "compact_replay_strict_failure_view_count",
+        "native_dense_fallback_envelope",
+        "native_dense_fallback_view_count",
+        "native_dense_fallback_compact_positions",
+        "native_dense_fallback_views",
+        "per_view",
+        "whole_pipeline_s2_s3_sparse_execution_verified",
+        "global_s2_s3_savings_claimed",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError(f"literal T=4 {label} replay fallback summary has an invalid schema")
+    if (
+        value.get("selected_output_contract") != _SELECTED_HEAD_REPLAY_CONTRACT
+        or value.get("padding_mode") != "replicate"
+        or value.get("head_cost_semantics") != _SELECTED_HEAD_REPLAY_COST_SEMANTICS
+        or value.get("native_full_passthrough_bitwise") is not True
+        or value.get("whole_pipeline_s2_s3_sparse_execution_verified") is not False
+        or value.get("global_s2_s3_savings_claimed") is not False
+    ):
+        raise ValueError(f"literal T=4 {label} replay fallback semantics changed")
+    batch_size = _nonnegative_int(value.get("batch_size"), label=f"{label} replay batch size")
+    if batch_size < 1:
+        raise ValueError(f"literal T=4 {label} replay batch size is empty")
+    raw_views = value.get("per_view")
+    if not isinstance(raw_views, list) or len(raw_views) != batch_size:
+        raise ValueError(f"literal T=4 {label} replay fallback views are invalid")
+    views = [
+        _validate_replay_fallback_view(item, label=f"{label} replay view {index}")
+        for index, item in enumerate(raw_views)
+    ]
+    if [item["view"] for item in views] != list(range(batch_size)):
+        raise ValueError(f"literal T=4 {label} replay view order changed")
+    envelope = value.get("native_dense_fallback_envelope")
+    if not isinstance(envelope, Mapping) or set(envelope) != {"atol", "rtol"}:
+        raise ValueError(f"literal T=4 {label} replay fallback envelope is invalid")
+    normalized_envelope = {
+        name: _nonnegative_float(envelope.get(name), label=f"{label} replay envelope {name}")
+        for name in ("atol", "rtol")
+    }
+    if any(
+        not _float_matches(normalized_envelope[name], expected)
+        for name, expected in _SELECTED_HEAD_NATIVE_DENSE_FALLBACK_ENVELOPE.items()
+    ):
+        raise ValueError(f"literal T=4 {label} replay fallback envelope changed")
+
+    integer_fields = (
+        "selected_final_output_positions",
+        "native_full_passthrough_positions",
+        "dense_head_macs",
+        "actual_head_macs",
+        "head_mac_delta",
+        "selected_compact_requested_positions",
+        "compact_replay_candidate_positions",
+        "candidate_replay_macs",
+        "selected_compact_replay_positions",
+        "compact_replay_strict_failure_view_count",
+        "native_dense_fallback_view_count",
+        "native_dense_fallback_compact_positions",
+    )
+    normalized = {
+        name: _nonnegative_int(value.get(name), label=f"{label} replay {name}")
+        for name in integer_fields
+    }
+    normalized["head_mac_saving"] = _nonnegative_float(
+        value.get("head_mac_saving"), label=f"{label} replay head MAC saving", maximum=1.0
+    )
+    expected = {
+        "selected_final_output_positions": sum(item["selected_final_output_positions"] for item in views),
+        "native_full_passthrough_positions": sum(
+            item["source_native_full_passthrough_positions"] for item in views
+        ),
+        "dense_head_macs": sum(item["dense_head_macs"] for item in views),
+        "actual_head_macs": sum(item["actual_head_macs"] for item in views),
+        "selected_compact_requested_positions": sum(
+            item["selected_compact_requested_positions"] for item in views
+        ),
+        "compact_replay_candidate_positions": sum(
+            item["compact_replay_candidate_positions"] for item in views
+        ),
+        "candidate_replay_macs": sum(item["candidate_replay_macs"] for item in views),
+        "selected_compact_replay_positions": sum(
+            item["selected_compact_replay_positions"] for item in views
+        ),
+        "compact_replay_strict_failure_view_count": sum(
+            item["compact_replay_strict_equivalent"] is False for item in views
+        ),
+        "native_dense_fallback_view_count": sum(
+            item["native_dense_fallback_applied"] for item in views
+        ),
+        "native_dense_fallback_compact_positions": sum(
+            item["native_dense_fallback_compact_positions"] for item in views
+        ),
+    }
+    if (
+        any(normalized[name] != expected[name] for name in expected)
+        or normalized["head_mac_delta"]
+        != normalized["dense_head_macs"] - normalized["actual_head_macs"]
+        or normalized["actual_head_macs"] > normalized["dense_head_macs"]
+    ):
+        raise ValueError(f"literal T=4 {label} replay fallback counters changed")
+    expected_saving = (
+        1.0 - normalized["actual_head_macs"] / normalized["dense_head_macs"]
+        if normalized["dense_head_macs"]
+        else 0.0
+    )
+    if not _float_matches(normalized["head_mac_saving"], expected_saving):
+        raise ValueError(f"literal T=4 {label} replay fallback MAC saving changed")
+    fallback_views = value.get("native_dense_fallback_views")
+    expected_fallback_views = [
+        item["view"] for item in views if item["native_dense_fallback_applied"]
+    ]
+    if fallback_views != expected_fallback_views:
+        raise ValueError(f"literal T=4 {label} replay fallback view list changed")
+    return {
+        "selected_output_contract": _SELECTED_HEAD_REPLAY_CONTRACT,
+        "padding_mode": "replicate",
+        "batch_size": batch_size,
+        "head_cost_semantics": _SELECTED_HEAD_REPLAY_COST_SEMANTICS,
+        **normalized,
+        "native_full_passthrough_bitwise": True,
+        "native_dense_fallback_envelope": normalized_envelope,
+        "native_dense_fallback_views": expected_fallback_views,
+        "per_view": views,
+        "whole_pipeline_s2_s3_sparse_execution_verified": False,
+        "global_s2_s3_savings_claimed": False,
+    }
+
+
+def _replay_fallback_summary_from_events(events: Any, *, label: str) -> dict[str, Any]:
+    """Extract only durable scalar fallback provenance from one native replay."""
+
+    required = {
+        "contract_version",
+        "padding_mode",
+        "batch_size",
+        "head_cost_semantics",
+        "selected_final_output_positions",
+        "native_full_passthrough_positions",
+        "native_full_passthrough_bitwise",
+        "dense_head_macs",
+        "actual_head_macs",
+        "head_mac_delta",
+        "head_mac_saving",
+        "selected_compact_requested_positions",
+        "compact_replay_candidate_positions",
+        "candidate_replay_macs",
+        "selected_compact_replay_positions",
+        "compact_replay_strict_failure_view_count",
+        "native_dense_fallback_envelope_atol",
+        "native_dense_fallback_envelope_rtol",
+        "native_dense_fallback_view_count",
+        "native_dense_fallback_compact_positions",
+        "per_view",
+        "whole_pipeline_s2_s3_sparse_execution_verified",
+        "global_s2_s3_savings_claimed",
+    }
+    if not isinstance(events, Mapping) or not required.issubset(events):
+        raise RuntimeError(f"literal T=4 collector {label} replay lacks fallback provenance")
+    raw_views = events.get("per_view")
+    if not isinstance(raw_views, list):
+        raise RuntimeError(f"literal T=4 collector {label} replay fallback views changed")
+    view_required = {
+        "batch_item",
+        "selected_final_output_positions",
+        "source_native_full_passthrough_positions",
+        "selected_compact_requested_positions",
+        "compact_replay_candidate_positions",
+        "candidate_replay_macs",
+        "selected_compact_replay_positions",
+        "compact_replay_candidate_finite",
+        "compact_replay_candidate_maximum_absolute_delta",
+        "compact_replay_candidate_mean_absolute_delta",
+        "compact_replay_strict_equivalent",
+        "compact_replay_fallback_envelope_equivalent",
+        "native_dense_fallback_applied",
+        "native_dense_fallback_compact_positions",
+        "native_full_passthrough_bitwise",
+        "dense_head_macs",
+        "replayed_head_macs",
+        "head_mac_saving",
+    }
+    views: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_views):
+        if not isinstance(item, Mapping) or not view_required.issubset(item):
+            raise RuntimeError(
+                f"literal T=4 collector {label} replay fallback view {index} changed"
+            )
+        views.append(
+            {
+                "view": item["batch_item"],
+                # Selected-output replay events carry this only on their
+                # native-dense branches; a regular compact candidate is
+                # necessarily not a native-dense capture.
+                "source_native_dense_head_capture": item.get(
+                    "source_native_dense_head_capture", False
+                ),
+                "selected_final_output_positions": item["selected_final_output_positions"],
+                "source_native_full_passthrough_positions": item[
+                    "source_native_full_passthrough_positions"
+                ],
+                "selected_compact_requested_positions": item[
+                    "selected_compact_requested_positions"
+                ],
+                "compact_replay_candidate_positions": item[
+                    "compact_replay_candidate_positions"
+                ],
+                "candidate_replay_macs": item["candidate_replay_macs"],
+                "selected_compact_replay_positions": item[
+                    "selected_compact_replay_positions"
+                ],
+                "compact_replay_candidate_finite": item[
+                    "compact_replay_candidate_finite"
+                ],
+                "compact_replay_candidate_maximum_absolute_delta": item[
+                    "compact_replay_candidate_maximum_absolute_delta"
+                ],
+                "compact_replay_candidate_mean_absolute_delta": item[
+                    "compact_replay_candidate_mean_absolute_delta"
+                ],
+                "compact_replay_strict_equivalent": item[
+                    "compact_replay_strict_equivalent"
+                ],
+                "compact_replay_fallback_envelope_equivalent": item[
+                    "compact_replay_fallback_envelope_equivalent"
+                ],
+                "native_dense_fallback_applied": item["native_dense_fallback_applied"],
+                "native_dense_fallback_compact_positions": item[
+                    "native_dense_fallback_compact_positions"
+                ],
+                "native_full_passthrough_bitwise": item[
+                    "native_full_passthrough_bitwise"
+                ],
+                "dense_head_macs": item["dense_head_macs"],
+                "actual_head_macs": item["replayed_head_macs"],
+                "head_mac_saving": item["head_mac_saving"],
+            }
+        )
+    return _validate_replay_fallback_summary(
+        {
+            "selected_output_contract": events["contract_version"],
+            "padding_mode": events["padding_mode"],
+            "batch_size": events["batch_size"],
+            "head_cost_semantics": events["head_cost_semantics"],
+            "selected_final_output_positions": events["selected_final_output_positions"],
+            "native_full_passthrough_positions": events[
+                "native_full_passthrough_positions"
+            ],
+            "native_full_passthrough_bitwise": events[
+                "native_full_passthrough_bitwise"
+            ],
+            "dense_head_macs": events["dense_head_macs"],
+            "actual_head_macs": events["actual_head_macs"],
+            "head_mac_delta": events["head_mac_delta"],
+            "head_mac_saving": events["head_mac_saving"],
+            "selected_compact_requested_positions": events[
+                "selected_compact_requested_positions"
+            ],
+            "compact_replay_candidate_positions": events[
+                "compact_replay_candidate_positions"
+            ],
+            "candidate_replay_macs": events["candidate_replay_macs"],
+            "selected_compact_replay_positions": events[
+                "selected_compact_replay_positions"
+            ],
+            "compact_replay_strict_failure_view_count": events[
+                "compact_replay_strict_failure_view_count"
+            ],
+            "native_dense_fallback_envelope": {
+                "atol": events["native_dense_fallback_envelope_atol"],
+                "rtol": events["native_dense_fallback_envelope_rtol"],
+            },
+            "native_dense_fallback_view_count": events[
+                "native_dense_fallback_view_count"
+            ],
+            "native_dense_fallback_compact_positions": events[
+                "native_dense_fallback_compact_positions"
+            ],
+            "native_dense_fallback_views": [
+                item["view"] for item in views if item["native_dense_fallback_applied"]
+            ],
+            "per_view": views,
+            "whole_pipeline_s2_s3_sparse_execution_verified": events[
+                "whole_pipeline_s2_s3_sparse_execution_verified"
+            ],
+            "global_s2_s3_savings_claimed": events["global_s2_s3_savings_claimed"],
+        },
+        label=label,
+    )
+
+
+def build_selected_head_replay_fallback_summary(
+    *, initial_events: Mapping[str, Any], final_events: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Build the immutable initial/final selected-head fallback ledger."""
+
+    initial = _replay_fallback_summary_from_events(initial_events, label="initial")
+    final = _replay_fallback_summary_from_events(final_events, label="final")
+    return _validate_selected_head_replay_fallback_summary(
+        {
+            "schema_version": SELECTED_HEAD_REPLAY_FALLBACK_SUMMARY_SCHEMA,
+            "initial_replay": initial,
+            "final_replay": final,
+            "whole_pipeline_s2_s3_sparse_execution_verified": False,
+            "global_s2_s3_savings_claimed": False,
+        }
+    )
+
+
+def _validate_selected_head_replay_fallback_summary(value: Any) -> dict[str, Any]:
+    """Validate both replay ledgers before freezing a V16T4 scene record."""
+
+    required = {
+        "schema_version",
+        "initial_replay",
+        "final_replay",
+        "whole_pipeline_s2_s3_sparse_execution_verified",
+        "global_s2_s3_savings_claimed",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != required
+        or value.get("schema_version") != SELECTED_HEAD_REPLAY_FALLBACK_SUMMARY_SCHEMA
+        or value.get("whole_pipeline_s2_s3_sparse_execution_verified") is not False
+        or value.get("global_s2_s3_savings_claimed") is not False
+    ):
+        raise ValueError("literal T=4 selected-head replay fallback summary is invalid")
+    initial = _validate_replay_fallback_summary(value.get("initial_replay"), label="initial")
+    final = _validate_replay_fallback_summary(value.get("final_replay"), label="final")
+    return {
+        "schema_version": SELECTED_HEAD_REPLAY_FALLBACK_SUMMARY_SCHEMA,
+        "initial_replay": initial,
+        "final_replay": final,
+        "whole_pipeline_s2_s3_sparse_execution_verified": False,
+        "global_s2_s3_savings_claimed": False,
+    }
 
 
 def _validate_selected_anchor_loo_aggregate(value: Any) -> dict[str, Any]:
@@ -1001,6 +1546,7 @@ def _validate_scene_evidence(
         "native_execution_sha256",
         "initial_attribute_binding_sha256",
         "final_selected_attribute_binding_sha256",
+        "selected_head_replay_fallback_summary",
         "materialized_attribute_binding_sha256",
         "full_passthrough_mask_sha256",
         "full_attribute_binding_sha256",
@@ -1056,6 +1602,16 @@ def _validate_scene_evidence(
         raw = value.get(field)
         if isinstance(raw, bool) or not isinstance(raw, int) or raw < minimum:
             raise ValueError(f"literal T=4 scene {field} is invalid")
+    replay_fallback_summary = _validate_selected_head_replay_fallback_summary(
+        value.get("selected_head_replay_fallback_summary")
+    )
+    if (
+        replay_fallback_summary["whole_pipeline_s2_s3_sparse_execution_verified"]
+        != value.get("whole_pipeline_s2_s3_sparse_execution_verified")
+        or replay_fallback_summary["global_s2_s3_savings_claimed"]
+        != value.get("global_s2_s3_savings_claimed")
+    ):
+        raise ValueError("literal T=4 scene replay fallback savings claims changed")
     aggregate = _validate_selected_anchor_loo_aggregate(
         value.get("selected_anchor_loo_aggregate")
     )
@@ -1072,7 +1628,10 @@ def _validate_scene_evidence(
         != aggregate["source_nonprobe_s3_attribute_reads"]
     ):
         raise ValueError("literal T=4 scene risks are not bound to its LOO aggregate")
-    return dict(value)
+    return {
+        **dict(value),
+        "selected_head_replay_fallback_summary": replay_fallback_summary,
+    }
 
 
 def _normalize_scene_records(
@@ -1532,10 +2091,12 @@ __all__ = [
     "LITERAL_T4_THRESHOLD_RULE",
     "LITERAL_T4_TRACE_ARTIFACT_KIND",
     "LITERAL_T4_TRACE_ARTIFACT_SCHEMA",
+    "SELECTED_HEAD_REPLAY_FALLBACK_SUMMARY_SCHEMA",
     "TRAIN_SPLIT",
     "V16T4_KIND",
     "VerifiedLiteralT4MaterializerGuard",
     "build_literal_t4_application",
+    "build_selected_head_replay_fallback_summary",
     "build_v16t4_trace_artifact",
     "build_v16t4_record",
     "literal_t4_profile",

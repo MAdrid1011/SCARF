@@ -95,6 +95,67 @@ def _loo_observation(calibration, risk: float) -> dict:
     }
 
 
+def _replay_events(*, fallback: bool) -> dict:
+    dense_macs = 100
+    candidate_macs = 10
+    actual_macs = dense_macs if fallback else candidate_macs
+    actual_positions = 0 if fallback else 2
+    fallback_positions = 2 if fallback else 0
+    row = {
+        "batch_item": 0,
+        "source_native_dense_head_capture": fallback,
+        "selected_final_output_positions": 3,
+        "source_native_full_passthrough_positions": 1,
+        "selected_compact_requested_positions": 2,
+        "compact_replay_candidate_positions": 2,
+        "candidate_replay_macs": candidate_macs,
+        "selected_compact_replay_positions": actual_positions,
+        "compact_replay_candidate_finite": True,
+        "compact_replay_candidate_maximum_absolute_delta": 1.5e-5 if fallback else 0.0,
+        "compact_replay_candidate_mean_absolute_delta": 1.0e-5 if fallback else 0.0,
+        "compact_replay_strict_equivalent": not fallback,
+        "compact_replay_fallback_envelope_equivalent": True,
+        "native_dense_fallback_applied": fallback,
+        "native_dense_fallback_compact_positions": fallback_positions,
+        "native_full_passthrough_bitwise": True,
+        "dense_head_macs": dense_macs,
+        "replayed_head_macs": actual_macs,
+        "head_mac_saving": 1.0 - actual_macs / dense_macs,
+    }
+    return {
+        "contract_version": "depthsplat-native-dense-regressor-selected-head-rgb-adapter-v1",
+        "padding_mode": "replicate",
+        "batch_size": 1,
+        "head_cost_semantics": "logical-route-cost-excludes-fallback-validation-v1",
+        "selected_final_output_positions": 3,
+        "native_full_passthrough_positions": 1,
+        "native_full_passthrough_bitwise": True,
+        "dense_head_macs": dense_macs,
+        "actual_head_macs": actual_macs,
+        "head_mac_delta": dense_macs - actual_macs,
+        "head_mac_saving": 1.0 - actual_macs / dense_macs,
+        "selected_compact_requested_positions": 2,
+        "compact_replay_candidate_positions": 2,
+        "candidate_replay_macs": candidate_macs,
+        "selected_compact_replay_positions": actual_positions,
+        "compact_replay_strict_failure_view_count": int(fallback),
+        "native_dense_fallback_envelope_atol": 2.0e-5,
+        "native_dense_fallback_envelope_rtol": 1.0e-5,
+        "native_dense_fallback_view_count": int(fallback),
+        "native_dense_fallback_compact_positions": fallback_positions,
+        "per_view": [row],
+        "whole_pipeline_s2_s3_sparse_execution_verified": False,
+        "global_s2_s3_savings_claimed": False,
+    }
+
+
+def _replay_fallback_summary(calibration) -> dict:
+    return calibration.build_selected_head_replay_fallback_summary(
+        initial_events=_replay_events(fallback=False),
+        final_events=_replay_events(fallback=True),
+    )
+
+
 def _observation(calibration, *, split: str, scene: str, sample_index: int) -> dict:
     offset = 1.0 if split == calibration.HOLDOUT_SPLIT else 0.0
     risks = [offset + sample_index / 100.0 + value for value in (0.1, 0.2, 0.8)]
@@ -127,6 +188,9 @@ def _observation(calibration, *, split: str, scene: str, sample_index: int) -> d
             "native_execution_sha256": _digest(1000 + number),
             "initial_attribute_binding_sha256": _digest(2000 + number),
             "final_selected_attribute_binding_sha256": _digest(3000 + number),
+            "selected_head_replay_fallback_summary": _replay_fallback_summary(
+                calibration
+            ),
             "materialized_attribute_binding_sha256": _digest(4000 + number),
             "full_passthrough_mask_sha256": _digest(5000 + number),
             "full_attribute_binding_sha256": _digest(6000 + number),
@@ -392,6 +456,7 @@ def test_native_scene_observation_uses_no_grad_and_releases_before_cuda_cache(mo
         return tracked(
             "initial_replay" if replay_count == 1 else "producer_replay",
             equivalence={"equivalent": True},
+            events=_replay_events(fallback=replay_count == 2),
         )
 
     packet_count = 0

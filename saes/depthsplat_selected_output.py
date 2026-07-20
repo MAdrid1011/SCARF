@@ -39,6 +39,8 @@ from saes.selected_output_replay import (
 DEPTHSPLAT_SELECTED_OUTPUT_CONTRACT = (
     "depthsplat-native-dense-regressor-selected-head-rgb-adapter-v1"
 )
+DEPTHSPLAT_NATIVE_DENSE_FALLBACK_ATOL = 2.0e-5
+DEPTHSPLAT_NATIVE_DENSE_FALLBACK_RTOL = FP32_RTOL
 
 
 @dataclass(frozen=True)
@@ -552,7 +554,12 @@ def _validate_selection(
 
 
 def _head_event_from_dense_source(
-    head: nn.Module, *, height: int, width: int, batch_item: int
+    head: nn.Module,
+    *,
+    height: int,
+    width: int,
+    batch_item: int,
+    selected_final_output_positions: int | None = None,
 ) -> dict[str, Any]:
     first, _, second = unpack_two_conv_head(head)
     positions = height * width
@@ -563,7 +570,11 @@ def _head_event_from_dense_source(
         "batch_item": batch_item,
         "source_native_dense_head_capture": True,
         "dense_spatial_positions": positions,
-        "selected_final_output_positions": positions,
+        "selected_final_output_positions": (
+            positions
+            if selected_final_output_positions is None
+            else selected_final_output_positions
+        ),
         "first_conv_required_output_positions": positions,
         "first_conv_dense_closure": True,
         "second_conv_selected_only": False,
@@ -572,6 +583,43 @@ def _head_event_from_dense_source(
         "head_mac_saving": 0.0,
         "padding_mode": "replicate",
     }
+
+
+def _numeric_equivalence_report(
+    reference: torch.Tensor,
+    candidate: torch.Tensor,
+    *,
+    atol: float,
+    rtol: float,
+) -> dict[str, Any]:
+    """Compare selected raw descriptors without emitting non-finite evidence."""
+
+    if reference.shape != candidate.shape:
+        raise ValueError("DepthSplat selected replay comparison shapes differ")
+    finite = bool(torch.isfinite(reference).all()) and bool(torch.isfinite(candidate).all())
+    report: dict[str, Any] = {
+        "atol": atol,
+        "rtol": rtol,
+        "finite": finite,
+    }
+    if not finite:
+        report.update(
+            {
+                "maximum_absolute_delta": None,
+                "mean_absolute_delta": None,
+                "equivalent": False,
+            }
+        )
+        return report
+    delta = (reference - candidate).abs()
+    report.update(
+        {
+            "maximum_absolute_delta": float(delta.max().item()),
+            "mean_absolute_delta": float(delta.mean().item()),
+            "equivalent": bool(torch.allclose(reference, candidate, rtol=rtol, atol=atol)),
+        }
+    )
+    return report
 
 
 def replay_depthsplat_selected_head(
@@ -587,7 +635,10 @@ def replay_depthsplat_selected_head(
     A Full tile is not an approximation and must retain the same raw head
     values the source encoder produced.  ``native_full_mask`` makes that
     exception explicit while compact L0/L1 positions continue through the
-    replicate-padded selected-output replay.
+    replicate-padded selected-output replay. If a finite compact replay falls
+    just outside the strict FP32 envelope but inside the fixed native-fallback
+    envelope, that entire view's compact positions are copied from the source
+    capture and charged as dense native work.
     """
 
     if (
@@ -622,6 +673,13 @@ def replay_depthsplat_selected_head(
     per_view: list[dict[str, Any]] = []
     selected_reference: list[torch.Tensor] = []
     selected_values: list[torch.Tensor] = []
+    strict_failure_views = 0
+    candidate_positions = 0
+    candidate_replay_macs = 0
+    actual_compact_replay_positions = 0
+    fallback_views = 0
+    fallback_positions = 0
+    full_passthrough_bitwise = True
     for view in range(views):
         mask = selection_mask[view]
         full = native_full_mask[view]
@@ -635,6 +693,18 @@ def replay_depthsplat_selected_head(
                     "batch_item": view,
                     "source_native_dense_head_capture": False,
                     "selected_final_output_positions": 0,
+                    "selected_compact_requested_positions": 0,
+                    "compact_replay_candidate_positions": 0,
+                    "candidate_replay_macs": 0,
+                    "selected_compact_replay_positions": 0,
+                    "compact_replay_candidate_finite": True,
+                    "compact_replay_candidate_maximum_absolute_delta": None,
+                    "compact_replay_candidate_mean_absolute_delta": None,
+                    "compact_replay_strict_equivalent": True,
+                    "compact_replay_fallback_envelope_equivalent": True,
+                    "native_dense_fallback_applied": False,
+                    "native_dense_fallback_compact_positions": 0,
+                    "native_full_passthrough_bitwise": True,
                     "dense_head_macs": 0,
                     "replayed_head_macs": 0,
                     "head_mac_saving": 0.0,
@@ -642,8 +712,20 @@ def replay_depthsplat_selected_head(
                 }
             )
             continue
+        full_bitwise = True
         if full_count:
             output[view, :, full] = dense_raw_head[view, :, full]
+            full_bitwise = bool(
+                torch.equal(output[view, :, full], dense_raw_head[view, :, full])
+            )
+        full_passthrough_bitwise &= full_bitwise
+        candidate_count = 0
+        candidate_macs = 0
+        actual_replay_count = 0
+        fallback_count = 0
+        candidate_report: dict[str, Any] | None = None
+        fallback_report: dict[str, Any] | None = None
+        fallback_applied = False
         if compact_count == 0:
             event = {
                 "batch_item": view,
@@ -663,12 +745,74 @@ def replay_depthsplat_selected_head(
             replay = replay_two_conv_selected_outputs(
                 head, head_input[view : view + 1], compact
             )
-            output[view, :, replay.coordinates[:, 0], replay.coordinates[:, 1]] = replay.values[0]
-            event = {"batch_item": view, **replay.events}
+            candidate = replay.values[0]
+            source = dense_raw_head[view, :, compact]
+            candidate_count = compact_count
+            candidate_positions += compact_count
+            candidate_macs = int(replay.events["replayed_head_macs"])
+            candidate_replay_macs += candidate_macs
+            candidate_report = _numeric_equivalence_report(
+                source, candidate, atol=FP32_ATOL, rtol=FP32_RTOL
+            )
+            fallback_report = _numeric_equivalence_report(
+                source,
+                candidate,
+                atol=DEPTHSPLAT_NATIVE_DENSE_FALLBACK_ATOL,
+                rtol=DEPTHSPLAT_NATIVE_DENSE_FALLBACK_RTOL,
+            )
+            if not candidate_report["equivalent"]:
+                strict_failure_views += 1
+            if (
+                candidate_report["finite"]
+                and not candidate_report["equivalent"]
+                and fallback_report["equivalent"]
+            ):
+                output[view, :, compact] = source
+                fallback_applied = True
+                fallback_count = compact_count
+                fallback_views += 1
+                fallback_positions += compact_count
+                event = _head_event_from_dense_source(
+                    head,
+                    height=height,
+                    width=width,
+                    batch_item=view,
+                    selected_final_output_positions=selected,
+                )
+            else:
+                output[view, :, replay.coordinates[:, 0], replay.coordinates[:, 1]] = candidate
+                actual_replay_count = compact_count
+                actual_compact_replay_positions += compact_count
+                event = {"batch_item": view, **replay.events}
         event.update(
             {
                 "source_native_full_passthrough_positions": full_count,
-                "selected_compact_replay_positions": compact_count,
+                "selected_compact_requested_positions": compact_count,
+                "compact_replay_candidate_positions": candidate_count,
+                "candidate_replay_macs": candidate_macs,
+                "selected_compact_replay_positions": actual_replay_count,
+                "compact_replay_candidate_finite": (
+                    True if candidate_report is None else candidate_report["finite"]
+                ),
+                "compact_replay_candidate_maximum_absolute_delta": (
+                    None
+                    if candidate_report is None
+                    else candidate_report["maximum_absolute_delta"]
+                ),
+                "compact_replay_candidate_mean_absolute_delta": (
+                    None
+                    if candidate_report is None
+                    else candidate_report["mean_absolute_delta"]
+                ),
+                "compact_replay_strict_equivalent": (
+                    True if candidate_report is None else candidate_report["equivalent"]
+                ),
+                "compact_replay_fallback_envelope_equivalent": (
+                    True if fallback_report is None else fallback_report["equivalent"]
+                ),
+                "native_dense_fallback_applied": fallback_applied,
+                "native_dense_fallback_compact_positions": fallback_count,
+                "native_full_passthrough_bitwise": full_bitwise,
             }
         )
         per_view.append(event)
@@ -676,8 +820,12 @@ def replay_depthsplat_selected_head(
         selected_values.append(output[view, :, mask])
     reference = torch.cat(selected_reference, dim=1)
     replayed = torch.cat(selected_values, dim=1)
-    delta = (reference - replayed).abs()
-    equivalent = bool(torch.allclose(reference, replayed, rtol=FP32_RTOL, atol=FP32_ATOL))
+    equivalence = _numeric_equivalence_report(
+        reference, replayed, atol=FP32_ATOL, rtol=FP32_RTOL
+    )
+    equivalence["equivalent"] = bool(
+        equivalence["equivalent"] and full_passthrough_bitwise
+    )
     dense_macs = sum(int(event["dense_head_macs"]) for event in per_view)
     actual_macs = sum(int(event["replayed_head_macs"]) for event in per_view)
     return DepthSplatSelectedHeadReplay(
@@ -687,6 +835,7 @@ def replay_depthsplat_selected_head(
             "contract_version": DEPTHSPLAT_SELECTED_OUTPUT_CONTRACT,
             "padding_mode": "replicate",
             "batch_size": views,
+            "head_cost_semantics": "logical-route-cost-excludes-fallback-validation-v1",
             "dense_head_macs": dense_macs,
             "actual_head_macs": actual_macs,
             "head_mac_delta": dense_macs - actual_macs,
@@ -697,18 +846,23 @@ def replay_depthsplat_selected_head(
                 native_full_mask.to(dtype=torch.uint8)
             ),
             "native_full_passthrough_positions": int(native_full_mask.sum().item()),
-            "selected_compact_replay_positions": int((selection_mask & ~native_full_mask).sum().item()),
+            "native_full_passthrough_bitwise": full_passthrough_bitwise,
+            "selected_compact_requested_positions": int(
+                (selection_mask & ~native_full_mask).sum().item()
+            ),
+            "compact_replay_candidate_positions": candidate_positions,
+            "candidate_replay_macs": candidate_replay_macs,
+            "selected_compact_replay_positions": actual_compact_replay_positions,
+            "compact_replay_strict_failure_view_count": strict_failure_views,
+            "native_dense_fallback_envelope_atol": DEPTHSPLAT_NATIVE_DENSE_FALLBACK_ATOL,
+            "native_dense_fallback_envelope_rtol": DEPTHSPLAT_NATIVE_DENSE_FALLBACK_RTOL,
+            "native_dense_fallback_view_count": fallback_views,
+            "native_dense_fallback_compact_positions": fallback_positions,
             "per_view": per_view,
             "whole_pipeline_s2_s3_sparse_execution_verified": False,
             "global_s2_s3_savings_claimed": False,
         },
-        equivalence={
-            "atol": FP32_ATOL,
-            "rtol": FP32_RTOL,
-            "maximum_absolute_delta": float(delta.max().item()),
-            "mean_absolute_delta": float(delta.mean().item()),
-            "equivalent": equivalent,
-        },
+        equivalence=equivalence,
         native_full_mask=native_full_mask,
     )
 
