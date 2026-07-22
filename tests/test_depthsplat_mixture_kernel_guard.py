@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from saes.depthsplat_mixture_kernel_guard import (
+    DepthSplatTileKernelClosureMeasurementCache,
     assess_depthsplat_tile_kernel_closure,
 )
 
@@ -270,3 +271,80 @@ def test_nonfinite_analytic_kernel_risk_is_an_unscorable_full_promotion(monkeypa
     assert summary["input_valid"] is False
     assert summary["reason"] == "kernel-integral"
     assert summary["maximum_kernel_risk"] is None
+
+
+def test_measurement_cache_rebinds_threshold_without_repeating_kernel_integrals(
+    monkeypatch,
+) -> None:
+    import saes.depthsplat_mixture_kernel_guard as kernel_guard
+
+    values = _inputs(
+        anchor_means=[[-3.0, 0.0, 4.0], [3.0, 0.0, 4.0]],
+        spatial_weights=[[0.0, 1.0]],
+        bilateral_assignment_weights=[[1.0, 0.0]],
+    )
+    expected = _assess(values, strict=10.0)
+    calls = 0
+    original = kernel_guard._relative_kernel_risk
+
+    def counted_relative_kernel_risk(**kwargs):
+        nonlocal calls
+        calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(kernel_guard, "_relative_kernel_risk", counted_relative_kernel_risk)
+    cache = DepthSplatTileKernelClosureMeasurementCache()
+    accepted = kernel_guard.assess_depthsplat_tile_kernel_closure(
+        **values,  # type: ignore[arg-type]
+        strict_maximum_relative_risk=10.0,
+        measurement_cache=cache,
+    )
+    rejected = kernel_guard.assess_depthsplat_tile_kernel_closure(
+        **values,  # type: ignore[arg-type]
+        strict_maximum_relative_risk=1.0e-6,
+        measurement_cache=cache,
+    )
+
+    assert accepted == expected
+    assert len(cache) == 1
+    assert calls == 4
+    assert rejected["passed"] is False
+    assert _per_output_risks(rejected)[0]["maximum_kernel_risk"] == _per_output_risks(
+        accepted
+    )[0]["maximum_kernel_risk"]
+
+
+def test_measurement_cache_rebinds_unscorable_source_measurements(monkeypatch) -> None:
+    import saes.depthsplat_mixture_kernel_guard as kernel_guard
+
+    values = _inputs(
+        anchor_means=[[0.0, 0.0, 3.0]],
+        spatial_weights=[[1.0]],
+        bilateral_assignment_weights=[[1.0]],
+    )
+    calls = 0
+
+    def unscorable_relative_kernel_risk(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return float("inf")
+
+    monkeypatch.setattr(
+        kernel_guard, "_relative_kernel_risk", unscorable_relative_kernel_risk
+    )
+    cache = DepthSplatTileKernelClosureMeasurementCache()
+    first = kernel_guard.assess_depthsplat_tile_kernel_closure(
+        **values,  # type: ignore[arg-type]
+        strict_maximum_relative_risk=1.0,
+        measurement_cache=cache,
+    )
+    second = kernel_guard.assess_depthsplat_tile_kernel_closure(
+        **values,  # type: ignore[arg-type]
+        strict_maximum_relative_risk=2.0,
+        measurement_cache=cache,
+    )
+
+    assert first["summary"]["reason"] == "kernel-integral"
+    assert second["summary"]["reason"] == "kernel-integral"
+    assert len(cache) == 1
+    assert calls == 2

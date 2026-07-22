@@ -198,15 +198,29 @@ class FSDRSimulator:
                 del self.recent_depths[k]
 
     def _insert_current(
-        self, signature: int, depth: float, position: Tuple[int, int]
+        self,
+        signature: int,
+        depth: float,
+        position: Tuple[int, int],
+        *,
+        top1_index: int | None = None,
     ) -> None:
         """Mirror the RTL sInsert state executed after every pixel."""
+        if top1_index is None:
+            cached_index = 0
+        elif not 0 <= top1_index < self.num_depth_candidates:
+            raise ValueError("top1 candidate index is out of range")
+        else:
+            # CacheEntry has the RTL's five-bit best-index field.  A 128-plane
+            # search stores its four-plane bin; the native 32-plane refinement
+            # scale stores the exact discrete Top-1 index.
+            cached_index = top1_index // max(1, self.num_depth_candidates // 32)
         self.cache.insert(
             CacheEntry(
                 signature=int(signature),
                 position=position,
                 best_depth=float(depth),
-                best_idx=0,
+                best_idx=cached_index,
                 peak_prob=0.9,
                 second_offset=1,
                 spread=0.1,
@@ -222,6 +236,16 @@ class FSDRSimulator:
         lo = cached_depth * (1.0 - window)
         hi = cached_depth * (1.0 + window)
         return lo <= actual_depth <= hi
+
+    def _narrowed_candidate_indices(
+        self, candidate_count: int, cached_index: int
+    ) -> np.ndarray:
+        """Map the cache's five-bit Top-1 coordinate to a D/4 candidate window."""
+        narrowed = max(1, candidate_count // 4)
+        bin_width = max(1, candidate_count // 32)
+        center = min(candidate_count - 1, cached_index * bin_width + bin_width // 2)
+        start = min(max(0, center - narrowed // 2), candidate_count - narrowed)
+        return np.arange(start, start + narrowed)
 
     def process_pixel(self, feature: torch.Tensor, actual_depth: float,
                       position: Tuple[int, int], pixel_idx: int,
@@ -282,7 +306,12 @@ class FSDRSimulator:
                     self.stats['depth_inconsistent'] += 1
                     self.stats['local_invalid_fallbacks'] += 1
                     self.stats['hit_no_guide'] += 1
-                    self._insert_current(signature, float(actual_depth), position)
+                    self._insert_current(
+                        signature,
+                        float(actual_depth),
+                        position,
+                        top1_index=top1_index,
+                    )
                     self._update_recent_depths(position, float(actual_depth))
                     self._record_candidate_work(self.num_depth_candidates)
                     return 'hit_no_guide', self.num_depth_candidates, actual_depth
@@ -292,10 +321,9 @@ class FSDRSimulator:
                 in_window = self._depth_in_window(actual_depth, cached_depth)
 
                 if has_top1:
-                    narrowed = max(1, self.num_depth_candidates // 4)
-                    nearest = np.argpartition(
-                        np.abs(candidates - cached_depth), narrowed - 1
-                    )[:narrowed]
+                    nearest = self._narrowed_candidate_indices(
+                        candidates.size, entry.best_idx
+                    )
                     if top1_index in nearest:
                         self.stats['guided_top1_covered'] += 1
                     else:
@@ -330,7 +358,12 @@ class FSDRSimulator:
                 self.stats['total_validated'] += 1
 
                 # Update cache with actual depth (S2 computed it, even if narrowed)
-                self._insert_current(signature, float(actual_depth), position)
+                self._insert_current(
+                    signature,
+                    float(actual_depth),
+                    position,
+                    top1_index=top1_index,
+                )
                 self._update_recent_depths(position, float(actual_depth))
 
                 searches = max(1, self.num_depth_candidates // 4)
@@ -339,7 +372,12 @@ class FSDRSimulator:
             else:
                 # Defensive only: CacheTable must not return an over-threshold hit.
                 self.stats['hit_no_guide'] += 1
-                self._insert_current(signature, float(actual_depth), position)
+                self._insert_current(
+                    signature,
+                    float(actual_depth),
+                    position,
+                    top1_index=top1_index,
+                )
                 self._update_recent_depths(position, float(actual_depth))
                 self._record_candidate_work(self.num_depth_candidates)
                 return 'hit_no_guide', self.num_depth_candidates, actual_depth
@@ -348,7 +386,12 @@ class FSDRSimulator:
             self.stats['cache_misses'] += 1
             self.stats['full_compute'] += 1
 
-            self._insert_current(signature, float(actual_depth), position)
+            self._insert_current(
+                signature,
+                float(actual_depth),
+                position,
+                top1_index=top1_index,
+            )
             self._update_recent_depths(position, float(actual_depth))
 
             self._record_candidate_work(self.num_depth_candidates)
@@ -419,18 +462,23 @@ class FSDRSimulator:
             raise ValueError("pixel_order must be a permutation of every frame pixel")
 
         signatures = self.hasher.hash_batch(features).detach().cpu().tolist()
-        anchor_values = anchors.cpu().tolist()
         top1_values = top1.cpu().tolist()
         candidate_rows = candidates.cpu().numpy()
         paths = [None] * pixel_count
         for pixel_idx in pixel_order:
             y, x = divmod(pixel_idx, width)
+            top1_index = int(top1_values[pixel_idx])
+            # The cache stores the selected full-search candidate, matching
+            # CacheEntry.best_depth and the local window's discrete Top-1
+            # coverage contract.  A posterior expectation can fall between
+            # modes and point a later D/4 window away from the actual winner.
+            best_depth = float(candidate_rows[pixel_idx, top1_index])
             path, _, _ = self.process_signature(
                 int(signatures[pixel_idx]),
-                float(anchor_values[pixel_idx]),
+                best_depth,
                 (y, x),
                 pixel_index_offset + pixel_idx,
-                top1_index=int(top1_values[pixel_idx]),
+                top1_index=top1_index,
                 candidate_values=candidate_rows[pixel_idx],
             )
             paths[pixel_idx] = path

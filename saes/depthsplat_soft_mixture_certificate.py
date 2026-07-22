@@ -18,7 +18,7 @@ import torch
 
 SCHEMA_VERSION = "depthsplat-soft-mixture-moment-certificate-v1"
 KIND = "depthsplat-source-only-soft-mixture-moment-replay"
-POLICY = "selected-anchor-spatial-s-bilateral-r-exact-moment-replay-v1"
+POLICY = "selected-anchor-source-geometry-s-bilateral-r-exact-moment-replay-v2"
 NUMERICAL_TOLERANCE_MULTIPLIER = 1024.0
 
 _INTEGER_DTYPES = {
@@ -154,11 +154,15 @@ def certify_depthsplat_tile_soft_mixture(
     merged_opacities: torch.Tensor,
     context_extrinsics: torch.Tensor,
     context_intrinsics: torch.Tensor,
+    virtual_mean_geometry: str = "selected-anchor-spatial-moment-v1",
+    virtual_mean_source: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     """Replay the exact selected-anchor S/R soft-mixture equations.
 
-    ``S`` builds the virtual field from selected anchors. ``R`` supplies the
-    numerical contribution of every virtual to every retained output. No
+    ``S`` builds virtual attributes from selected anchors and uses either the
+    selected-anchor spatial mean or a bound source z-depth camera-ray mean
+    with transported native offsets.
+    ``R`` supplies every virtual contribution to every retained output. No
     boolean owner partition or projected-domain proxy participates.
     """
 
@@ -189,6 +193,38 @@ def certify_depthsplat_tile_soft_mixture(
     ):
         return _failure(
             reason="input-contract",
+            tile_key=tile_key,
+            anchor_count=anchor_count,
+            virtual_count=virtual_count,
+        )
+    if virtual_mean_geometry not in {
+        "selected-anchor-spatial-moment-v1",
+        "source-z-depth-camera-ray-offset-transport-v2",
+    }:
+        return _failure(
+            reason="virtual-mean-geometry",
+            tile_key=tile_key,
+            anchor_count=anchor_count,
+            virtual_count=virtual_count,
+        )
+    if virtual_mean_geometry == "selected-anchor-spatial-moment-v1":
+        if virtual_mean_source is not None:
+            return _failure(
+                reason="virtual-mean-source",
+                tile_key=tile_key,
+                anchor_count=anchor_count,
+                virtual_count=virtual_count,
+            )
+    elif (
+        not torch.is_tensor(virtual_mean_source)
+        or not torch.is_floating_point(virtual_mean_source)
+        or virtual_mean_source.shape != (virtual_count, 3)
+        or virtual_mean_source.device != anchor_source_means.device
+        or virtual_mean_source.dtype != anchor_source_means.dtype
+        or not bool(torch.isfinite(virtual_mean_source).all())
+    ):
+        return _failure(
+            reason="virtual-mean-source",
             tile_key=tile_key,
             anchor_count=anchor_count,
             virtual_count=virtual_count,
@@ -312,7 +348,12 @@ def certify_depthsplat_tile_soft_mixture(
             virtual_count=virtual_count,
         )
 
-    expected_virtual_means = spatial_weights @ anchor_source_means
+    expected_virtual_means = (
+        spatial_weights @ anchor_source_means
+        if virtual_mean_geometry == "selected-anchor-spatial-moment-v1"
+        else virtual_mean_source
+    )
+    assert expected_virtual_means is not None
     virtual_deltas = anchor_source_means.unsqueeze(0) - expected_virtual_means.unsqueeze(1)
     expected_virtual_covariances = (
         spatial_weights.reshape(virtual_count, anchor_count, 1, 1)
@@ -394,6 +435,12 @@ def certify_depthsplat_tile_soft_mixture(
         "anchor_dense_slots_sha256": _tensor_sha256(anchor_dense_slots),
         "virtual_origin_slots_sha256": _tensor_sha256(virtual_origin_slots),
         "spatial_weights_sha256": _tensor_sha256(spatial_weights),
+        "virtual_mean_geometry": virtual_mean_geometry,
+        "virtual_mean_source_sha256": (
+            _tensor_sha256(virtual_mean_source)
+            if virtual_mean_source is not None
+            else None
+        ),
         "bilateral_assignment_weights_sha256": _tensor_sha256(
             bilateral_assignment_weights
         ),

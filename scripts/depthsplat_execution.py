@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -122,3 +122,50 @@ def extract_depthsplat_execution_tensors(
         final_depth=final_depth,
         final_match_probability=final_match_probability,
     )
+
+
+def align_depthsplat_plane_sweep_candidate_scales(
+    probability_scales: Sequence[torch.Tensor],
+    plane_sweep_depth_scales: Sequence[torch.Tensor],
+    *,
+    batch_size: int,
+    view_count: int,
+) -> tuple[torch.Tensor, ...]:
+    """Align captured native plane-sweep depths with probability volumes.
+
+    The native warp receives one candidate tensor for each reference/source
+    pair.  For the fixed two-view DL3DV protocol, that pair axis is exactly the
+    batch-by-view probability axis, so the captured metric-depth candidates can
+    be used directly for discrete FSDR window accounting at every scale.
+    """
+    if batch_size <= 0 or view_count != 2:
+        raise ValueError("plane-sweep candidate capture requires the two-view protocol")
+    if len(probability_scales) != len(plane_sweep_depth_scales) or not probability_scales:
+        raise ValueError("plane-sweep probability and candidate scales must match")
+
+    aligned: list[torch.Tensor] = []
+    rows = batch_size * view_count
+    for scale_index, (probabilities, candidate_depths) in enumerate(
+        zip(probability_scales, plane_sweep_depth_scales)
+    ):
+        if (
+            probabilities.dim() != 4
+            or candidate_depths.dim() != 4
+            or probabilities.shape != candidate_depths.shape
+            or probabilities.shape[0] != rows
+            or probabilities.shape[1] <= 0
+            or not bool(torch.isfinite(candidate_depths).all())
+            or bool((candidate_depths <= 0).any())
+        ):
+            raise ValueError(
+                f"plane-sweep candidate scale {scale_index} is not aligned with native probabilities"
+            )
+        aligned.append(
+            rearrange(
+                candidate_depths,
+                "(b v) d h w -> b v d h w",
+                b=batch_size,
+                v=view_count,
+            )
+        )
+    return tuple(aligned)

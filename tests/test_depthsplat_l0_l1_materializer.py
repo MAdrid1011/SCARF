@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -277,6 +278,7 @@ def _preflight(
     selected_anchor_attribute_loo_frozen_guard=None,
     selected_anchor_attribute_loo_maximum_risk=None,
     mixture_kernel_closure_frozen_guard=None,
+    route_isolation="l0_l1",
     preflight_source_sample_image_grid=None,
     maximum_coverage_covariance_scale=None,
     execution_profile=None,
@@ -352,6 +354,7 @@ def _preflight(
         mixture_kernel_closure_frozen_guard=(
             mixture_kernel_closure_frozen_guard
         ),
+        route_isolation=route_isolation,
     )
     return plan, packet, packed, preflight
 
@@ -387,6 +390,258 @@ def _authenticated_literal_frozen_guard(plan, *, threshold_value=30.0):
     return calibration._issue_verified_literal_t4_materializer_guard(
         _literal_frozen_guard(plan, threshold_value=threshold_value)
     )
+
+
+def test_conditional_transport_does_not_leak_an_anchor_offset_to_other_outputs():
+    """Each receiving anchor must own its transported virtual geometry."""
+
+    from depthsplat.src.geometry.projection import get_world_rays, sample_image_grid
+    from saes.depthsplat_backend import source_native_depthsplat_coordinates
+    from saes.depthsplat_l0_l1_materializer import (
+        _build_tile_updates,
+        depthsplat_z_depth_world_means,
+    )
+
+    features = torch.zeros((1, 1, 2, 4, 4), dtype=torch.float32)
+    z_depths = torch.full((1, 1, 4, 4), 2.0, dtype=torch.float32)
+    plan = _plan(
+        features,
+        z_depths,
+        feature_threshold=0.1,
+        depth_threshold=0.1,
+    )
+    assert plan.tile_trace[0]["pre_guard_route"] == "L0"
+    packet, packed = _selected_packet_and_packed(
+        plan.selection_mask,
+        z_depths,
+        routing_features=features,
+        native_full_mask=plan.full_mask,
+    )
+    slot_to_index = {
+        int(slot): index for index, slot in enumerate(packet.dense_slots.tolist())
+    }
+    source_grid, _ = sample_image_grid((4, 4), packet.coordinates.device)
+
+    def build(source_packet, source_packed=packed):
+        return _build_tile_updates(
+            packet=source_packet,
+            packed=source_packed,
+            slot_to_index=slot_to_index,
+            feature_map=features[0, 0],
+            z_depth_map=z_depths[0, 0],
+            record=plan.tile_trace[0],
+            level="L0",
+            semantics="engineering-lightweight-12-balanced-v1",
+            view=0,
+            tile_y=0,
+            tile_x=0,
+            height=4,
+            width=4,
+            feature_statistic=plan.events["feature_statistic"],
+            source_grid=source_grid,
+            source_get_world_rays=get_world_rays,
+            maximum_feature_relative_residual=1.0,
+            maximum_coverage_covariance_scale=16.0,
+        )[0]
+
+    baseline = {slot: mean for slot, mean, *_ in build(packet)}
+    perturbed_raw = packet.raw_head_descriptors.clone()
+    # Slot 3 is the top-right L0 corner. Keep the offset inside the native
+    # half-pixel envelope while changing only its conditional transport.
+    perturbed_raw[slot_to_index[3], 1] += 0.1
+    perturbed_packet = replace(
+        packet,
+        raw_head_descriptors=perturbed_raw,
+        coordinates=source_native_depthsplat_coordinates(
+            perturbed_raw,
+            plan.selection_mask,
+            sample_image_grid=sample_image_grid,
+        ),
+    )
+    perturbed_means = packed.means.clone()
+    index = slot_to_index[3]
+    perturbed_means[index] = depthsplat_z_depth_world_means(
+        perturbed_packet.coordinates[index : index + 1],
+        perturbed_packet.extrinsics[index : index + 1],
+        perturbed_packet.intrinsics[index : index + 1],
+        perturbed_packet.depths[index : index + 1],
+        source_get_world_rays=get_world_rays,
+    )[0]
+    perturbed_packed = replace(packed, means=perturbed_means)
+    perturbed = {
+        slot: mean for slot, mean, *_ in build(perturbed_packet, perturbed_packed)
+    }
+
+    assert torch.allclose(baseline[0], perturbed[0], rtol=0.0, atol=1.0e-7)
+    assert not torch.allclose(baseline[3], perturbed[3], rtol=0.0, atol=1.0e-7)
+
+def test_fixed_scale_conditional_transport_isolated_per_receiving_anchor():
+    """The fixed-scale SAES path must retain conditional offset ownership."""
+
+    from depthsplat.src.geometry.projection import get_world_rays, sample_image_grid
+    from saes.depthsplat_backend import source_native_depthsplat_coordinates
+    from saes.depthsplat_l0_l1_materializer import (
+        _build_fixed_scale_selected_only_tile_updates,
+        depthsplat_z_depth_world_means,
+    )
+
+    features = torch.zeros((1, 1, 2, 4, 4), dtype=torch.float32)
+    z_depths = torch.full((1, 1, 4, 4), 2.0, dtype=torch.float32)
+    plan = _plan(
+        features,
+        z_depths,
+        soft_mixture_normalized_t4=True,
+        feature_threshold=0.1,
+        depth_threshold=0.1,
+    )
+    assert plan.tile_trace[0]["pre_guard_route"] == "L0"
+    packet, packed = _selected_packet_and_packed(
+        plan.selection_mask,
+        z_depths,
+        routing_features=features,
+        native_full_mask=plan.full_mask,
+    )
+    slot_to_index = {
+        int(slot): index for index, slot in enumerate(packet.dense_slots.tolist())
+    }
+
+    def build(source_packet, source_packed=packed):
+        return _build_fixed_scale_selected_only_tile_updates(
+            packet=source_packet,
+            packed=source_packed,
+            slot_to_index=slot_to_index,
+            raw_feature_map=features[0, 0],
+            record=plan.tile_trace[0],
+            level="L0",
+            semantics="engineering-lightweight-12-balanced-v1",
+            view=0,
+            tile_y=0,
+            tile_x=0,
+            height=4,
+            width=4,
+            feature_statistic=plan.events["feature_statistic"],
+            assignment_feature_semantics="unit-normalized-bilinear-s1-v1",
+            coverage_enriched=False,
+            conditional_anchor_transport=True,
+            routing_z_depth_map=z_depths[0, 0],
+            source_get_world_rays=get_world_rays,
+        )[0]
+
+    baseline_updates = {slot: values for slot, *values in build(packet)}
+    baseline = {slot: values[0] for slot, values in baseline_updates.items()}
+    perturbed_raw = packet.raw_head_descriptors.clone()
+    perturbed_raw[slot_to_index[3], 1] += 0.1
+    perturbed_packet = replace(
+        packet,
+        raw_head_descriptors=perturbed_raw,
+        coordinates=source_native_depthsplat_coordinates(
+            perturbed_raw,
+            plan.selection_mask,
+            sample_image_grid=sample_image_grid,
+        ),
+    )
+    perturbed_means = packed.means.clone()
+    index = slot_to_index[3]
+    perturbed_means[index] = depthsplat_z_depth_world_means(
+        perturbed_packet.coordinates[index : index + 1],
+        perturbed_packet.extrinsics[index : index + 1],
+        perturbed_packet.intrinsics[index : index + 1],
+        perturbed_packet.depths[index : index + 1],
+        source_get_world_rays=get_world_rays,
+    )[0]
+    perturbed = {
+        slot: mean
+        for slot, mean, *_ in build(
+            perturbed_packet, replace(packed, means=perturbed_means)
+        )
+    }
+
+    assert torch.allclose(baseline[0], perturbed[0], rtol=0.0, atol=1.0e-7)
+    assert not torch.allclose(baseline[3], perturbed[3], rtol=0.0, atol=1.0e-7)
+
+    perturbed_harmonics = packed.harmonics.clone()
+    perturbed_harmonics[slot_to_index[3]] += 0.1
+    perturbed_opacities = packed.opacities.clone()
+    perturbed_opacities[slot_to_index[3]] += 0.05
+    attribute_perturbed = {
+        slot: values
+        for slot, *values in build(
+            packet,
+            replace(
+                packed,
+                harmonics=perturbed_harmonics,
+                opacities=perturbed_opacities,
+            ),
+        )
+    }
+
+    assert torch.allclose(
+        baseline_updates[0][2], attribute_perturbed[0][2], rtol=0.0, atol=1.0e-7
+    )
+    assert torch.allclose(
+        baseline_updates[0][3], attribute_perturbed[0][3], rtol=0.0, atol=1.0e-7
+    )
+    assert not torch.allclose(
+        baseline_updates[3][2], attribute_perturbed[3][2], rtol=0.0, atol=1.0e-7
+    )
+    assert not torch.allclose(
+        baseline_updates[3][3], attribute_perturbed[3][3], rtol=0.0, atol=1.0e-7
+    )
+
+
+def test_direct_conditional_profile_materializes_normalized_l0_without_kernel_guard():
+    """The real direct route keeps normalized L0 without certificate promotion."""
+
+    from depthsplat.src.geometry.projection import get_world_rays, sample_image_grid
+    from saes.depthsplat_l0_l1_materializer import (
+        DEPTHSPLAT_COVERAGE_CERTIFICATE,
+        DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
+        preflight_depthsplat_l0_l1_materialization,
+        resolve_depthsplat_compact_final_route,
+    )
+
+    features = torch.zeros((1, 1, 2, 4, 4), dtype=torch.float32)
+    z_depths = torch.full((1, 1, 4, 4), 2.0, dtype=torch.float32)
+    plan = _plan(
+        features,
+        z_depths,
+        soft_mixture_normalized_t4=True,
+        feature_threshold=0.1,
+        depth_threshold=0.1,
+    )
+    packet, packed = _selected_packet_and_packed(
+        plan.selection_mask,
+        z_depths,
+        routing_features=features,
+        native_full_mask=plan.full_mask,
+    )
+    preflight = preflight_depthsplat_l0_l1_materialization(
+        packet,
+        packed,
+        plan,
+        features,
+        z_depths,
+        source_sample_image_grid=sample_image_grid,
+        source_get_world_rays=get_world_rays,
+        maximum_coverage_covariance_scale=16.0,
+        execution_profile=DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
+    )
+    final_route = resolve_depthsplat_compact_final_route(plan, preflight)
+
+    assert preflight.events["execution_profile"] == (
+        DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE
+    )
+    assert preflight.events["soft_mixture_certificate_aggregate"] is None
+    assert preflight.events["mixture_kernel_closure_aggregate"] is None
+    assert preflight.events["coverage_certificate"] == DEPTHSPLAT_COVERAGE_CERTIFICATE
+    assert preflight.events["maximum_coverage_covariance_scale"] == pytest.approx(16.0)
+    assert preflight.events["coverage_max_containment_lhs_after_scale"] <= 2.0 + 1e-5
+    assert 1.0 <= preflight.events["coverage_max_moment_covariance_scale"] <= 16.0
+    assert preflight.tile_trace[0]["assignment_transport"] == (
+        "bilateral-soft-moment-v1"
+    )
+    assert final_route.events["route_counts"] == {"L0": 1, "L1": 0, "Full": 0}
+    assert preflight.update_dense_slots.numel() == 4
 
 
 def _kernel_risk_frozen_guard(plan, *, threshold_value=0.1):
@@ -1272,6 +1527,52 @@ def test_soft_mixture_kernel_closure_retries_l0_on_existing_l1_prefetch(monkeypa
     assert route.events["mixture_kernel_closure_aggregate_sha256"] == (
         preflight.events["mixture_kernel_closure_aggregate_sha256"]
     )
+
+
+def test_kernel_closure_route_isolation_forces_requested_level_to_full(monkeypatch):
+    import saes.depthsplat_l0_l1_materializer as materializer
+    from saes.depthsplat_l0_l1_materializer import resolve_depthsplat_compact_final_route
+
+    original_guard = materializer.assess_depthsplat_tile_kernel_closure
+
+    def accepting_kernel_closure(**kwargs):
+        return _forced_kernel_closure_result(original_guard(**kwargs), passed=True)
+
+    monkeypatch.setattr(
+        materializer, "assess_depthsplat_tile_kernel_closure", accepting_kernel_closure
+    )
+    features = torch.zeros(1, 1, 3, 4, 4)
+    z_depths = torch.full((1, 1, 4, 4), 2.0)
+
+    plan, _packet, _packed, preflight = _preflight(
+        features,
+        z_depths,
+        soft_mixture_kernel_closure_t4=True,
+        route_isolation="l1_only",
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+    assert preflight.tile_trace[0]["reason"] == "route-isolation-l0-forced-full"
+    assert route.events["route_counts"] == {"L0": 0, "L1": 0, "Full": 1}
+
+    plan, _packet, _packed, preflight = _preflight(
+        features,
+        z_depths,
+        soft_mixture_kernel_closure_t4=True,
+        route_isolation="l0_only",
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+    assert route.events["route_counts"] == {"L0": 1, "L1": 0, "Full": 0}
+
+    plan, _packet, _packed, preflight = _preflight(
+        features,
+        z_depths,
+        soft_mixture_kernel_closure_t4=True,
+        route_isolation="l0_to_l1",
+    )
+    route = resolve_depthsplat_compact_final_route(plan, preflight)
+    assert preflight.tile_trace[0]["accepted_level"] == "L1"
+    assert preflight.tile_trace[0]["l0_to_l1_coordinated"] is True
+    assert route.events["route_counts"] == {"L0": 0, "L1": 1, "Full": 0}
 
 
 def test_kernel_risk_guard_is_authenticated_and_binds_the_calibrated_threshold(

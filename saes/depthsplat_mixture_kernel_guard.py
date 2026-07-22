@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from typing import Any
+import sys
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Any, Mapping
 
 import torch
 
@@ -27,6 +30,67 @@ _INTEGER_DTYPES = {
     torch.int64,
     torch.uint8,
 }
+
+
+@dataclass(frozen=True)
+class _DepthSplatTileKernelClosureOutputMeasurement:
+    """Threshold-independent analytic values for one merged output."""
+
+    output_index: int
+    normalizer: float
+    world_kernel_risk: float
+    source_kernel_risk: float
+    maximum_kernel_risk: float
+    source_log_depth_rms: float
+
+
+@dataclass(frozen=True)
+class DepthSplatTileKernelClosureMeasurement:
+    """Source-only analytic kernel measurement before a risk limit is bound.
+
+    A valid measurement contains only threshold-independent quantities.  It can
+    therefore be bound to several candidate limits without repeating the
+    projected Gaussian integrals.
+    """
+
+    tile_key: tuple[int, int, int] | None
+    anchor_count: int
+    virtual_count: int
+    default_strict_maximum_relative_risk: float | None
+    input_valid: bool
+    reason: str | None
+    maximum_world_kernel_risk: float | None
+    maximum_source_kernel_risk: float | None
+    maximum_kernel_risk: float | None
+    maximum_source_log_depth_rms: float | None
+    covariance_numerical_floors: tuple[float, float, float] | None
+    per_output: tuple[_DepthSplatTileKernelClosureOutputMeasurement, ...]
+    binding: Mapping[str, str] | None
+
+
+@dataclass
+class DepthSplatTileKernelClosureMeasurementCache:
+    """In-process cache of source measurements keyed by tile inputs."""
+
+    _measurements: dict[str, DepthSplatTileKernelClosureMeasurement] = field(
+        default_factory=dict
+    )
+
+    def get(self, key: str) -> DepthSplatTileKernelClosureMeasurement | None:
+        return self._measurements.get(key)
+
+    def put(
+        self,
+        key: str,
+        measurement: DepthSplatTileKernelClosureMeasurement,
+    ) -> None:
+        self._measurements[key] = measurement
+
+    def clear(self) -> None:
+        self._measurements.clear()
+
+    def __len__(self) -> int:
+        return len(self._measurements)
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -240,7 +304,7 @@ def _source_projection(
     return centers, projected_covariances, depths
 
 
-def assess_depthsplat_tile_kernel_closure(
+def _assess_depthsplat_tile_kernel_closure_uncached(
     *,
     tile_key: tuple[int, int, int],
     anchor_dense_slots: torch.Tensor,
@@ -608,10 +672,416 @@ def assess_depthsplat_tile_kernel_closure(
     }
 
 
+def _default_strict_maximum_relative_risk(value: Any) -> float | None:
+    if not torch.is_tensor(value) or not torch.is_floating_point(value):
+        return None
+    return float(NUMERICAL_CLOSURE_TOLERANCE_MULTIPLIER * torch.finfo(value.dtype).eps)
+
+
+def _resolve_strict_maximum_relative_risk(
+    value: float | None,
+    *,
+    default: float | None,
+) -> float | None:
+    if value is None:
+        value = default
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0.0
+    ):
+        return None
+    return float(value)
+
+
+def _input_measurement_cache_key(
+    *,
+    tile_key: Any,
+    anchor_dense_slots: Any,
+    virtual_origin_slots: Any,
+    bilateral_assignment_weights: Any,
+    anchor_source_means: Any,
+    anchor_source_covariances: Any,
+    anchor_source_opacities: Any,
+    virtual_means: Any,
+    virtual_covariances: Any,
+    virtual_opacities: Any,
+    merged_means: Any,
+    merged_covariances: Any,
+    merged_opacities: Any,
+    context_extrinsics: Any,
+    context_intrinsics: Any,
+) -> str | None:
+    """Return a process-local key without doing the analytic kernel work."""
+
+    checked_tile_key = _valid_tile_key(tile_key)
+    values = {
+        "anchor_dense_slots": anchor_dense_slots,
+        "virtual_origin_slots": virtual_origin_slots,
+        "bilateral_assignment_weights": bilateral_assignment_weights,
+        "anchor_source_means": anchor_source_means,
+        "anchor_source_covariances": anchor_source_covariances,
+        "anchor_source_opacities": anchor_source_opacities,
+        "virtual_means": virtual_means,
+        "virtual_covariances": virtual_covariances,
+        "virtual_opacities": virtual_opacities,
+        "merged_means": merged_means,
+        "merged_covariances": merged_covariances,
+        "merged_opacities": merged_opacities,
+        "context_extrinsics": context_extrinsics,
+        "context_intrinsics": context_intrinsics,
+    }
+    if checked_tile_key is None or not all(torch.is_tensor(value) for value in values.values()):
+        return None
+    try:
+        return _canonical_sha256(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "kind": KIND,
+                "policy": POLICY,
+                "tile_key": list(checked_tile_key),
+                "tensor_sha256": {
+                    name: _tensor_sha256(value) for name, value in values.items()
+                },
+                # Device participates in the computation but not in the
+                # persisted evidence binding.
+                "devices": {name: str(value.device) for name, value in values.items()},
+            }
+        )
+    except (RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _measurement_from_uncached_assessment(
+    assessment: Mapping[str, Any],
+    *,
+    default_strict_maximum_relative_risk: float | None,
+) -> DepthSplatTileKernelClosureMeasurement:
+    """Extract threshold-independent values from the established guard output."""
+
+    summary = assessment.get("summary")
+    if not isinstance(summary, Mapping):
+        raise RuntimeError("kernel-closure measurement summary is invalid")
+    tile_value = assessment.get("tile_key")
+    tile_key = _valid_tile_key(tuple(tile_value)) if isinstance(tile_value, list) else None
+    anchor_count = summary.get("anchor_count")
+    virtual_count = summary.get("virtual_count")
+    if (
+        isinstance(anchor_count, bool)
+        or not isinstance(anchor_count, int)
+        or isinstance(virtual_count, bool)
+        or not isinstance(virtual_count, int)
+    ):
+        raise RuntimeError("kernel-closure measurement counts are invalid")
+    if summary.get("input_valid") is not True:
+        reason = summary.get("reason")
+        if not isinstance(reason, str):
+            raise RuntimeError("kernel-closure measurement failure is invalid")
+        return DepthSplatTileKernelClosureMeasurement(
+            tile_key=tile_key,
+            anchor_count=anchor_count,
+            virtual_count=virtual_count,
+            default_strict_maximum_relative_risk=default_strict_maximum_relative_risk,
+            input_valid=False,
+            reason=reason,
+            maximum_world_kernel_risk=None,
+            maximum_source_kernel_risk=None,
+            maximum_kernel_risk=None,
+            maximum_source_log_depth_rms=None,
+            covariance_numerical_floors=None,
+            per_output=(),
+            binding=None,
+        )
+
+    records = summary.get("per_output")
+    floors = summary.get("covariance_numerical_floors")
+    binding = assessment.get("binding")
+    if not isinstance(records, list) or not isinstance(floors, Mapping) or not isinstance(binding, Mapping):
+        raise RuntimeError("kernel-closure measurement evidence is invalid")
+    try:
+        per_output = tuple(
+            _DepthSplatTileKernelClosureOutputMeasurement(
+                output_index=int(record["output_index"]),
+                normalizer=float(record["normalizer"]),
+                world_kernel_risk=float(record["world_kernel_risk"]),
+                source_kernel_risk=float(record["source_kernel_risk"]),
+                maximum_kernel_risk=float(record["maximum_kernel_risk"]),
+                source_log_depth_rms=float(record["source_log_depth_rms"]),
+            )
+            for record in records
+            if isinstance(record, Mapping)
+        )
+        numerical_floors = (
+            float(floors["source"]),
+            float(floors["virtual"]),
+            float(floors["merged"]),
+        )
+        maximum_world_kernel_risk = float(summary["maximum_world_kernel_risk"])
+        maximum_source_kernel_risk = float(summary["maximum_source_kernel_risk"])
+        maximum_kernel_risk = float(summary["maximum_kernel_risk"])
+        maximum_source_log_depth_rms = float(summary["maximum_source_log_depth_rms"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("kernel-closure measurement values are invalid") from error
+    if len(per_output) != len(records) or tile_key is None:
+        raise RuntimeError("kernel-closure measurement output evidence is invalid")
+    if any(not isinstance(key, str) or not isinstance(value, str) for key, value in binding.items()):
+        raise RuntimeError("kernel-closure measurement binding is invalid")
+    return DepthSplatTileKernelClosureMeasurement(
+        tile_key=tile_key,
+        anchor_count=anchor_count,
+        virtual_count=virtual_count,
+        default_strict_maximum_relative_risk=default_strict_maximum_relative_risk,
+        input_valid=True,
+        reason=None,
+        maximum_world_kernel_risk=maximum_world_kernel_risk,
+        maximum_source_kernel_risk=maximum_source_kernel_risk,
+        maximum_kernel_risk=maximum_kernel_risk,
+        maximum_source_log_depth_rms=maximum_source_log_depth_rms,
+        covariance_numerical_floors=numerical_floors,
+        per_output=per_output,
+        binding=MappingProxyType(dict(binding)),
+    )
+
+
+def measure_depthsplat_tile_kernel_closure(
+    *,
+    tile_key: tuple[int, int, int],
+    anchor_dense_slots: torch.Tensor,
+    virtual_origin_slots: torch.Tensor,
+    bilateral_assignment_weights: torch.Tensor,
+    anchor_source_means: torch.Tensor,
+    anchor_source_covariances: torch.Tensor,
+    anchor_source_opacities: torch.Tensor,
+    virtual_means: torch.Tensor,
+    virtual_covariances: torch.Tensor,
+    virtual_opacities: torch.Tensor,
+    merged_means: torch.Tensor,
+    merged_covariances: torch.Tensor,
+    merged_opacities: torch.Tensor,
+    context_extrinsics: torch.Tensor,
+    context_intrinsics: torch.Tensor,
+    measurement_cache: DepthSplatTileKernelClosureMeasurementCache | None = None,
+) -> DepthSplatTileKernelClosureMeasurement:
+    """Compute the source-only analytic risks once, before choosing a limit."""
+
+    if measurement_cache is not None and not isinstance(
+        measurement_cache, DepthSplatTileKernelClosureMeasurementCache
+    ):
+        raise TypeError("kernel-closure measurement cache is invalid")
+    cache_key = _input_measurement_cache_key(
+        tile_key=tile_key,
+        anchor_dense_slots=anchor_dense_slots,
+        virtual_origin_slots=virtual_origin_slots,
+        bilateral_assignment_weights=bilateral_assignment_weights,
+        anchor_source_means=anchor_source_means,
+        anchor_source_covariances=anchor_source_covariances,
+        anchor_source_opacities=anchor_source_opacities,
+        virtual_means=virtual_means,
+        virtual_covariances=virtual_covariances,
+        virtual_opacities=virtual_opacities,
+        merged_means=merged_means,
+        merged_covariances=merged_covariances,
+        merged_opacities=merged_opacities,
+        context_extrinsics=context_extrinsics,
+        context_intrinsics=context_intrinsics,
+    )
+    if measurement_cache is not None and cache_key is not None:
+        cached = measurement_cache.get(cache_key)
+        if cached is not None:
+            return cached
+    uncached = _assess_depthsplat_tile_kernel_closure_uncached(
+        tile_key=tile_key,
+        anchor_dense_slots=anchor_dense_slots,
+        virtual_origin_slots=virtual_origin_slots,
+        bilateral_assignment_weights=bilateral_assignment_weights,
+        anchor_source_means=anchor_source_means,
+        anchor_source_covariances=anchor_source_covariances,
+        anchor_source_opacities=anchor_source_opacities,
+        virtual_means=virtual_means,
+        virtual_covariances=virtual_covariances,
+        virtual_opacities=virtual_opacities,
+        merged_means=merged_means,
+        merged_covariances=merged_covariances,
+        merged_opacities=merged_opacities,
+        context_extrinsics=context_extrinsics,
+        context_intrinsics=context_intrinsics,
+        # This finite upper bound prevents a threshold decision from affecting
+        # the measurement while preserving the existing fail-closed integral
+        # handling for nonfinite risks.
+        strict_maximum_relative_risk=sys.float_info.max,
+    )
+    measurement = _measurement_from_uncached_assessment(
+        uncached,
+        default_strict_maximum_relative_risk=_default_strict_maximum_relative_risk(
+            anchor_source_means
+        ),
+    )
+    if measurement_cache is not None and cache_key is not None:
+        measurement_cache.put(cache_key, measurement)
+    return measurement
+
+
+def bind_depthsplat_tile_kernel_closure_measurement(
+    measurement: DepthSplatTileKernelClosureMeasurement,
+    *,
+    strict_maximum_relative_risk: float | None = None,
+) -> dict[str, Any]:
+    """Bind a cached analytic measurement to one maximum relative risk."""
+
+    if not isinstance(measurement, DepthSplatTileKernelClosureMeasurement):
+        raise TypeError("kernel-closure measurement is invalid")
+    threshold = _resolve_strict_maximum_relative_risk(
+        strict_maximum_relative_risk,
+        default=measurement.default_strict_maximum_relative_risk,
+    )
+    if threshold is None:
+        return _failure(
+            reason="risk-threshold",
+            tile_key=measurement.tile_key,
+            anchor_count=measurement.anchor_count,
+            virtual_count=measurement.virtual_count,
+            strict_maximum_relative_risk=None,
+        )
+    if not measurement.input_valid:
+        return _failure(
+            reason=measurement.reason or "measurement-contract",
+            tile_key=measurement.tile_key,
+            anchor_count=measurement.anchor_count,
+            virtual_count=measurement.virtual_count,
+            strict_maximum_relative_risk=threshold,
+        )
+    if (
+        measurement.maximum_world_kernel_risk is None
+        or measurement.maximum_source_kernel_risk is None
+        or measurement.maximum_kernel_risk is None
+        or measurement.maximum_source_log_depth_rms is None
+        or measurement.covariance_numerical_floors is None
+        or measurement.binding is None
+    ):
+        raise ValueError("kernel-closure measurement is incomplete")
+
+    output_records: list[dict[str, Any]] = []
+    guard_passed = True
+    for output in measurement.per_output:
+        output_passed = output.maximum_kernel_risk <= threshold
+        guard_passed = guard_passed and output_passed
+        output_records.append(
+            {
+                "output_index": output.output_index,
+                "normalizer": output.normalizer,
+                "world_kernel_risk": output.world_kernel_risk,
+                "source_kernel_risk": output.source_kernel_risk,
+                "maximum_kernel_risk": output.maximum_kernel_risk,
+                "source_log_depth_rms": output.source_log_depth_rms,
+                "passed": output_passed,
+            }
+        )
+    source_floor, virtual_floor, merged_floor = measurement.covariance_numerical_floors
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": KIND,
+        "policy": POLICY,
+        "source_only": _source_only_metadata(),
+        "tile_key": list(measurement.tile_key) if measurement.tile_key is not None else None,
+        "passed": guard_passed,
+        "summary": {
+            "input_valid": True,
+            "reason": None if guard_passed else "kernel-closure-risk-exceeds-strict-limit",
+            "anchor_count": measurement.anchor_count,
+            "virtual_count": measurement.virtual_count,
+            "strict_maximum_relative_risk": threshold,
+            "maximum_world_kernel_risk": measurement.maximum_world_kernel_risk,
+            "maximum_source_kernel_risk": measurement.maximum_source_kernel_risk,
+            "maximum_kernel_risk": measurement.maximum_kernel_risk,
+            "maximum_source_log_depth_rms": measurement.maximum_source_log_depth_rms,
+            "covariance_numerical_floors": {
+                "source": source_floor,
+                "virtual": virtual_floor,
+                "merged": merged_floor,
+            },
+            "per_output": output_records,
+        },
+        "binding": dict(measurement.binding),
+    }
+
+
+def assess_depthsplat_tile_kernel_closure(
+    *,
+    tile_key: tuple[int, int, int],
+    anchor_dense_slots: torch.Tensor,
+    virtual_origin_slots: torch.Tensor,
+    bilateral_assignment_weights: torch.Tensor,
+    anchor_source_means: torch.Tensor,
+    anchor_source_covariances: torch.Tensor,
+    anchor_source_opacities: torch.Tensor,
+    virtual_means: torch.Tensor,
+    virtual_covariances: torch.Tensor,
+    virtual_opacities: torch.Tensor,
+    merged_means: torch.Tensor,
+    merged_covariances: torch.Tensor,
+    merged_opacities: torch.Tensor,
+    context_extrinsics: torch.Tensor,
+    context_intrinsics: torch.Tensor,
+    strict_maximum_relative_risk: float | None = None,
+    measurement_cache: DepthSplatTileKernelClosureMeasurementCache | None = None,
+) -> dict[str, Any]:
+    """Measure source-only kernel closure, then bind its requested risk limit."""
+
+    anchor_count = (
+        int(anchor_source_means.shape[0])
+        if torch.is_tensor(anchor_source_means) and anchor_source_means.ndim == 2
+        else 0
+    )
+    virtual_count = (
+        int(virtual_means.shape[0])
+        if torch.is_tensor(virtual_means) and virtual_means.ndim == 2
+        else 0
+    )
+    threshold = _resolve_strict_maximum_relative_risk(
+        strict_maximum_relative_risk,
+        default=_default_strict_maximum_relative_risk(anchor_source_means),
+    )
+    if threshold is None:
+        return _failure(
+            reason="risk-threshold",
+            tile_key=tile_key,
+            anchor_count=anchor_count,
+            virtual_count=virtual_count,
+            strict_maximum_relative_risk=None,
+        )
+    measurement = measure_depthsplat_tile_kernel_closure(
+        tile_key=tile_key,
+        anchor_dense_slots=anchor_dense_slots,
+        virtual_origin_slots=virtual_origin_slots,
+        bilateral_assignment_weights=bilateral_assignment_weights,
+        anchor_source_means=anchor_source_means,
+        anchor_source_covariances=anchor_source_covariances,
+        anchor_source_opacities=anchor_source_opacities,
+        virtual_means=virtual_means,
+        virtual_covariances=virtual_covariances,
+        virtual_opacities=virtual_opacities,
+        merged_means=merged_means,
+        merged_covariances=merged_covariances,
+        merged_opacities=merged_opacities,
+        context_extrinsics=context_extrinsics,
+        context_intrinsics=context_intrinsics,
+        measurement_cache=measurement_cache,
+    )
+    return bind_depthsplat_tile_kernel_closure_measurement(
+        measurement,
+        strict_maximum_relative_risk=threshold,
+    )
+
+
 __all__ = (
+    "DepthSplatTileKernelClosureMeasurement",
+    "DepthSplatTileKernelClosureMeasurementCache",
     "KIND",
     "NUMERICAL_CLOSURE_TOLERANCE_MULTIPLIER",
     "POLICY",
     "SCHEMA_VERSION",
     "assess_depthsplat_tile_kernel_closure",
+    "bind_depthsplat_tile_kernel_closure_measurement",
+    "measure_depthsplat_tile_kernel_closure",
 )

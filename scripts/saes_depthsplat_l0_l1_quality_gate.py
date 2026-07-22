@@ -556,7 +556,7 @@ def _load_isolated_source_target_record(
     context_indices: list[int],
     input_identity: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Load only the target-free sample-zero selection and camera sidecar."""
+    """Load only the target-free selection and camera sidecar bound to context."""
 
     from scripts.calibration_inputs import (
         load_target_free_record,
@@ -587,8 +587,17 @@ def _load_isolated_source_target_record(
         raise RuntimeError("DepthSplat isolated target source tree differs from context audit")
 
     source_audit = _read_json_object(source_audit_path, "source target-free audit")
+    source_sample_index = input_identity.get(
+        "source_sample_index", SOURCE_SAMPLE_INDEX
+    )
+    if (
+        isinstance(source_sample_index, bool)
+        or not isinstance(source_sample_index, int)
+        or source_sample_index < 0
+    ):
+        raise RuntimeError("DepthSplat quality gate context input has an invalid sample index")
     expected_selection = {
-        "source_sample_index": SOURCE_SAMPLE_INDEX,
+        "source_sample_index": source_sample_index,
         "scene": scene,
         "context_indices": list(context_indices),
     }
@@ -603,7 +612,7 @@ def _load_isolated_source_target_record(
         or source_audit.get("paper_result_eligible") is not False
         or source_audit.get("model") != MODEL
         or source_audit.get("dataset") != DATASET
-        or source_audit.get("source_sample_index") != SOURCE_SAMPLE_INDEX
+        or source_audit.get("source_sample_index") != source_sample_index
         or source_audit.get("target_rgb_included") is not False
         or source_audit.get("target_rgb_opened") is not False
         or source_audit.get("target_rgb_paths_passed_to_encoder") is not False

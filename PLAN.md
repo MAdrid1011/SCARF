@@ -2851,3 +2851,44 @@
   replay presented as sparse execution. The nonzero materialization repair
   remains separate and must use source-faithful geometry, a nonzero deletion,
   and the original Table 1 quality tolerances before any expansion.
+
+## 33. DepthSplat Executed-Work Repair
+
+- Selected intervention: make the SAES cycle record consume only work that the
+  pinned encoder actually executed. Probe-first route masks remain source
+  telemetry unless a model-specific sparse producer executes the required
+  dependency footprint.
+- Fixed quality boundary: no materialization, route threshold, target access,
+  renderer, or quality metric changes. Full work remains native dense and no
+  planned-but-unexecuted S2/S3 position may be charged as skipped.
+- Acceptance: focused CPU tests must show that a route plan cannot lower the
+  actual cycle count when `whole_pipeline_s2_s3_sparse_execution_verified` is
+  false. The existing sample-0 direct-conditional result is retained as the
+  quality anchor; no new data run is justified by accounting-only code.
+
+## 34. DepthSplat Sparse-Datapath Projection
+
+- User-updated primary quality gate: accept a route when measured mean
+  `PSNR loss <= 0.5 dB`. SSIM and LPIPS remain mandatory reported observables,
+  but do not silently veto this explicitly PSNR-only gate.
+- Selected intervention: add a separate coefficient-compatible hardware
+  projection that issues only source-route S2 probe searches and source-route
+  S3 emissions, with all bypassed work, control, materialization, and retained
+  output costs explicit. It must never replace or relabel the dense-execution
+  record.
+- Comparability boundary: the projection uses the same checkpoint, context,
+  route, selected-head closure, and moment materialization. It is a simulator
+  result with `measured=false`, not a GPU wall-clock claim. A real sparse
+  producer remains a separately required implementation for measured timing.
+- First slice: recover the best existing current-source-compatible candidate
+  under the new PSNR limit, then run exactly one fresh fixed-sample result only if
+  its source identity and implementation can be reproduced.
+- Result: the current `kernel-closure-v3`, `threshold=2.0`, `l0_to_l1` route
+  was rerun without route changes on fixed DL3DV samples `{7,16,19}`. All
+  pass the explicit `0.5 dB` PSNR gate, with mean/max loss `0.1027/0.2109 dB`,
+  mean Gaussian saving `3.85%`, and mean LPIPS increase `0.00371`. Current
+  dense execution remains `0.9975x` SAES-only; the same-weight projected
+  sparse datapath reports a serial `1.0074x` lower bound and a `>=1.4435x`
+  perfect-overlap upper bound. The paper's `1.26x` lies within every sample's
+  bound and requires `66.25%` of the stated S2/S3 feature-stream overlap
+  window. S4/GGU/writeback remains explicitly unmodeled in this projection.

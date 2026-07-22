@@ -54,3 +54,37 @@ def test_depthsplat_reference_tensors_reject_unaligned_matching_feature():
         extract_depthsplat_execution_tensors(
             results, batch_size=1, view_count=2, image_height=4, image_width=8
         )
+
+
+def test_depthsplat_plane_sweep_candidates_align_every_native_scale():
+    from scripts.depthsplat_execution import align_depthsplat_plane_sweep_candidate_scales
+
+    results = _results()
+    probabilities = results["match_probs"]
+    candidates = [
+        torch.full_like(probability, float(index + 1))
+        for index, probability in enumerate(probabilities)
+    ]
+
+    aligned = align_depthsplat_plane_sweep_candidate_scales(
+        probabilities, candidates, batch_size=1, view_count=2
+    )
+
+    assert [tuple(item.shape) for item in aligned] == [
+        (1, 2, 8, 1, 2),
+        (1, 2, 4, 2, 4),
+    ]
+    assert torch.equal(aligned[1][0, 1], candidates[1][1])
+
+
+def test_depthsplat_plane_sweep_candidates_reject_nonpositive_depths():
+    from scripts.depthsplat_execution import align_depthsplat_plane_sweep_candidate_scales
+
+    results = _results()
+    candidates = [torch.ones_like(item) for item in results["match_probs"]]
+    candidates[1][0, 0, 0, 0] = 0.0
+
+    with pytest.raises(ValueError, match="scale 1"):
+        align_depthsplat_plane_sweep_candidate_scales(
+            results["match_probs"], candidates, batch_size=1, view_count=2
+        )

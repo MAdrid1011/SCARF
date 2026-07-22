@@ -221,9 +221,11 @@ def _sample_root(output_dir: Path, sample_index: int) -> Path:
 
 
 def _fixed_selections(
-    *, model_name: str = DEFAULT_MODEL
+    *,
+    model_name: str = DEFAULT_MODEL,
+    source_sample_indices: Sequence[int] = FIXED_SAMPLE_INDICES,
 ) -> tuple[Any, Any, list[dict[str, Any]]]:
-    """Resolve fixed source ordinals to the prepared dataloader's execution order."""
+    """Resolve canonical source ordinals to prepared execution rows."""
     identity = _expected_identity(model_name)
     selection = resolve_claim_selection(identity["model"], "dl3dv", ROOT)
     experiment = resolve_experiment(identity["model"], "dl3dv", ROOT)
@@ -248,10 +250,20 @@ def _fixed_selections(
     if execution_summary != summary:
         raise ValueError("prepared execution order changed the canonical selection")
     by_source = {row["sample_index"]: row for row in rows}
-    fixed = [by_source[index] for index in FIXED_SAMPLE_INDICES if index in by_source]
-    if len(fixed) != len(FIXED_SAMPLE_INDICES):
-        raise ValueError("fixed eight-scene source ordinal is unavailable")
-    return selection, experiment, fixed
+    requested = tuple(source_sample_indices)
+    if (
+        not requested
+        or any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0
+            for index in requested
+        )
+        or len(set(requested)) != len(requested)
+    ):
+        raise ValueError("requested source sample indices are invalid")
+    selected = [by_source[index] for index in requested if index in by_source]
+    if len(selected) != len(requested):
+        raise ValueError("requested source sample index is unavailable")
+    return selection, experiment, selected
 
 
 def _validate_prepared_contract(
@@ -889,11 +901,25 @@ def run_fixed_eight_scene_gate(
     acid_plan_path: Path = DEFAULT_PLAN_PATH,
     acid_materialization_root: Path = DEFAULT_MATERIALIZATION_ROOT,
     model_name: str = DEFAULT_MODEL,
+    source_sample_indices: Sequence[int] | None = None,
 ) -> dict[str, Any]:
-    """Execute the fixed V16 quality contract serially for DL3DV indices 0..7."""
+    """Execute the fixed V16 contract for canonical DL3DV source ordinals."""
     model_name = _model_name(model_name)
     identity = _expected_identity(model_name)
-    claim_selection, experiment, fixed_selections = _fixed_selections(model_name=model_name)
+    requested = (
+        FIXED_SAMPLE_INDICES
+        if source_sample_indices is None
+        else tuple(source_sample_indices)
+    )
+    if source_sample_indices is None:
+        claim_selection, experiment, fixed_selections = _fixed_selections(
+            model_name=model_name
+        )
+    else:
+        claim_selection, experiment, fixed_selections = _fixed_selections(
+            model_name=model_name,
+            source_sample_indices=requested,
+        )
     prepared_dataset = _validate_prepared_contract(experiment, model_name=model_name)
     classic_backend_identity = _live_classic_backend_identity(
         experiment, model_name=model_name
@@ -942,7 +968,7 @@ def run_fixed_eight_scene_gate(
         finally:
             _release_cuda(device)
 
-    completed = len(samples) == len(FIXED_SAMPLE_INDICES)
+    completed = len(samples) == len(requested)
     aggregate = _aggregate_completed_samples(samples) if completed else None
     all_sample_pass = completed and all(
         sample["quality"]["status"] == "PASS"
@@ -957,7 +983,10 @@ def run_fixed_eight_scene_gate(
         "status": status,
         "paper_result_eligible": False,
         "model": model_name,
-        "fixed_sample_indices": list(FIXED_SAMPLE_INDICES),
+        "fixed_sample_indices": list(requested),
+        "selection_scope": (
+            "fixed-eight-scene" if requested == FIXED_SAMPLE_INDICES else "canonical-prefix-or-explicit"
+        ),
         "fixed_selections": [
             _selection_identity(selection) for selection in fixed_selections
         ],
@@ -989,6 +1018,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", choices=CLASSIC_MODELS, default=DEFAULT_MODEL)
     parser.add_argument("--raw-root", type=Path, default=DEFAULT_RAW_ROOT)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=len(FIXED_SAMPLE_INDICES),
+        help="Canonical DL3DV prefix size; defaults to the fixed eight-scene gate",
+    )
     parser.add_argument("--v15-calibration-record", type=Path, required=True)
     parser.add_argument("--v16-calibration-record", type=Path, required=True)
     parser.add_argument("--acid-plan-path", type=Path, default=DEFAULT_PLAN_PATH)
@@ -998,6 +1033,8 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MATERIALIZATION_ROOT,
     )
     args = parser.parse_args(argv)
+    if args.num_samples <= 0:
+        parser.error("--num-samples must be positive")
     device = torch.device(args.device)
     if device.type != "cuda" or not torch.cuda.is_available():
         parser.error("the fixed eight-scene V16 gate requires CUDA")
@@ -1011,6 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
             acid_plan_path=args.acid_plan_path,
             acid_materialization_root=args.acid_materialization_root,
             model_name=args.model,
+            source_sample_indices=tuple(range(args.num_samples)),
         )
     except Exception as exc:
         parser.error(f"eight-scene V16 gate could not start: {exc}")

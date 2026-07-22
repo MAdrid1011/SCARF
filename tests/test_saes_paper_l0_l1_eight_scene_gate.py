@@ -145,10 +145,15 @@ def _install_fake_pipeline(
         for index in range(8)
     }
 
-    def fixed_selections(*, model_name: str):
+    def fixed_selections(*, model_name: str, source_sample_indices=tuple(range(8))):
         if model_name != expected_model:
             pytest.fail("fixed selections received the wrong model")
-        return type("Selection", (), {"sample_count": 8})(), object(), selections
+        requested = tuple(source_sample_indices)
+        return (
+            type("Selection", (), {"sample_count": 8})(),
+            object(),
+            [selections[index] for index in requested],
+        )
 
     monkeypatch.setattr(module, "_fixed_selections", fixed_selections)
 
@@ -404,6 +409,26 @@ def test_fixed_eight_scene_gate_forwards_mvsplat_identity_through_every_stage(
     assert model_calls.count(("audit", "mvsplat")) == 8
     assert model_calls.count(("quality", "mvsplat")) == 8
     assert calls.index(("audit", 0)) < calls.index(("quality", 0))
+
+
+def test_gate_runs_an_explicit_canonical_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    from scripts import saes_paper_l0_l1_eight_scene_gate as gate
+
+    calls, _model_calls = _install_fake_pipeline(monkeypatch, gate, tmp_path)
+    record = gate.run_fixed_eight_scene_gate(
+        output_dir=tmp_path / "prefix",
+        raw_root=tmp_path / "raw",
+        device=torch.device("cpu"),
+        v15_calibration_record=tmp_path / "v15.json",
+        v16_calibration_record=tmp_path / "v16.json",
+        source_sample_indices=(0, 1, 2),
+    )
+
+    assert record["status"] == "PASS"
+    assert record["fixed_sample_indices"] == [0, 1, 2]
+    assert record["selection_scope"] == "canonical-prefix-or-explicit"
+    assert [sample["sample_index"] for sample in record["samples"]] == [0, 1, 2]
+    assert all(sample_index < 3 for _stage, sample_index in calls)
 
 
 def test_fixed_eight_scene_gate_fails_closed_when_quality_identity_drifts(

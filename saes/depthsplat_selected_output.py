@@ -585,6 +585,90 @@ def _head_event_from_dense_source(
     }
 
 
+def estimate_depthsplat_selected_head_schedule(
+    head: nn.Module,
+    producer_request_mask: torch.Tensor,
+    *,
+    emitted_output_mask: torch.Tensor | None = None,
+    native_full_mask: torch.Tensor | None = None,
+) -> dict[str, Any]:
+    """Schedule the two-convolution head for the committed source route.
+
+    The first replicate-padded convolution is needed at the one-pixel closure
+    around every producer-requested output, while the second convolution is
+    needed only at producer-requested positions.  ``emitted_output_mask``
+    records the smaller final packet when the producer had to prefetch an
+    L1-capable output that the final route did not emit. Full tiles remain in
+    both masks in their entirety, so this never turns a Full route into a
+    compact one.
+    """
+
+    first, _, second = unpack_two_conv_head(head)
+    if (
+        not torch.is_tensor(producer_request_mask)
+        or producer_request_mask.dtype != torch.bool
+        or producer_request_mask.ndim != 3
+        or not bool(producer_request_mask.any())
+    ):
+        raise ValueError("DepthSplat selected-head producer request mask is invalid")
+    if emitted_output_mask is None:
+        emitted_output_mask = producer_request_mask
+    elif (
+        not torch.is_tensor(emitted_output_mask)
+        or emitted_output_mask.dtype != torch.bool
+        or emitted_output_mask.shape != producer_request_mask.shape
+        or bool((emitted_output_mask & ~producer_request_mask).any())
+    ):
+        raise ValueError("DepthSplat selected-head emitted output mask is invalid")
+    if native_full_mask is None:
+        native_full_mask = torch.zeros_like(producer_request_mask)
+    elif (
+        not torch.is_tensor(native_full_mask)
+        or native_full_mask.dtype != torch.bool
+        or native_full_mask.shape != producer_request_mask.shape
+        or bool((native_full_mask & ~emitted_output_mask).any())
+    ):
+        raise ValueError("DepthSplat selected-head schedule Full mask is invalid")
+    first_required = torch.nn.functional.max_pool2d(
+        producer_request_mask.unsqueeze(1).to(dtype=torch.float32),
+        kernel_size=3,
+        stride=1,
+        padding=1,
+    ).to(dtype=torch.bool)
+    views, height, width = producer_request_mask.shape
+    dense_positions = views * height * width
+    producer_positions = int(producer_request_mask.sum().item())
+    emitted_positions = int(emitted_output_mask.sum().item())
+    full_positions = int(native_full_mask.sum().item())
+    first_positions = int(first_required.sum().item())
+    first_macs_per_position = 9 * first.in_channels * first.out_channels
+    second_macs_per_position = 9 * second.in_channels * second.out_channels
+    dense_head_macs = dense_positions * (
+        first_macs_per_position + second_macs_per_position
+    )
+    scheduled_head_macs = (
+        first_positions * first_macs_per_position
+        + producer_positions * second_macs_per_position
+    )
+    if scheduled_head_macs > dense_head_macs:
+        raise RuntimeError("DepthSplat selected-head schedule exceeds dense head work")
+    return {
+        "execution_semantics": "producer-request-mask-two-conv-closure",
+        "dense_output_positions": dense_positions,
+        "producer_requested_output_positions": producer_positions,
+        "final_output_positions": emitted_positions,
+        "producer_only_prefetch_output_positions": producer_positions - emitted_positions,
+        "native_full_output_positions": full_positions,
+        "compact_output_positions": emitted_positions - full_positions,
+        "first_convolution_required_positions": first_positions,
+        "second_convolution_required_positions": producer_positions,
+        "dense_head_macs": dense_head_macs,
+        "scheduled_head_macs": scheduled_head_macs,
+        "head_mac_saving_rate": 1.0 - scheduled_head_macs / dense_head_macs,
+        "dense_source_capture_validation_only": True,
+    }
+
+
 def _numeric_equivalence_report(
     reference: torch.Tensor,
     candidate: torch.Tensor,

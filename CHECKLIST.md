@@ -1325,3 +1325,30 @@ Verified on 2026-07-16 and 2026-07-17:
   source-bound selected-head route because Gaussian mean error reached
   `0.17310333` against the dense native Adapter. Keep it diagnostic-only; do
   not relax the attribute or image-quality tolerances.
+
+### DepthSplat Executed-Work Repair
+
+- [x] Replace route-scaled SAES cycle estimates with executed-work accounting.
+- [x] Add a regression that rejects nonzero S2/S3 savings without a verified
+  sparse producer.
+- [x] Run the focused accounting and quality-gate contract suites: `16` cycle
+  tests and `91` packet/materializer/certificate tests pass in the existing
+  `depthsplat` environment.
+
+### DepthSplat Sparse-Datapath Projection
+
+- [x] Add a separately labeled coefficient-compatible projected cycle model.
+- [x] Bind projected S2/S3 counts to the actual source route and selected-head
+  closure; reject a projection that overwrites dense execution counts.
+- [x] Reproduce the current-source-compatible fixed sample-16 kernel route at
+  `outputs/ae_dl3dv_repair_diagnostics/depthsplat_sample016_kernel_closure_psnr05_projection_v1/`:
+  `4.49%` saving, `-0.0318 dB` PSNR loss, and a source-bound projected
+  `1.0089x..1.4435x` interval. The `1.26x` target requires `66.2%` of the
+  declared S2/S3 overlap window; measured Dense execution remains separate.
+- [x] Reproduce fixed samples 7 and 19 under the same route before aggregating.
+  The fixed `{7,16,19}` trio passes the user-authorized PSNR gate in all
+  cases: mean/max loss `0.1027/0.2109 dB`, mean Gaussian saving `3.85%`, and
+  mean LPIPS increase `0.00371`. Dense execution records SAES-only `0.9975x`;
+  the separately labeled same-weight sparse-datapath projection spans
+  `1.0074x..>=1.4435x`, with the paper's `1.26x` requiring `66.25%` of its
+  declared S2/S3 feature-stream overlap window.

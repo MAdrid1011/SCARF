@@ -235,6 +235,58 @@ def test_discrete_top1_coverage_uses_the_actual_nearest_candidate_subset():
     assert summary["discrete_candidate_evidence"] is True
 
 
+def test_discrete_path_caches_the_selected_top1_depth_not_posterior_anchor():
+    from fsdr import FSDRSimulator
+
+    simulator = FSDRSimulator(
+        feature_dim=2,
+        cache_size=2,
+        hamming_threshold=3,
+        num_depth_candidates=4,
+        guidance_policy="paper-hamming",
+        seed=41,
+    )
+    features = torch.ones(2, 2)
+    # The posterior anchors are deliberately between the two modes.  A cache
+    # write based on them would center the second one-candidate window on 0,
+    # despite both full searches selecting 3.
+    anchors = torch.tensor([0.0, 0.0])
+    top1 = torch.tensor([3, 3])
+    candidates = torch.tensor(
+        [[0.0, 1.0, 2.0, 3.0], [0.0, 1.0, 2.0, 3.0]]
+    )
+
+    paths = simulator.process_discrete_frame(
+        features, anchors, top1, candidates, width=2
+    )
+
+    assert paths == ["full_compute", "guided"]
+    assert simulator.get_summary()["top1_coverage"] == pytest.approx(1.0)
+
+
+def test_discrete_cache_uses_the_stored_top1_index_for_local_candidate_windows():
+    from fsdr import FSDRSimulator
+
+    simulator = FSDRSimulator(
+        feature_dim=2,
+        cache_size=2,
+        hamming_threshold=3,
+        num_depth_candidates=4,
+        guidance_policy="paper-hamming",
+        seed=47,
+    )
+    features = torch.ones(2, 2)
+    anchors = torch.tensor([3.0, 300.0])
+    top1 = torch.tensor([3, 3])
+    candidates = torch.tensor(
+        [[0.0, 1.0, 2.0, 3.0], [3.0, 100.0, 200.0, 300.0]]
+    )
+
+    simulator.process_discrete_frame(
+        features, anchors, top1, candidates, width=2
+    )
+
+    assert simulator.get_summary()["guided_top1_covered"] == 1
 def test_begin_frame_clears_frame_local_state_but_preserves_aggregate_counts():
     from fsdr import FSDRSimulator
 

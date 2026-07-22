@@ -132,6 +132,27 @@ def test_soft_mixture_replays_tiny_nonzero_bilateral_contributor_numerically() -
     assert binding["bilateral_assignment_weights_sha256"]
 
 
+def test_soft_mixture_replays_source_z_depth_virtual_mean_geometry() -> None:
+    values = _inputs()
+    virtual_means = values["virtual_means"]
+    assert torch.is_tensor(virtual_means)
+    values["virtual_mean_geometry"] = "source-z-depth-camera-ray-offset-transport-v2"
+    values["virtual_mean_source"] = virtual_means.clone()
+
+    certificate = _certificate(values)
+
+    assert certificate["passed"] is True
+    binding = certificate["binding"]
+    assert isinstance(binding, dict)
+    assert (
+        binding["virtual_mean_geometry"]
+        == "source-z-depth-camera-ray-offset-transport-v2"
+    )
+
+    values["virtual_mean_source"] = virtual_means + 0.05
+    assert _certificate(values)["passed"] is False
+
+
 def test_soft_mixture_rejects_tile_camera_or_psd_tampering() -> None:
     values = _inputs()
     camera_tampered = copy.copy(values)

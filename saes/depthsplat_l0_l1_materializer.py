@@ -139,6 +139,9 @@ DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE = (
 DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE = (
     "depthsplat-soft-mixture-kernel-closure-t4-balanced-l1-source-only-v3"
 )
+DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE = (
+    "depthsplat-direct-conditional-t4-balanced-l1-source-only-v1"
+)
 DEPTHSPLAT_LITERAL_PAPER_T4_DECISION_SEMANTICS = (
     "paper-probe-feature-variance-first-hit"
 )
@@ -199,6 +202,10 @@ def _is_kernel_closure_profile(execution_profile: Any) -> bool:
         execution_profile
         == DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE
     )
+
+
+def _is_direct_conditional_profile(execution_profile: Any) -> bool:
+    return execution_profile == DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE
 
 
 @dataclass(frozen=True)
@@ -365,7 +372,7 @@ def _validate_execution_profile_plan_binding(
 ) -> None:
     """Keep each materializer mechanism tied to its own probe-plan contract."""
 
-    expected_profile = {
+    expected_profiles = {
         "saes-incremental-probe-first-plan-v1": DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE,
         LITERAL_PAPER_T4_PLAN_CONTRACT: DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
         DEPTHSPLAT_COVERAGE_ENRICHED_T4_PLAN_CONTRACT: (
@@ -377,14 +384,19 @@ def _validate_execution_profile_plan_binding(
         DEPTHSPLAT_SOFT_MIXTURE_T4_PLAN_CONTRACT: (
             DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE
         ),
-        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_PLAN_CONTRACT: (
-            DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE
-        ),
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_PLAN_CONTRACT: {
+            DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
+        },
         DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_PLAN_CONTRACT: (
             DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE
         ),
     }.get(plan.events.get("contract_version"))
-    if expected_profile is None or execution_profile != expected_profile:
+    if expected_profiles is None:
+        raise ValueError("DepthSplat materializer execution profile does not match plan contract")
+    if isinstance(expected_profiles, str):
+        expected_profiles = {expected_profiles}
+    if execution_profile not in expected_profiles:
         raise ValueError("DepthSplat materializer execution profile does not match plan contract")
 
 
@@ -971,7 +983,10 @@ def _validate_routing_inputs(
             feature_threshold=float(plan.events["feature_threshold"]),
             depth_threshold=float(plan.events["depth_threshold"]),
         )
-    elif execution_profile == DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE:
+    elif execution_profile in {
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
+    }:
         rebuilt = build_depthsplat_soft_mixture_normalized_t4_probe_first_plan(
             routing_features,
             routing_z_depths,
@@ -1065,6 +1080,7 @@ def _validate_routing_inputs(
         in {
             DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
         }
         and plan.events.get("assignment_feature_semantics")
         != "unit-normalized-bilinear-s1-v1"
@@ -1271,6 +1287,7 @@ def _selected_anchor_attribute_loo_frozen_guard(
             DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
         }
         or not isinstance(value.get("route_plan_contract"), str)
         or not value["route_plan_contract"]
@@ -2856,7 +2873,10 @@ def _validate_coverage_certificate(
             tile_trace=preflight.tile_trace,
             tile_trace_sha256=trace_sha256,
         )
-    elif profile == DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE:
+    elif profile in {
+        DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
+    }:
         if (
             isinstance(maximum_scale, bool)
             or not isinstance(maximum_scale, (int, float))
@@ -3052,10 +3072,16 @@ def _build_tile_updates(
         # z-depth order. The incremental union masses sum exactly to the final
         # alpha and provide an order-defined, reproducible moment/SH measure.
         contributor_depths = torch.cat(
-            (packet.depths[index].reshape(1), target_z_depths[depth_order])
+            (
+                packet.depths[index].reshape(1),
+                target_z_depths[depth_order],
+            )
         )
         contributor_alphas = torch.cat(
-            (base_opacity.reshape(1), contribution_alpha[depth_order])
+            (
+                base_opacity.reshape(1),
+                contribution_alpha[depth_order],
+            )
         )
         contributors = torch.cat(
             (
@@ -3568,6 +3594,8 @@ def _validate_soft_mixture_evidence(
     merged_opacities: torch.Tensor,
     context_extrinsics: torch.Tensor,
     context_intrinsics: torch.Tensor,
+    virtual_mean_geometry: str = "selected-anchor-spatial-moment-v1",
+    virtual_mean_source: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     """Rebuild a soft S/R certificate from live source-only tile tensors."""
 
@@ -3591,6 +3619,8 @@ def _validate_soft_mixture_evidence(
         merged_opacities=merged_opacities,
         context_extrinsics=context_extrinsics,
         context_intrinsics=context_intrinsics,
+        virtual_mean_geometry=virtual_mean_geometry,
+        virtual_mean_source=virtual_mean_source,
     )
     if not isinstance(soft_mixture, Mapping) or dict(soft_mixture) != expected:
         raise ValueError("DepthSplat soft-mixture certificate binding changed")
@@ -3661,6 +3691,7 @@ def _validate_mixture_kernel_closure_evidence(
     context_extrinsics: torch.Tensor,
     context_intrinsics: torch.Tensor,
     strict_maximum_relative_risk: float | None = None,
+    measurement_cache: Any | None = None,
 ) -> dict[str, Any]:
     """Rebuild the strict source-only closure guard from live tile tensors."""
 
@@ -3681,6 +3712,7 @@ def _validate_mixture_kernel_closure_evidence(
         context_extrinsics=context_extrinsics,
         context_intrinsics=context_intrinsics,
         strict_maximum_relative_risk=strict_maximum_relative_risk,
+        measurement_cache=measurement_cache,
     )
     if not isinstance(kernel_closure, Mapping) or dict(kernel_closure) != expected:
         raise ValueError("DepthSplat mixture kernel-closure binding changed")
@@ -4108,7 +4140,11 @@ def _build_fixed_scale_selected_only_tile_updates(
     support_basis_profile: bool = False,
     soft_mixture_profile: bool = False,
     kernel_closure_profile: bool = False,
+    conditional_anchor_transport: bool = False,
     kernel_closure_maximum_relative_risk: float | None = None,
+    kernel_closure_measurement_cache: Any | None = None,
+    routing_z_depth_map: torch.Tensor | None = None,
+    source_get_world_rays: Callable[..., tuple[torch.Tensor, torch.Tensor]] | None = None,
 ) -> tuple[list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]], dict[str, Any]]:
     """Build selected-only fixed-scale moment updates for one compact tile."""
 
@@ -4122,6 +4158,15 @@ def _build_fixed_scale_selected_only_tile_updates(
         or assignment_feature_semantics
         not in {"raw-bilinear-s1-v1", "unit-normalized-bilinear-s1-v1"}
         or (kernel_closure_profile and not soft_mixture_profile)
+        or (
+            conditional_anchor_transport
+            and (
+                coverage_enriched
+                or support_basis_profile
+                or soft_mixture_profile
+                or kernel_closure_profile
+            )
+        )
         or (
             kernel_closure_maximum_relative_risk is not None
             and (
@@ -4145,7 +4190,10 @@ def _build_fixed_scale_selected_only_tile_updates(
         raise ValueError("DepthSplat fixed-scale tile does not have the required route")
     anchors = _route_anchor_positions(record, level=level, semantics=semantics)
     engineering_profile = (
-        coverage_enriched or support_basis_profile or soft_mixture_profile
+        coverage_enriched
+        or support_basis_profile
+        or soft_mixture_profile
+        or conditional_anchor_transport
     )
     projected_support_guard = coverage_enriched or support_basis_profile
     source_label = "selected-anchor" if engineering_profile else "selected-probe"
@@ -4228,7 +4276,129 @@ def _build_fixed_scale_selected_only_tile_updates(
         device=packed.means.device,
         dtype=packed.means.dtype,
     )
-    virtual_means = spatial @ source_means
+    virtual_mean_geometry = "selected-anchor-spatial-moment-v1"
+    virtual_mean_source: torch.Tensor | None = None
+    conditional_virtual_means: list[torch.Tensor] | None = None
+    if conditional_anchor_transport:
+        if (
+            not torch.is_tensor(routing_z_depth_map)
+            or routing_z_depth_map.shape != (height, width)
+            or not bool(torch.isfinite(routing_z_depth_map).all())
+            or not callable(source_get_world_rays)
+        ):
+            raise ValueError("DepthSplat conditional transport inputs are invalid")
+        target_centres = _pixel_centres(
+            target_positions,
+            height=height,
+            width=width,
+            device=packed.means.device,
+            dtype=packed.means.dtype,
+        )
+        anchor_centres = _pixel_centres(
+            source_positions,
+            height=height,
+            width=width,
+            device=packed.means.device,
+            dtype=packed.means.dtype,
+        )
+        anchor_offsets = packet.coordinates[anchor_indices] - anchor_centres
+        offset_limit = torch.tensor(
+            (0.5 / width, 0.5 / height),
+            device=anchor_offsets.device,
+            dtype=anchor_offsets.dtype,
+        )
+        if (
+            not bool(torch.isfinite(anchor_offsets).all())
+            or bool((anchor_offsets.abs() > offset_limit + 2e-5).any())
+        ):
+            raise ValueError("DepthSplat conditional native offset transport is invalid")
+        virtual_z_depths = torch.stack(
+            [routing_z_depth_map[row, column] for row, column in target_positions]
+        ).to(device=packed.means.device, dtype=packed.means.dtype)
+        conditional_virtual_means = []
+        for anchor_offset, index in enumerate(anchor_indices):
+            coordinates = target_centres + anchor_offsets[anchor_offset].unsqueeze(0)
+            if (
+                not bool(torch.isfinite(coordinates).all())
+                or bool((coordinates < 0.0).any())
+                or bool((coordinates > 1.0).any())
+            ):
+                raise ValueError(
+                    "DepthSplat conditional transported coordinate is invalid"
+                )
+            conditional_virtual_means.append(
+                depthsplat_z_depth_world_means(
+                    coordinates,
+                    packet.extrinsics[index].unsqueeze(0).expand(
+                        len(target_local), -1, -1
+                    ),
+                    packet.intrinsics[index].unsqueeze(0).expand(
+                        len(target_local), -1, -1
+                    ),
+                    virtual_z_depths,
+                    source_get_world_rays=source_get_world_rays,
+                )
+            )
+        virtual_means = conditional_virtual_means[0]
+        virtual_mean_geometry = (
+            "per-receiving-anchor-source-z-depth-offset-transport-v1"
+        )
+    elif kernel_closure_profile and level == "L1":
+        if (
+            not torch.is_tensor(routing_z_depth_map)
+            or routing_z_depth_map.shape != (height, width)
+            or not bool(torch.isfinite(routing_z_depth_map).all())
+            or not callable(source_get_world_rays)
+        ):
+            raise ValueError("DepthSplat L1 source z-depth mean inputs are invalid")
+        virtual_coordinates = _pixel_centres(
+            target_positions,
+            height=height,
+            width=width,
+            device=packed.means.device,
+            dtype=packed.means.dtype,
+        )
+        anchor_centres = _pixel_centres(
+            source_positions,
+            height=height,
+            width=width,
+            device=packed.means.device,
+            dtype=packed.means.dtype,
+        )
+        anchor_offsets = packet.coordinates[anchor_indices] - anchor_centres
+        offset_limit = torch.tensor(
+            (0.5 / width, 0.5 / height),
+            device=anchor_offsets.device,
+            dtype=anchor_offsets.dtype,
+        )
+        if (
+            not bool(torch.isfinite(anchor_offsets).all())
+            or bool((anchor_offsets.abs() > offset_limit + 2e-5).any())
+        ):
+            raise ValueError("DepthSplat L1 native offset transport is invalid")
+        virtual_coordinates = virtual_coordinates + spatial @ anchor_offsets
+        if (
+            not bool(torch.isfinite(virtual_coordinates).all())
+            or bool((virtual_coordinates < 0.0).any())
+            or bool((virtual_coordinates > 1.0).any())
+        ):
+            raise ValueError("DepthSplat L1 transported virtual coordinate is invalid")
+        virtual_z_depths = torch.stack(
+            [routing_z_depth_map[row, column] for row, column in target_positions]
+        ).to(device=packed.means.device, dtype=packed.means.dtype)
+        context_extrinsic = packet.extrinsics[anchor_indices[0]].unsqueeze(0)
+        context_intrinsic = packet.intrinsics[anchor_indices[0]].unsqueeze(0)
+        virtual_mean_source = depthsplat_z_depth_world_means(
+            virtual_coordinates,
+            context_extrinsic.expand(len(target_local), -1, -1),
+            context_intrinsic.expand(len(target_local), -1, -1),
+            virtual_z_depths,
+            source_get_world_rays=source_get_world_rays,
+        )
+        virtual_means = virtual_mean_source
+        virtual_mean_geometry = "source-z-depth-camera-ray-offset-transport-v2"
+    else:
+        virtual_means = spatial @ source_means
     mean_deltas = source_means.unsqueeze(0) - virtual_means.unsqueeze(1)
     virtual_covariances = (
         spatial.reshape(spatial.shape[0], spatial.shape[1], 1, 1)
@@ -4298,6 +4468,7 @@ def _build_fixed_scale_selected_only_tile_updates(
             raise ValueError("DepthSplat fixed-scale assignment is invalid")
         assignments.append(weights)
     assignment = torch.stack(assignments)
+    assignment_transport = "bilateral-soft-moment-v1"
     updates: list[tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
     coverage_updates: list[dict[str, Any]] = []
     minimum_merged_eigenvalues: list[float] = []
@@ -4314,16 +4485,62 @@ def _build_fixed_scale_selected_only_tile_updates(
             mass_sum <= torch.finfo(masses.dtype).eps
         ):
             raise ValueError("DepthSplat fixed-scale moment mass is invalid")
-        contributors = torch.cat((source_means[anchor_offset].unsqueeze(0), virtual_means), dim=0)
-        contributor_covariances = torch.cat(
-            (source_covariances[anchor_offset].unsqueeze(0), virtual_covariances), dim=0
-        )
-        contributor_harmonics = torch.cat(
-            (source_harmonics[anchor_offset].unsqueeze(0), virtual_harmonics), dim=0
-        )
-        contributor_opacities = torch.cat(
-            (source_opacities[anchor_offset].reshape(1), virtual_opacities), dim=0
-        )
+        if conditional_anchor_transport:
+            if conditional_virtual_means is None:
+                raise RuntimeError("DepthSplat conditional transport state is missing")
+            update_virtual_means = conditional_virtual_means[anchor_offset]
+            update_virtual_covariances = source_covariances[anchor_offset].unsqueeze(
+                0
+            ).expand(len(target_local), -1, -1)
+            contributors = torch.cat(
+                (source_means[anchor_offset].unsqueeze(0), update_virtual_means),
+                dim=0,
+            )
+            contributor_covariances = torch.cat(
+                (
+                    source_covariances[anchor_offset].unsqueeze(0),
+                    update_virtual_covariances,
+                ),
+                dim=0,
+            )
+            contributor_harmonics = torch.cat(
+                (
+                    source_harmonics[anchor_offset].unsqueeze(0),
+                    source_harmonics[anchor_offset]
+                    .unsqueeze(0)
+                    .expand(len(target_local), -1, -1),
+                ),
+                dim=0,
+            )
+            contributor_opacities = torch.cat(
+                (
+                    source_opacities[anchor_offset].reshape(1),
+                    source_opacities[anchor_offset]
+                    .expand(len(target_local)),
+                ),
+                dim=0,
+            )
+        else:
+            update_virtual_means = virtual_means
+            update_virtual_covariances = virtual_covariances
+            contributors = torch.cat(
+                (source_means[anchor_offset].unsqueeze(0), virtual_means), dim=0
+            )
+            contributor_covariances = torch.cat(
+                (
+                    source_covariances[anchor_offset].unsqueeze(0),
+                    virtual_covariances,
+                ),
+                dim=0,
+            )
+            contributor_harmonics = torch.cat(
+                (source_harmonics[anchor_offset].unsqueeze(0), virtual_harmonics),
+                dim=0,
+            )
+            contributor_opacities = torch.cat(
+                (source_opacities[anchor_offset].reshape(1), virtual_opacities),
+                dim=0,
+            )
         merged_mean = (masses.unsqueeze(1) * contributors).sum(dim=0) / mass_sum
         deltas = contributors - merged_mean.unsqueeze(0)
         merged_covariance = (
@@ -4350,8 +4567,8 @@ def _build_fixed_scale_selected_only_tile_updates(
         coverage = _literal_finite_psd_moment_merge(
             merged_covariance,
             merged_mean,
-            virtual_means,
-            virtual_covariances,
+            update_virtual_means,
+            update_virtual_covariances,
         )
         updates.append((slot, merged_mean, merged_covariance, merged_harmonics, merged_opacity))
         minimum_merged_eigenvalues.append(
@@ -4517,6 +4734,8 @@ def _build_fixed_scale_selected_only_tile_updates(
             merged_opacities=torch.stack([item[4] for item in updates]),
             context_extrinsics=packet.extrinsics[anchor_indices],
             context_intrinsics=packet.intrinsics[anchor_indices],
+            virtual_mean_geometry=virtual_mean_geometry,
+            virtual_mean_source=virtual_mean_source,
         )
         tile_soft_mixture = _validate_soft_mixture_evidence(
             tile_soft_mixture,
@@ -4543,6 +4762,8 @@ def _build_fixed_scale_selected_only_tile_updates(
             merged_opacities=torch.stack([item[4] for item in updates]),
             context_extrinsics=packet.extrinsics[anchor_indices],
             context_intrinsics=packet.intrinsics[anchor_indices],
+            virtual_mean_geometry=virtual_mean_geometry,
+            virtual_mean_source=virtual_mean_source,
         )
         soft_mixture_sha256 = _canonical_sha256(tile_soft_mixture)
         if kernel_closure_profile and tile_soft_mixture["passed"] is True:
@@ -4567,6 +4788,7 @@ def _build_fixed_scale_selected_only_tile_updates(
                 context_extrinsics=packet.extrinsics[anchor_indices],
                 context_intrinsics=packet.intrinsics[anchor_indices],
                 strict_maximum_relative_risk=kernel_closure_maximum_relative_risk,
+                measurement_cache=kernel_closure_measurement_cache,
             )
             tile_kernel_closure = _validate_mixture_kernel_closure_evidence(
                 tile_kernel_closure,
@@ -4590,6 +4812,7 @@ def _build_fixed_scale_selected_only_tile_updates(
                 context_extrinsics=packet.extrinsics[anchor_indices],
                 context_intrinsics=packet.intrinsics[anchor_indices],
                 strict_maximum_relative_risk=kernel_closure_maximum_relative_risk,
+                measurement_cache=kernel_closure_measurement_cache,
             )
             kernel_closure_sha256 = _canonical_sha256(tile_kernel_closure)
         coverage_updates = [
@@ -4608,6 +4831,7 @@ def _build_fixed_scale_selected_only_tile_updates(
         ]
     return updates, {
         "virtual_count": len(target_local),
+        "virtual_mean_geometry": virtual_mean_geometry,
         "coverage": {
             "certificate": (
                 DEPTHSPLAT_SUPPORT_BASIS_T4_MOMENT_CERTIFICATE
@@ -4633,8 +4857,16 @@ def _build_fixed_scale_selected_only_tile_updates(
             "support_basis": tile_support_basis,
             "support_basis_sha256": support_basis_sha256,
         },
-        "virtual_geometry_source": f"{source_label}-gaussian-spatial-moment-v1",
-        "virtual_attribute_source": f"{source_label}-gaussian-spatial-linear-v1",
+        "virtual_geometry_source": (
+            virtual_mean_geometry
+            if conditional_anchor_transport
+            else f"{source_label}-gaussian-spatial-moment-v1"
+        ),
+        "virtual_attribute_source": (
+            "per-receiving-anchor-source-attribute-transport-v1"
+            if conditional_anchor_transport
+            else f"{source_label}-gaussian-spatial-linear-v1"
+        ),
         "omitted_routing_z_depth_reads": 0,
         **{
             (
@@ -4645,6 +4877,7 @@ def _build_fixed_scale_selected_only_tile_updates(
         },
         "opacity_compositing_order": "literal-weighted-average-no-alpha-union-v1",
         "assignment_feature_semantics": assignment_feature_semantics,
+        "assignment_transport": assignment_transport,
         "soft_mixture_certificate": tile_soft_mixture,
         "soft_mixture_certificate_sha256": soft_mixture_sha256,
         "soft_mixture_certificate_passed": (
@@ -4675,6 +4908,8 @@ def preflight_depthsplat_l0_l1_materialization(
     collect_selected_anchor_attribute_loo_risk: bool = False,
     mixture_kernel_closure_frozen_guard: Any | None = None,
     mixture_kernel_closure_maximum_relative_risk: float | None = None,
+    mixture_kernel_closure_measurement_cache: Any | None = None,
+    route_isolation: str = "l0_l1",
 ) -> DepthSplatCompactMaterializationPreflight:
     """Construct all nonzero L0/L1 updates without reading skipped attributes.
 
@@ -4700,7 +4935,9 @@ def preflight_depthsplat_l0_l1_materialization(
             DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
         }
+        or route_isolation not in {"l0_l1", "l0_only", "l1_only", "l0_to_l1"}
     ):
         raise ValueError("DepthSplat materializer safety thresholds are invalid")
     if selected_anchor_attribute_loo_maximum_risk is not None:
@@ -4791,7 +5028,10 @@ def preflight_depthsplat_l0_l1_materialization(
             width=width,
             semantics=semantics,
         )
-    elif execution_profile == DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE:
+    elif execution_profile in {
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
+    }:
         _validate_soft_mixture_normalized_t4_plan(
             plan,
             views=views,
@@ -4867,7 +5107,11 @@ def preflight_depthsplat_l0_l1_materialization(
             width=width,
             device=initial_packet.raw_head_descriptors.device,
         )
-        if execution_profile == DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE
+        if execution_profile
+        in {
+            DEPTHSPLAT_DEVELOPMENT_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
+        }
         else None
     )
     plan_records = {
@@ -4890,6 +5134,7 @@ def preflight_depthsplat_l0_l1_materialization(
             DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
         }
         and collect_loo
     ):
@@ -4941,15 +5186,23 @@ def preflight_depthsplat_l0_l1_materialization(
                 ),
                 soft_mixture_profile=_is_soft_mixture_profile(execution_profile),
                 kernel_closure_profile=_is_kernel_closure_profile(execution_profile),
+                conditional_anchor_transport=_is_direct_conditional_profile(
+                    execution_profile
+                ),
                 kernel_closure_maximum_relative_risk=(
                     frozen_kernel_guard["threshold_value"]
                     if frozen_kernel_guard is not None
                     else mixture_kernel_closure_maximum_relative_risk
                 ),
+                kernel_closure_measurement_cache=(
+                    mixture_kernel_closure_measurement_cache
+                ),
+                routing_z_depth_map=routing_z_depths[0, view],
+                source_get_world_rays=source_get_world_rays,
             )
         if source_grid is None:
             raise RuntimeError("DepthSplat development source grid is missing")
-        return _build_tile_updates(
+        tile_updates, evidence = _build_tile_updates(
             packet=initial_packet,
             packed=initial_packed,
             slot_to_index=slot_to_index,
@@ -4969,6 +5222,13 @@ def preflight_depthsplat_l0_l1_materialization(
             maximum_feature_relative_residual=float(maximum_feature_relative_residual),
             maximum_coverage_covariance_scale=float(maximum_coverage_covariance_scale),
         )
+        if _is_direct_conditional_profile(execution_profile):
+            evidence = {
+                **evidence,
+                "assignment_feature_semantics": assignment_feature_semantics,
+                "assignment_transport": "bilateral-soft-moment-v1",
+            }
+        return tile_updates, evidence
 
     def l1_prefetch_is_available(
         *, record: Mapping[str, Any], view: int, tile_y: int, tile_x: int
@@ -5051,6 +5311,42 @@ def preflight_depthsplat_l0_l1_materialization(
                     entry["reason"] = "source_full_passthrough"
                     trace.append(entry)
                     continue
+                if (
+                    route_isolation == "l1_only" and level == "L0"
+                ) or (route_isolation == "l0_only" and level == "L1"):
+                    reason = f"route-isolation-{level.lower()}-forced-full"
+                    _mark_tile(
+                        promote, view=view, tile_y=tile_y, tile_x=tile_x, tile_size=4
+                    )
+                    entry.update({"accepted": False, "reason": reason})
+                    rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+                    trace.append(entry)
+                    continue
+                candidate_level = level
+                if route_isolation == "l0_to_l1" and level == "L0":
+                    if (
+                        record.get("depth_uniform") is not True
+                        or not l1_prefetch_is_available(
+                            record=record,
+                            view=view,
+                            tile_y=tile_y,
+                            tile_x=tile_x,
+                        )
+                    ):
+                        reason = "route-isolation-l0-to-l1-prefetch-unavailable-forced-full"
+                        _mark_tile(
+                            promote,
+                            view=view,
+                            tile_y=tile_y,
+                            tile_x=tile_x,
+                            tile_size=4,
+                        )
+                        entry.update({"accepted": False, "reason": reason})
+                        rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+                        trace.append(entry)
+                        continue
+                    candidate_level = "L1"
+                    entry["l0_to_l1_coordinated"] = True
                 try:
                     if collect_loo:
                         endpoint_anchor_count = _selected_anchor_opacity_endpoint_count(
@@ -5061,13 +5357,13 @@ def preflight_depthsplat_l0_l1_materialization(
                             tile_x=tile_x,
                             height=height,
                             width=width,
-                            level=str(level),
+                            level=str(candidate_level),
                             semantics=semantics,
                             plan_record=record,
                         )
                         if endpoint_anchor_count:
                             loo = _selected_anchor_attribute_loo_unscorable_certificate(
-                                level=str(level),
+                                level=str(candidate_level),
                                 semantics=semantics,
                                 plan_record=record,
                                 endpoint_anchor_count=endpoint_anchor_count,
@@ -5093,7 +5389,7 @@ def preflight_depthsplat_l0_l1_materialization(
                             tile_x=tile_x,
                             height=height,
                             width=width,
-                            level=str(level),
+                            level=str(candidate_level),
                             semantics=semantics,
                             plan_record=record,
                         )
@@ -5126,19 +5422,21 @@ def preflight_depthsplat_l0_l1_materialization(
                             )
                     tile_updates, evidence = build_compact_tile(
                         record=record,
-                        level=str(level),
+                        level=str(candidate_level),
                         view=view,
                         tile_y=tile_y,
                         tile_x=tile_x,
                     )
-                    accepted_level = str(level)
+                    accepted_level = str(candidate_level)
                     if _is_soft_mixture_profile(execution_profile):
                         failure = soft_mixture_candidate_failure(
-                            evidence, level=str(level), entry=entry
+                            evidence, level=str(candidate_level), entry=entry
                         )
                         if failure is not None:
                             can_enrich = (
-                                level == "L0"
+                                route_isolation != "l0_only"
+                                and
+                                candidate_level == "L0"
                                 and record.get("depth_uniform") is True
                                 and l1_prefetch_is_available(
                                     record=record,
@@ -5333,6 +5631,7 @@ def preflight_depthsplat_l0_l1_materialization(
         "assignment_feature_map_sha256": _tensor_sha256(assignment_features),
         "assignment_feature_semantics": assignment_feature_semantics,
         "execution_profile": execution_profile,
+        "route_isolation": route_isolation,
     }
     update_binding = _update_binding(
         update_slots, means, covariances, harmonics, opacities
@@ -5495,6 +5794,7 @@ def preflight_depthsplat_l0_l1_materialization(
         ),
         "maximum_coverage_covariance_scale": float(maximum_coverage_covariance_scale),
         "execution_profile": execution_profile,
+        "route_isolation": route_isolation,
         "formal_paper_selected_probe_only": (
             execution_profile == DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE
         ),
@@ -5680,10 +5980,11 @@ def resolve_depthsplat_compact_final_route(
         DEPTHSPLAT_LITERAL_PAPER_T4_MATERIALIZATION_PROFILE,
         DEPTHSPLAT_COVERAGE_ENRICHED_T4_MATERIALIZATION_PROFILE,
         DEPTHSPLAT_SUPPORT_BASIS_T4_MATERIALIZATION_PROFILE,
-        DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
-        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
-        DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
-    }:
+            DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
+        }:
         raise ValueError("DepthSplat final route materialization profile is invalid")
     _validate_execution_profile_plan_binding(
         plan, execution_profile=execution_profile
@@ -5704,7 +6005,10 @@ def resolve_depthsplat_compact_final_route(
         _validate_soft_mixture_t4_plan(
             plan, views=views, height=height, width=width, semantics=semantics
         )
-    elif execution_profile == DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE:
+    elif execution_profile in {
+        DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+        DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
+    }:
         _validate_soft_mixture_normalized_t4_plan(
             plan, views=views, height=height, width=width, semantics=semantics
         )
@@ -5732,6 +6036,7 @@ def resolve_depthsplat_compact_final_route(
             in {
                 DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
                 DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+                DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
             }
             and preflight.events.get("assignment_feature_semantics")
             != "unit-normalized-bilinear-s1-v1"
@@ -5835,6 +6140,7 @@ def resolve_depthsplat_compact_final_route(
         in {
             DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
             DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE,
         }
         and any(
             record.get("assignment_feature_semantics")
@@ -6201,8 +6507,8 @@ def apply_depthsplat_compact_l0_l1_materialization(
         or (
             preflight.events.get("execution_profile")
             in {
-                DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
-                DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE,
+            DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE,
             }
             and preflight.events.get("assignment_feature_semantics")
             != "unit-normalized-bilinear-s1-v1"
@@ -6502,6 +6808,7 @@ __all__ = [
     "DEPTHSPLAT_SOFT_MIXTURE_T4_MATERIALIZATION_PROFILE",
     "DEPTHSPLAT_SOFT_MIXTURE_NORMALIZED_T4_MATERIALIZATION_PROFILE",
     "DEPTHSPLAT_SOFT_MIXTURE_KERNEL_CLOSURE_T4_MATERIALIZATION_PROFILE",
+    "DEPTHSPLAT_DIRECT_CONDITIONAL_T4_MATERIALIZATION_PROFILE",
     "DEPTHSPLAT_SOFT_MIXTURE_T4_MOMENT_CERTIFICATE",
     "DEPTHSPLAT_LITERAL_PAPER_T4_MOMENT_CERTIFICATE",
     "DEPTHSPLAT_MATERIALIZER_SCHEMA_VERSION",

@@ -165,6 +165,40 @@ def test_selected_head_replay_matches_replicate_padded_dense_outputs_and_keeps_o
     assert replay.events["whole_pipeline_s2_s3_sparse_execution_verified"] is False
 
 
+def test_selected_head_schedule_charges_producer_prefetch_separately_from_final_packet():
+    from saes.depthsplat_selected_output import estimate_depthsplat_selected_head_schedule
+
+    head = torch.nn.Sequential(
+        torch.nn.Conv2d(4, 6, 3, 1, 1, padding_mode="replicate"),
+        torch.nn.GELU(),
+        torch.nn.Conv2d(6, 7, 3, 1, 1, padding_mode="replicate"),
+    )
+    selection = torch.zeros(1, 5, 6, dtype=torch.bool)
+    selection[0, 2, 3] = True
+    producer_request = selection.clone()
+    producer_request[0, 2, 4] = True
+    native_full = torch.zeros_like(selection)
+    native_full[0, 2, 3] = True
+
+    sparse = estimate_depthsplat_selected_head_schedule(
+        head,
+        producer_request,
+        emitted_output_mask=selection,
+        native_full_mask=native_full,
+    )
+    dense = estimate_depthsplat_selected_head_schedule(head, torch.ones_like(selection))
+
+    assert sparse["native_full_output_positions"] == 1
+    assert sparse["producer_requested_output_positions"] == 2
+    assert sparse["final_output_positions"] == 1
+    assert sparse["producer_only_prefetch_output_positions"] == 1
+    assert sparse["first_convolution_required_positions"] == 12
+    assert sparse["second_convolution_required_positions"] == 2
+    assert sparse["scheduled_head_macs"] < sparse["dense_head_macs"]
+    assert dense["scheduled_head_macs"] == dense["dense_head_macs"]
+    assert dense["head_mac_saving_rate"] == 0.0
+
+
 def test_selected_head_replay_preserves_declared_full_outputs_bitwise():
     from saes.depthsplat_selected_output import replay_depthsplat_selected_head
 
