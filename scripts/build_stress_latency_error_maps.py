@@ -154,7 +154,7 @@ def view_loss_trace(
     selected_index: int | None = None
     selected = selected_dir.resolve()
     for row in rows:
-        value = max(0.0, float(row[key]))
+        value = float(row[key])
         values.append(value)
         if Path(str(row["dir"])).resolve() == selected:
             selected_index = len(values) - 1
@@ -162,17 +162,12 @@ def view_loss_trace(
         raise KeyError(f"Selected directory {selected_dir} is not present in the quality distribution")
 
     actual_selected = values[selected_index]
-    plot_values = list(values)
-    max_other = max((v for i, v in enumerate(values) if i != selected_index), default=0.0)
-    if plot_values[selected_index] <= max_other:
-        margin = max(max_other * 0.06, 1e-4)
-        plot_values[selected_index] = max_other + margin
 
     return {
-        "values": plot_values,
+        "values": values,
         "selected_index": selected_index,
         "actual_selected": actual_selected,
-        "plot_selected": plot_values[selected_index],
+        "plot_selected": actual_selected,
     }
 
 

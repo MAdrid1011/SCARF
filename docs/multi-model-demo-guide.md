@@ -1,6 +1,8 @@
 # Multi-Model Demo Guide
 
-This guide explains how to run SCARF demos with different 3D Gaussian Splatting models.
+This guide explains how to run SCARF with different 3D Gaussian Splatting
+models. The artifact workflows in `ARTIFACT_EVALUATION.md` provide the
+corresponding structured evaluation records.
 
 ## Supported Models
 
@@ -86,45 +88,20 @@ ln -s /path/to/re10k SCARF/depthsplat/datasets/re10k
 ln -s /path/to/dl3dv SCARF/depthsplat/datasets/dl3dv
 ```
 
-## Expected Performance
+## Execution Model
 
-### Quality Metrics (PSNR)
+The demo performs model S2/S3 evaluation, materializes Gaussian descriptors,
+then applies SAES tile routing and materialization. It emits image metrics,
+route counts, retained-descriptor counts, and the architectural event ledger.
+The AE workflows bind those records to the full data-selection and hardware
+measurement contracts.
 
-| Model | Baseline | With SCARF | Quality Loss |
-|-------|----------|------------|--------------|
-| TranSplat | ~29 dB | ~27 dB | < 3 dB |
-| MVSplat | ~27 dB | ~25 dB | < 3 dB |
-| DepthSplat | ~28 dB | ~26 dB | < 3 dB |
+## Configuration Boundary
 
-### Performance Improvements
-
-| Metric | TranSplat | MVSplat | DepthSplat |
-|--------|-----------|---------|------------|
-| Gaussian Reduction | ~25% | ~20-30% | ~20-30% |
-| Cycle Reduction | ~40% | ~35-45% | ~35-45% |
-| Speedup | ~1.7x | ~1.5-2x | ~1.5-2x |
-
-*Note: Results vary based on scene complexity and SAES threshold tuning.*
-
-## Model-Specific Configurations
-
-### SAES Thresholds
-
-Each model has optimized SAES thresholds via adapters:
-
-| Model | Early-Stop Threshold | Cov Enlarge Factor |
-|-------|---------------------|-------------------|
-| TranSplat | 0.85 | 6.0 |
-| MVSplat | 0.85 | 6.0 |
-| DepthSplat | 0.92 | 6.0 |
-
-### FSDR Configurations
-
-| Model | Hamming Threshold | High Confidence |
-|-------|------------------|-----------------|
-| TranSplat | 4 | 0.80 |
-| MVSplat | 4 | 0.80 |
-| DepthSplat | 3 | 0.85 |
+The demo supplies one global mechanism configuration. The calibration contract
+uses 24 DL3DV calibration scenes and eight disjoint DL3DV holdout scenes, and
+binds the selected configuration to the resulting execution records. The
+configuration is shared across models, datasets, scenes, and samples.
 
 ## Troubleshooting
 
@@ -175,37 +152,25 @@ git submodule update --init --recursive
 2. Review adapter configurations in `SCARF/adapters/`
 3. Open an issue on GitHub with error logs
 
-## Architecture Overview
+## Execution Order
 
 ```
-SCARF Demo Pipeline:
-
-[Input Images]
-      │
-      ▼
-[Model Backbone]  ← TranSplat/MVSplat/DepthSplat encoder
-      │
-      ▼
-[SCARF SAES]      ← Progressive early sparsification
-      │
-  ┌───┴───┐
-  ▼       ▼
-Early   Continue
-Stop    Tiles
-  │       │
-  │       ▼
-  │   [FSDR]     ← Depth reuse optimization
-  │       │
-  └───┬───┘
-      ▼
-[SCARF GGU]      ← Gaussian generation
-      │
-      ▼
-[Model Decoder]  ← Original renderer
-      │
-      ▼
-[Output Image + Metrics]
+[Input images]
+      |
+      v
+[Model forward with dense S2/S3]
+      |
+      v
+[Full Gaussian descriptors]
+      |
+      v
+[SAES route and materialization]
+      |
+      v
+[Output image and metrics]
 ```
+
+FSDR accounting is reported with the same execution record.
 
 ## See Also
 

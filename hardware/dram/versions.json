@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "ramulator2": {
+    "url": "https://github.com/CMU-SAFARI/ramulator2.git",
+    "tag": "v2.1.0",
+    "commit": "38c51d40a976c6b07fbc09de869a7e08dc187d29",
+    "license_sha256": "74a1f19701bb06cb80b4ec31e6de6472f5fd767e5949c1c4d51f70007d18b3f2"
+  },
+  "drampower": {
+    "url": "https://github.com/tukl-msd/DRAMPower.git",
+    "tag": "v6.0.2",
+    "commit": "c26ccf948100199977533ee8198ce8ec7fbd83ac",
+    "dramutils_version": "v1.13.4",
+    "license_sha256": "70ece834787b0c70141d2e5a6d0f2e09dd998dd3b113af6b2aa296e58a3c6024",
+    "lpddr5_memspec_sha256": "e8787e3c70cf11d7d990cee085e059f515b05bc584b0d7c7159bf9ac1bf9facb"
+  }
+}

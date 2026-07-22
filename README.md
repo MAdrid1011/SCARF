@@ -2,12 +2,31 @@
 
 SCARF is a hardware-realizable accelerator for depth-guided generalizable 3D Gaussian Splatting (G-3DGS) encoders, co-designed with a scene-adaptive dataflow that exploits semantic similarity in 2D feature space (FSDR) and geometric continuity in 3D space (SAES).
 
+## MICRO 2026 Artifact Evaluation
+
+Zenodo DOI: [10.5281/zenodo.21482385](https://doi.org/10.5281/zenodo.21482385)
+
+The reviewer-facing setup, command mapping, and hardware scope are documented
+in the [artifact evaluation guide](ARTIFACT_EVALUATION.md). The fastest CUDA
+path is the packaged Functional quick workflow:
+
+```bash
+docker build -t scarf-ae:1.0.0 .
+mkdir -p outputs/docker-quick
+docker run --rm --gpus all --user "$(id -u):$(id -g)" \
+  -v "$PWD/outputs/docker-quick:/results" scarf-ae:1.0.0
+```
+
+The container resolves the hash-pinned MVSplat checkpoint on first use and
+writes a structured Functional result below `outputs/docker-quick/quick/`.
+
 ## Key Features
 
 ### End-to-End Hardware Simulation
 - Full pipeline runs through ASIC hardware unit simulators by default
-- Feature Extractor → Depth Predictor → GGU, each stage's output feeds the next
-- Zero `SW_FALLBACK` — every `F.*` / `torch.*` operation is routed through a hardware unit
+- Feature Extractor → Depth Predictor → GGU, with each stage feeding the next
+- Result provenance records the simulated stages and rejects missing cycle data
+  in artifact-evaluation mode
 
 ### Hardware Units (encoder/)
 
@@ -17,29 +36,32 @@ SCARF is a hardware-realizable accelerator for depth-guided generalizable 3D Gau
 | **GEMMUnit** | Matrix multiplication, batched matmul |
 | **ActivationUnit** | ReLU, GELU, SiLU, Sigmoid, Softplus |
 | **NormalizationUnit** | LayerNorm, BatchNorm, InstanceNorm, GroupNorm (configurable eps) |
-| **BilinearUnit** | Bilinear / nearest / bicubic interpolation, grid_sample |
+| **BilinearUnit** | Bilinear / nearest / bicubic interpolation, `grid_sample` |
 | **SoftmaxUnit** | Softmax with optional temperature (LUT-based exp) |
 | **PoolingUnit** | Average pooling, max pooling, adaptive average pooling |
 | **PadUnit** | Constant / reflect / replicate / circular padding |
 | **DeformableAttentionUnit** | Multi-scale deformable attention |
 
 ### SAES (Scene-Adaptive Early Sparsification)
-- Analyzes feature similarity within tiles
-- Skips depth search for homogeneous regions
-- Reduces Gaussian count by ~30%
+- Uses probe feature variance followed by probe-depth standard deviation to
+  select L0, L1, or Full at tile granularity
+- Keeps the pretrained adaptor as the source of every retained probe descriptor
+- Binds retained descriptors, route decisions, and Gaussian materialization to
+  the execution record
 
 ### FSDR (Feature Similarity Depth Reuse)
 - Caches depth results using LSH-based feature signatures
-- Reuses cached depths for similar pixels
-- Reduces memory access by ~87%
+- Narrows only a valid Hamming-matched local candidate set and otherwise falls
+  back to full search
+- Records cache eligibility and depth-reuse events in the same result schema
 
 ## Supported Models
 
 | Model | Status | Description |
 |-------|--------|-------------|
-| **TranSplat** | ✅ Full | Transformer-based with depth priors |
-| **MVSplat** | ✅ Full | Multi-view stereo with cost volume |
-| **DepthSplat** | ✅ Full | DINOv2 features with 3-view support |
+| **TranSplat** | Functional adapter | Transformer-based with depth priors |
+| **MVSplat** | Functional adapter | Multi-view stereo with cost volume |
+| **DepthSplat** | Functional adapter | DINOv2 features with 3-view support |
 
 See [Multi-Model Demo Guide](docs/multi-model-demo-guide.md) for detailed instructions.
 
@@ -100,18 +122,32 @@ git submodule update --init --recursive
 ### 2. Environment Setup
 
 ```bash
-# Create conda environment (recommended)
-conda create -n transplat python=3.10
-conda activate transplat
+# TranSplat and MVSplat (PyTorch 2.1 profile)
+bash install.sh --profile classic --venv .venv/classic
 
-# Install SCARF core dependencies
-pip install -r requirements.txt
-
-# Install model-specific dependencies (pick the model(s) you need)
-pip install -r transplat/requirements.txt
-pip install -r mvsplat/requirements.txt
-pip install -r depthsplat/requirements.txt
+# DepthSplat uses a separate PyTorch 2.4 environment
+bash install.sh --profile depthsplat --venv .venv/depthsplat
 ```
+
+Do not install all three upstream requirement files into one environment.
+Their PyTorch and CUDA constraints differ. The AE runner discovers these two
+default virtual environments automatically. If they live elsewhere, export
+`SCARF_PYTHON_CLASSIC` and `SCARF_PYTHON_DEPTHSPLAT` with their interpreter
+paths. If automatic CUDA discovery cannot find the compiler matching the
+profile, set `SCARF_NVCC` to its `nvcc` executable; the checker still requires
+the locked CUDA release.
+
+For a small Functional smoke test that does not download Re10K, build the
+deterministic synthetic fixture and run quick mode:
+
+```bash
+bash data/download_checkpoints.sh --profile quick
+.venv/classic/bin/python data/build_quick_dataset.py --output datasets/quick-re10k
+bash scripts/run_ae.sh quick
+```
+
+This fixture verifies installation and end-to-end execution. Run the quality
+and mechanism workflows for the paper evaluation matrix.
 
 ### 3. Setup Data
 
@@ -120,7 +156,7 @@ Copy (or symlink) checkpoints and datasets into each submodule directory:
 ```bash
 # --- TranSplat ---
 cp -r /path/to/checkpoints/re10k.ckpt          transplat/checkpoints/
-cp -r /path/to/checkpoints/depth_anything_v2_vits.pth transplat/checkpoints/
+cp -r /path/to/checkpoints/depth_anything_v2_vitb.pth transplat/checkpoints/
 cp -r /path/to/datasets/re10k                   transplat/datasets/
 
 # --- MVSplat ---
@@ -142,7 +178,7 @@ Required files per model:
 
 | Model | Checkpoints | Dataset |
 |-------|------------|---------|
-| TranSplat | `re10k.ckpt`, `depth_anything_v2_vits.pth` | `re10k/` |
+| TranSplat | `re10k.ckpt`, `depth_anything_v2_vitb.pth` | `re10k/` |
 | MVSplat | `re10k.ckpt` | `re10k/` |
 | DepthSplat | `depthsplat_re10k.ckpt` | `re10k/` |
 
@@ -214,8 +250,8 @@ When SAES and FSDR are enabled (default), they sit between Depth Predictor and G
 - [Architecture Overview](docs/architecture.md)
 
 Module-level documentation:
-- [feature_extractor/README.md](feature_extractor/README.md) — Feature extraction
-- [depth_predictor/README.md](depth_predictor/README.md) — Depth prediction
+- [Feature extraction](feature_extractor/README.md)
+- [Depth prediction](depth_predictor/README.md)
 
 ## License
 
@@ -223,7 +259,7 @@ MIT License
 
 ## Related Projects
 
-- [TranSplat](https://github.com/xingyoujun/transplat) - Original TranSplat implementation (AAAI 2025)
+- [TranSplat](https://github.com/xingyoujun/transplat), the original AAAI 2025 implementation
 
 ## Citation
 

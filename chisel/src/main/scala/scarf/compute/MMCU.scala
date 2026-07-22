@@ -165,13 +165,14 @@ class MMCU(val arraySize: Int = ScarfConfig.PEArraySize) extends Module {
 
   // DMA sub-FSM: serialise outBufReg → external memory
   when(dmaActive) {
+    val dmaRowIdx = dmaRow(log2Ceil(arraySize) - 1, 0)
     cWrWire   := true.B
     cAddrWire := snapMTile * arraySize.U * effN + snapNTile * arraySize.U +
                  dmaRow * effN
     for (j <- 0 until arraySize) {
       cDataWire(j) := Mux(io.useBias,
-        outBufReg(dmaRow)(j) + io.biasData(j),
-        outBufReg(dmaRow)(j))
+        outBufReg(dmaRowIdx)(j) + io.biasData(j),
+        outBufReg(dmaRowIdx)(j))
     }
     dmaRow := dmaRow + 1.U
     when(dmaRow === (arraySize - 1).U) {

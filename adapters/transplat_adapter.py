@@ -119,7 +119,7 @@ class TransplatAdapter(BaseAdapter):
     
     def get_fsdr_config_overrides(self) -> Dict:
         return {
-            'hamming_threshold': 4,
+            'hamming_threshold': 3,
             'high_confidence_threshold': 0.8,
         }
     

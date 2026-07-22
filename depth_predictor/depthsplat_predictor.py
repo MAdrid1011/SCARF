@@ -30,7 +30,7 @@ from .base_predictor import BaseDepthPredictorSim
 from .types import DepthPredictorConfig, DepthPredictorOutput, CycleBreakdown
 from .hw_depth_predictor import HWDepthPredictor
 from encoder import ConvEngine, BilinearUnit, ActivationUnit, GEMMUnit
-from encoder.types import CycleStats, ActivationType
+from encoder.types import CycleStats, ActivationType, ENCODER_CYCLES
 
 
 class DepthSplatDepthPredictorSim(BaseDepthPredictorSim):
@@ -85,6 +85,10 @@ class DepthSplatDepthPredictorSim(BaseDepthPredictorSim):
         self.gemm_unit = GEMMUnit()
         self.gelu_unit = ActivationUnit(ActivationType.GELU)
         self.sigmoid_unit = ActivationUnit(ActivationType.SIGMOID)
+        # Populated by the native pass-through path.  Cost-volume accounting
+        # must use the executed probability-volume shape rather than infer it
+        # from an arbitrary caller feature tensor.
+        self._native_cost_volume_scales: List[Tuple[int, int, int]] = []
     
     def load_from_model(self, model: nn.Module) -> None:
         """
@@ -277,6 +281,8 @@ class DepthSplatDepthPredictorSim(BaseDepthPredictorSim):
             cameras_dist_index = torch.argsort(cameras_dist_matrix)
             nn_matrix = cameras_dist_index[:, :, :4]  # top 4 nearest
         
+        self._native_cost_volume_scales = []
+
         # Call MultiViewUniMatch.forward - THIS IS ACTUAL COMPUTATION
         results_dict = self._depth_predictor(
             images,
@@ -302,6 +308,15 @@ class DepthSplatDepthPredictorSim(BaseDepthPredictorSim):
         # match_probs contains the softmax probability over depth candidates
         # Use as densities (confidence)
         match_probs = results_dict.get('match_probs', [])
+        self._native_cost_volume_scales = [
+            (
+                int(probabilities.shape[1]),
+                int(probabilities.shape[-2]),
+                int(probabilities.shape[-1]),
+            )
+            for probabilities in match_probs
+            if probabilities.dim() == 4 and probabilities.shape[0] == B * V
+        ]
         if len(match_probs) > 0:
             # [BV, D, H, W] -> take max prob as density
             match_prob = match_probs[-1]
@@ -338,27 +353,30 @@ class DepthSplatDepthPredictorSim(BaseDepthPredictorSim):
         H_full = images.shape[-2] if images is not None else H * 4
         W_full = images.shape[-1] if images is not None else W * 4
         
-        # DepthSplat uses multiple scales
-        scales = [1, 2, 4]  # 1/4, 1/8, 1/16 of original resolution
-        
         total_cost_volume_cycles = 0
         total_unet_cycles = 0
         total_depth_head_cycles = 0
         total_softmax_cycles = 0
         
-        for scale in scales:
-            h_scale = H // scale
-            w_scale = W // scale
-            d_scale = D // scale  # Fewer depth candidates at coarser scales
-            
-            # Cost volume construction per scale
-            # Warping: BilinearUnit
-            warp_cycles = (V - 1) * B * d_scale * 4 * h_scale * w_scale
-            
-            # Correlation
-            corr_cycles = (V - 1) * B * d_scale * 4 * C * h_scale * w_scale
-            
-            total_cost_volume_cycles += warp_cycles + corr_cycles
+        executed_scales = self._native_cost_volume_scales or [(D, H, W)]
+        candidate_work = 0
+        for d_scale, h_scale, w_scale in executed_scales:
+            # MultiViewUniMatch builds one plane sweep for every reference
+            # view, source view, depth hypothesis, and feature position.  The
+            # prior model omitted the reference-view factor and invented three
+            # scales for the DL3DV checkpoint, which has num_scales=1.
+            scale_cycles, scale_candidates = self._plane_sweep_cycles(
+                batch_size=B,
+                view_count=V,
+                feature_channels=int(
+                    getattr(self._depth_predictor, "feature_channels", C)
+                ),
+                depth_candidates=d_scale,
+                height=h_scale,
+                width=w_scale,
+            )
+            total_cost_volume_cycles += scale_cycles
+            candidate_work += scale_candidates
             
             # U-Net regression per scale
             unet_channels = [128, 256]
@@ -402,9 +420,64 @@ class DepthSplatDepthPredictorSim(BaseDepthPredictorSim):
             unet_refinement=total_unet_cycles,
             depth_head=total_depth_head_cycles,
             softmax_regression=total_softmax_cycles,
-            depth_refinement=depth_refinement_cycles + dpt_cycles,
+            # The learned DPTHead is accounted for exactly once in the
+            # upsampling stage below.  Keeping it here as well double-counts
+            # the native residual-depth path.
+            depth_refinement=depth_refinement_cycles,
             upsampling=dpt_cycles,  # DPTHead includes upsampling
             gaussian_head=gaussian_head_cycles,
+        )
+        self._cost_volume_candidate_evaluations = candidate_work
+
+    @staticmethod
+    def _plane_sweep_cycles(
+        *,
+        batch_size: int,
+        view_count: int,
+        feature_channels: int,
+        depth_candidates: int,
+        height: int,
+        width: int,
+    ) -> Tuple[int, int]:
+        """Count the executed native DepthSplat plane-sweep work.
+
+        ``MultiViewUniMatch`` makes every context view a reference and warps
+        each of the remaining views for every candidate plane.  This mirrors
+        ``warp_with_pose_depth_candidates`` followed by the channel reduction
+        in the pinned implementation.
+        """
+        if min(
+            batch_size,
+            view_count,
+            feature_channels,
+            depth_candidates,
+            height,
+            width,
+        ) <= 0:
+            raise ValueError("plane-sweep dimensions must be positive")
+        source_views = view_count - 1
+        if source_views <= 0:
+            return 0, 0
+
+        source_pairs = batch_size * view_count * source_views
+        candidate_evaluations = source_pairs * depth_candidates * height * width
+        channel_batches = (feature_channels + 31) // 32
+        bilinear_cycles_per_candidate = (
+            ENCODER_CYCLES["bilinear_coord"]
+            + ENCODER_CYCLES["bilinear_sample"]
+            + ENCODER_CYCLES["bilinear_interpolate"]
+            + 1  # zero-padding border check in BilinearUnit.grid_sample
+        ) * channel_batches
+
+        # _hw_ds_warp_features: one inverse-K back-projection per source pair,
+        # then two 3x3 transforms per candidate plane (pose and projection).
+        backproject_cycles = source_pairs * 3 * 3 * height * width // 1024
+        transform_cycles = candidate_evaluations * 2 * 3 * 3 // 1024
+        sampling_cycles = candidate_evaluations * bilinear_cycles_per_candidate
+        correlation_cycles = candidate_evaluations * feature_channels // 1024
+        return (
+            backproject_cycles + transform_cycles + sampling_cycles + correlation_cycles,
+            candidate_evaluations,
         )
 
 

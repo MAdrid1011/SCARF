@@ -180,6 +180,19 @@ class BaseDepthPredictorSim(ABC):
         self.depth_head_sim.reset_cycles()
         self.bilinear_unit.reset_cycles()
 
+    def set_strict_mode(self, strict: bool) -> None:
+        predictor = getattr(self, "_hw_predictor", None)
+        if predictor is None:
+            raise RuntimeError("strict mode requires a hardware depth predictor")
+        predictor.set_strict_mode(strict)
+
+    def set_accurate_mode(self, accurate: bool) -> None:
+        """Use reference numerics while retaining the hardware cycle model."""
+        predictor = getattr(self, "_hw_predictor", None)
+        if predictor is None:
+            raise RuntimeError("accurate mode requires a hardware depth predictor")
+        predictor.set_use_original(accurate)
+
 
 class PassThroughDepthPredictorSim(BaseDepthPredictorSim):
     """

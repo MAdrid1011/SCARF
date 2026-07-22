@@ -8,7 +8,7 @@ import scarf.{ScarfConfig, ModelConfig, PipeState, SAESLevel}
  * PipelineController — Top-level FSM for SCARF pipeline.
  *
  * Manages: IDLE → LOAD_CONFIG → S1_CNN → S1_TRANSFORMER [→ S1_DINOV2]
- *          → S2S3_TILE_LOOP (per tile: SAES → S2/S3 or PROBE_ONLY)
+ *          → S2S3_TILE_LOOP (per tile: SAES decision → S2/S3)
  *          → GGU → DONE
  *
  * MMCU is the single compute unit for Conv/GEMM/Attention (replaces
@@ -141,10 +141,16 @@ class PipelineController extends Module {
       io.saesClassifyStart := stateEntry
       when(io.saesClassifyDone) {
         saesResult := io.saesLevel
+        // The controller cannot legally bypass S2/S3 merely because a tile
+        // classifies as L0/L1.  Probe execution, assignment/moment matching,
+        // and retained-descriptor buffering need a real datapath; until that
+        // datapath is implemented, every level follows the baseline S2/S3
+        // route.  This preserves functional semantics and prevents the RTL
+        // control skeleton from implying unimplemented SAES savings.
         state := Mux(
-          io.saesLevel === SAESLevel.sFull,
-          Mux(io.config.fsdrEnabled, PipeState.sS2_FSDRLookup, PipeState.sS2_CostVol),
-          PipeState.sS2S3_ProbeOnly,
+          io.config.fsdrEnabled,
+          PipeState.sS2_FSDRLookup,
+          PipeState.sS2_CostVol,
         )
       }
     }
@@ -184,12 +190,6 @@ class PipelineController extends Module {
     is(PipeState.sS3_GaussHead) {
       io.mmcuStart := stateEntry
       when(io.mmcuDone) { state := PipeState.sGGU }
-    }
-
-    // Probe-only path
-    is(PipeState.sS2S3_ProbeOnly) {
-      io.bilinearStart := stateEntry
-      when(io.bilinearDone) { state := PipeState.sGGU }
     }
 
     // GGU

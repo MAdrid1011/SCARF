@@ -1,0 +1,3 @@
+{"cycle": 0, "op": "read", "address": "0x80000000", "bytes": 128}
+{"cycle": 4, "op": "read", "address": "0x81000000", "bytes": 64}
+{"cycle": 12, "op": "write", "address": "0x82000000", "bytes": 64}

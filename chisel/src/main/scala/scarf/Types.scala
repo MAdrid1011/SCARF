@@ -14,7 +14,6 @@ object PipeState extends ChiselEnum {
       sS2_FSDRLookup,
       sS2_CostVol, sS2_UNet, sS2_DepthHead, sS2_Regression,
       sS3_Refine, sS3_GaussHead,
-      sS2S3_ProbeOnly,
       sGGU,
       sS2S3_NextTile,
       sDone = Value

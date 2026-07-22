@@ -17,6 +17,7 @@ from .types import (
     ENCODER_CYCLES,
     ENCODER_RESOURCES,
 )
+from .mmcu_events import record_conv_tensors
 
 
 class ConvEngine:
@@ -112,14 +113,28 @@ class ConvEngine:
             stride=stride, padding=padding, output_padding=output_padding, groups=groups
         )
         
-        # Cycle model: transposed conv ≈ standard conv on zero-inserted input
-        # Zero-insertion expands input by stride, then standard conv
+        cycles = self._compute_transposed_cycles(input, weight, output)
+        self._total_cycles += cycles.total_cycles
+        return output, cycles
+
+    def _compute_transposed_cycles(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        output: torch.Tensor,
+    ) -> CycleStats:
+        """Compute transposed-convolution cycles from executed tensor shapes."""
+        # Cycle model: transposed conv is a standard convolution on a
+        # zero-inserted input, plus address-generation overhead.
         B, Cout, H_out, W_out = output.shape
         Cin = weight.shape[0]
         K = weight.shape[2]
         total_macs = B * H_out * W_out * Cin * Cout * K * K
         pe_throughput = self.config.pe_array_size ** 2
         compute_cycles = (total_macs + pe_throughput - 1) // pe_throughput
+        record_conv_tensors(
+            input, weight, output, array_size=self.config.pe_array_size
+        )
         # Extra overhead for zero-insertion address generation
         setup_cycles = ENCODER_CYCLES['conv_setup'] * 2
         weight_load_cycles = Cin * Cout * K * K // self.config.pe_array_size
@@ -136,8 +151,7 @@ class ConvEngine:
                 'type': 'transposed',
             }
         )
-        self._total_cycles += cycles.total_cycles
-        return output, cycles
+        return cycles
     
     def _compute_cycles(
         self,
@@ -165,6 +179,9 @@ class ConvEngine:
         
         # Compute cycles
         compute_cycles = (total_macs + pe_throughput - 1) // pe_throughput
+        record_conv_tensors(
+            input, weight, output, array_size=self.config.pe_array_size
+        )
         
         # Setup/overhead cycles
         setup_cycles = ENCODER_CYCLES['conv_setup']

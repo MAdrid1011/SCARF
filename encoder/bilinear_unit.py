@@ -184,7 +184,7 @@ class BilinearUnit:
                 4 * ENCODER_CYCLES['bilinear_interpolate']
             )
         else:
-            cycles_per_pixel = 4  # fallback
+            raise ValueError(f"unsupported interpolation mode: {mode}")
         
         compute_cycles = output_pixels * channel_batches * cycles_per_pixel
         

@@ -1,0 +1,66 @@
+{
+  "calibration": {
+    "candidate_records_sha256": null,
+    "evaluation_disjoint": null,
+    "manifest_sha256": null,
+    "selection_rule": "quality constraints, maximum event work reduction"
+  },
+  "fixed": {
+    "fsdr_cache_size": 32,
+    "fsdr_contraction_ratio": 4,
+    "fsdr_hamming_threshold": 3,
+    "fsdr_guidance_policy": "paper-hamming-local-validity",
+    "saes_depth_threshold": 0.1,
+    "saes_feature_threshold": 0.2,
+    "saes_l1_depth_reference": "primary-routing-probes-v1",
+    "saes_moment_geometry": "c2w-probe-depth-ray-v1",
+    "saes_tile_size": 4
+  },
+  "saes_execution_identity": {
+    "context_guard_max_center_mahalanobis": 2.0,
+    "context_guard_max_footprint_ratio": 16.0,
+    "context_guard_max_relative_depth_span": 0.25,
+    "context_guard_policy": "projected-anchor-coverage-occlusion-v3",
+    "context_safety_guard": true,
+    "cross_check_threshold": 0.015,
+    "decision_semantics": "probe-normalized-std-first-hit",
+    "depth_routing_semantics": "metric-depth-standard-deviation",
+    "depth_threshold": 0.1,
+    "feature_threshold": 0.2,
+    "full_tile_mode": "dense_passthrough",
+    "l0_anchor_count": 4,
+    "l0_anchor_layout": "t4-corners-v1",
+    "l0_anchor_positions": [[0, 0], [0, 3], [3, 0], [3, 3]],
+    "l1_anchor_count": 12,
+    "l1_anchor_layout": "t4-corners-plus-boundary-v1",
+    "l1_anchor_positions": [[0, 0], [0, 3], [3, 0], [3, 3], [0, 1], [0, 2], [1, 0], [1, 3], [2, 0], [2, 3], [3, 1], [3, 2]],
+    "l1_depth_reference": "primary-routing-probes-v1",
+    "materialization": "representative",
+    "materialization_guard": true,
+    "materialization_guard_max_opacity_distance": 0.2,
+    "materialization_guard_min_covariance_cosine": 0.7,
+    "materialization_guard_min_harmonic_cosine": 0.7,
+    "materialization_guard_policy": "anchor-attribute-consistency-v1",
+    "moment_geometry": "c2w-probe-depth-ray-v1",
+    "route_order": "feature_L0_then_primary_probe_depth_L1_then_Full",
+    "route_sha256": "fa2e79efbe89f54ed63ab9b6f083fa2a9af09a4d72cefa8218c9611911da0cbd",
+    "schema_version": "saes-execution-identity-v1",
+    "tile_size": 4
+  },
+  "global_configuration": true,
+  "projection": {
+    "kind": "random_hyperplane_lsh",
+    "rom": "artifact/lsh_projection.json",
+    "rom_sha256": "6d0e152d715bdd2591b5829fc24dac6f63e3bab31c13710580d52900de433e39",
+    "seed": 42
+  },
+  "schema_version": "1.0",
+  "search_space": {
+    "beta_d": [0.5, 1.0, 2.0],
+    "beta_f": [0.05, 0.1, 0.2],
+    "beta_x": [0.25, 0.5, 1.0],
+    "gamma_depth": [0.05, 0.075, 0.1, 0.15]
+  },
+  "selected": null,
+  "status": "preregistered"
+}

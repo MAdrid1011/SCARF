@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0",
+  "files": [
+    {
+      "profile": "classic",
+      "model": "transplat",
+      "dataset": "re10k",
+      "evaluation_datasets": ["re10k", "dl3dv"],
+      "url": "https://huggingface.co/xingyoujun/transplat/resolve/ca57237d8138b3b730c783af73ebb0285d1f3163/re10k.ckpt",
+      "path": "transplat/checkpoints/re10k.ckpt",
+      "size": 546690188,
+      "sha256": "89e43c205a04962e427801385d7d18e74cba063d05a76bf8b28e5fa746a4b69a"
+    },
+    {
+      "profile": "classic",
+      "model": "transplat",
+      "dataset": "acid",
+      "evaluation_datasets": ["acid"],
+      "url": "https://huggingface.co/xingyoujun/transplat/resolve/ca57237d8138b3b730c783af73ebb0285d1f3163/acid.ckpt",
+      "path": "transplat/checkpoints/acid.ckpt",
+      "size": 546690188,
+      "sha256": "ee230bf84d7c0bf527bff54b856f269f221d56b2256ecd753df7b94b1b5c2555"
+    },
+    {
+      "profile": "classic",
+      "model": "mvsplat",
+      "dataset": "re10k",
+      "evaluation_datasets": ["re10k", "dl3dv"],
+      "url": "https://huggingface.co/dylanebert/mvsplat/resolve/124fd69083b1207b3ebcc1ba91e5ab673ce60cd1/re10k.ckpt",
+      "path": "mvsplat/checkpoints/re10k.ckpt",
+      "size": 48019233,
+      "sha256": "83d0d9eaa753fa4a1f925288dc1f90b8c3297fad0ab0f6ed1f11a1c5946da25a"
+    },
+    {
+      "profile": "classic",
+      "model": "mvsplat",
+      "dataset": "acid",
+      "evaluation_datasets": ["acid"],
+      "url": "https://huggingface.co/dylanebert/mvsplat/resolve/124fd69083b1207b3ebcc1ba91e5ab673ce60cd1/acid.ckpt",
+      "path": "mvsplat/checkpoints/acid.ckpt",
+      "size": 48018760,
+      "sha256": "253785dee0804e6d7f312bd5b927a47454ba55c32735c0a2685b5d07594e142f"
+    },
+    {
+      "profile": "depthsplat",
+      "model": "depthsplat",
+      "dataset": "re10k",
+      "evaluation_datasets": ["re10k", "acid"],
+      "url": "https://huggingface.co/haofeixu/depthsplat/resolve/ed5116c11f7932fff3714989e2b65716730f6f87/depthsplat-gs-large-re10k-256x256-view2-e0f0f27a.pth",
+      "path": "depthsplat/checkpoints/re10k.ckpt",
+      "size": 1417795172,
+      "sha256": "e0f0f27a1213e69b0bfd7758e2408b2bcb2ce0928b3559a78c2ba2b934939c4b"
+    },
+    {
+      "profile": "depthsplat",
+      "model": "depthsplat",
+      "dataset": "dl3dv",
+      "evaluation_datasets": ["dl3dv"],
+      "url": "https://huggingface.co/haofeixu/depthsplat/resolve/ed5116c11f7932fff3714989e2b65716730f6f87/depthsplat-gs-base-dl3dv-256x448-randview2-6-02c7b19d.pth",
+      "path": "depthsplat/checkpoints/dl3dv.ckpt",
+      "size": 483879091,
+      "sha256": "02c7b19d8d038f71b512ef434d42b49698c3288d8ed65b748c04bd43d298f37a"
+    }
+  ]
+}

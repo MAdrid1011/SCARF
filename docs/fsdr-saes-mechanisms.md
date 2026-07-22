@@ -2,20 +2,19 @@
 
 This document describes the two scene-adaptive mechanisms used by SCARF:
 Feature Similarity Depth Reuse (FSDR) and Scene-Adaptive Early Sparsification
-(SAES). Both mechanisms reduce encoder work before it reaches the most
-expensive depth-search and Gaussian-generation paths.
+(SAES). FSDR narrows a depth-search window when its cache conditions pass. SAES
+uses probe statistics to select an L0, L1, or Full materialization route.
 
 ## 1. Overview
 
 | Mechanism | Redundancy source | Stage | Main action |
 |-----------|-------------------|-------|-------------|
 | FSDR | Feature-space similarity | S2 depth prediction | Reuse a cached depth anchor to narrow the candidate window |
-| SAES | Local 3D continuity | S2 and S3 | Select a lower-cost Gaussian-generation path for regular tiles |
+| SAES | Local 3D continuity | Gaussian materialization | Classify tiles and materialize retained output |
 
-FSDR and SAES are applied to disjoint work. SAES first classifies a tile and
-bypasses depth prediction or Gaussian generation when the probe evidence is
-sufficient. FSDR then handles the remaining pixels that still require depth
-prediction. This keeps their cycle savings additive in the simulator.
+FSDR and SAES are represented as distinct mechanism paths. Their events,
+selection, retained descriptors, and cycle accounting are carried in the
+structured execution record.
 
 ## 2. FSDR
 
@@ -71,15 +70,16 @@ FSDR is implemented with a small hash-and-CAM subsystem:
 
 ## 3. SAES
 
-SAES targets redundant Gaussian materialization in locally regular tiles. It
-uses a small set of probes to estimate feature, depth, and Gaussian consistency.
-The result selects one of three generation paths.
+SAES specifies a route for redundant Gaussian materialization in locally regular
+tiles. It uses a small set of probes and follows the published first-hit
+decision order: feature statistic for L0, then depth statistic for L1 after an
+L0 miss, then Full.
 
-| Path | Trigger condition | Action |
+| Path | Trigger condition | Materialization action |
 |------|-------------------|--------|
-| L0 representative path | Low feature variance | Use representative Gaussians for the tile |
-| L1 lightweight path | Low depth variance | Reuse a lightweight geometry path |
-| Full path | Irregular tile | Run full per-pixel Gaussian generation |
+| L0 representative path | Low feature variance | Construct representative output from retained descriptors |
+| L1 lightweight path | L0 miss and low probe-depth standard deviation | Retain the declared anchors for materialization |
+| Full path | Irregular tile | Keep the dense descriptor output |
 
 ### 3.1 Probe Selection
 
@@ -89,22 +89,26 @@ keeps the path decision stable as tile size changes.
 
 ### 3.2 Path Decision
 
-SAES computes three statistics:
+SAES computes the two decision statistics specified by the mechanism:
 
 - Feature variance for L0 decisions.
-- Depth variance for L1 decisions.
-- Gaussian similarity for validation and quality control.
+- Probe-depth standard deviation for L1 decisions after an L0 miss.
 
-The default thresholds are selected from the sensitivity study in the paper. A
-tile only takes a lower-cost path when the probe statistics indicate enough local
-regularity.
+At T=4, L1 computes its depth-reliability mean and standard deviation from four
+primary corner routing probes. If L1 is selected, it retains those four primary
+anchors plus eight boundary anchors, for twelve anchors total. The boundary
+anchors do not alter the L1 reference statistics.
+
+The threshold is bound by the disjoint DL3DV calibration contract. The
+calibration and holdout provenance is retained with the global configuration.
 
 ### 3.3 Representative Gaussian Generation
 
-For L0 tiles, SAES builds representative Gaussians by weighted moment matching.
-Position and covariance use first- and second-moment statistics. Opacity and
-spherical-harmonic coefficients are averaged with range checks. This keeps the
-representative path conservative in textured or geometrically complex areas.
+For L0, SAES builds representative Gaussians from retained descriptors by
+weighted moment matching. Position and covariance
+use first- and second-moment statistics. Opacity and spherical-harmonic
+coefficients are averaged with range checks. This keeps the representative path
+conservative in textured or geometrically complex areas.
 
 ## 4. Simulator Integration
 
@@ -124,9 +128,23 @@ python scripts/demo.py --model transplat --no-saes
 python scripts/demo.py --model transplat --no-fsdr --no-saes
 ```
 
-The simulator reports cycle counts, path statistics, cache hit rates, Gaussian
-counts, and image-quality metrics. These counters are used by the paper to
-attribute speedup to hardware execution, FSDR, and SAES.
+The demo reports path statistics, cache hit rates, Gaussian counts, image
+metrics, and architectural accounting. The full AE workflow records the
+execution trace, hardware counters, and device timing in the result schema.
+
+### 4.1 Execution Contract
+
+The simulation path materializes the S3 descriptor tensors before SAES routing.
+The result schema records that boundary together with the selected FSDR and
+SAES events. The full evaluation workflow combines those records with the
+configured quality, hardware, and validation paths.
+
+### 4.2 FSDR Trace Isolation
+
+`--claim-run --fsdr-only` runs the FSDR path under the global configuration
+bound by the calibration contract. The target-free FSDR mode removes target RGB
+before device transfer and records that boundary in its result. The aggregate
+schema keeps this trace kind separate from a full matrix result.
 
 ## 5. Related Documentation
 

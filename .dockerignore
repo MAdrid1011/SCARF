@@ -1,0 +1,14 @@
+.venv
+.pytest_cache
+**/__pycache__
+*.py[cod]
+outputs
+downloads
+assets
+checkpoints
+**/checkpoints
+datasets/*
+!datasets/quick-re10k
+!datasets/quick-re10k/**
+micro59-submit
+artifact/reference_results/evidence

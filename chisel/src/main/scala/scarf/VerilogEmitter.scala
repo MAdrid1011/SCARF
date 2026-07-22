@@ -22,7 +22,7 @@ object VerilogEmitter extends App {
     new ScarfTop,
     Array("--target-dir", outputDir),
     Array(
-      "--lowering-options=disallowLocalVariables",
+      "--lowering-options=disallowLocalVariables,disallowPackedArrays",
     ),
   )
 
@@ -32,7 +32,7 @@ object VerilogEmitter extends App {
     Array(
       "--split-verilog",
       s"-o=$outputDir/split",
-      "--lowering-options=disallowLocalVariables",
+      "--lowering-options=disallowLocalVariables,disallowPackedArrays",
     ),
   )
 

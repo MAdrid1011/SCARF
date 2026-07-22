@@ -143,23 +143,30 @@ class CacheTable:
         self.entries[lru_idx] = entry
         return lru_idx
     
-    def update(self, entry: CacheEntry, new_depth: float, alpha: Optional[float] = None):
+    def update(
+        self,
+        entry: CacheEntry,
+        new_depth: float,
+        *,
+        new_signature: int,
+        new_position: Tuple[int, int],
+    ):
         """
-        Update entry depth with exponential moving average.
+        Write the current feature signature and final depth into a hit entry.
         
         Args:
             entry: Entry to update (must be in cache)
             new_depth: New depth estimate
-            alpha: EMA coefficient (default from config)
+            new_signature: Current pixel's LSH signature
+            new_position: Current pixel's raster position
         
         Hardware:
             - 1 multiply, 2 adds
             - In-place SRAM update
         """
-        if alpha is None:
-            alpha = self.config.depth_update_alpha
-        
-        entry.best_depth = (1 - alpha) * entry.best_depth + alpha * new_depth
+        entry.signature = int(new_signature)
+        entry.position = new_position
+        entry.best_depth = float(new_depth)
         entry.last_access = self.time
         self.time += 1
     

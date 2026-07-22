@@ -195,6 +195,15 @@ class MVSplatFeatureExtractor:
                     trans_features = features_per_view
                     transformer_cycles = 0
         
+        # Keep numerical execution identical to the pinned model. The hardware
+        # simulators above provide cycle counts from the same tensor shapes.
+        with torch.no_grad():
+            trans_features, cnn_features_bvchw = self.backbone(
+                images,
+                attn_splits=attn_splits,
+                return_cnn_features=True,
+            )
+
         # Adjust for cross-attention disabled
         if self.wo_cross_attn:
             transformer_cycles = transformer_cycles // 2

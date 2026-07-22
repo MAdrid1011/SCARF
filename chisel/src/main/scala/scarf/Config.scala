@@ -65,6 +65,7 @@ class ModelConfig extends Bundle {
   val fsdrEnabled       = Bool()
   val fsdrCacheSize     = UInt(10.W)
   val fsdrHammingThresh = UInt(4.W)
+  val fsdrDepthValidThresh = UInt(10.W) // Q0.10 relative depth tolerance
 }
 
 object ModelPresets {
@@ -83,6 +84,7 @@ object ModelPresets {
     "fsdrEnabled"        -> 1,
     "fsdrCacheSize"      -> 32,
     "fsdrHammingThresh"  -> 3,
+    "fsdrDepthValidThresh" -> 102,
   )
 
   def mvsplat: Map[String, BigInt] = Map(
@@ -100,6 +102,7 @@ object ModelPresets {
     "fsdrEnabled"        -> 1,
     "fsdrCacheSize"      -> 32,
     "fsdrHammingThresh"  -> 3,
+    "fsdrDepthValidThresh" -> 102,
   )
 
   def depthsplat: Map[String, BigInt] = Map(
@@ -117,5 +120,6 @@ object ModelPresets {
     "fsdrEnabled"        -> 1,
     "fsdrCacheSize"      -> 32,
     "fsdrHammingThresh"  -> 3,
+    "fsdrDepthValidThresh" -> 102,
   )
 }

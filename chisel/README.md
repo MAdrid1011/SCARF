@@ -19,6 +19,8 @@ chisel/
 |   |   |-- compute/
 |   |   |   |-- ConvEngine.scala
 |   |   |   |-- GEMMUnit.scala
+|   |   |   |-- SAESAssignmentNormalizer.scala
+|   |   |   |-- SAESScalarMomentAccumulator.scala
 |   |   |   |-- BilinearUnit.scala
 |   |   |   |-- ActivationUnit.scala
 |   |   |   |-- NormUnit.scala
@@ -37,6 +39,7 @@ chisel/
 |   |   |   |-- FeatureBuffer.scala
 |   |   |   |-- TileSPM.scala
 |   |   |   |-- DRAMInterface.scala
+|   |   |   |-- SAESDescriptorBuffer.scala
 |   |   |   `-- FSDRCache.scala
 |   |   `-- control/
 |   |       |-- PipelineController.scala
@@ -91,7 +94,10 @@ cd generated && verilator --lint-only ScarfTop.v
 | `GEMMUnit.scala` | `encoder/gemm_unit.py` |
 | `BilinearUnit.scala` | `encoder/bilinear_unit.py` |
 | `VectorALU.scala` | `encoder/softmax_unit.py` |
+| `SAESAssignmentNormalizer.scala` | `saes/rtl_assignment_reference.py` exact Q0.16 score normalization |
+| `SAESScalarMomentAccumulator.scala` | `saes/rtl_moment_reference.py` exact scalar first/second moments |
 | `GGUArray.scala` | `ggu/ggu_processor.py` |
+| `SAESDescriptorBuffer.scala` | `saes/hardware_accounting.py` packed retained-descriptor layout |
 | `FSDRController.scala` | `fsdr/narrowed_search_simulator.py` |
 | `FSDRCache.scala` | `fsdr/cache_table.py` |
 

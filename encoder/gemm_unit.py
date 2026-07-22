@@ -16,6 +16,7 @@ from .types import (
     ENCODER_CYCLES,
     ENCODER_RESOURCES,
 )
+from .mmcu_events import record_mmcu_slots
 
 
 class GEMMUnit:
@@ -129,6 +130,9 @@ class GEMMUnit:
         
         # Total compute cycles
         compute_cycles = batch * num_tiles_m * num_tiles_n * cycles_per_tile
+        useful_slots = batch * M * N * K
+        scheduled_slots = compute_cycles * self.config.array_m * self.config.array_n
+        record_mmcu_slots(useful_slots, scheduled_slots)
         
         # Overhead per batch
         overhead = batch * ENCODER_CYCLES['gemm_tile_overhead']

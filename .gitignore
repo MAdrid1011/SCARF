@@ -12,6 +12,7 @@ build/
 develop-eggs/
 dist/
 downloads/
+/hug
 eggs/
 .eggs/
 lib/
@@ -208,7 +209,11 @@ __marimo__/
 
 # Output files
 outputs/
+datasets/*
+!datasets/quick-re10k/
+!datasets/quick-re10k/**
 .milestones/
+artifact/reference_results/evidence/
 
 # Paper draft (do not distribute)
 main.pdf
@@ -244,7 +249,7 @@ g3dgs/
 .codex-openai-docs-cache/
 micro59-submit/
 skills/
-memory/
+/memory/
 obj_dir/
 challenge-metrics/
 openai-node-test.sh

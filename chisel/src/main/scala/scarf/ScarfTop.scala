@@ -50,6 +50,10 @@ class ScarfTop extends Module {
     val done  = Output(Bool())
     val busy  = Output(Bool())
     val pipeState = Output(PipeState())
+    // Observable SAES classification timing for RTL/VCD event reconciliation.
+    // ``saesDecisionCycles`` is valid only while ``saesDecisionDone`` is high.
+    val saesDecisionDone = Output(Bool())
+    val saesDecisionCycles = Output(UInt(2.W))
 
     // AXI4 DRAM interface
     val axiArAddr  = Output(UInt(ScarfConfig.AddrWidth.W))
@@ -108,6 +112,8 @@ class ScarfTop extends Module {
   val dramOutputBase  = RegInit("h82000000".U(32.W))
   val dmaOffset       = RegInit(0.U(32.W))
   val pixelCounter    = RegInit(0.U(16.W))
+  val fsdrLocalDepthSum = RegInit(0.U(24.W))
+  val fsdrLocalDepthCount = RegInit(0.U(8.W))
 
   val cameraFx = RegInit("h4500".U(32.W))
   val cameraFy = RegInit("h4500".U(32.W))
@@ -166,10 +172,18 @@ class ScarfTop extends Module {
   saesCtrl.io.config  := configRegs.io.config
   pipeline.io.saesLevel       := saesCtrl.io.level
   pipeline.io.saesClassifyDone := saesCtrl.io.done
+  io.saesDecisionDone := saesCtrl.io.done
+  io.saesDecisionCycles := saesCtrl.io.decisionCycles
 
   saesCtrl.io.probeFeatureVar := featureBuf.io.doutA
   saesCtrl.io.probeDepthStd   := tileBuf.io.rdData
   saesCtrl.io.crossCheckError := featureBuf.io.doutB
+  // The published top-level trace currently has no serialized descriptor
+  // comparator producer. Keep the new Control interface fail-open only at
+  // this integration boundary; no RTL timing or S2/S3 saving is claimed until
+  // the producer and retained-output schedule are co-simulated.
+  saesCtrl.io.l0MaterializationValid := true.B
+  saesCtrl.io.l1MaterializationValid := true.B
 
   // ═══════════════════════════════════════════════
   // FSDR Controller + LSH Hash + Cache wiring
@@ -195,6 +209,22 @@ class ScarfTop extends Module {
   fsdrCache.io.hammingThresh := configRegs.io.config.fsdrHammingThresh
   fsdrCtrl.io.cacheHit       := fsdrCache.io.hit
   fsdrCtrl.io.cacheHitDepth  := fsdrCache.io.hitDepth
+
+  when(fsdrCtrl.io.start) {
+    fsdrLocalDepthSum := 0.U
+    fsdrLocalDepthCount := 0.U
+  }.elsewhen(fsdrCtrl.io.cacheInsertEn) {
+    fsdrLocalDepthSum := fsdrLocalDepthSum + fsdrCtrl.io.computedDepth
+    when(fsdrLocalDepthCount =/= 255.U) {
+      fsdrLocalDepthCount := fsdrLocalDepthCount + 1.U
+    }
+  }
+  fsdrCtrl.io.localDepthCount := fsdrLocalDepthCount
+  fsdrCtrl.io.localDepthMean := Mux(
+    fsdrLocalDepthCount === 0.U,
+    0.U,
+    (fsdrLocalDepthSum / fsdrLocalDepthCount)(ScarfConfig.DataWidth - 1, 0),
+  )
 
   fsdrCache.io.insertEn      := fsdrCtrl.io.cacheInsertEn
   fsdrCache.io.insertSig     := fsdrCtrl.io.cacheInsertSig

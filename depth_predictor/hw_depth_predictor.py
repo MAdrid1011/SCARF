@@ -16,6 +16,7 @@ NO PyTorch high-level operations - everything goes through hardware units.
 
 import logging
 import math
+from contextlib import contextmanager, nullcontext
 
 import torch
 import torch.nn as nn
@@ -34,13 +35,36 @@ from encoder import (
     CycleStats, ActivationType, NormType, EncoderConfig,
     SoftmaxUnit, SoftmaxConfig,
 )
-from .types import DepthPredictorConfig, DepthPredictorOutput, CycleBreakdown
+from encoder.mmcu_events import recording_stage, trace_torch_mmcu_modules
+from .types import (
+    CycleBreakdown,
+    DepthPredictorConfig,
+    DepthPredictorOutput,
+    align_view_major_features,
+)
 
 # ---- Hardware parallelism constants ----
 # Derived from encoder/types.py ConvConfig(pe_array_size=32) → 32×32 = 1024 MACs/cycle
 MAC_PAR = 1024       # MACs per cycle: 32×32 systolic array (ConvEngine / GEMMUnit)
 VEC_ALU = 64         # Vector ALU width: element-wise ops, norms, activations
 BILINEAR_PAR = 32    # BilinearUnit parallel channels (from BilinearConfig.parallel_channels)
+
+
+@contextmanager
+def capture_first_tensor_input(module: nn.Module):
+    """Capture executed tensor inputs and always remove the temporary hook."""
+    captured: List[torch.Tensor] = []
+
+    def capture(_module, inputs):
+        if not inputs or not isinstance(inputs[0], torch.Tensor):
+            raise RuntimeError("Gaussian head did not receive a tensor input")
+        captured.append(inputs[0].detach())
+
+    handle = module.register_forward_pre_hook(capture)
+    try:
+        yield captured
+    finally:
+        handle.remove()
 
 
 class HWUNetUnit:
@@ -367,6 +391,11 @@ class HWUNetUnit:
                     
                 else:
                     # Unknown module type - try to execute it directly
+                    if self.strict_mode:
+                        raise RuntimeError(
+                            "unsupported hardware layer in forward_with_weights: "
+                            f"name={name}, type={type(module).__name__}"
+                        )
                     import warnings
                     warnings.warn(f"[CRITICAL FALLBACK] forward_with_weights using ORIGINAL module: name={name}, type={type(module).__name__}")
                     try:
@@ -612,6 +641,10 @@ class HWUNetUnit:
         
         else:
             # Fallback: should not happen for known layer types
+            if self.strict_mode:
+                raise RuntimeError(
+                    f"unsupported hardware layer: {type(layer).__name__}"
+                )
             import warnings
             warnings.warn(f"[CRITICAL FALLBACK] _hw_layer using ORIGINAL module: {type(layer).__name__}")
             try:
@@ -655,7 +688,7 @@ class HWUNetUnit:
             if len(in_layers_list) > 1:
                 in_rest = nn.Sequential(*in_layers_list[:-1])
                 in_conv = in_layers_list[-1]
-                
+
                 h, cycles = self._hw_sequential(h, in_rest, device)
                 total_cycles += cycles
                 h, cycles = self._hw_layer(h, block.h_upd, device)
@@ -1452,6 +1485,7 @@ class HWDepthPredictor:
         self.config = config or DepthPredictorConfig()
         self.device = device
         self.model_type = model_type
+        self.strict_mode = False
         
         # Select cost volume mode based on model type
         # TranSplat uses transformer attention, MVSplat/DepthSplat use plane-sweep
@@ -1531,7 +1565,7 @@ class HWDepthPredictor:
         
         # Pooling unit for avg_pool2d / max_pool2d
         self.pooling = PoolingUnit()
-        
+
         # Padding unit for standalone padding operations
         self.pad_unit = PadUnit()
         
@@ -1540,6 +1574,9 @@ class HWDepthPredictor:
         
         self._initialized = False
         self._cycle_breakdown = CycleBreakdown()
+
+    def set_strict_mode(self, strict: bool) -> None:
+        self.strict_mode = bool(strict)
     
     # =========================================================================
     # Helper methods: route computation through hardware units
@@ -1838,6 +1875,22 @@ class HWDepthPredictor:
     def set_use_original(self, use_original: bool):
         """Set whether to use original model for computation (preserves accuracy)."""
         self._use_original_computation = use_original
+
+    def _reference_model_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Filter model-specific arguments for the pinned reference predictor."""
+        allowed = {
+            "cnn_features",
+            "extra_info",
+            "gaussians_per_pixel",
+            "deterministic",
+        }
+        if self.model_type == self.MODEL_TRANSPLAT:
+            allowed.update({"da_depth", "dino_feature"})
+        return {
+            key: value
+            for key, value in kwargs.items()
+            if key in allowed and value is not None
+        }
     
     def forward(
         self,
@@ -1909,19 +1962,68 @@ class HWDepthPredictor:
         """
         B, V, C, H, W = features.shape
         D = self.config.num_depth_candidates
+        captured_logits: List[torch.Tensor] = []
+        depth_head = getattr(self._original_depth_predictor, "depth_head_lowres", None)
+        hook = None
+        if isinstance(depth_head, nn.Module):
+            hook = depth_head.register_forward_hook(
+                lambda _module, _inputs, output: captured_logits.append(output.detach())
+            )
+        gaussian_head = getattr(
+            self._original_depth_predictor, "to_gaussians", None
+        )
+        capture_context = (
+            capture_first_tensor_input(gaussian_head)
+            if isinstance(gaussian_head, nn.Module)
+            else nullcontext([])
+        )
+        gaussian_modules = [
+            getattr(self._original_depth_predictor, name)
+            for name in (
+                "upsampler",
+                "proj_feature",
+                "refine_unet",
+                "to_gaussians",
+            )
+            if hasattr(self._original_depth_predictor, name)
+        ]
         
         # Run original model
-        with torch.no_grad():
-            # Build kwargs for original model
-            model_kwargs = {k: v for k, v in kwargs.items() 
-                          if k in ['da_depth', 'dino_feature', 'cnn_features', 'extra_info',
-                                  'gaussians_per_pixel', 'deterministic']}
-            model_kwargs.setdefault('gaussians_per_pixel', 1)
-            model_kwargs.setdefault('deterministic', True)
-            
-            output = self._original_depth_predictor(
-                features, intrinsics, extrinsics, near, far, **model_kwargs
-            )
+        try:
+            with (
+                capture_context as captured_saes_features,
+                torch.no_grad(),
+                trace_torch_mmcu_modules(
+                    self._original_depth_predictor,
+                    "s2",
+                    exclude_modules=gaussian_modules,
+                ),
+            ):
+                # Build kwargs for original model
+                model_kwargs = self._reference_model_kwargs(kwargs)
+                model_kwargs.setdefault('gaussians_per_pixel', 1)
+                model_kwargs.setdefault('deterministic', True)
+
+                if gaussian_modules:
+                    from .module_cycle_trace import run_callable_with_module_cycle_trace
+
+                    gaussian_trace = run_callable_with_module_cycle_trace(
+                        lambda: self._original_depth_predictor(
+                            features, intrinsics, extrinsics, near, far, **model_kwargs
+                        ),
+                        gaussian_modules,
+                        mmcu_stage_name="s3",
+                    )
+                    output = gaussian_trace.output
+                    gaussian_head_cycles = gaussian_trace.total_cycles
+                else:
+                    output = self._original_depth_predictor(
+                        features, intrinsics, extrinsics, near, far, **model_kwargs
+                    )
+                    gaussian_head_cycles = 0
+        finally:
+            if hook is not None:
+                hook.remove()
         
         # Parse output
         if isinstance(output, tuple):
@@ -1930,6 +2032,15 @@ class HWDepthPredictor:
             depths = output
             densities = None
             raw_gaussians = None
+        saes_features = None
+        if captured_saes_features:
+            if len(captured_saes_features) != 1:
+                raise RuntimeError(
+                    "Gaussian head input capture must execute exactly once"
+                )
+            saes_features = align_view_major_features(
+                captured_saes_features[0], batch_size=B, view_count=V
+            )
         
         # Estimate hardware cycles based on actual computation performed
         cost_volume_cycles = self._estimate_cost_volume_cycles(B, V, C, H, W, D)
@@ -1942,12 +2053,57 @@ class HWDepthPredictor:
             unet_refinement=unet_cycles,
             depth_head=depth_head_cycles,
             softmax_regression=regression_cycles,
+            gaussian_head=gaussian_head_cycles,
         )
         
+        depth_probs = None
+        depth_candidates_evidence = None
+        probability_source = None
+        if len(captured_logits) == 1:
+            logits = captured_logits[0]
+            if logits.dim() == 4 and logits.shape[0] == V * B:
+                D = logits.shape[1]
+                depth_probs = rearrange(
+                    torch.softmax(logits, dim=1),
+                    '(v b) d h w -> b v d h w',
+                    v=V,
+                    b=B,
+                )
+
+                def expand_bound(bound: torch.Tensor, label: str) -> torch.Tensor:
+                    bound = bound.to(device=logits.device, dtype=logits.dtype)
+                    if bound.dim() == 0:
+                        return bound.reshape(1, 1).expand(B, V)
+                    if bound.shape == (B, V):
+                        return bound
+                    if bound.dim() == 1 and bound.numel() == B:
+                        return bound[:, None].expand(B, V)
+                    if bound.dim() == 1 and B == 1 and bound.numel() == V:
+                        return bound[None, :]
+                    raise ValueError(f"{label} cannot be aligned to [B,V]")
+
+                near_bv = expand_bound(near, "near").clamp_min(1e-8)
+                far_bv = expand_bound(far, "far").clamp_min(1e-8)
+                interpolation = torch.linspace(
+                    0.0, 1.0, D, device=logits.device, dtype=logits.dtype
+                ).reshape(1, 1, D)
+                min_inverse_depth = (1.0 / far_bv).unsqueeze(-1)
+                max_inverse_depth = (1.0 / near_bv).unsqueeze(-1)
+                depth_candidates_evidence = (
+                    min_inverse_depth
+                    + interpolation * (max_inverse_depth - min_inverse_depth)
+                )[..., None, None]
+                probability_source = "pinned_original_depth_head_softmax"
+
         return DepthPredictorOutput(
             depths=depths,
             densities=densities,
             raw_gaussians=raw_gaussians,
+            saes_features=saes_features,
+            depth_probs=depth_probs,
+            depth_candidates=depth_candidates_evidence,
+            candidate_domain="inverse_depth" if depth_probs is not None else None,
+            probability_source=probability_source,
             total_cycles=self._cycle_breakdown.total,
             cycle_breakdown=self._cycle_breakdown,
         )
@@ -2844,10 +3000,16 @@ class HWDepthPredictor:
                 )
             except Exception as e:
                 logger.warning("_forward_stereo_batched_hw failed: %s", e, exc_info=True)
+                if self.strict_mode:
+                    raise RuntimeError(
+                        "strict MVSplat batched hardware path failed"
+                    ) from e
                 # Fall back to per-view processing
                 pass
         
         # Per-view processing (less accurate but more portable)
+        if self.strict_mode:
+            raise RuntimeError("strict hardware path forbids per-view stereo fallback")
         return self._forward_stereo_perview_hw(
             features, intrinsics, extrinsics, near, far,
             H_out, W_out, D, device, disp_candidates, depth_candidates, images,
@@ -4479,6 +4641,7 @@ class HWDepthPredictor:
         
         return pdf, coarse_disps, total_cycles
     
+    @recording_stage("s3")
     def _hw_gaussian_head(
         self,
         features_vb: torch.Tensor,  # [VB, C, H, W] at low res
@@ -4748,6 +4911,13 @@ class HWDepthPredictor:
         )
         total_cycles += mv_cycles
         # features_list_mv: list of [BV, C, H, W]
+        if num_scales > 1:
+            if dp is None or not hasattr(dp, 'mv_pyramid'):
+                raise RuntimeError("DepthSplat multi-scale model has no mv_pyramid")
+            features_list_mv, pyramid_cycles = self._hw_ds_feature_pyramid(
+                features_list_mv[0], dp.mv_pyramid
+            )
+            total_cycles += pyramid_cycles
         
         # ===== 4. DINOv2 ViT =====
         mono_intermediate_features, vit_cycles = self._hw_ds_dinov2(
@@ -4763,7 +4933,22 @@ class HWDepthPredictor:
             mono_features, c = self._hw_interpolate(mono_features, scale_factor=2)
             total_cycles += c
         
-        features_list_mono = [mono_features]
+        if num_scales > 1:
+            if dp is None or not hasattr(dp, 'mono_pyramid'):
+                raise RuntimeError("DepthSplat multi-scale model has no mono_pyramid")
+            features_list_mono, pyramid_cycles = self._hw_ds_feature_pyramid(
+                mono_features, dp.mono_pyramid
+            )
+            total_cycles += pyramid_cycles
+        else:
+            features_list_mono = [mono_features]
+
+        if len(features_list_mv) != num_scales or len(features_list_mono) != num_scales:
+            raise RuntimeError(
+                "DepthSplat feature pyramid scale mismatch: "
+                f"expected={num_scales}, mv={len(features_list_mv)}, "
+                f"mono={len(features_list_mono)}"
+            )
         
         # Close S1-shared feature extraction cycle tracking
         _fe_cycles = total_cycles - _fe_start
@@ -4878,11 +5063,19 @@ class HWDepthPredictor:
             
             # Use regressor with hardware units
             regressor = dp.regressor[scale_idx]
-            out, reg_cycles = self._hw_unet.forward_with_weights(concat, 128, {}, original_module=regressor)
+            regressor_res = dp.regressor_residual[scale_idx]
+            regressor_channels = self._depthsplat_regressor_output_channels(
+                dp, scale_idx
+            )
+            out, reg_cycles = self._hw_unet.forward_with_weights(
+                concat,
+                regressor_channels,
+                {},
+                original_module=regressor,
+            )
             total_cycles += reg_cycles
             
             # Residual path
-            regressor_res = dp.regressor_residual[scale_idx]
             w_res = regressor_res.weight.data
             b_res = regressor_res.bias.data if regressor_res.bias is not None else torch.zeros(w_res.shape[0], device=device)
             if w_res.shape[1] != concat.shape[1]:
@@ -5289,6 +5482,58 @@ class HWDepthPredictor:
         features_mv = rearrange(torch.stack(out_features, dim=1), "b v c h w -> (b v) c h w")
         
         return [features_mv], total_cycles
+
+    def _hw_ds_feature_pyramid(
+        self, x: torch.Tensor, pyramid: nn.Module
+    ) -> Tuple[list[torch.Tensor], int]:
+        """Run DepthSplat's ViT feature pyramid with hardware units."""
+        stages = getattr(pyramid, 'stages', None)
+        if stages is None:
+            raise ValueError("DepthSplat feature pyramid has no stages")
+
+        outputs = []
+        total_cycles = 0
+        for stage in stages:
+            out = x
+            for layer in stage:
+                if isinstance(layer, nn.ConvTranspose2d):
+                    out, cycles = self._hw_conv_transpose(out, layer)
+                elif isinstance(layer, nn.Conv2d):
+                    out, cycles = self._hw_conv(out, layer)
+                elif isinstance(layer, nn.GELU):
+                    out, cycles = self._hw_activation(out, 'gelu')
+                elif isinstance(layer, nn.MaxPool2d):
+                    out, stats = self.pooling.max_pool2d(
+                        out,
+                        layer.kernel_size,
+                        stride=layer.stride,
+                        padding=layer.padding,
+                    )
+                    cycles = stats.total_cycles
+                elif isinstance(layer, nn.Identity):
+                    cycles = 0
+                else:
+                    raise RuntimeError(
+                        "unsupported DepthSplat feature-pyramid layer: "
+                        f"{type(layer).__name__}"
+                    )
+                total_cycles += cycles
+            outputs.append(out)
+
+        return outputs, total_cycles
+
+    @staticmethod
+    def _depthsplat_regressor_output_channels(
+        depth_predictor: nn.Module, scale_idx: int
+    ) -> int:
+        """Return the checkpoint-defined U-Net width for one depth scale."""
+        residual = depth_predictor.regressor_residual[scale_idx]
+        channels = getattr(residual, 'out_channels', None)
+        if not isinstance(channels, int) or channels <= 0:
+            raise ValueError(
+                f"DepthSplat scale {scale_idx} has no positive regressor width"
+            )
+        return channels
     
     @staticmethod
     def _hw_ds_batch_features(features):
@@ -6577,6 +6822,8 @@ class HWDepthPredictor:
         
         # If no weights were applied, use simplified fallback
         if not applied_any:
+            if self.strict_mode:
+                raise RuntimeError("strict hardware U-Net has no applicable loaded weights")
             return self._simplified_unet_forward(x, out_channels, device)
         
         # Ensure output has correct number of channels
@@ -6633,6 +6880,7 @@ class HWDepthPredictor:
         
         return out
     
+    @recording_stage("s3")
     def _compute_raw_gaussians_with_original(
         self,
         features: torch.Tensor,  # [B, C, H, W]
@@ -6694,7 +6942,8 @@ class HWDepthPredictor:
                     else:
                         gaussian_in = gaussian_in[:, :expected_in_ch]
                 
-                raw_out = to_g(gaussian_in)
+                with trace_torch_mmcu_modules(to_g, "s3"):
+                    raw_out = to_g(gaussian_in)
             
             # Estimate cycles
             for layer in to_g:
@@ -6789,6 +7038,7 @@ class HWDepthPredictor:
             weight[i, i, 1, 1] = 0.9
         return weight
     
+    @recording_stage("s3")
     def _compute_raw_gaussians_hw(
         self,
         features: torch.Tensor,     # [B, C, H, W]
@@ -7028,6 +7278,3 @@ class HWDepthPredictor:
     @property
     def cycle_breakdown(self) -> CycleBreakdown:
         return self._cycle_breakdown
-
-
-
