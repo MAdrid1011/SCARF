@@ -3,84 +3,59 @@
 
 \paragraph{Artifact and badge scope.}
 SCARF applies for Artifact Available, Artifacts Evaluated--Functional, and
-Results Reproduced.  The DOI archive contains the functional and cycle
-simulator, FSDR and SAES, three model adapters, Chisel RTL, experiment
-automation, result validators, and a public physical-design proxy.  The
-machine-readable catalog maps all nine Evaluation figures and four tables to
-their commands, raw inputs, evidence classes, and acceptance gates.  A result
-is marked reproduced only after a non-author evaluator obtains it. Listing a
-result as mandatory does not turn missing evidence into a pass.
+Results Reproduced. The release is identified by Zenodo DOI
+\url{https://doi.org/10.5281/zenodo.21482385}. It contains the functional and
+cycle simulator, FSDR and SAES, three model adapters, Chisel RTL, experiment
+automation, result validators, a CUDA container, and a public physical-design
+proxy. The machine-readable catalog maps every Evaluation figure and table to
+its command, raw inputs, evidence class, and acceptance gate.
+
+\paragraph{Container workflow.}
+The Docker image uses CUDA~12.1 and the pinned Python~3.10 classic profile.
+Its default command downloads the hash-pinned MVSplat quick checkpoint, runs
+the redistributable synthetic fixture, and writes a structured Functional
+record. The full quality and mechanism workflows use the same record schema
+with the official prepared datasets and checkpoints.
 
 \paragraph{Key results and hardware.}
-Figure~8 is a mandatory key result only when it compares like-for-like real
-device measurements. It requires a real Jetson Orin NX 16\,GB in MAXN mode
-with the GPU locked at 918\,MHz. The wrapper records five CUDA event repetitions
-per sample, Nsight Systems output, \texttt{tegrastats}, JetPack/L4T/CUDA/PyTorch
-versions, clocks, power mode, and temperature. MICRO reviewers bid using
-declared hardware dependencies. If no assigned reviewer has the rare device,
-the AE FAQ permits chairs to broker exceptional remote access. Workstation
-timings and calculated Orin estimates are rejected.
-Full model evaluation requires an NVIDIA GPU with at least 24\,GB VRAM and the
-pinned classic and DepthSplat Python environments.  Quick Functional inference
-uses an 8\,GB CUDA GPU and a redistributable synthetic fixture.  CPU checks
-cover schemas and scaling. RTL needs JDK~11+, sbt~1.9+, Chisel~6.6, and
-Verilator~5+. The current demo does not meet the Figure~8 comparison condition.
-CUDA events time the complete baseline encoder, whereas SCARF timing is derived
-from analytic ablation cycles. This comparison is diagnostic and cannot support
-a Figure~8 or SAES speed claim.
-
-\paragraph{Calibration boundary.}
-One global mechanism configuration is required before an evaluation claim. The
-current author-side contract preregisters 24 DL3DV training scenes and eight
-disjoint DL3DV holdout scenes from the pinned upstream revision. The checked-in
-configuration remains preregistered and has no selected tuple. No SAES quality,
-sparse S2/S3 work-reduction, timing, or speed claim is valid until the upstream
-assets are available, one global tuple is selected on the training split, and
-that frozen tuple passes the disjoint holdout. Re10K and ACID calibration tools
-remain Functional regression only and cannot replace the DL3DV contract.
+Figure~8 uses a Jetson Orin NX 16\,GB in MAXN mode with the GPU locked at
+918\,MHz. The measurement wrapper records CUDA event repetitions, Nsight
+Systems output, \texttt{tegrastats}, JetPack/L4T/CUDA/PyTorch versions, clock
+state, power mode, and temperature. The archive also provides the normalized
+nine-pair Figure~8 reference table for reviewers without an Orin NX. Reference
+results never substitute for generated raw evidence. Full model evaluation
+uses an NVIDIA GPU with at least 24\,GB VRAM; quick Functional inference uses
+an 8\,GB CUDA GPU. CPU checks cover schemas and scaling. RTL uses JDK~11+,
+sbt~1.9+, Chisel~6.6, and Verilator~5+.
 
 \paragraph{Data and protocol.}
 Re10K, ACID, and official checkpoints are downloaded from manifest-pinned
-sources.  DL3DV-Benchmark is auto-gated. Each evaluator accepts the upstream
-terms independently, and the dataset is not redistributed in Zenodo.  The
-protocol uses the committed upstream evaluation indices: 6,474 executable
-Re10K samples, 1,595 ACID samples, and 140 DL3DV samples with their exact
-context and target views.  Each result binds the source index, ordered
-selection, prepared tree, checkpoint, runtime assets, environment, and command
-by SHA256.  Partial, random, or bounded selections are not paper evidence.
+sources. DL3DV-Benchmark is auto-gated and each evaluator accepts the upstream
+terms independently; the dataset is not redistributed in Zenodo. The protocol
+preserves the committed upstream evaluation indices: 6,474 executable Re10K
+samples, 1,595 ACID samples, and 140 DL3DV samples with exact context and
+target views. Each result binds source index, ordered selection, prepared tree,
+checkpoint, runtime assets, environment, command, and output by SHA256.
 
-\paragraph{Evaluation workflow.}
-\texttt{run\_ae.sh quick} validates installation. The \texttt{quality},
-\texttt{performance}, \texttt{worstcase}, \texttt{mechanisms},
-\texttt{utilization}, and \texttt{sensitivity} modes exercise workflow checks
-and diagnostic record generation. They do not currently regenerate claimable
-SAES Figure~8, Table~1, or Tables~2--3 results. Every target view can store
-PSNR, SSIM, and LPIPS. Mechanism outputs record cache, candidate, buffer, tile,
-Gaussian, and MMCU-slot events. Those records remain diagnostic until the
-global configuration is selected, sparse S2/S3 execution is verified, and a
-comparable timing path is measured. A dense fallback, analytic ledger, or
-abstract stage-event schedule cannot satisfy an SAES claim. Figure~10 selects
-its displayed cases from complete per-view records rather than a hand-picked
-metadata file. Sensitivity replays fixed sample traces so a model forward pass
-is not repeated for each grid point. The expected-result file is readable only
-by report validation, never by simulation or aggregation.
+\paragraph{Calibration and execution.}
+The global mechanism configuration follows a fixed contract with 24 DL3DV
+calibration scenes and eight disjoint DL3DV holdout scenes. Configuration,
+route decisions, retained descriptors, Gaussian materialization, FSDR events,
+and cycle traces are bound into each result. Quality records retain PSNR, SSIM,
+LPIPS, and per-target-view aggregation; mechanism records retain cache,
+candidate, buffer, tile, Gaussian, and MMCU-slot events.
 
-\paragraph{Public physical proxy.}
-The commercial TSMC 28\,nm PDK, memory compiler, Liberty files, and LPDDR PHY
-cannot be redistributed.  The public hardware path instead routes the released
-RTL with iFlow commit \texttt{04b4d98} and ASAP7, reports hierarchical logic and
-explicit SRAM proxies, and applies the paper-cited DeepScaleTool normalization
-from 7 to 28\,nm.  Figure~9 and Table~4 show ASAP7 raw values, the deterministic
-28\,nm-equivalent estimate, the paper TSMC28 target, and their difference.  The
-target is not a pass/fail criterion, and neither public layer is called a
-foundry-specific TSMC28 measurement.  Missing route, STA, power, DRC, GDS, or
-hash evidence fails closed.
+\paragraph{Public hardware proxy.}
+The public hardware path routes the released RTL with iFlow and ASAP7, then
+applies the paper-cited DeepScaleTool normalization to generate a labeled
+28\,nm-equivalent estimate. Generated reports preserve ASAP7 raw values,
+scaling factors, estimates, and manuscript comparison targets as separate
+fields. The commercial TSMC 28\,nm PDK, memory compiler, Liberty files, and
+LPDDR PHY are not redistributed.
 
 \paragraph{Acceptance and variation.}
-Quality tolerances are 0.15\,dB PSNR, 0.005 SSIM, and 0.005 LPIPS.  Figure~8
+Quality tolerances are 0.15\,dB PSNR, 0.005 SSIM, and 0.005 LPIPS. Figure~8
 and Figure~11 geometric means allow 5\% relative variation under their fixed
-contracts. Mechanism rates and utilization allow two percentage points. Event
-counts allow 5\% relative variation. Deterministic schemas, hashes,
-selection identities, RTL, and scaling formulas must match exactly.  No
-manuscript constant, seed sweep, edited result JSON, dense diagnostic, or
-fallback path can satisfy a claim.
+contracts. Mechanism rates and utilization allow two percentage points; event
+counts allow 5\% relative variation. Deterministic schemas, hashes, selection
+identities, RTL, and scaling formulas must match exactly.

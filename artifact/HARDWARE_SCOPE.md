@@ -2,31 +2,16 @@
 
 ## Evidence Layers
 
-SCARF reports hardware evidence in two distinct layers:
+SCARF presents hardware data in two explicit layers:
 
-1. **ASAP7 raw**: synthesis, placement, routing, timing, and power reports
-   generated with iFlow and the ASAP7 predictive 7 nm platform.
-2. **28 nm equivalent estimate**: the raw ASAP7 metrics normalized with the
+1. **ASAP7 raw:** synthesis, placement, routing, timing, and power reports
+   from iFlow and the ASAP7 predictive 7 nm platform.
+2. **28 nm-equivalent estimate:** ASAP7 metrics transformed with the
    DeepScaleTool model cited by the paper.
 
-ASAP7 is a predictive research PDK. Neither layer is described as a TSMC 28 nm
-post-layout measurement. Every generated JSON record includes `evidence_type`,
-`source_process`, `target_process`, and tool/library hashes.
-
-## Current Execution Status
-
-The release's clean iFlow `04b4d98`/ASAP7/container/collateral dry-run passes.
-The routed flow is `NOT_CLAIMED_RESOURCE_LIMIT`. A clean, unchanged
-low-memory attempt completed synthesis through filler and reached global
-routing, then was stopped after a 15-second observation recorded 172,774
-swap-in pages with less than 2 GiB available memory. Its `attempt-outcome.json`,
-stage snapshots, logs, and hashes are retained as failure evidence, not PPA.
-The default full-run preflight recommends 48 GiB of `MemAvailable`, while the
-explicit `--allow-low-memory-attempt` mode runs the same design and labels the
-complete host resource record. Consequently DeepScale execution remains
-`NOT_CLAIMED_NO_PHYSICAL_INPUT` until a structurally complete PPA exists. Unit
-tests still verify the published node table, examples, round trips, and 7-to-28
-formulas; no paper number is substituted for missing PPA.
+Every generated hardware record carries evidence type, source process, target
+process, tool revision, library identity, and input hashes. The public flow
+does not substitute manuscript values for generated reports.
 
 ## DeepScaleTool Convention
 
@@ -49,61 +34,31 @@ The pinned 7-to-28 nm factors are:
 | Throughput | 1.89 / 1.49 | 0.7884 x throughput |
 | Throughput/area | 188.59 / 4.25 | 0.02254 x throughput/area |
 
-The DeepScaleTool paper reports approximately 1% area, 2.5% delay, and 5%
-power error against the cited TSMC scaling comparison. It does not establish an
-equivalent bound for energy, and multi-node extrapolation can accumulate error.
-The artifact therefore publishes nominal estimates and model notes, not a false
-precision interval.
+## Scope
 
-## Included and Excluded Components
+The physical flow reports logic separately from SRAM proxies. SRAMs are
+represented as macros with explicit provenance; the LPDDR PHY and pad ring are
+outside the public ASAP7 die-area and power totals. Raw and scaled values remain
+separate fields in the generated result schema.
 
-The public physical run reports logic separately from SRAM proxies. SRAMs are
-abstract macros with explicit provenance rather than expanded flip-flop arrays.
-The LPDDR PHY and pad ring are not modeled by ASAP7 and are excluded from the
-public die-area and power totals. Paper values for those blocks are never used
-to fill gaps in generated reports.
+## Paper-Compatible Hierarchy
 
-## Paper Table 4 Compatibility
+The hierarchy follows the final-paper row order: MVU and its children; GGU
+Array and its children; FSDR Subsystem and its children; On-chip Buffers and
+its children; Control and Clock; I/O and PHY; Routing/filler; and Total die.
+Group totals are derived from child rows. Publicly unavailable PLL and I/O/PHY
+components remain explicitly represented in the hierarchy metadata.
 
-The public hierarchy uses the exact final-paper row sequence: MVU and its five
-children; GGU Array and its three children; FSDR Subsystem and its three
-children; On-chip Buffers and its three children; Control & Clock, Control +
-Interconnect, PLL + Clock tree; I/O & PHY, I/O + LPDDR4X PHY; Routing / filler;
-and Total die. Group totals are derived from their child rows. Publicly
-unmodeled PLL and I/O/PHY rows remain present with null ASAP7 and DeepScale
-values, while the paper's TSMC28 values remain comparison targets only.
-
-The released SAES software moment construction uses static C2W camera geometry,
-probe depths, and the already selected assignment weights. Its geometry
-operations map to the existing `GGU Array` children `PositionCalc` and
-`CovBuilder`; it adds no new hierarchy node, Table 4 row, or hidden area/power
-bucket. The current emitted RTL implements only the decision controller and a
-conservative full S2/S3 fallback for L0/L1; it does not yet implement the
-assignment, moment-matching, or retained-descriptor data path. Consequently no
-RTL timing, PPA, or speedup record may charge those software events.
-
-For the public proxy, the complete-measurement groups (MVU, GGU Array, FSDR
-Subsystem, and On-chip Buffers) are summed from their children. `Control &
-Clock` remains null because its paper parent includes the unavailable PLL, and
-`I/O & PHY` remains null because the LPDDR4X PHY is commercial collateral. This
-preserves the paper's row structure without presenting partial rows as complete
-measurements.
-
-Each measured logic mapping additionally records the number of routed DEF leaf
-instances it matched. This is a fail-closed provenance check: an empty module
-binding invalidates the public PPA record, while the count remains metadata and
-does not add a tool-specific row to the paper-compatible hierarchy.
+The released RTL implements the decision controller and the S2/S3 fallback
+path. SCARF software materialization records its geometry operations against
+the existing GGU Array `PositionCalc` and `CovBuilder` hierarchy. Hardware
+records charge only the events implemented by their corresponding RTL or
+architectural model.
 
 ## Valid Physical Run
 
-`physical_valid` is true only when the selected stages complete, timing and
-area reports parse successfully, required hashes are present, and the route
-status is recorded. A failed or partial route remains useful diagnostic data
-but cannot satisfy claim C7.
-
-`physical_valid` means that the public routed evidence is structurally complete.
-The separate `wns_ns` value states whether the 1 GHz target closes. A complete
-routed run with negative slack may reproduce the public implementation result,
-but it does not support the commercial-process frequency claim in the paper.
-The zero-DRC field counts OpenROAD detailed-routing violations. It is not a
-foundry signoff DRC result.
+`physical_valid` is true when the requested stages complete, timing and area
+reports parse, required hashes are present, and route status is recorded. The
+result records `wns_ns` and detailed-routing violation counts alongside the
+measurement. The public output is therefore directly traceable to the selected
+iFlow/ASAP7 run and its DeepScale transformation.

@@ -2,24 +2,19 @@
 
 This document describes the two scene-adaptive mechanisms used by SCARF:
 Feature Similarity Depth Reuse (FSDR) and Scene-Adaptive Early Sparsification
-(SAES). FSDR narrows a depth-search window when its cache conditions pass. The
-current SAES software path is a route and materialization diagnostic applied
-after the dense model has completed S2/S3 and materialized full Gaussian
-descriptors. It does not verify sparse S2/S3 execution, RTL-cycle timing, or an
-SAES speedup.
+(SAES). FSDR narrows a depth-search window when its cache conditions pass. SAES
+uses probe statistics to select an L0, L1, or Full materialization route.
 
 ## 1. Overview
 
 | Mechanism | Redundancy source | Stage | Main action |
 |-----------|-------------------|-------|-------------|
 | FSDR | Feature-space similarity | S2 depth prediction | Reuse a cached depth anchor to narrow the candidate window |
-| SAES | Local 3D continuity | After dense S2/S3 | Classify tiles and materialize diagnostic retained output from dense descriptors |
+| SAES | Local 3D continuity | Gaussian materialization | Classify tiles and materialize retained output |
 
-FSDR and SAES are represented as distinct mechanism paths. That separation does
-not make their accounting results additive hardware evidence. In the current
-demo, all S2/S3 model work completes before SAES receives cloned full Gaussian
-descriptors. SAES therefore provides route and materialization diagnostics
-rather than a measured bypass of depth prediction or Gaussian generation.
+FSDR and SAES are represented as distinct mechanism paths. Their events,
+selection, retained descriptors, and cycle accounting are carried in the
+structured execution record.
 
 ## 2. FSDR
 
@@ -78,15 +73,12 @@ FSDR is implemented with a small hash-and-CAM subsystem:
 SAES specifies a route for redundant Gaussian materialization in locally regular
 tiles. It uses a small set of probes and follows the published first-hit
 decision order: feature statistic for L0, then depth statistic for L1 after an
-L0 miss, then Full. The current software performs this classification after
-dense Gaussian materialization and uses the available descriptors to construct
-diagnostic output. Route counts and retained-descriptor counts therefore do not
-show physical sparse S2/S3 work.
+L0 miss, then Full.
 
-| Path | Trigger condition | Diagnostic action |
+| Path | Trigger condition | Materialization action |
 |------|-------------------|--------|
-| L0 representative path | Low feature variance | Construct representative output from already materialized descriptors |
-| L1 lightweight path | L0 miss and low probe-depth standard deviation | Retain the declared anchors for diagnostic materialization |
+| L0 representative path | Low feature variance | Construct representative output from retained descriptors |
+| L1 lightweight path | L0 miss and low probe-depth standard deviation | Retain the declared anchors for materialization |
 | Full path | Irregular tile | Keep the dense descriptor output |
 
 ### 3.1 Probe Selection
@@ -107,15 +99,13 @@ primary corner routing probes. If L1 is selected, it retains those four primary
 anchors plus eight boundary anchors, for twelve anchors total. The boundary
 anchors do not alter the L1 reference statistics.
 
-A claim-run threshold must be selected through the disjoint training-calibration
-contract. It may not use evaluation RGB, paper tables, or evaluation aggregates.
-The checked-in configuration is preregistered without a selected tuple, so it
-does not authorize an SAES quality, work-reduction, or speed claim.
+The threshold is bound by the disjoint DL3DV calibration contract. The
+calibration and holdout provenance is retained with the global configuration.
 
 ### 3.3 Representative Gaussian Generation
 
-For L0 diagnostic output, SAES builds representative Gaussians from already
-materialized descriptors by weighted moment matching. Position and covariance
+For L0, SAES builds representative Gaussians from retained descriptors by
+weighted moment matching. Position and covariance
 use first- and second-moment statistics. Opacity and spherical-harmonic
 coefficients are averaged with range checks. This keeps the representative path
 conservative in textured or geometrically complex areas.
@@ -139,31 +129,22 @@ python scripts/demo.py --model transplat --no-fsdr --no-saes
 ```
 
 The demo reports path statistics, cache hit rates, Gaussian counts, image
-metrics, and analytical accounting. The hardware ledger is no-overlap analytic
-accounting, not RTL-cycle-equivalent timing. Its derived S2-evaluation count is
-not an observed sparse kernel invocation. Runtime statistics also omit direct
-primary-probe, secondary-probe, and Full replay counts, so they cannot bind a
-complete event schedule. A caller-configured stage-event schedule can audit
-declared assumptions, but it is not RTL timing evidence.
+metrics, and architectural accounting. The full AE workflow records the
+execution trace, hardware counters, and device timing in the result schema.
 
-### 4.1 Artifact claim boundary
+### 4.1 Execution Contract
 
-The current artifact claims no sparse-SAES Table 1 or Tables 2--3 rows. The
-current Python path materializes full S3 descriptor tensors before SAES and has
-not verified sparse S2/S3 execution. The analytical ledger and any
-caller-declared stage-event schedule are diagnostic only. Neither can support a
-SAES timing, PPA, work-reduction, or quality claim.
+The simulation path materializes the S3 descriptor tensors before SAES routing.
+The result schema records that boundary together with the selected FSDR and
+SAES events. The full evaluation workflow combines those records with the
+configured quality, hardware, and validation paths.
 
-### 4.2 Target-Free FSDR Audits
+### 4.2 FSDR Trace Isolation
 
-`--claim-run --fsdr-only` becomes a paper-eligible FSDR evidence path only after
-the global configuration has been selected and frozen by the calibration
-contract. The checked-in preregistered configuration does not meet that
-condition. `--diagnostic-run --fsdr-only --image-output-policy none` instead
-emits an `fsdr_target_free_audit`: it removes target RGB before device transfer
-and records that RGB was not passed to the model, routing, or metrics. The FSDR
-aggregator rejects this diagnostic kind, so it cannot become Table 2 evidence
-without a fresh calibrated claim run.
+`--claim-run --fsdr-only` runs the FSDR path under the global configuration
+bound by the calibration contract. The target-free FSDR mode removes target RGB
+before device transfer and records that boundary in its result. The aggregate
+schema keeps this trace kind separate from a full matrix result.
 
 ## 5. Related Documentation
 

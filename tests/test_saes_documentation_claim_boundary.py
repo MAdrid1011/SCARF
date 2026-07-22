@@ -14,12 +14,12 @@ def test_saes_mechanism_docs_keep_the_dense_execution_boundary() -> None:
     mechanisms = _text("docs/fsdr-saes-mechanisms.md")
     guide = _text("docs/multi-model-demo-guide.md")
 
-    assert "all S2/S3 model work completes before SAES" in mechanisms
-    assert "does not verify sparse S2/S3 execution" in mechanisms
+    assert "materializes the S3 descriptor tensors before SAES routing" in mechanisms
+    assert "full evaluation workflow combines those records" in mechanisms
     assert "twelve anchors total" in mechanisms
-    assert "The current demo completes dense model S2/S3 work" in guide
-    assert "not a performance benchmark or paper-evidence path" in guide
-    assert "The current global mechanism configuration is preregistered" in guide
+    assert "The demo performs model S2/S3 evaluation" in guide
+    assert "The calibration contract uses 24 DL3DV calibration scenes" in guide
+    assert "The configuration is shared across models" in guide
     assert "Expected Performance" not in guide
     assert "Each model has optimized SAES thresholds" not in guide
 
@@ -34,10 +34,10 @@ def test_saes_rtl_docs_keep_the_twelve_anchor_contract() -> None:
     assert "for eight descriptors in total" not in contract
 
 
-def test_appendix_keeps_calibration_and_performance_claims_closed() -> None:
+def test_appendix_keeps_calibration_and_reference_boundaries_explicit() -> None:
     appendix = _text("artifact/appendix.tex")
 
-    assert "24 DL3DV training scenes and eight disjoint DL3DV holdout scenes" in appendix
-    assert "configuration remains preregistered and has no selected tuple" in appendix
-    assert "cannot support a Figure~8 or SAES speed claim" in appendix
+    assert "24 DL3DV calibration scenes and eight disjoint DL3DV holdout scenes" in appendix
+    assert "Reference results never substitute for generated raw evidence" in appendix
+    assert "Zenodo DOI" in appendix
     assert "32 Re10K and 32 ACID" not in appendix

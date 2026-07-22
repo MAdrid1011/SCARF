@@ -1,13 +1,17 @@
-# Archived Reference Evidence
+# Reference Results
 
-The final release stores compact, public evidence from the clean-room run in
-this directory. Run `scripts/stage_reference_results.py` only after the full AE
-validator reports `PASS` with `--require-key-results`. Staging also verifies
-that each execution result matches the current source tree, submodule revisions,
-mechanism configuration, and calibration provenance; stale Functional evidence
-is intentionally rejected rather than rewritten.
+`orin_nx_reference.csv` is the normalized nine-pair Figure 8 reference table
+from the submission. It retains the source identifier and SHA256 so an
+evaluator without a Jetson Orin NX can compare a locally generated report with
+the archived reference values.
 
-The staging command copies structured results, Orin measurement records and raw
-logs, RTL and DRAM evidence, public physical reports, scaling output, and report
-figures. Full datasets and large routed databases remain external. Their hashes
-and regeneration commands stay in the structured records.
+The columns separate the original Orin NX baseline, SCARF Dataflow on Orin NX,
+and the SCARF ASIC speedup. The table is a comparison reference, not a device
+measurement record. An evaluator with an Orin NX should run
+`bash scripts/run_ae.sh performance --device orin`; that workflow emits the
+CUDA-event, Nsight, thermal, and device records used by the validator.
+
+Hash-verified execution evidence is staged separately by
+`scripts/stage_reference_results.py` after the full validator passes. Full
+datasets and large routed databases remain external; their identities and
+regeneration commands are carried by the structured result records.

@@ -35,6 +35,7 @@ def test_source_release_excludes_internal_plans_and_failure_logs():
 
     assert not include_in_source_release(Path("PLAN.md"))
     assert not include_in_source_release(Path("CHECKLIST.md"))
+    assert not include_in_source_release(Path("SUMMARY.md"))
     assert not include_in_source_release(Path("outputs/ae_failures/saes/results.json"))
     assert include_in_source_release(Path("artifact/CLAIMS.md"))
 
@@ -44,6 +45,12 @@ def test_source_release_allowlist_excludes_unreviewed_artifact_content():
 
     assert include_in_source_release(Path("scripts/run_ae.py"))
     assert include_in_source_release(Path("artifact/mechanism_config.json"))
+    assert include_in_source_release(Path("artifact/release.json"))
+    assert include_in_source_release(
+        Path("artifact/reference_results/orin_nx_reference.csv")
+    )
+    assert include_in_source_release(Path("Dockerfile"))
+    assert include_in_source_release(Path("docker/run-functional.sh"))
     assert not include_in_source_release(
         Path("artifact/reference_results/evidence/raw.json")
     )
@@ -52,18 +59,24 @@ def test_source_release_allowlist_excludes_unreviewed_artifact_content():
     assert not include_in_source_release(Path("status.md"))
 
 
-def test_source_release_excludes_internal_diagnostics_and_wip_candidates():
+def test_source_release_excludes_author_diagnostics():
     from scripts.build_archive import include_in_source_release
 
     internal_paths = {
         "artifact/CHECKLIST.md",
         "artifact/PLAN.md",
         "docs/saes-execution-dependency-audit.md",
+        "docs/saes-rtl-contract.md",
+        "docs/three-badge-readiness.md",
         "scripts/saes_dependency_audit.py",
+        "scripts/saes_depthsplat_l0_l1_execution_audit.py",
+        "scripts/saes_paper_l0_l1_compact_packet_pilot.py",
+        "scripts/saes_sparse_packet_quality_pilot.py",
         "scripts/saes_same_budget_dense_oracle.py",
         "scripts/saes_selected_output_quality_gate.py",
         "data/prepare_dl3dv_target_free_audit_inputs.py",
         "saes/frozen_audit_preflight.py",
+        "saes/projected_domain_coverage_audit.py",
         "tests/test_saes_same_budget_dense_oracle.py",
         "data/acid_joint_training_contract.py",
         "data/plan_acid_joint_calibration.py",

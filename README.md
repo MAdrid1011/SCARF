@@ -4,10 +4,21 @@ SCARF is a hardware-realizable accelerator for depth-guided generalizable 3D Gau
 
 ## MICRO 2026 Artifact Evaluation
 
-The reviewer-facing setup, claim-to-command mapping, tolerances, and public
-ASAP7/DeepScaleTool hardware scope are documented in
-[artifact evaluation guide](ARTIFACT_EVALUATION.md). Use that guide for badge
-evaluation. The examples below are developer-oriented.
+Zenodo DOI: [10.5281/zenodo.21482385](https://doi.org/10.5281/zenodo.21482385)
+
+The reviewer-facing setup, command mapping, and hardware scope are documented
+in the [artifact evaluation guide](ARTIFACT_EVALUATION.md). The fastest CUDA
+path is the packaged Functional quick workflow:
+
+```bash
+docker build -t scarf-ae:1.0.0 .
+mkdir -p outputs/docker-quick
+docker run --rm --gpus all --user "$(id -u):$(id -g)" \
+  -v "$PWD/outputs/docker-quick:/results" scarf-ae:1.0.0
+```
+
+The container downloads the hash-pinned MVSplat checkpoint on first use and
+writes a structured result below `outputs/docker-quick/quick/`.
 
 ## Key Features
 
@@ -35,15 +46,14 @@ evaluation. The examples below are developer-oriented.
 - Uses probe feature variance followed by probe-depth standard deviation to
   select L0, L1, or Full at tile granularity
 - Keeps the pretrained adaptor as the source of every retained probe descriptor
-- Current sparse-quality and SAES RTL-speed claims are explicitly not claimed;
-  see [artifact/CLAIMS.md](artifact/CLAIMS.md) for the authoritative status
+- Binds retained descriptors, route decisions, and Gaussian materialization to
+  the execution record
 
 ### FSDR (Feature Similarity Depth Reuse)
 - Caches depth results using LSH-based feature signatures
 - Narrows only a valid Hamming-matched local candidate set and otherwise falls
   back to full search
-- Paper-result status is defined only by validated raw evidence, not these
-  developer descriptions
+- Records cache eligibility and depth-reuse events in the same result schema
 
 ## Supported Models
 

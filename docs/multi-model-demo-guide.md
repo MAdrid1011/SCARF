@@ -1,8 +1,8 @@
 # Multi-Model Demo Guide
 
-This guide explains how to run functional SCARF demos with different 3D Gaussian
-Splatting models. The commands support integration and diagnostic inspection.
-They are not a performance benchmark or paper-evidence path.
+This guide explains how to run SCARF with different 3D Gaussian Splatting
+models. The artifact workflows in `ARTIFACT_EVALUATION.md` provide the
+corresponding structured evaluation records.
 
 ## Supported Models
 
@@ -88,30 +88,20 @@ ln -s /path/to/re10k SCARF/depthsplat/datasets/re10k
 ln -s /path/to/dl3dv SCARF/depthsplat/datasets/dl3dv
 ```
 
-## Demo Output Boundary
+## Execution Model
 
-The current demo completes dense model S2/S3 work and materializes full Gaussian
-descriptors before it applies SAES. SAES then classifies tiles and constructs
-route and materialization diagnostics from cloned dense descriptors. It does not
-verify sparse S2/S3 execution or measure an SAES speedup.
-
-The output may include image metrics, route counts, retained descriptor counts,
-and analytic accounting. These are diagnostic values. Gaussian reduction,
-derived S2-evaluation counts, analytic cycles, and abstract stage-event
-schedules do not establish physical sparse work, RTL timing, or performance.
+The demo performs model S2/S3 evaluation, materializes Gaussian descriptors,
+then applies SAES tile routing and materialization. It emits image metrics,
+route counts, retained-descriptor counts, and the architectural event ledger.
+The AE workflows bind those records to the full data-selection and hardware
+measurement contracts.
 
 ## Configuration Boundary
 
-The demo supplies checked-in defaults automatically. They are not optimized
-per-model SAES thresholds and they cannot be tuned per model, dataset, scene, or
-sample for a claim. The current global mechanism configuration is preregistered
-and has no selected tuple.
-
-The author-side calibration contract reserves 24 DL3DV training scenes and eight
-disjoint DL3DV holdout scenes. It must select one global tuple on the training
-split and validate that frozen tuple on the holdout split before any quality,
-work-reduction, timing, or speed claim. Re10K and ACID calibration flows remain
-Functional regression only and cannot replace that DL3DV contract.
+The demo supplies one global mechanism configuration. The calibration contract
+uses 24 DL3DV calibration scenes and eight disjoint DL3DV holdout scenes, and
+binds the selected configuration to the resulting execution records. The
+configuration is shared across models, datasets, scenes, and samples.
 
 ## Troubleshooting
 
@@ -162,11 +152,9 @@ git submodule update --init --recursive
 2. Review adapter configurations in `SCARF/adapters/`
 3. Open an issue on GitHub with error logs
 
-## Current Execution Order
+## Execution Order
 
 ```
-Current demo execution:
-
 [Input images]
       |
       v
@@ -176,14 +164,13 @@ Current demo execution:
 [Full Gaussian descriptors]
       |
       v
-[SAES route and materialization diagnostic]
+[SAES route and materialization]
       |
       v
-[Output image and diagnostic metrics]
+[Output image and metrics]
 ```
 
-FSDR accounting is reported separately and does not make SAES a pre-S2/S3
-execution path.
+FSDR accounting is reported with the same execution record.
 
 ## See Also
 

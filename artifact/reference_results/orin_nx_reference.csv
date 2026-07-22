@@ -1,0 +1,10 @@
+reference_kind,source_id,source_sha256,pair,dataset,paper_model,orin_nx_normalized,scarf_dataflow_on_orin_nx_normalized,scarf_asic_speedup
+paper_reference,figure8_speedup,ef3ff17d4ac8cbc9d53b25a7574b7b375e58c67dcab7d4773a75d0cebb02988e,transplat/re10k,Re10K,TranSplat,1.00,1.23,3.08
+paper_reference,figure8_speedup,ef3ff17d4ac8cbc9d53b25a7574b7b375e58c67dcab7d4773a75d0cebb02988e,mvsplat/re10k,Re10K,MVSplat,1.00,1.29,2.70
+paper_reference,figure8_speedup,ef3ff17d4ac8cbc9d53b25a7574b7b375e58c67dcab7d4773a75d0cebb02988e,depthsplat/re10k,Re10K,DepthSplat,1.00,1.45,3.09
+paper_reference,figure8_speedup,ef3ff17d4ac8cbc9d53b25a7574b7b375e58c67dcab7d4773a75d0cebb02988e,transplat/acid,ACID,TranSplat,1.00,1.44,3.25
+paper_reference,figure8_speedup,ef3ff17d4ac8cbc9d53b25a7574b7b375e58c67dcab7d4773a75d0cebb02988e,mvsplat/acid,ACID,MVSplat,1.00,1.33,2.86
+paper_reference,figure8_speedup,ef3ff17d4ac8cbc9d53b25a7574b7b375e58c67dcab7d4773a75d0cebb02988e,depthsplat/acid,ACID,DepthSplat,1.00,1.50,3.22
+paper_reference,figure8_speedup,ef3ff17d4ac8cbc9d53b25a7574b7b375e58c67dcab7d4773a75d0cebb02988e,transplat/dl3dv,DL3DV,TranSplat,1.00,1.11,2.85
+paper_reference,figure8_speedup,ef3ff17d4ac8cbc9d53b25a7574b7b375e58c67dcab7d4773a75d0cebb02988e,mvsplat/dl3dv,DL3DV,MVSplat,1.00,1.24,2.52
+paper_reference,figure8_speedup,ef3ff17d4ac8cbc9d53b25a7574b7b375e58c67dcab7d4773a75d0cebb02988e,depthsplat/dl3dv,DL3DV,DepthSplat,1.00,1.41,2.96
