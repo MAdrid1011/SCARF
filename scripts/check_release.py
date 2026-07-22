@@ -687,8 +687,19 @@ def check_doi() -> tuple[str | None, list[str]]:
 
 
 def build_manifest(
-    require_doi: bool = False, *, reference_results: Path | None = None
+    require_doi: bool = False,
+    *,
+    reference_results: Path | None = None,
+    require_reference_evidence: bool = True,
 ) -> dict[str, Any]:
+    """Validate release inputs for either a source-only or full bundle.
+
+    A source-only archive is enough to exercise Artifact Available and must
+    not imply that the independent-result evidence bundle already exists.  The
+    default remains the full release contract, including a passing staged
+    evidence set validated with ``--require-key-results``.
+    """
+
     files = archive_files()
     submodules, failures = submodule_record()
     failures.extend(check_local_paths(files))
@@ -700,7 +711,10 @@ def build_manifest(
     failures.extend(check_orin_contract())
     failures.extend(check_claim_status())
     failures.extend(check_evaluation_protocol())
-    failures.extend(check_reference_results(ROOT, reference_results=reference_results))
+    if require_reference_evidence:
+        failures.extend(
+            check_reference_results(ROOT, reference_results=reference_results)
+        )
     doi = None
     if require_doi:
         doi, doi_failures = check_doi()
@@ -710,6 +724,7 @@ def build_manifest(
         "git_commit": git("rev-parse", "HEAD"),
         "submodules": submodules,
         "zenodo_doi": doi,
+        "reference_evidence_required": bool(require_reference_evidence),
         "files": {
             str(path.relative_to(ROOT)): sha256_file(path)
             for path in files

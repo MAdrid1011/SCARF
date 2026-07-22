@@ -143,6 +143,48 @@ def test_single_source_archive_identifies_itself_as_a_release_source(
     assert result["bundle_kind"] == "source"
 
 
+def test_source_only_archive_excludes_unavailable_results_evidence(
+    tmp_path, monkeypatch
+):
+    import scripts.build_archive as archive
+    import scripts.check_release as release
+
+    source = tmp_path / "README.md"
+    source.write_text("portable\n", encoding="utf-8")
+    monkeypatch.setattr(archive, "ROOT", tmp_path)
+    monkeypatch.setattr(archive, "git", lambda *_args: "")
+    monkeypatch.setattr(archive, "source_release_files", lambda: [source])
+    captured = {}
+
+    def manifest(*_args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "schema_version": "1.0",
+            "git_commit": "a" * 40,
+            "submodules": {
+                "transplat": "b" * 40,
+                "mvsplat": "c" * 40,
+                "depthsplat": "d" * 40,
+            },
+            "zenodo_doi": None,
+            "validation": {"pass": True, "failures": []},
+        }
+
+    monkeypatch.setattr(release, "build_manifest", manifest)
+    output = tmp_path / "source-only.tar.gz"
+
+    result = archive.build_source_only(output, "SCARF-AE")
+
+    assert captured == {"require_reference_evidence": False}
+    assert result["status"] == "PASS"
+    with tarfile.open(output, "r:gz") as bundle:
+        manifest_member = bundle.extractfile("SCARF-AE/release-manifest.json")
+        assert manifest_member is not None
+        record = json.loads(manifest_member.read().decode("utf-8"))
+    assert record["release_scope"] == "artifact-available-source-only"
+    assert record["evidence_bundle_included"] is False
+
+
 def test_build_mapping_rejects_unsafe_duplicate_and_symlink_inputs(tmp_path):
     import scripts.build_archive as archive
 

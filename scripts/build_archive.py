@@ -505,6 +505,46 @@ def build(
     return _build_from_mapping(output, prefix, source_manifest, files, "tar.gz")
 
 
+def build_source_only(
+    output: Path,
+    prefix: str,
+    require_doi: bool = False,
+) -> dict[str, Any]:
+    """Build an Artifact-Available source archive without an evidence claim.
+
+    This route retains every source-release validation except the staged
+    Results-Reproduced evidence requirement.  It deliberately labels the
+    archive as source-only, so it cannot be mistaken for the full source plus
+    evidence release produced by :func:`build_bundles`.
+    """
+
+    if git("status", "--porcelain"):
+        raise ValueError("source-only archive requires a clean worktree")
+    _validate_prefix(prefix)
+    from scripts.check_release import build_manifest
+
+    identity = build_manifest(
+        require_doi,
+        require_reference_evidence=False,
+    )
+    if not identity["validation"]["pass"]:
+        raise ValueError(
+            "source-only release checks failed: "
+            + "; ".join(identity["validation"]["failures"])
+        )
+    files = {
+        path.relative_to(ROOT).as_posix(): path for path in source_release_files()
+    }
+    source_manifest = {
+        **identity,
+        "bundle_kind": "source",
+        "release_scope": "artifact-available-source-only",
+        "evidence_bundle_included": False,
+        "results_reproduced_evidence": "not-included",
+    }
+    return _build_from_mapping(output, prefix, source_manifest, files, "tar.gz")
+
+
 def build_bundles(
     output_dir: Path,
     version: str,
@@ -710,11 +750,27 @@ def main() -> int:
         type=Path,
         help="Use a separately staged, hash-verified reference-results directory",
     )
+    parser.add_argument(
+        "--source-only",
+        action="store_true",
+        help=(
+            "Build a clean Artifact-Available source archive without packaging "
+            "or claiming Results-Reproduced evidence."
+        ),
+    )
     args = parser.parse_args()
     if sum(bool(value) for value in (args.output, args.verify, args.output_dir)) != 1:
         parser.error("specify exactly one of --output, --output-dir, or --verify")
+    if args.source_only and (args.output is None or args.reference_results is not None):
+        parser.error("--source-only requires --output and does not accept --reference-results")
     try:
-        if args.output_dir:
+        if args.source_only:
+            result = build_source_only(
+                args.output.resolve(),
+                args.prefix,
+                args.require_doi,
+            )
+        elif args.output_dir:
             result = build_bundles(
                 args.output_dir.resolve(),
                 args.version,
