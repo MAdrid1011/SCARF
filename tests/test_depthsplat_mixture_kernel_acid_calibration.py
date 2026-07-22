@@ -97,7 +97,10 @@ def _trace(module, *, risk: float, valid: bool = True, certificate_passed: bool 
         "schema_version": module.SOFT_MIXTURE_CERTIFICATE_SCHEMA_VERSION,
         "kind": module.SOFT_MIXTURE_CERTIFICATE_KIND,
         "policy": module.SOFT_MIXTURE_CERTIFICATE_POLICY,
+        "tile_key": [0, 0, 0],
         "passed": certificate_passed,
+        "source_only": dict(module._SOFT_MIXTURE_SOURCE_ONLY),
+        "summary": {"input_valid": certificate_passed},
     }
     if valid:
         return [

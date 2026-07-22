@@ -26,12 +26,13 @@ classic profile. Its default command is equivalent to:
 
 ```bash
 bash data/download_checkpoints.sh --profile quick
+"$SCARF_PYTHON_CLASSIC" data/build_quick_dataset.py --output datasets/quick-re10k
 bash scripts/run_ae.sh quick --output-root /results
 ```
 
 Use `docker run --rm --gpus all scarf-ae:1.0.0 --help` to display the
-container entry-point contract. The quick fixture is intentionally separate
-from the full dataset workflows.
+container entry-point contract. The quick fixture validates the installed
+end-to-end stack; the full dataset workflows evaluate the paper matrix.
 
 ## Native Setup
 
@@ -120,9 +121,9 @@ compare their reports against a stable reference.
 
 An evaluator with a Jetson Orin NX should execute the performance workflow.
 That route records CUDA events, Nsight stage traces, tegrastats, device identity,
-power mode, clock state, and architectural cycles. The validator treats those
-generated records as the hardware measurement surface; the reference table is
-for comparison.
+power mode, clock state, and architectural cycles. The validator compares
+generated device records with the archived reference table under the same fixed
+protocol.
 
 ## Protocol and Verification
 
@@ -144,8 +145,9 @@ python scripts/check_release.py \
 ```
 
 `scripts/three_badge_readiness.py` reports source-archive, Functional, and
-full-result gates separately. The source archive contains no generated outputs,
-planning files, failure logs, or third-party datasets.
+full-result gates separately. The source archive contains the release source,
+its manifest, and the redistributable quick fixture; third-party datasets and
+checkpoints remain manifest-pinned external inputs.
 
 ## Public Hardware Scope
 

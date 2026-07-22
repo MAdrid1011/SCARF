@@ -17,8 +17,8 @@ docker run --rm --gpus all --user "$(id -u):$(id -g)" \
   -v "$PWD/outputs/docker-quick:/results" scarf-ae:1.0.0
 ```
 
-The container downloads the hash-pinned MVSplat checkpoint on first use and
-writes a structured result below `outputs/docker-quick/quick/`.
+The container resolves the hash-pinned MVSplat checkpoint on first use and
+writes a structured Functional result below `outputs/docker-quick/quick/`.
 
 ## Key Features
 
@@ -146,7 +146,8 @@ bash data/download_checkpoints.sh --profile quick
 bash scripts/run_ae.sh quick
 ```
 
-This fixture cannot be used for a paper-result claim.
+This fixture verifies installation and end-to-end execution. Run the quality
+and mechanism workflows for the paper evaluation matrix.
 
 ### 3. Setup Data
 

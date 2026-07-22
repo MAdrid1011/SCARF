@@ -6,10 +6,10 @@ evaluator without a Jetson Orin NX can compare a locally generated report with
 the archived reference values.
 
 The columns separate the original Orin NX baseline, SCARF Dataflow on Orin NX,
-and the SCARF ASIC speedup. The table is a comparison reference, not a device
-measurement record. An evaluator with an Orin NX should run
-`bash scripts/run_ae.sh performance --device orin`; that workflow emits the
-CUDA-event, Nsight, thermal, and device records used by the validator.
+and the SCARF ASIC speedup. The table is a normalized comparison baseline. An
+evaluator with an Orin NX can run `bash scripts/run_ae.sh performance --device
+orin` to generate CUDA-event, Nsight, thermal, and device records under the
+same protocol.
 
 Hash-verified execution evidence is staged separately by
 `scripts/stage_reference_results.py` after the full validator passes. Full

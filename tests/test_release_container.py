@@ -16,6 +16,9 @@ def test_container_defaults_to_the_cuda_functional_quick_workflow() -> None:
     assert "FROM base AS source-manifest" in dockerfile
     assert "scripts/build_archive.py --source-only --require-doi" in dockerfile
     assert "release-manifest.json" in dockerfile
+    assert "if [ -f release-manifest.json ]" in dockerfile
+    assert "COPY --from=source-manifest /opt/release/SCARF-AE/ /opt/scarf/" in dockerfile
+    assert "MPLCONFIGDIR=/tmp/matplotlib" in dockerfile
     assert "ENTRYPOINT [\"/opt/scarf/docker/run-functional.sh\"]" in dockerfile
     assert "data/download_checkpoints.sh --profile quick" in contents
     assert "scripts/run_ae.sh quick --output-root" in contents

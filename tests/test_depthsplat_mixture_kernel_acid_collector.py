@@ -102,7 +102,10 @@ def _observation(calibration, *, split: str, scene: str, sample_index: int):
         "schema_version": calibration.SOFT_MIXTURE_CERTIFICATE_SCHEMA_VERSION,
         "kind": calibration.SOFT_MIXTURE_CERTIFICATE_KIND,
         "policy": calibration.SOFT_MIXTURE_CERTIFICATE_POLICY,
+        "tile_key": [0, 0, 0],
         "passed": True,
+        "source_only": dict(calibration._SOFT_MIXTURE_SOURCE_ONLY),
+        "summary": {"input_valid": True},
     }
     trace = [
         {

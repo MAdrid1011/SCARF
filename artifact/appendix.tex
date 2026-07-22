@@ -22,7 +22,8 @@ Figure~8 uses a Jetson Orin NX 16\,GB in MAXN mode with the GPU locked at
 918\,MHz. The measurement wrapper records CUDA event repetitions, Nsight
 Systems output, \texttt{tegrastats}, JetPack/L4T/CUDA/PyTorch versions, clock
 state, power mode, and temperature. The archive also provides the normalized
-nine-pair Figure~8 reference table for reviewers without an Orin NX. Reference
+nine-pair Figure~8 reference table for reviewers without an Orin NX. The same
+workflow emits generated raw device evidence when run on Orin. Reference
 results never substitute for generated raw evidence. Full model evaluation
 uses an NVIDIA GPU with at least 24\,GB VRAM; quick Functional inference uses
 an 8\,GB CUDA GPU. CPU checks cover schemas and scaling. RTL uses JDK~11+,

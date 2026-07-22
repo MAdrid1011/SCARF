@@ -100,11 +100,9 @@ SOURCE_RELEASE_ARTIFACT_FILES = frozenset(
     }
 )
 SOURCE_RELEASE_QUICK_DATASET_PREFIX = "datasets/quick-re10k/"
-# These paths are author-side diagnostic entrypoints, failed-candidate material,
-# or joint-calibration work in progress.  They are intentionally explicit so
-# that the reviewer source bundle retains ordinary scripts, documentation, and
-# tests rather than excluding a whole top-level directory.
-SOURCE_RELEASE_INTERNAL_PATH_PREFIXES = frozenset(
+# Non-release support files are excluded explicitly so the source bundle keeps
+# the ordinary implementation, documentation, and tests in each subsystem.
+SOURCE_RELEASE_EXCLUDED_PATH_PREFIXES = frozenset(
     {
         "data/acid_joint_",
         "data/context_only_audit_input.py",
@@ -222,7 +220,7 @@ def _is_source_release_path(normalized: str) -> bool:
     parts = PurePosixPath(normalized).parts
     if any(
         normalized.startswith(prefix)
-        for prefix in SOURCE_RELEASE_INTERNAL_PATH_PREFIXES
+        for prefix in SOURCE_RELEASE_EXCLUDED_PATH_PREFIXES
     ):
         return False
     if "checkpoints" in parts:

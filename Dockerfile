@@ -22,28 +22,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 FROM base AS source-manifest
 
-WORKDIR /opt/scarf
-COPY . /opt/scarf
+WORKDIR /work/scarf
+COPY . /work/scarf
 
-RUN python3 scripts/build_archive.py --source-only --require-doi \
-        --output /tmp/scarf-source.tar.gz --prefix SCARF-AE \
-    && mkdir /tmp/scarf-source \
-    && tar -xzf /tmp/scarf-source.tar.gz -C /tmp/scarf-source \
-    && cp /tmp/scarf-source/SCARF-AE/release-manifest.json /opt/scarf/ \
-    && rm -rf /tmp/scarf-source /tmp/scarf-source.tar.gz \
-    && find /opt/scarf -type d -name .git -prune -exec rm -rf {} + \
-    && find /opt/scarf -type f -path '*/.git' -delete
+# Build from the reviewed source bundle. Published source archives carry their
+# manifest already; Git worktrees create the same bundle during the build.
+RUN if [ -f release-manifest.json ]; then \
+        mkdir -p /opt/release/SCARF-AE \
+        && cp -a /work/scarf/. /opt/release/SCARF-AE/; \
+    else \
+        python3 scripts/build_archive.py --source-only --require-doi \
+            --output /tmp/scarf-source.tar.gz --prefix SCARF-AE \
+        && mkdir -p /opt/release \
+        && tar -xzf /tmp/scarf-source.tar.gz -C /opt/release \
+        && rm -f /tmp/scarf-source.tar.gz; \
+    fi \
+    && test -f /opt/release/SCARF-AE/release-manifest.json
 
 FROM base AS runtime
 
 WORKDIR /opt/scarf
-COPY --from=source-manifest /opt/scarf /opt/scarf
+COPY --from=source-manifest /opt/release/SCARF-AE/ /opt/scarf/
 
 RUN bash install.sh --profile classic --venv /opt/scarf/.venv/classic \
     && mkdir -p /results /opt/scarf/mvsplat/checkpoints \
     && chmod -R a+rwX /opt/scarf /results
 
 ENV SCARF_PYTHON_CLASSIC=/opt/scarf/.venv/classic/bin/python \
-    SCARF_OUTPUT_ROOT=/results
+    SCARF_OUTPUT_ROOT=/results \
+    HOME=/tmp \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    XDG_CACHE_HOME=/tmp/.cache
 
 ENTRYPOINT ["/opt/scarf/docker/run-functional.sh"]
