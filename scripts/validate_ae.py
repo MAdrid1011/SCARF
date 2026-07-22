@@ -1057,6 +1057,24 @@ def validate_complete(
     }
 
 
+def validate_current_release(
+    output: Path,
+    *,
+    require_key_results: bool = False,
+    allow_missing_quick: bool = False,
+    validation_profile: str = "author-preflight",
+) -> dict[str, Any]:
+    """Validate an output root against the validator-owned paper contract."""
+
+    return validate_complete(
+        output,
+        ROOT / "artifact" / "expected_results.json",
+        require_key_results=require_key_results,
+        allow_missing_quick=allow_missing_quick,
+        validation_profile=validation_profile,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)

@@ -56,7 +56,7 @@ def test_readiness_keeps_unrun_key_results_explicit(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(readiness, "validate", lambda _record: None)
     monkeypatch.setattr(
         readiness,
-        "validate_complete",
+        "validate_current_release",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             FileNotFoundError("missing full evidence")
         ),
@@ -101,7 +101,7 @@ def test_readiness_requires_all_three_badge_conditions(tmp_path, monkeypatch) ->
     monkeypatch.setattr(readiness, "validate", lambda _record: None)
     monkeypatch.setattr(
         readiness,
-        "validate_complete",
+        "validate_current_release",
         lambda *_args, **_kwargs: {
             "status": "PASS",
             "summary": {"passed": 4, "total": 4},

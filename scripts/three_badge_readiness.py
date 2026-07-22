@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.build_archive import verify
-from scripts.validate_ae import validate_complete
+from scripts.validate_ae import validate_current_release
 from scripts.validate_result import validate
 
 
@@ -150,9 +150,8 @@ def _catalog_states() -> dict[str, str | None]:
 def _results_record(output_root: Path) -> dict[str, Any]:
     states = _catalog_states()
     try:
-        validation = validate_complete(
+        validation = validate_current_release(
             output_root,
-            ROOT / "artifact/expected_results.json",
             require_key_results=True,
             validation_profile="evaluator-final",
         )
