@@ -4600,7 +4600,7 @@ def main(argv=None):
     write_result(record, result_path)
     print()
     print(f"Structured result: {result_path}")
-    print("Physical PPA is intentionally excluded; run hardware/iflow/run.sh.")
+    print("Physical PPA workflow: hardware/iflow/run.sh")
 
 
 if __name__ == '__main__':
