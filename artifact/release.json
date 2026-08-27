@@ -1,6 +1,0 @@
-{
-  "schema_version": "1.0",
-  "release_version": "v1.0.0",
-  "zenodo_doi": "10.5281/zenodo.21482385",
-  "reference_performance_table": "artifact/reference_results/orin_nx_reference.csv"
-}

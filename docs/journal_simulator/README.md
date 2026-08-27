@@ -9,7 +9,7 @@
 - [设计来源与约束](01_source_of_truth.md)
 - [模拟器总体架构](02_simulator_architecture.md)
 - [周期模型与资源合同](03_cycle_model.md)
-- [SAES 基元一致性重建](04_saes_primitive_reconstruction.md)
+- [SAES 固定路径基元重建](04_saes_primitive_reconstruction.md)
 - [真实工作负载与实验合同](05_experiment_contract.md)
 - [实施者工作流](06_implementer_workflow.md)
 - [静态锚点与对照数据](07_static_anchors.md)
@@ -44,4 +44,3 @@ runs/<run_id>/
 ```
 
 `cycles.json` 中的全优化周期必须与 `ablation_all_combinations.csv` 的 `RMCF+FSDR+SAES` 行完全相同。任何差异都表示配置或任务图不一致，结果不得发布。
-

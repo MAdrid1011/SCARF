@@ -64,7 +64,7 @@ render_gaussians(outputs.gaussians, target_cameras) -> Tensor
 
 ### S3 路径任务
 
-SAES 首先为探针执行 Adaptor。新的基元一致性重建在探针 Gaussian 可用后决定继续代表路径、轻量路径或回退 Full。代表和轻量路径只提交保留的 Gaussian。Full 路径为 tile 中全部像素生成 Adaptor 任务。具体算法见 [SAES 基元一致性重建](04_saes_primitive_reconstruction.md)。
+SAES 路径选择器完全按照论文确定 L0、L1 或 Full，并在任务描述符中冻结该标签。L0 和 L1 首先为论文规定的探针执行 Adaptor，然后在已选路径内部使用固定路径基元重建，只提交原路径规定的保留 Gaussian。Full 为 tile 中全部像素生成 Adaptor 任务，不调用重建算法。重建器不得改变标签或新增 Full tile。具体算法见 [SAES 固定路径基元重建](04_saes_primitive_reconstruction.md)。
 
 ### S4 转换任务
 
@@ -112,4 +112,3 @@ FIFO 满、SPM 无空间、DRAM 未返回、权重未就绪、PSum 表项冲突�
 ## 追踪与复现
 
 每次运行保存官方仓库提交、权重校验和、数据集样本清单、配置来源图、软件环境、GPU 型号和模拟器提交。追踪文件采用列式分块，允许 GPU 直接统计候选分布、区域形状、Gaussian 数量和地址跨度。Python 对象追踪只允许用于小规模调试。
-

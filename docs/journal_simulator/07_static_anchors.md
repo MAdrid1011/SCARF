@@ -34,7 +34,7 @@
 
 [fsdr_saes_paper_reference.csv](anchors/fsdr_saes_paper_reference.csv) 保存九组 FSDR 引导率、Top-1 覆盖率、S2 候选节省、特征流量削减，以及 SAES L0、L1、低方差一致率、Gaussian 节省和 S2 评估节省。
 
-FSDR 实现首先核对候选身份和 Top-1 覆盖，再核对引导率。SAES 实现首先核对逐视图质量和 Full 回退，再核对 Gaussian 节省。达到节省比例但质量不通过不算成功。
+FSDR 实现首先核对候选身份和 Top-1 覆盖，再核对引导率。SAES 实现先以论文选择器复现 L0、L1、Full 标签和原始比例，再冻结该标签测试路径内部重建质量。替换算法前后路径比例、Gaussian 数量和任务取消集合必须相同；达到节省比例但质量不通过仍不算成功。
 
 ## 消融与平台对照
 
@@ -68,4 +68,3 @@ NoOpt 和八组合论文对照
 ```
 
 实施后在同一页追加真实值、差异和解释。不要覆盖实施前锚点。
-

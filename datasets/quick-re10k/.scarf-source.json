@@ -1,9 +1,0 @@
-{
-  "functional_fixture": true,
-  "generator_sha256": "1e3c39878ee627970a8a7477cc287519378f5ea1f961c2d26b50cb9b3617297f",
-  "paper_result_eligible": false,
-  "representation": "re10k-synthetic-functional-v1",
-  "scene": "scarf-functional-scene",
-  "schema_version": "1.0",
-  "view_count": 5
-}

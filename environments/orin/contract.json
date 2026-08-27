@@ -1,9 +1,0 @@
-{
-  "schema_version": "1.0",
-  "status": "runtime_autodetect",
-  "device_model_contains": "Jetson Orin NX",
-  "power_mode_contains": "MAXN",
-  "require_jetson_clocks": true,
-  "maximum_allowed_temperature_c": 80.0,
-  "timing_repetitions": 5
-}
