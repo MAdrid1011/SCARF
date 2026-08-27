@@ -1,0 +1,10 @@
+dataset,model,Early convergence,S1 MAC reduction,S2 MAC reduction,Full fallback
+Re10K,Tran,71.0,56.8,61.8,3.4
+Re10K,MV,69.0,52.1,58.0,4.8
+Re10K,Depth,72.0,57.9,59.8,2.9
+ACID,Tran,74.0,59.2,64.4,4.1
+ACID,MV,72.0,54.4,60.5,5.5
+ACID,Depth,74.0,59.6,61.4,3.6
+DL3DV,Tran,69.0,55.2,60.0,5.8
+DL3DV,MV,67.0,50.6,56.3,7.2
+DL3DV,Depth,70.0,53.7,58.1,5.0

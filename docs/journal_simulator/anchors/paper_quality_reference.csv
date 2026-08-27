@@ -1,0 +1,10 @@
+model,dataset,baseline_psnr,scarf_psnr,baseline_ssim,scarf_ssim,baseline_lpips,scarf_lpips,source_kind
+TranSplat,RealEstate10K,28.08,28.07,0.919,0.917,0.128,0.130,paper_reported
+TranSplat,ACID,29.58,29.60,0.899,0.901,0.145,0.144,paper_reported
+TranSplat,DL3DV,25.08,25.07,0.854,0.852,0.178,0.180,paper_reported
+MVSplat,RealEstate10K,30.22,30.23,0.942,0.944,0.128,0.123,paper_reported
+MVSplat,ACID,32.08,32.06,0.916,0.915,0.144,0.146,paper_reported
+MVSplat,DL3DV,28.02,28.05,0.914,0.912,0.145,0.146,paper_reported
+DepthSplat,RealEstate10K,28.43,28.42,0.925,0.923,0.122,0.123,paper_reported
+DepthSplat,ACID,29.43,29.44,0.910,0.910,0.137,0.137,paper_reported
+DepthSplat,DL3DV,26.93,26.98,0.885,0.886,0.157,0.156,paper_reported

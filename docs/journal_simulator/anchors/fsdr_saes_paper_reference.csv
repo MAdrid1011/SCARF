@@ -1,0 +1,10 @@
+model,dataset,fsdr_guided_pct,fsdr_top1_coverage_pct,fsdr_s2_saved_m,fsdr_s2_saved_pct,fsdr_traffic_saved_mb,fsdr_traffic_saved_pct,saes_l0_pct,saes_l1_pct,saes_low_variance_consistency_pct,saes_gaussians_saved_pct,saes_s2_saved_m,source_kind
+TranSplat,RealEstate10K,72.1,99.91,4.54,54.2,415,51.5,17.2,14.8,100.00,20.2,1.45,paper_reported
+TranSplat,ACID,76.0,99.93,4.78,57.4,438,54.4,21.3,11.2,99.86,24.3,1.79,paper_reported
+TranSplat,DL3DV,65.0,99.88,4.09,48.9,374,46.5,12.0,10.1,99.23,17.0,1.01,paper_reported
+MVSplat,RealEstate10K,66.2,99.90,1.04,49.6,95,47.2,29.0,12.5,100.00,24.0,0.61,paper_reported
+MVSplat,ACID,71.0,99.87,1.12,53.4,102,50.7,36.0,18.0,99.77,28.0,0.76,paper_reported
+MVSplat,DL3DV,58.0,99.83,0.91,43.4,84,41.7,21.3,8.5,99.75,16.1,0.45,paper_reported
+DepthSplat,RealEstate10K,83.0,99.89,5.22,62.2,478,59.4,38.7,18.6,99.59,29.2,3.25,paper_reported
+DepthSplat,ACID,87.0,99.95,5.47,65.2,501,62.3,46.7,25.1,99.85,33.8,3.92,paper_reported
+DepthSplat,DL3DV,78.0,99.85,4.91,58.5,449,55.8,30.7,13.2,99.62,24.8,2.57,paper_reported
