@@ -7,6 +7,7 @@
 ## 文档结构
 
 - [设计来源与约束](01_source_of_truth.md)
+- [模块一致性表](architecture_conformance.md)
 - [模拟器总体架构](02_simulator_architecture.md)
 - [周期模型与资源合同](03_cycle_model.md)
 - [SAES 固定路径基元重建](04_saes_primitive_reconstruction.md)
@@ -14,6 +15,7 @@
 - [实施者工作流](06_implementer_workflow.md)
 - [静态锚点与对照数据](07_static_anchors.md)
 - [高斯简化相关工作审计](08_literature_survey.md)
+- [实施约束追踪](09_requirement_traceability.md)
 
 ## 不可违反的设计边界
 
@@ -24,6 +26,7 @@
 5. 功能模拟必须使用官方预训练模型和真实数据。模型或数据不可获得时，该组合标记为 `SKIPPED_UNAVAILABLE`，不得使用随机张量、代理网络或合成指标补齐。
 6. 质量优先于吞吐。任何未通过质量合同的优化组合不得进入性能汇总，也不得通过放宽指标或只报告均值来掩盖最坏视图退化。
 7. 所有数值参数都必须携带来源和推导。裸数值配置被视为错误，除非它来自张量形状、数据类型定义或数学恒等式。
+8. 资源下载和实验复现不使用 SHA、MD5、内容散列或 digest 做完整性校验。FSDR 的 LSH 签名是论文定义的核心算法，不属于该禁止范围。
 
 ## 输出合同
 
@@ -39,8 +42,13 @@ runs/<run_id>/
   quality_per_view.csv
   quality_summary.json
   ablation_all_combinations.csv
+  saes_path_labels.parquet
   gpu_utilization.jsonl
+  baseline_measurement.json
+  baseline_normalization.json
   trace_manifest.json
 ```
 
 `cycles.json` 中的全优化周期必须与 `ablation_all_combinations.csv` 的 `RMCF+FSDR+SAES` 行完全相同。任何差异都表示配置或任务图不一致，结果不得发布。
+
+`baseline_normalization.json` 只在目标 baseline GPU 不可用时生成，且必须把换算结果标记为 `NORMALIZED_FROM_MEASURED`，不得写成目标 GPU 实测值。

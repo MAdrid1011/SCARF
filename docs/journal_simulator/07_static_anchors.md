@@ -52,19 +52,31 @@ FSDR 实现首先核对候选身份和 Top-1 覆盖，再核对引导率。SAES 
 
 ## 每组实施前报告
 
-每个模型与数据集组合在实现前创建一页 anchor report，至少包含以下内容。
+每个模型与数据集组合在实现前按 [anchor report 模板](anchors/anchor_report_template.md) 创建 `anchors/reports/<model>__<dataset>.md`。任何可用组合在该页完成前不得进入小时级运行。模型、官方权重或真实数据不可获得时，该页只记录来源查找结果和跳过状态，不生成代理锚点。
+
+锚点必须由官方模型源码、真实张量形状、数据集的视图数、分辨率、场景结构和已有期刊预估静态推导。已有预估数据直接复制并保留 `source_kind`、原文件和原始口径，不用平均值重建、平滑或修改尾数。新推导中每个延迟、带宽、命中、候选数和质量范围都必须指向来源或公式。
+
+每页至少包含以下内容。
 
 ```text
 模型和官方提交
 权重和训练数据来源
 评测 split、分辨率和视图数
 S1/S2/S3/S4 静态算子与字节数
+NoOpt 的逐资源、逐阶段周期区间及关键路径推导
 RMCF 静态区间
 FSDR 论文对照
 SAES 论文对照
-NoOpt 和八组合论文对照
+NoOpt、RMCF、FSDR、SAES、RMCF+FSDR、RMCF+SAES、FSDR+SAES 和 All 的预期任务削减、周期区间和论文对照
 质量对照
+当前 GPU 实测 baseline 和目标 GPU 直测或可靠换算方法
 不可获得项和跳过原因
 ```
 
-实施后在同一页追加真实值、差异和解释。不要覆盖实施前锚点。
+锚点还必须记录每项预估的下界、中心值、上界和敏感参数。中心值不得直接输入周期模拟器；它只用来发现实现过差或无法解释地过好。实施后在同一页追加真实值、差异和解释，不覆盖实施前锚点。
+
+## 九组工作负载覆盖门
+
+MVSplat、TranSplat 和 DepthSplat 与 RealEstate10K、ACID 和 DL3DV 形成九个目标单元。实施顺序为先闭环 MVSplat 与 RealEstate10K，再一次扩展一个单元。每个单元的状态只能是 `ANCHOR_REQUIRED`、`READY_TO_RUN`、`MEASURED`、`SKIPPED_NO_OFFICIAL_CHECKPOINT`、`SKIPPED_UNAVAILABLE_DATASET` 或 `SKIPPED_NO_RELIABLE_BASELINE_CONVERSION`。
+
+只有真实模型、官方权重、真实数据集和完整锚点页均可用时，状态才能从 `ANCHOR_REQUIRED` 转为 `READY_TO_RUN`。不可获得单元保留跳过记录，不使用随机张量、代理模型、替代数据集或伪造质量值补齐。

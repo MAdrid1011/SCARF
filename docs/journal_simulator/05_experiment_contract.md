@@ -18,7 +18,7 @@
 | ACID | [Infinite Nature 官方项目页](https://infinite-nature.github.io/) | 使用官方 ACID 下载和模型仓库定义的 evaluation index |
 | DL3DV | [官方项目页](https://dl3dv-10k.github.io/DL3DV-10K/) | 使用模型官方定义的 DL3DV Benchmark split 和分辨率 |
 
-下载器必须验证文件大小、校验和、许可信息和样本清单。需要账户接受公开许可的数据可以使用已接受许可的本机凭据。需要付费、商业授权或无法公开取得的数据直接跳过，不等待机主提供商业资源。
+下载器必须记录官方 URL、发布版本、文件名、字节数、许可信息和样本清单，并通过格式解析、官方加载器和最小真实样本读取确认资源可用。下载、缓存和运行阶段不使用 SHA、MD5、内容散列或 digest 校验。需要账户接受公开许可的数据可以使用已接受许可的本机凭据。需要付费、商业授权或无法公开取得的数据直接跳过，不等待机主提供商业资源。
 
 如果某模型没有对应数据集的官方权重，只在模型论文或官方仓库明确规定跨数据集协议时使用其他官方权重。否则该组合标记为 `SKIPPED_NO_OFFICIAL_CHECKPOINT`。
 
@@ -60,12 +60,30 @@ PSNR、SSIM 和 LPIPS 在 GPU 上批量计算。LPIPS 使用[官方实现](https
 - 稳态完成间隔周期
 - 1 GHz 下的 inference/s
 - 相对 NoOpt 的吞吐加速比
-- 相对 Jetson Orin NX 实测吞吐的系统加速比
+- 相对目标 baseline GPU 直接实测或可靠换算吞吐的系统加速比
 - S1 至 S4 的周期归属和资源阻塞周期
 
 不报告能效、功耗、面积、面积效率或工艺缩放结果。
 
-Jetson Orin NX 基线必须在同一输入、同一官方权重和同一质量配置上实测。GPU 时间使用 CUDA Event 和 Nsight Systems 或 PyTorch Profiler 的 CUDA activity。主循环不得用 Python wall clock 包围异步 kernel 后直接读取结果。
+目标 baseline GPU 可用时，必须在同一输入、同一官方权重和同一质量配置上直接实测。GPU 时间使用 CUDA Event 和 Nsight Systems 或 PyTorch Profiler 的 CUDA activity。主循环不得用 Python wall clock 包围异步 kernel 后直接读取结果。
+
+### 目标 baseline GPU 不可用时的换算
+
+实现平台没有论文目标 baseline GPU 时，不等待机主提供设备。实施者先在当前 GPU 上实测完整工作负载，再使用可复现的配对实测关系换算到目标 GPU。换算结果用于评审者在缺少目标设备时复现基线，但必须与直接实测明确区分。
+
+换算以阶段或算子形状类别 $k$ 为单位。对当前 GPU 上实测的时间 $t_{\mathrm{local},k}$，使用同一软件路径、精度、batch、形状和功耗模式下的配对校准测量得到
+
+\[
+r_k=\frac{t_{\mathrm{target},k}^{\mathrm{cal}}}
+{t_{\mathrm{local},k}^{\mathrm{cal}}},\qquad
+\hat t_{\mathrm{target}}=\sum_k t_{\mathrm{local},k}r_k.
+\]
+
+配对校准可来自实施者可重跑的开源微基准、官方性能追踪或同时覆盖当前 GPU 和目标 GPU 的公开实测产物。每个 $r_k$ 必须保存两端硬件模式、软件版本、输入形状、实测时间和来源。计算密集、带宽受限、不规则采样和 rasterization 不共用一个缩放比。
+
+禁止使用峰值 FLOPS、显存带宽、CUDA 核心数或一个全局平均倍率直接换算端到端基线。当真实算子形状超出配对校准覆盖范围，或目标平台的 CPU、I/O 与 GPU 统一内存开销无法建立实测关系时，对应基线标记为 `SKIPPED_NO_RELIABLE_BASELINE_CONVERSION`，不做外推。
+
+`baseline_normalization.json` 保存当前 GPU 原始测量、分组时间、每组换算关系、适用范围、校准残差和最终求和。结果字段 `baseline_kind` 必须为 `MEASURED_ON_TARGET`、`NORMALIZED_FROM_MEASURED` 或跳过状态之一。
 
 ## 八种消融
 
@@ -78,10 +96,11 @@ model,dataset,scene,mechanism_mask,total_cycles,
 s1_cycles,s2_cycles,s3_cycles,s4_cycles,
 throughput_inf_s,speedup_vs_noopt,
 psnr,ssim,lpips,quality_pass,
-saes_l0_tiles,saes_l1_tiles,saes_full_tiles,saes_path_digest
+saes_l0_tiles,saes_l1_tiles,saes_full_tiles,
+saes_path_mismatch_count,saes_path_first_mismatch,saes_path_labels_file
 ```
 
-`saes_path_digest` 由完整路径标签张量按清单规定的稳定散列生成，用于证明内部重建没有改变路径。它不是周期模型的输入。
+运行直接逐元素比较替换前后的完整路径标签张量，并把原始标签以列式文件落盘；不生成哈希或 digest。只有 `saes_path_mismatch_count` 为零时才通过路径一致性门。
 
 NoOpt 是相同硬件上的无优化架构。Orin NX 是系统级外部基线。二者不能混用。
 
