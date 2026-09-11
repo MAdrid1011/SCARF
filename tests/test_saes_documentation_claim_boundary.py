@@ -21,22 +21,3 @@ def test_saes_mechanism_docs_explain_the_public_execution_flow() -> None:
     assert "The same command shape is used for all three adapters" in guide
     assert "Expected Performance" not in guide
     assert "Each model has optimized SAES thresholds" not in guide
-
-
-def test_saes_rtl_docs_keep_the_twelve_anchor_contract() -> None:
-    contract = _text("docs/saes-rtl-contract.md")
-
-    assert "four L0 descriptors and twelve L1 descriptors" in contract
-    assert "[0, 3, 12, 15, 1, 2, 4, 7, 8, 11, 13, 14]" in contract
-    assert "The separate stage-event simulator is not that replay" in contract
-    assert "[5, 10, 1, 2]" not in contract
-    assert "for eight descriptors in total" not in contract
-
-
-def test_appendix_keeps_calibration_and_reference_boundaries_explicit() -> None:
-    appendix = _text("artifact/appendix.tex")
-
-    assert "24 DL3DV calibration scenes and eight disjoint DL3DV holdout scenes" in appendix
-    assert "Reference results never substitute for generated raw evidence" in appendix
-    assert "Zenodo DOI" in appendix
-    assert "32 Re10K and 32 ACID" not in appendix

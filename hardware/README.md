@@ -11,13 +11,14 @@ the resulting metrics to a 28 nm equivalent estimate with DeepScaleTool.
 - Neither is a replacement for foundry-specific TSMC 28 nm signoff.
 - LPDDR PHY, pads, and proprietary compiled SRAMs are excluded from public PPA.
 
-The machine-readable scope and factors are in
-`artifact/HARDWARE_SCOPE.md`.
+The machine-readable Orin proxy contract is in
+[`hardware/orin/proxy_spec.json`](orin/proxy_spec.json). The released claim
+boundary is recorded in [`artifact/claim_status.json`](../artifact/claim_status.json).
 
-The staged SAES retained-descriptor RTL contract is in
-[`docs/saes-rtl-contract.md`](../docs/saes-rtl-contract.md). It explicitly
-separates the current classifier-only evidence from unimplemented assignment,
-moment-matching, and buffer timing.
+The current FSDR and SAES execution contract is documented in
+[`docs/fsdr-saes-mechanisms.md`](../docs/fsdr-saes-mechanisms.md). The emitted,
+source-bound SystemVerilog snapshot is described in
+[`hardware/orin/rtl/README.md`](orin/rtl/README.md).
 
 ## Entry Points
 
