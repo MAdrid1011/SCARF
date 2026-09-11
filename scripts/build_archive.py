@@ -72,11 +72,10 @@ SOURCE_RELEASE_DIRECTORIES = frozenset(
 SOURCE_RELEASE_ARTIFACT_FILES = frozenset(
     {
         "artifact/CALIBRATION.md",
-        "artifact/CLAIMS.md",
-        "artifact/EVALUATION_PROTOCOL.md",
-        "artifact/HARDWARE_SCOPE.md",
-        "artifact/HOTCRP_SUBMISSION.md",
-        "artifact/appendix.tex",
+        "artifact/calibration/frozen/mechanism_config.json",
+        "artifact/calibration/frozen/candidates.json",
+        "artifact/calibration/frozen/calibration-result.json",
+        "artifact/calibration/frozen/manifest-summary.json",
         "artifact/claim_status.json",
         "artifact/evaluation_catalog.json",
         "artifact/evaluation_protocol.json",
@@ -93,10 +92,11 @@ SOURCE_RELEASE_ARTIFACT_FILES = frozenset(
         "artifact/protocol/reviewer/manifest.json",
         "artifact/protocol/reviewer/re10k.json",
         "artifact/quick/evaluation_index.json",
-        "artifact/reference_results/README.md",
         "artifact/reference_results/manifest.json",
         "artifact/reference_results/orin_nx_reference.csv",
         "artifact/release.json",
+        "artifact/key_results_run.json",
+        "artifact/key_results_local_smoke.json",
     }
 )
 SOURCE_RELEASE_QUICK_DATASET_PREFIX = "datasets/quick-re10k/"
@@ -108,7 +108,6 @@ SOURCE_RELEASE_REQUIRED_PATHS = frozenset(
         "data/context_only_audit_input.py",
         "data/plan_acid_joint_calibration.py",
         "data/prepare_dl3dv_target_free_audit_inputs.py",
-        "docs/saes-rtl-contract.md",
         "integration/acid_joint_context.py",
         "integration/acid_joint_model_context.py",
         "saes/joint_materialization_calibrator.py",
@@ -125,12 +124,31 @@ SOURCE_RELEASE_REQUIRED_PATHS = frozenset(
         "scripts/saes_sparse_consumer_render_audit.py",
         "scripts/saes_sparse_packet_quality_pilot.py",
         "scripts/saes_target_free_materialization_audit.py",
+        "scripts/claim_readiness.py",
+        "scripts/init_claim_evidence.py",
+        "scripts/simulate_claim_workflows.py",
+        "scripts/import_claim_evidence.py",
+        "scripts/normalize_orin_proxy.py",
+        "scripts/init_orin_proxy_input.py",
+        "scripts/export_rtl_stimulus.py",
+        "scripts/export_claim_timing.py",
+        "scripts/run_calibration.py",
+        "scripts/freeze_acid_calibration.py",
+        "scripts/reviewer_claim_workflow.py",
+        "scripts/run_reviewer_claims.py",
+        "scripts/generate_local_proxy_report.py",
+        "scripts/run_rtl_timing.py",
+        "hardware/orin/proxy_spec.json",
     }
 )
 # Non-release support files are excluded explicitly so the source bundle keeps
 # the ordinary implementation, documentation, and tests in each subsystem.
 SOURCE_RELEASE_EXCLUDED_PATH_PREFIXES = frozenset(
     {
+        # The reviewer reply is maintained as correspondence, not artifact
+        # content, and must never be included in a distributable archive.
+        "artifact/REVIEWER_RESPONSE_CN.md",
+        "artifact/REVIEWER_RESPONSE_EN.md",
         "data/acid_joint_",
         "data/context_only_audit_input.py",
         "data/frozen_audit_contract.py",
@@ -139,7 +157,12 @@ SOURCE_RELEASE_EXCLUDED_PATH_PREFIXES = frozenset(
         "data/prepare_dl3dv_target_free_audit_inputs.py",
         "docs/saes-execution-dependency-audit.md",
         "docs/saes-rtl-contract.md",
+        "docs/claim-timing-backend.md",
+        "docs/git-msg-tags.md",
+        "docs/orin-nx-proxy-protocol.md",
+        "docs/reviewer-claim-workflow.md",
         "docs/three-badge-readiness.md",
+        "docs/workload-to-rtl-binding-repair-plan.md",
         "integration/acid_joint_",
         "saes/frozen_audit_preflight.py",
         "saes/joint_materialization_",
@@ -246,6 +269,8 @@ def _require_regular_file(path: Path, *, label: str) -> None:
 
 def _is_source_release_path(normalized: str) -> bool:
     parts = PurePosixPath(normalized).parts
+    if normalized.endswith("_codex.md"):
+        return False
     if normalized in SOURCE_RELEASE_REQUIRED_PATHS:
         return True
     if any(
@@ -801,7 +826,7 @@ def main() -> int:
     parser.add_argument("--prefix", default="SCARF-AE")
     parser.add_argument("--verify", type=Path)
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--version", default="v1.0.0")
+    parser.add_argument("--version", default="v1.0.4")
     parser.add_argument("--require-doi", action="store_true")
     parser.add_argument(
         "--reference-results",

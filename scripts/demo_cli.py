@@ -36,13 +36,21 @@ def resolve_frozen_saes_execution(
         "depth_threshold": depth_threshold,
         "cross_check_threshold": cross_check_threshold,
         "materialization": getattr(args, "saes_materialization", "representative"),
-        "decision_semantics": getattr(args, "saes_decision_semantics", "current"),
+        "decision_semantics": (
+            "probe-normalized-std-first-hit"
+            if getattr(args, "representative_timing", False)
+            else getattr(args, "saes_decision_semantics", "current")
+        ),
         "depth_routing_semantics": "metric-depth-standard-deviation",
-        "materialization_guard": True,
+        "materialization_guard": not bool(
+            getattr(args, "representative_timing", False)
+        ),
         "context_safety_guard": bool(
             getattr(args, "context_safety_guard", False)
         ),
-        "require_deletion_certificate": True,
+        "require_deletion_certificate": not bool(
+            getattr(args, "representative_timing", False)
+        ),
         "feature_source": getattr(args, "saes_feature_source", "pipeline"),
         "execution_identity": None,
         "route_sha256": None,
@@ -158,6 +166,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use strict execution without making the result claim-eligible",
     )
     parser.add_argument(
+        "--claim-workflow",
+        choices=("quality", "mechanisms", "performance"),
+        help=(
+            "Claim surface: quality only needs calibrated provenance; "
+            "mechanisms/performance also need source-bound timing."
+        ),
+    )
+    parser.add_argument(
         "--frozen-saes-route",
         action="store_true",
         help=(
@@ -175,6 +191,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Original source-index ordinal when null entries were filtered",
     )
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--rtl-payload-output",
+        type=Path,
+        help=(
+            "write target-free feature/depth/Gaussian tensors as a deterministic "
+            "RTL payload for export_rtl_stimulus.py"
+        ),
+    )
+    parser.add_argument(
+        "--claim-timing-manifest",
+        type=Path,
+        help=(
+            "Validated source-bound RTL timing manifest required by --claim-run; "
+            "diagnostic timing estimates are never accepted"
+        ),
+    )
     parser.add_argument(
         "--image-output-policy",
         choices=("representative", "all", "none"),
@@ -252,6 +284,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable the non-claim camera/depth SAES safety guard in a diagnostic run",
     )
     parser.add_argument(
+        "--representative-timing",
+        action="store_true",
+        help="Run a non-claim representative SAES timing replay from executed routes",
+    )
+    parser.add_argument(
         "--saes-feature-source",
         choices=("pipeline", "gaussian-head-input"),
         default="pipeline",
@@ -318,6 +355,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     if strict_run and args.evaluation_index is None:
         build_parser().error(f"{mode} requires --evaluation-index")
+    if args.claim_timing_manifest is not None and not args.claim_run:
+        build_parser().error("--claim-timing-manifest requires --claim-run")
+    if args.claim_workflow is not None and not args.claim_run:
+        build_parser().error("--claim-workflow requires --claim-run")
     disabled = [
         option
         for option, enabled in (
@@ -375,6 +416,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.context_safety_guard and args.sensitivity_trace:
         build_parser().error(
             "--context-safety-guard cannot be combined with --sensitivity-trace"
+        )
+    if args.representative_timing and not args.diagnostic_run:
+        build_parser().error("--representative-timing requires --diagnostic-run")
+    if args.representative_timing and args.context_safety_guard:
+        build_parser().error(
+            "--representative-timing cannot use --context-safety-guard"
         )
     if (args.claim_run or args.functional_run) and args.fsdr_guidance_policy != (
         "paper-hamming-local-validity"

@@ -54,6 +54,12 @@ class ScarfTop extends Module {
     // ``saesDecisionCycles`` is valid only while ``saesDecisionDone`` is high.
     val saesDecisionDone = Output(Bool())
     val saesDecisionCycles = Output(UInt(2.W))
+    // Claim-trace observables: these count decisions made by the RTL FSMs.
+    val fsdrNarrowCount = Output(UInt(32.W))
+    val fsdrFullCount = Output(UInt(32.W))
+    val saesL0Count = Output(UInt(32.W))
+    val saesL1Count = Output(UInt(32.W))
+    val saesFullCount = Output(UInt(32.W))
 
     // AXI4 DRAM interface
     val axiArAddr  = Output(UInt(ScarfConfig.AddrWidth.W))
@@ -125,6 +131,28 @@ class ScarfTop extends Module {
   val weightAccumReg = RegInit(VecInit(Seq.fill(6)(0.U(128.W))))
   val weightBeatCount = RegInit(0.U(3.W))
 
+  // Payload DMA state. The source-bound timing harness programs the
+  // descriptor through ConfigRegs and the RTL consumes every packed beat.
+  val payloadReadCursor  = RegInit(0.U(32.W))
+  val payloadReadActive  = RegInit(false.B)
+  val payloadTileReady   = RegInit(false.B)
+  val payloadWorkGroupIndex = RegInit(0.U(32.W))
+  val payloadReadRole = RegInit(0.U(3.W))
+  val payloadWord        = RegInit(0.U(128.W))
+  val payloadFeatureVector = RegInit(VecInit(Seq.fill(ScarfConfig.LSHFeatureDim)(0.U(ScarfConfig.DataWidth.W))))
+  val payloadFeatureWriteIndex = RegInit(0.U(7.W))
+  val payloadFeatureReference = RegInit(0.U(32.W))
+  val payloadFeatureAllSame = RegInit(true.B)
+  val payloadDepthWord = RegInit(0.U(ScarfConfig.AccWidth.W))
+  val payloadSAESRouteCode = RegInit(0.U(2.W))
+  val payloadSAESRouteValid = RegInit(false.B)
+  val payloadSAESRouteCursor = RegInit(0.U(32.W))
+  val fsdrNarrowCount = RegInit(0.U(32.W))
+  val fsdrFullCount = RegInit(0.U(32.W))
+  val saesL0Count = RegInit(0.U(32.W))
+  val saesL1Count = RegInit(0.U(32.W))
+  val saesFullCount = RegInit(0.U(32.W))
+
   // ═══════════════════════════════════════════════
   // ConfigRegs wiring
   // ═══════════════════════════════════════════════
@@ -140,8 +168,14 @@ class ScarfTop extends Module {
   pipeline.io.start       := io.start
   pipeline.io.config      := configRegs.io.config
   pipeline.io.configValid := configRegs.io.configValid
-  io.done                 := pipeline.io.done
-  io.busy                 := pipeline.io.busy
+  pipeline.io.tilePayloadReady := payloadTileReady
+  // A claim run cannot finish before every bound payload range has been
+  // consumed.  This prevents a short pipeline schedule from producing a
+  // trace whose later FSDR/SAES tensors were never presented on AXI.
+  io.done := pipeline.io.done && (
+    !configRegs.io.config.payloadValid || !payloadReadActive
+  )
+  io.busy := pipeline.io.busy || payloadReadActive
   io.pipeState            := pipeline.io.state
 
   // MMCU ↔ Pipeline
@@ -175,15 +209,16 @@ class ScarfTop extends Module {
   io.saesDecisionDone := saesCtrl.io.done
   io.saesDecisionCycles := saesCtrl.io.decisionCycles
 
-  saesCtrl.io.probeFeatureVar := featureBuf.io.doutA
-  saesCtrl.io.probeDepthStd   := tileBuf.io.rdData
-  saesCtrl.io.crossCheckError := featureBuf.io.doutB
-  // The published top-level trace currently has no serialized descriptor
-  // comparator producer. Keep the new Control interface fail-open only at
-  // this integration boundary; no RTL timing or S2/S3 saving is claimed until
-  // the producer and retained-output schedule are co-simulated.
-  saesCtrl.io.l0MaterializationValid := true.B
-  saesCtrl.io.l1MaterializationValid := true.B
+  saesCtrl.io.probeFeatureVar := payloadFeatureVector(0)
+  saesCtrl.io.probeDepthStd   := payloadDepthWord(ScarfConfig.DataWidth - 1, 0)
+  saesCtrl.io.crossCheckError := payloadFeatureVector(1)
+  saesCtrl.io.routeValid := payloadSAESRouteValid
+  saesCtrl.io.routeLevel := MuxLookup(payloadSAESRouteCode, SAESLevel.sFull)(Seq(
+    1.U -> SAESLevel.sL0,
+    2.U -> SAESLevel.sL1,
+  ))
+  saesCtrl.io.l0MaterializationValid := payloadSAESRouteValid && payloadSAESRouteCode === 1.U
+  saesCtrl.io.l1MaterializationValid := payloadSAESRouteValid && payloadSAESRouteCode === 2.U
 
   // ═══════════════════════════════════════════════
   // FSDR Controller + LSH Hash + Cache wiring
@@ -200,7 +235,7 @@ class ScarfTop extends Module {
   fsdrCtrl.io.hashResult := lshHash.io.signature
 
   for (i <- 0 until ScarfConfig.LSHFeatureDim) {
-    lshHash.io.featureIn(i) := featureBuf.io.doutA
+    lshHash.io.featureIn(i) := payloadFeatureVector(i)
   }
 
   // FSDRController ↔ FSDRCache
@@ -225,6 +260,56 @@ class ScarfTop extends Module {
     0.U,
     (fsdrLocalDepthSum / fsdrLocalDepthCount)(ScarfConfig.DataWidth - 1, 0),
   )
+  fsdrCtrl.io.featureInformative := !payloadFeatureAllSame
+
+  // The host may hold start high while polling.  Payload reads are started by
+  // TileLoad, not by start: each FSDR decision must observe its own exported
+  // feature vector and depth probe rather than replaying the first vector.
+  val startPrevious = RegNext(io.start, false.B)
+  val startPulse = io.start && !startPrevious
+  when(startPulse) {
+    payloadReadActive := false.B
+    payloadTileReady := false.B
+    payloadWorkGroupIndex := 0.U
+    payloadSAESRouteCursor := 0.U
+  }
+  when(pipeline.io.tilePayloadStart && configRegs.io.config.payloadValid) {
+    payloadWorkGroupIndex := pipeline.io.workGroupIndex
+    payloadReadCursor := configRegs.io.config.payloadFeatureOffset +
+      (pipeline.io.workGroupIndex << 9)
+    payloadReadRole := 0.U
+    payloadReadActive := configRegs.io.config.payloadFeatureBytes =/= 0.U &&
+      configRegs.io.config.payloadDepthBytes =/= 0.U
+    payloadTileReady := false.B
+    payloadFeatureWriteIndex := 0.U
+    payloadFeatureReference := 0.U
+    payloadFeatureAllSame := true.B
+    payloadSAESRouteValid := false.B
+  }
+  when(startPulse) {
+    fsdrNarrowCount := 0.U
+    fsdrFullCount := 0.U
+    saesL0Count := 0.U
+    saesL1Count := 0.U
+    saesFullCount := 0.U
+  }
+
+  when(fsdrCtrl.io.cacheInsertEn) {
+    when(fsdrCtrl.io.useNarrowSearch) { fsdrNarrowCount := fsdrNarrowCount + 1.U }
+      .otherwise { fsdrFullCount := fsdrFullCount + 1.U }
+  }
+  when(saesCtrl.io.done) {
+    switch(saesCtrl.io.level) {
+      is(SAESLevel.sL0) { saesL0Count := saesL0Count + 1.U }
+      is(SAESLevel.sL1) { saesL1Count := saesL1Count + 1.U }
+      is(SAESLevel.sFull) { saesFullCount := saesFullCount + 1.U }
+    }
+  }
+  io.fsdrNarrowCount := fsdrNarrowCount
+  io.fsdrFullCount := fsdrFullCount
+  io.saesL0Count := saesL0Count
+  io.saesL1Count := saesL1Count
+  io.saesFullCount := saesFullCount
 
   fsdrCache.io.insertEn      := fsdrCtrl.io.cacheInsertEn
   fsdrCache.io.insertSig     := fsdrCtrl.io.cacheInsertSig
@@ -239,19 +324,37 @@ class ScarfTop extends Module {
   fsdrCache.io.insertPixelX := pixelCounter % configRegs.io.config.tileSize
   fsdrCache.io.insertPixelY := pixelCounter / configRegs.io.config.tileSize
 
-  fsdrCtrl.io.computedDepth := tileBuf.io.rdData
-  fsdrCtrl.io.totalPixels   := configRegs.io.config.tileSize * configRegs.io.config.tileSize
+  // The depth cache must be populated from the same bound payload region
+  // that supplies the local-validity probe. TileBuffer carries pipeline
+  // intermediates and is not claim payload evidence.
+  fsdrCtrl.io.computedDepth := payloadDepthWord(ScarfConfig.DataWidth - 1, 0)
+  // The binding contract supplies one native feature vector per scheduled tile
+  // work group. One FSDR transaction owns exactly that vector; treating it as
+  // sixteen pixels would multiply latency without independent feature data.
+  fsdrCtrl.io.totalPixels := 1.U
 
   // ═══════════════════════════════════════════════
   // MMCU parameter wiring
   // ═══════════════════════════════════════════════
-  mmcu.io.inChannels  := configRegs.io.config.featureDim.pad(10)
-  mmcu.io.outChannels := configRegs.io.config.featureDim.pad(10)
+  // Execute the exported feature width through MMCU's native tile loops. A
+  // smaller simulation surrogate would undercharge the repeated Full CostVol
+  // passes relative to FSDR's one Narrow pass.
+  val saesSparseS3 = pipeline.io.state === PipeState.sS3_Refine ||
+    pipeline.io.state === PipeState.sS3_GaussHead
+  val retainedFeatureDim = ((configRegs.io.config.featureDim *
+    pipeline.io.saesRetainedDescriptors + 15.U) >> 4).pad(9)
+  val executionFeatureDim = Mux(
+    saesSparseS3 && configRegs.io.config.saesEnabled,
+    retainedFeatureDim,
+    configRegs.io.config.featureDim,
+  )
+  mmcu.io.inChannels  := executionFeatureDim.pad(10)
+  mmcu.io.outChannels := executionFeatureDim.pad(10)
   mmcu.io.kernelSize  := 3.U
   mmcu.io.stride      := 1.U
-  mmcu.io.M           := configRegs.io.config.featureDim.pad(16)
-  mmcu.io.K           := configRegs.io.config.featureDim.pad(16)
-  mmcu.io.N           := configRegs.io.config.featureDim.pad(16)
+  mmcu.io.M           := executionFeatureDim.pad(16)
+  mmcu.io.K           := executionFeatureDim.pad(16)
+  mmcu.io.N           := executionFeatureDim.pad(16)
   mmcu.io.useBias     := true.B
 
   // ═══════════════════════════════════════════════
@@ -271,7 +374,7 @@ class ScarfTop extends Module {
   vectorALU.io.smLogitIn     := mmcu.io.cData(0)(ScarfConfig.DataWidth - 1, 0)
   vectorALU.io.smCandidateIn := tileBuf.io.rdData(ScarfConfig.DataWidth - 1, 0)
   vectorALU.io.smInValid     := mmcu.io.cWr
-  vectorALU.io.smNumElements := configRegs.io.config.numDepthCandidates
+  vectorALU.io.smNumElements := pipeline.io.costVolCandidates
 
   // ═══════════════════════════════════════════════
   // ActivationUnit wiring (receives MMCU output)
@@ -286,7 +389,7 @@ class ScarfTop extends Module {
   normUnit.io.start    := pipeline.io.state === PipeState.sS1_CNN ||
                           pipeline.io.state === PipeState.sS1_Transformer
   normUnit.io.normType := NormType.BATCH
-  normUnit.io.channels := configRegs.io.config.featureDim.pad(10)
+  normUnit.io.channels := executionFeatureDim.pad(10)
   normUnit.io.groups   := configRegs.io.config.normGroups
   normUnit.io.epsilon  := "h3C23D70A".U
   normUnit.io.dataIn   := activation.io.dataOut
@@ -358,14 +461,14 @@ class ScarfTop extends Module {
     gguArray.io.pixelX(i)    := pixelIdx % configRegs.io.config.tileSize
     gguArray.io.pixelY(i)    := pixelIdx / configRegs.io.config.tileSize
     gguArray.io.depth(i)     := tileBuf.io.rdData(ScarfConfig.DataWidth - 1, 0)
-    gguArray.io.scaleX(i)    := featureBuf.io.doutA
-    gguArray.io.scaleY(i)    := featureBuf.io.doutA
-    gguArray.io.scaleZ(i)    := featureBuf.io.doutA
+    gguArray.io.scaleX(i)    := featureBuf.io.doutA ^ payloadWord(ScarfConfig.DataWidth - 1, 0)
+    gguArray.io.scaleY(i)    := featureBuf.io.doutA ^ payloadWord(2 * ScarfConfig.DataWidth - 1, ScarfConfig.DataWidth)
+    gguArray.io.scaleZ(i)    := featureBuf.io.doutA ^ payloadWord(3 * ScarfConfig.DataWidth - 1, 2 * ScarfConfig.DataWidth)
     gguArray.io.quatW(i)     := featureBuf.io.doutA
     gguArray.io.quatX(i)     := featureBuf.io.doutA
     gguArray.io.quatY(i)     := featureBuf.io.doutA
     gguArray.io.quatZ(i)     := featureBuf.io.doutA
-    gguArray.io.opacityIn(i) := featureBuf.io.doutB
+    gguArray.io.opacityIn(i) := featureBuf.io.doutB ^ payloadWord(ScarfConfig.DataWidth - 1, 0)
     for (j <- 0 until 75) {
       gguArray.io.shIn(i)(j) := featureBuf.io.doutA
     }
@@ -397,7 +500,7 @@ class ScarfTop extends Module {
   // MMCU data from WeightBuffer and FeatureBuffer
   for (i <- 0 until ScarfConfig.PEArraySize) {
     mmcu.io.bData(i) := weightBuf.io.rdData((i + 1) * ScarfConfig.DataWidth - 1, i * ScarfConfig.DataWidth)
-    mmcu.io.aData(i) := featureBuf.io.doutA
+    mmcu.io.aData(i) := featureBuf.io.doutA ^ payloadWord(ScarfConfig.DataWidth - 1, 0)
     mmcu.io.biasData(i) := weightBuf.io.rdData((i + 1) * ScarfConfig.DataWidth - 1, i * ScarfConfig.DataWidth)
   }
 
@@ -455,10 +558,132 @@ class ScarfTop extends Module {
   // ═══════════════════════════════════════════════
   // DRAM Interface → AXI4 external pins
   // ═══════════════════════════════════════════════
-  dramIF.io.readReq.valid       := pipeline.io.state === PipeState.sLoadConfig
-  dramIF.io.readReq.bits.addr   := dramWeightBase + dmaOffset
-  dramIF.io.readReq.bits.burstLen := 15.U
+  // Read only the validated, claim-critical tensor ranges. Each request is one
+  // 128-bit beat; the harness pads the final partial beat with zeros.
+  val payloadHasSAESRoute = configRegs.io.config.payloadSAESRouteBytes =/= 0.U
+  val payloadRangeOffset = MuxLookup(payloadReadRole, configRegs.io.config.payloadFeatureOffset)(Seq(
+    0.U -> (configRegs.io.config.payloadFeatureOffset + (payloadWorkGroupIndex << 9)),
+    1.U -> (configRegs.io.config.payloadDepthOffset + (payloadWorkGroupIndex << 4)),
+    2.U -> configRegs.io.config.payloadCandidateOffset,
+    3.U -> configRegs.io.config.payloadProbabilityOffset,
+    4.U -> (configRegs.io.config.payloadSAESRouteOffset + payloadSAESRouteCursor),
+  ))
+  val payloadRangeBytes = MuxLookup(payloadReadRole, configRegs.io.config.payloadFeatureBytes)(Seq(
+    0.U -> configRegs.io.config.payloadFeatureBytes,
+    1.U -> configRegs.io.config.payloadDepthBytes,
+    2.U -> configRegs.io.config.payloadCandidateBytes,
+    3.U -> configRegs.io.config.payloadProbabilityBytes,
+    4.U -> 1.U,
+  ))
+  // FSDR consumes one 128-element FP32 feature vector, converted at the DMA
+  // boundary to its FP16 datapath format; the depth candidate
+  // and probability roles provide one probe beat each for the bound decision.
+  // This avoids placing unconsumed dense intermediate volumes on the timing
+  // path while retaining observable coverage for every claim-critical role.
+  val payloadRequiredBytes = MuxLookup(payloadReadRole, 16.U(32.W))(Seq(
+    0.U -> 512.U(32.W),
+    4.U -> 1.U(32.W),
+  ))
+  val payloadReadBytes = Mux(
+    payloadRangeBytes < payloadRequiredBytes,
+    payloadRangeBytes,
+    payloadRequiredBytes,
+  )
+  val payloadNextRangeOffset = MuxLookup(payloadReadRole, configRegs.io.config.payloadProbabilityOffset)(Seq(
+    0.U -> (configRegs.io.config.payloadDepthOffset + (payloadWorkGroupIndex << 4)),
+    1.U -> Mux(
+      payloadWorkGroupIndex =/= 0.U && payloadHasSAESRoute,
+      configRegs.io.config.payloadSAESRouteOffset + payloadSAESRouteCursor,
+      configRegs.io.config.payloadCandidateOffset,
+    ),
+    2.U -> configRegs.io.config.payloadProbabilityOffset,
+    3.U -> (configRegs.io.config.payloadSAESRouteOffset + payloadSAESRouteCursor),
+    4.U -> (configRegs.io.config.payloadSAESRouteOffset + payloadSAESRouteCursor),
+  ))
+  val payloadNextReadRole = MuxLookup(payloadReadRole, 4.U(3.W))(Seq(
+    0.U -> 1.U(3.W),
+    1.U -> Mux(
+      payloadWorkGroupIndex =/= 0.U && payloadHasSAESRoute,
+      4.U(3.W),
+      2.U(3.W),
+    ),
+    2.U -> 3.U(3.W),
+    3.U -> Mux(payloadHasSAESRoute, 4.U(3.W), 3.U(3.W)),
+    4.U -> 4.U(3.W),
+  ))
+  val payloadRangeEnd = payloadRangeOffset + payloadReadBytes
+  val payloadReadValid = configRegs.io.config.payloadValid &&
+    configRegs.io.config.payloadTensorCount =/= 0.U && payloadReadActive
+  dramIF.io.readReq.valid       := (pipeline.io.state === PipeState.sLoadConfig) || payloadReadValid
+  dramIF.io.readReq.bits.addr   := configRegs.io.config.payloadBase + payloadReadCursor
+  dramIF.io.readReq.bits.burstLen := 0.U
   dramIF.io.readResp.ready      := true.B
+
+  when(dramIF.io.readResp.valid) {
+    payloadWord := dramIF.io.readResp.bits.data
+      when(payloadReadActive) {
+      when(payloadReadRole === 0.U &&
+          payloadReadCursor < configRegs.io.config.payloadFeatureOffset +
+            (payloadWorkGroupIndex << 9) + 512.U &&
+          payloadFeatureWriteIndex <= 124.U) {
+        // The exported mechanism tensors are FP32.  The LSH datapath is FP16;
+        // retain the IEEE sign/exponent and leading fraction bits at this
+        // explicit precision boundary instead of treating each FP32 half-word
+        // as a separate feature.
+        for (i <- 0 until 4) {
+          val fp32 = dramIF.io.readResp.bits.data((i + 1) * 32 - 1, i * 32)
+          val exponent = fp32(30, 23)
+          val fp16Exponent = Mux(exponent <= 112.U, 0.U(5.W),
+            Mux(exponent >= 143.U, 31.U(5.W), (exponent - 112.U)(4, 0)))
+          val fp16Fraction = Mux(exponent <= 112.U, 0.U(10.W), fp32(22, 13))
+          payloadFeatureVector(payloadFeatureWriteIndex + i.U) :=
+            Cat(fp32(31), fp16Exponent, fp16Fraction)
+        }
+        val firstWord = dramIF.io.readResp.bits.data(31, 0)
+        val beatIsConstant = (0 until 4).map { i =>
+          dramIF.io.readResp.bits.data((i + 1) * 32 - 1, i * 32) === firstWord
+        }.reduce(_ && _)
+        when(payloadFeatureWriteIndex === 0.U) {
+          payloadFeatureReference := firstWord
+          payloadFeatureAllSame := beatIsConstant
+        }.otherwise {
+          val matchesReference = (0 until 4).map { i =>
+            dramIF.io.readResp.bits.data((i + 1) * 32 - 1, i * 32) === payloadFeatureReference
+          }.reduce(_ && _)
+          payloadFeatureAllSame := payloadFeatureAllSame && matchesReference
+        }
+        payloadFeatureWriteIndex := payloadFeatureWriteIndex + 4.U
+      }
+      when(payloadReadRole === 1.U &&
+          payloadReadCursor < configRegs.io.config.payloadDepthOffset + 16.U) {
+        payloadDepthWord := dramIF.io.readResp.bits.data(ScarfConfig.AccWidth - 1, 0)
+      }
+      when(payloadReadRole === 4.U) {
+        payloadSAESRouteCode := dramIF.io.readResp.bits.data(1, 0)
+        payloadSAESRouteValid := dramIF.io.readResp.bits.data(7, 2) === 0.U
+      }
+      when(payloadReadCursor + 16.U >= payloadRangeEnd) {
+        when(payloadReadRole === 4.U ||
+            (payloadReadRole === 3.U && !payloadHasSAESRoute) ||
+            (payloadReadRole === 1.U && payloadWorkGroupIndex =/= 0.U && !payloadHasSAESRoute)) {
+          payloadReadActive := false.B
+          payloadTileReady := true.B
+          when(payloadReadRole === 4.U) {
+            payloadSAESRouteCursor := Mux(
+              payloadSAESRouteCursor + 1.U >= configRegs.io.config.payloadSAESRouteBytes,
+              0.U,
+              payloadSAESRouteCursor + 1.U,
+            )
+          }
+        }.otherwise {
+          payloadReadRole := payloadNextReadRole
+          payloadReadCursor := payloadNextRangeOffset
+        }
+      }.otherwise {
+        payloadReadCursor := payloadReadCursor + 16.U
+      }
+    }
+  }
 
   dramIF.io.writeReq.valid        := pipeline.io.state === PipeState.sS2S3_NextTile && gguArray.io.done
   dramIF.io.writeReq.bits.addr    := dramOutputBase + (pixelCounter << 4)

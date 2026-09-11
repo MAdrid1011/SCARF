@@ -219,6 +219,24 @@ def test_aggregate_results_preserves_evidence_and_computes_dataset_means(tmp_pat
     assert record["validation"]["dispersion"]["baseline.psnr_db"]["population_stddev"] == 0.5
 
 
+def test_quality_claim_aggregate_does_not_require_timing_backend(tmp_path):
+    from scripts.aggregate_results import aggregate
+    from scripts.validate_result import validate
+
+    records = [sample_record(0), sample_record(1)]
+    for record in records:
+        record["provenance"]["execution_contract"] = {
+            "run_class": "claim",
+            "saes_materialization": "representative",
+        }
+        record["provenance"]["claim_workflow"] = "quality"
+
+    aggregate_record = aggregate(write_samples(tmp_path, records), 2)
+    validate(aggregate_record)
+    assert aggregate_record["provenance"]["claim_workflow"] == "quality"
+    assert "claim_timing" not in aggregate_record["performance"]
+
+
 def test_v2_aggregate_sums_discrete_events_and_mmcu_slots(tmp_path):
     from scripts.aggregate_results import aggregate
     from scripts.validate_result import validate

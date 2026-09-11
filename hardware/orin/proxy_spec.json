@@ -1,0 +1,17 @@
+{
+  "schema_version": "scarf-orin-proxy-spec-v1",
+  "claim_eligible": false,
+  "device_model": "NVIDIA Jetson Orin NX 16GB (declared target)",
+  "architecture": "Ampere",
+  "fp32_tflops": 1.88,
+  "memory_bandwidth_gbps": 102.4,
+  "clock_mhz": 918,
+  "asic_reference_clock_mhz": 1000,
+  "clock_basis": "published maximum GPU clock; replace with the locked clock used by a real run",
+  "source": "NVIDIA Jetson Orin NX 16GB public product specification",
+  "method": "declared_peak_specification_not_device_measurement",
+  "notes": [
+    "Replace this target spec only with a documented platform-specific specification.",
+    "The proxy remains non-claim evidence even when the target specification is changed."
+  ]
+}

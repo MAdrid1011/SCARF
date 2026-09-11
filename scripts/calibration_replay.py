@@ -121,6 +121,10 @@ def replay_calibration_sample(
             context_extrinsics=context_extrinsics,
             context_intrinsics=context_intrinsics,
             ray_depth_mode=ray_depth_mode,
+            # Calibration must replay the same frozen safety boundary used by
+            # the claim path.  Leaving this disabled makes the offline trace
+            # accept tiles that the shipped execution identity would reject.
+            context_safety_guard=True,
         )
         fsdr = FSDRSimulator(
             feature_dim=int(view_features.shape[1]),
@@ -148,6 +152,12 @@ def replay_calibration_sample(
             for local_index, path in enumerate(paths):
                 reuse = fsdr.reuse_data.get(local_index)
                 if reuse is None:
+                    continue
+                # An out-of-window cache hit is not a valid depth substitute.
+                # Keep the dense Gaussian instead of applying a guessed ratio;
+                # this is the same fail-closed quality boundary as the claim
+                # renderer and prevents a cache miss from becoming corruption.
+                if not reuse.get("in_window", True):
                     continue
                 ratio = float(reuse["depth_ratio"])
                 if math.isclose(ratio, 1.0, rel_tol=0.0, abs_tol=1e-6):

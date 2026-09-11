@@ -2358,35 +2358,29 @@ class ProgressiveSAES:
             and torch.isfinite(harmonics).all()
             and torch.isfinite(opacities).all()
         )
-        covariance_cosines = []
-        harmonic_cosines = []
-        opacity_distances = []
-        for first in range(len(anchor_indices)):
-            for second in range(first + 1, len(anchor_indices)):
-                covariance_cosines.append(
-                    float(
-                        F.cosine_similarity(
-                            covariances[first].unsqueeze(0),
-                            covariances[second].unsqueeze(0),
-                            eps=1e-8,
-                        ).item()
-                    )
-                )
-                harmonic_cosines.append(
-                    float(
-                        F.cosine_similarity(
-                            harmonics[first].unsqueeze(0),
-                            harmonics[second].unsqueeze(0),
-                            eps=1e-8,
-                        ).item()
-                    )
-                )
-                opacity_distances.append(
-                    float((opacities[first] - opacities[second]).abs().max().item())
-                )
-        covariance_minimum = min(covariance_cosines, default=float("-inf"))
-        harmonic_minimum = min(harmonic_cosines, default=float("-inf"))
-        opacity_maximum = max(opacity_distances, default=float("inf"))
+        pair_first, pair_second = torch.triu_indices(
+            len(anchor_indices), len(anchor_indices), offset=1,
+            device=covariances.device,
+        )
+        if pair_first.numel() == 0:
+            covariance_minimum = float("-inf")
+            harmonic_minimum = float("-inf")
+            opacity_maximum = float("inf")
+        else:
+            covariance_norms = covariances / covariances.norm(
+                dim=1, keepdim=True
+            ).clamp_min(1e-8)
+            harmonic_norms = harmonics / harmonics.norm(
+                dim=1, keepdim=True
+            ).clamp_min(1e-8)
+            covariance_values = (covariance_norms[pair_first] * covariance_norms[pair_second]).sum(dim=1)
+            harmonic_values = (harmonic_norms[pair_first] * harmonic_norms[pair_second]).sum(dim=1)
+            opacity_values = (
+                opacities[pair_first] - opacities[pair_second]
+            ).abs().amax(dim=1)
+            covariance_minimum = float(covariance_values.amin().item())
+            harmonic_minimum = float(harmonic_values.amin().item())
+            opacity_maximum = float(opacity_values.amax().item())
         return {
             "level": level,
             "anchor_indices": list(anchor_indices),
@@ -2536,23 +2530,23 @@ class ProgressiveSAES:
         )
         maximum_center_mahalanobis = 0.0
         try:
-            for first in range(len(anchor_indices)):
-                for second in range(first + 1, len(anchor_indices)):
-                    delta = centers[first] - centers[second]
-                    pair_covariance = (
-                        projected_covariances[first] + projected_covariances[second]
-                    )
-                    distance_squared = torch.dot(
-                        delta,
-                        torch.linalg.solve(pair_covariance, delta),
-                    )
-                    if not bool(torch.isfinite(distance_squared)):
-                        result["reason"] = "invalid_footprint"
-                        return result
-                    maximum_center_mahalanobis = max(
-                        maximum_center_mahalanobis,
-                        float(distance_squared.clamp_min(0.0).sqrt().item()),
-                    )
+            pair_first, pair_second = torch.triu_indices(
+                len(anchor_indices), len(anchor_indices), offset=1,
+                device=centers.device,
+            )
+            deltas = centers[pair_first] - centers[pair_second]
+            pair_covariances = (
+                projected_covariances[pair_first]
+                + projected_covariances[pair_second]
+            )
+            solved = torch.linalg.solve(pair_covariances, deltas.unsqueeze(-1)).squeeze(-1)
+            distances_squared = (deltas * solved).sum(dim=1)
+            if not bool(torch.isfinite(distances_squared).all()):
+                result["reason"] = "invalid_footprint"
+                return result
+            maximum_center_mahalanobis = float(
+                distances_squared.clamp_min(0.0).sqrt().amax().item()
+            )
         except RuntimeError:
             result["reason"] = "invalid_footprint"
             return result

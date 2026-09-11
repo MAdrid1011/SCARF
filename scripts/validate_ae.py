@@ -1057,6 +1057,110 @@ def validate_complete(
     }
 
 
+def validate_workflow_smoke(output: Path) -> dict[str, Any]:
+    """Validate a selected end-to-end run without comparing paper targets.
+
+    This scope is deliberately weaker than ``--require-key-results``: it
+    proves that the selected samples, payloads, source timing, aggregates, and
+    reports are closed over one selection, while never promoting a one-scene
+    smoke run to full Results Reproduced evidence.
+    """
+    from scripts.reviewer_run_config import load_selection
+    from scripts.claim_timing_backend import load_claim_timing_manifest
+
+    output = Path(output).resolve()
+    selection = load_selection(output / "run-selection.json")
+    checks: list[dict[str, Any]] = []
+    selection_hash = selection["selection_sha256"]
+    checks.append({"claim": "workflow_smoke:selection_hash", "pass": bool(selection_hash)})
+    timing_path = output / "timing-backend/manifest.json"
+    timing = None
+    if timing_path.is_file():
+        try:
+            timing = load_claim_timing_manifest(timing_path, root=output)
+            checks.append({"claim": "workflow_smoke:source_rtl_timing", "pass": True})
+        except (OSError, ValueError) as exc:
+            checks.append({"claim": "workflow_smoke:source_rtl_timing", "pass": False, "error": str(exc)})
+    else:
+        checks.append({"claim": "workflow_smoke:source_rtl_timing", "pass": False, "error": "timing-backend/manifest.json is missing"})
+
+    for pair, pair_selection in sorted(selection["pairs"].items()):
+        directory = pair.replace("/", "_")
+        for workflow in ("quality", "mechanisms"):
+            path = output / workflow / directory / "results.json"
+            check = {
+                "claim": f"workflow_smoke:{workflow}:{pair}",
+                "path": str(path.relative_to(output)),
+                "pass": False,
+            }
+            try:
+                record = load(path)
+                validate(record)
+                evaluation = record["provenance"]["evaluation"]
+                check["pass"] = (
+                    evaluation.get("kind") == "dataset_aggregate"
+                    and evaluation.get("sample_count") == pair_selection["sample_count"]
+                    and evaluation.get("run_selection_sha256") == selection_hash
+                    and record.get("provenance", {}).get("execution_contract", {}).get("run_class") == "claim"
+                )
+                if workflow == "mechanisms" and timing is None:
+                    check["pass"] = False
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                check["error"] = str(exc)
+            checks.append(check)
+
+        quality_samples = output / "quality" / directory / "samples"
+        payload_paths = sorted(quality_samples.glob("sample_*/rtl-payload.bin"))
+        checks.append({
+            "claim": f"workflow_smoke:payloads:{pair}",
+            "actual": len(payload_paths),
+            "target": pair_selection["sample_count"],
+            "pass": len(payload_paths) == pair_selection["sample_count"],
+        })
+        if timing is not None:
+            present = sum(
+                1 for key in timing.samples
+                if f"{key[0]}/{key[1]}" == pair and key[2] in {
+                    int(sample["sample_index"]) for sample in pair_selection["samples"]
+                }
+            )
+            checks.append({
+                "claim": f"workflow_smoke:timing_coverage:{pair}",
+                "actual": present,
+                "target": pair_selection["sample_count"],
+                "pass": present == pair_selection["sample_count"],
+            })
+    proxy = output / "reports/orin-nx-proxy.json"
+    if proxy.is_file():
+        try:
+            proxy_record = load(proxy)
+            checks.append({
+                "claim": "workflow_smoke:proxy_is_nonclaim",
+                "pass": proxy_record.get("claim_eligible") is False,
+            })
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            checks.append({"claim": "workflow_smoke:proxy_is_nonclaim", "pass": False, "error": str(exc)})
+    report_dir = output / "reports"
+    checks.append({
+        "claim": "workflow_smoke:reports_present",
+        "pass": (report_dir / "table1_quality.csv").is_file()
+        and (report_dir / "figure11_ablation.csv").is_file(),
+    })
+    passed = all(check.get("pass") is True for check in checks)
+    return {
+        "schema_version": "1.0",
+        "status": "PASS" if passed else "FAIL",
+        "validation_profile": "workflow-smoke",
+        "workflow_smoke": True,
+        "require_key_results": False,
+        "checks": checks,
+        "summary": {
+            "passed": sum(check.get("pass") is True for check in checks),
+            "total": len(checks),
+        },
+    }
+
+
 def validate_current_release(
     output: Path,
     *,
@@ -1099,17 +1203,27 @@ def main() -> int:
         action="store_true",
         help="Use quality evidence as the functional source reference when quick was not run",
     )
+    parser.add_argument(
+        "--workflow-smoke",
+        action="store_true",
+        help="validate the configured subset and bindings without paper target comparisons",
+    )
     args = parser.parse_args()
     try:
-        record = validate_complete(
-            args.input.resolve(),
-            args.expected.resolve(),
-            require_key_results=(
-                args.require_key_results or args.profile == "evaluator-final"
-            ),
-            allow_missing_quick=args.allow_missing_quick,
-            validation_profile=args.profile,
-        )
+        if args.workflow_smoke:
+            if args.require_key_results or args.profile == "evaluator-final":
+                raise ValueError("--workflow-smoke cannot be combined with key-result validation")
+            record = validate_workflow_smoke(args.input.resolve())
+        else:
+            record = validate_complete(
+                args.input.resolve(),
+                args.expected.resolve(),
+                require_key_results=(
+                    args.require_key_results or args.profile == "evaluator-final"
+                ),
+                allow_missing_quick=args.allow_missing_quick,
+                validation_profile=args.profile,
+            )
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

@@ -56,20 +56,9 @@ _DATASET_REPRESENTATIONS = {
 }
 
 _HYDRA_OVERRIDES = {
-    # The public Re10K checkpoint is the large ViT-L model. These are the
-    # exact evaluation overrides published in the pinned DepthSplat README.
-    ("depthsplat", "re10k"): (
-        "model.encoder.num_scales=2",
-        "model.encoder.upsample_factor=2",
-        "model.encoder.lowest_feature_resolution=4",
-        "model.encoder.monodepth_vit_type=vitl",
-    ),
-    ("depthsplat", "acid"): (
-        "model.encoder.num_scales=2",
-        "model.encoder.upsample_factor=2",
-        "model.encoder.lowest_feature_resolution=4",
-        "model.encoder.monodepth_vit_type=vitl",
-    ),
+    # The pinned Re10K checkpoint is the default DepthSplat vits,
+    # single-scale architecture. Do not substitute a ViT-L multi-scale graph:
+    # its checkpoint tensors have incompatible widths and pyramid topology.
     # The public DL3DV checkpoint is the base ViT-B model.
     ("depthsplat", "dl3dv"): (
         "model.encoder.num_scales=2",

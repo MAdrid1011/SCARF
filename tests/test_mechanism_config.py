@@ -7,7 +7,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_preregistered_config_has_portable_nonclaim_provenance():
+def test_frozen_config_has_portable_claim_provenance():
     from scripts.mechanism_config import load_mechanism_config
     from scripts.saes_execution_identity import build_saes_execution_identity
 
@@ -15,11 +15,11 @@ def test_preregistered_config_has_portable_nonclaim_provenance():
         ROOT / "artifact/mechanism_config.json"
     )
 
-    assert config["status"] == "preregistered"
-    assert provenance["status"] == "preregistered"
+    assert config["status"] == "calibrated"
+    assert provenance["status"] == "calibrated"
     assert provenance["global_configuration"] is True
-    assert provenance["evaluation_disjoint"] is False
-    assert provenance["candidate_records_sha256"] is None
+    assert provenance["evaluation_disjoint"] is True
+    assert len(provenance["candidate_records_sha256"]) == 64
     assert len(provenance["mechanism_config_sha256"]) == 64
     assert len(provenance["manifest_sha256"]) == 64
     assert config["fixed"]["saes_l1_depth_reference"] == "primary-routing-probes-v1"
@@ -119,15 +119,18 @@ def test_calibrated_config_requires_complete_hash_bound_selection(tmp_path):
     path = tmp_path / "config.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="calibration hashes"):
+    with pytest.raises(ValueError, match="tuple does not match"):
         load_mechanism_config(path)
 
 
-def test_claim_execution_rejects_a_preregistered_config():
+def test_claim_execution_accepts_the_frozen_config():
     from scripts.mechanism_config import require_calibrated_mechanism
 
-    with pytest.raises(RuntimeError, match="has not been calibrated"):
-        require_calibrated_mechanism(ROOT / "artifact/mechanism_config.json")
+    _config, provenance = require_calibrated_mechanism(
+        ROOT / "artifact/mechanism_config.json"
+    )
+    assert provenance["status"] == "calibrated"
+    assert provenance["protocol"] == "acid_train_holdout_v1"
 
 
 def test_result_builder_emits_v21_and_binds_the_mechanism_config():

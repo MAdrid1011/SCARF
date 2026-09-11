@@ -1,0 +1,53 @@
+{
+  "claim_eligible": true,
+  "holdout": {
+    "candidate_set_sha256": "cb35541deaa13e79b57a5855f8c3e3e592f64cb3dc1dd4609186a05e2814c2c3",
+    "count": 1,
+    "quality": {
+      "lpips_increase": 0.0004922798252664506,
+      "psnr_loss_db": 0.0,
+      "ssim_loss": 3.3855438232421875e-05
+    },
+    "scene_set_sha256": "da764ac0d4771e6d15e8a5ce10a201253abb17ab060e9d39f2e40b9424586e7e",
+    "selection_sha256": "2af239d79111c54836f62d200278e56a55bacfa462ecc398d02d716ca5a9334b",
+    "trace_set_sha256": "13d0f4dea748711bbecd863d25518b06a557d10ef14e8dc790e92510a64cce98",
+    "traces": [
+      {
+        "path": "results.json",
+        "scene": "4fa73a829dde9435",
+        "sha256": "74989a43984f61295fea6e1ecb4999170e996a788bd7eef64d47c1816e7b7b83"
+      }
+    ],
+    "validated_parameters_sha256": "cee5f40a47e6ae8c3d8df546706aa96f717293c8203288458063522f61d60aed"
+  },
+  "kind": "frozen_calibration_candidate_summary",
+  "protocol": "acid_train_holdout_v1",
+  "schema_version": "scarf-calibration-candidates-v1",
+  "selected": {
+    "beta_d": 1.0,
+    "beta_f": 0.1,
+    "beta_x": 0.5,
+    "gamma_depth": 0.075
+  },
+  "selection_rule": "quality constraints, maximum event work reduction",
+  "train": {
+    "candidate_set_sha256": "21be0e1d22a26b22e62afe66e3b2428e5a57edf8530439a3ea6aec65c3c276d5",
+    "count": 1,
+    "quality": {
+      "lpips_increase": 1.1479516615509056e-05,
+      "psnr_loss_db": 0.0,
+      "ssim_loss": 7.808208465576172e-06
+    },
+    "scene_set_sha256": "ed280117717e79f8d05cc24988f7d16f6b956fbeba409fd4099769a10d740b65",
+    "selection_sha256": "922539db8535e9d9275dc6054b9b888a89fcad991ba101dd5246006c7a2f91b2",
+    "trace_set_sha256": "74fcec111aee729997c871d038e79effdab14e2d2781cb56f9f981a78272b195",
+    "traces": [
+      {
+        "path": "results.json",
+        "scene": "244c8d81c004cb58",
+        "sha256": "f28420c4e14077ef94c87a4fdface2a1173d5f46b37e96635fd02db3b32a78ec"
+      }
+    ],
+    "validated_parameters_sha256": "cee5f40a47e6ae8c3d8df546706aa96f717293c8203288458063522f61d60aed"
+  }
+}

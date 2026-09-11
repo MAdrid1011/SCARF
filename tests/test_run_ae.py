@@ -44,6 +44,46 @@ def test_quality_dry_run_plans_all_pairs_independently_of_current_evidence(tmp_p
     }
 
 
+def test_proxy_workflow_uses_unified_entry_point(tmp_path):
+    proxy_input = tmp_path / "reviewer-gpu-proxy.json"
+    proxy_input.write_text("{}", encoding="utf-8")
+    plan = dry_run(tmp_path / "outputs", "proxy", "--proxy-input", str(proxy_input))
+    assert plan["mode"] == "proxy"
+    assert plan["software_claim_scope"]["status"] == "PROXY_ONLY"
+    assert plan["proxy_scope"] == {
+        "status": "PROXY_ONLY",
+        "claim_eligible": False,
+        "evidence_class": "hardware_proxy",
+    }
+    command = plan["commands"][0]
+    assert command[command.index("--input") + 1] == str(proxy_input.resolve())
+    assert command[command.index("--output") + 1].endswith(
+        "reports/orin-nx-proxy.json"
+    )
+
+
+def test_proxy_workflow_rejects_real_orin_device_flag(tmp_path):
+    proxy_input = tmp_path / "reviewer-gpu-proxy.json"
+    proxy_input.write_text("{}", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(RUNNER),
+            "proxy",
+            "--dry-run",
+            "--output-root",
+            str(tmp_path / "outputs"),
+            "--proxy-input",
+            str(proxy_input),
+            "--device",
+            "orin",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+
+
 def test_pair_filter_runs_only_requested_protocol_pairs(tmp_path):
     plan = dry_run(
         tmp_path,
@@ -534,6 +574,23 @@ def test_non_orin_performance_is_pending_and_does_not_schedule_orin_wrapper(
         for item in plan["experiments"]
         for command in item["commands"]
     )
+
+
+def test_public_performance_command_stages_canonical_speedup_evidence(tmp_path):
+    plan = dry_run(
+        tmp_path,
+        "performance",
+        "--num-samples",
+        "1",
+        "--pairs",
+        "transplat/re10k",
+    )
+
+    item = plan["experiments"][0]
+    assert item["workflow"] == "performance"
+    assert item["result_workflow"] == "speedup"
+    assert "/speedup/transplat_re10k" in item["result"]
+    assert "/speedup/transplat_re10k" in " ".join(item["command"])
 
 
 def test_execute_plan_skips_pending_evaluator_experiments(tmp_path, monkeypatch):

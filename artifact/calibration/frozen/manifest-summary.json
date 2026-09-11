@@ -1,0 +1,12 @@
+{
+  "dataset": "acid",
+  "evaluation_disjoint": true,
+  "holdout_count": 1,
+  "holdout_scene_set_sha256": "da764ac0d4771e6d15e8a5ce10a201253abb17ab060e9d39f2e40b9424586e7e",
+  "manifest_sha256": "b7db611fd48e17b870edcdc4dff8e89dbab8f6efb3b7ffd3ed2d36730c286ae9",
+  "protocol": "acid_train_holdout_v1",
+  "schema_version": "scarf-calibration-manifest-summary-v1",
+  "source": "local-real-acid-target-free-traces",
+  "train_count": 1,
+  "train_scene_set_sha256": "ed280117717e79f8d05cc24988f7d16f6b956fbeba409fd4099769a10d740b65"
+}

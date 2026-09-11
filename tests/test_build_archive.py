@@ -37,7 +37,15 @@ def test_source_release_excludes_internal_plans_and_failure_logs():
     assert not include_in_source_release(Path("CHECKLIST.md"))
     assert not include_in_source_release(Path("SUMMARY.md"))
     assert not include_in_source_release(Path("outputs/ae_failures/saes/results.json"))
-    assert include_in_source_release(Path("artifact/CLAIMS.md"))
+    assert not include_in_source_release(Path("artifact/CLAIMS.md"))
+
+
+def test_source_release_excludes_agent_companion_notes() -> None:
+    from scripts.build_archive import include_in_source_release
+
+    assert not include_in_source_release(
+        Path("chisel/src/main/scala/scarf/control/PipelineController_codex.md")
+    )
 
 
 def test_source_release_allowlist_excludes_unreviewed_artifact_content():
@@ -46,11 +54,15 @@ def test_source_release_allowlist_excludes_unreviewed_artifact_content():
     assert include_in_source_release(Path("scripts/run_ae.py"))
     assert include_in_source_release(Path("artifact/mechanism_config.json"))
     assert include_in_source_release(Path("artifact/release.json"))
+    assert not include_in_source_release(Path("artifact/REVIEWER_RESPONSE_CN.md"))
     assert include_in_source_release(
         Path("artifact/reference_results/orin_nx_reference.csv")
     )
     assert include_in_source_release(Path("Dockerfile"))
     assert include_in_source_release(Path("docker/run-functional.sh"))
+    assert include_in_source_release(Path("scripts/init_orin_proxy_input.py"))
+    assert include_in_source_release(Path("scripts/normalize_orin_proxy.py"))
+    assert include_in_source_release(Path("hardware/orin/proxy_spec.json"))
     assert not include_in_source_release(
         Path("artifact/reference_results/evidence/raw.json")
     )

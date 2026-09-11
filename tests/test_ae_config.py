@@ -58,18 +58,8 @@ def test_invalid_model_or_dataset_is_rejected():
 def test_depthsplat_checkpoint_variants_pin_upstream_hydra_overrides():
     from scripts.ae_config import resolve_experiment
 
-    large_re10k = (
-        "model.encoder.num_scales=2",
-        "model.encoder.upsample_factor=2",
-        "model.encoder.lowest_feature_resolution=4",
-        "model.encoder.monodepth_vit_type=vitl",
-    )
-    assert resolve_experiment("depthsplat", "re10k", Path("/repo")).hydra_overrides == (
-        large_re10k
-    )
-    assert resolve_experiment("depthsplat", "acid", Path("/repo")).hydra_overrides == (
-        large_re10k
-    )
+    assert resolve_experiment("depthsplat", "re10k", Path("/repo")).hydra_overrides == ()
+    assert resolve_experiment("depthsplat", "acid", Path("/repo")).hydra_overrides == ()
     assert resolve_experiment("depthsplat", "dl3dv", Path("/repo")).hydra_overrides == (
         "model.encoder.num_scales=2",
         "model.encoder.upsample_factor=4",

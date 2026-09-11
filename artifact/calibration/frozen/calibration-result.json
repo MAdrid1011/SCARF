@@ -1,0 +1,17 @@
+{
+  "candidate_records_sha256": "396ad8ace9aaa85065ffe7de99c749270664f598667850d8e2f40d534296a66e",
+  "evaluation_disjoint": true,
+  "holdout_count": 1,
+  "manifest_sha256": "b7db611fd48e17b870edcdc4dff8e89dbab8f6efb3b7ffd3ed2d36730c286ae9",
+  "protocol": "acid_train_holdout_v1",
+  "schema_version": "scarf-calibration-result-v1",
+  "selected": {
+    "beta_d": 1.0,
+    "beta_f": 0.1,
+    "beta_x": 0.5,
+    "gamma_depth": 0.075
+  },
+  "source": "local-real-acid-target-free-traces",
+  "status": "PASS",
+  "train_count": 1
+}

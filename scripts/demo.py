@@ -58,6 +58,7 @@ import sys
 import os
 import time
 import json
+import struct
 from dataclasses import dataclass
 from typing import Dict, Optional, List
 import argparse
@@ -128,6 +129,155 @@ except ModuleNotFoundError as exc:
     capture_torch_rng_state = None
     restore_torch_rng_state = None
     strict_stage_error = None
+
+
+def _payload_layout(name: str, shape: tuple[int, ...]) -> tuple[str, str]:
+    """Return an explicit layout and semantic role for one runtime tensor."""
+    from scripts.rtl_payload import infer_tensor_layout
+
+    return infer_tensor_layout(name, shape)
+
+
+def _runtime_candidate_count(candidate_tensor: object, expected: int, *, probabilities: object = None) -> int:
+    """Read the executed model's explicit D axis and bind it to its predictor."""
+    if torch is None or not torch.is_tensor(candidate_tensor):
+        raise RuntimeError("RTL payload requires executed depth candidates")
+    shape = tuple(int(value) for value in candidate_tensor.shape)
+    layout, role = _payload_layout("depth_candidates", shape)
+    if role != "depth_candidates" or "D" not in layout:
+        raise RuntimeError(f"depth candidate export has no explicit D axis: {shape}")
+    count = int(shape[layout.index("D")])
+    if count != int(expected):
+        raise RuntimeError(
+            "depth candidate export disagrees with the loaded predictor: "
+            f"tensor D={count}, predictor D={expected}"
+        )
+    if probabilities is not None:
+        if not torch.is_tensor(probabilities):
+            raise RuntimeError("depth probability export is not a tensor")
+        probability_shape = tuple(int(value) for value in probabilities.shape)
+        probability_layout, probability_role = _payload_layout(
+            "depth_probabilities", probability_shape
+        )
+        if probability_role != "depth_probabilities" or "D" not in probability_layout:
+            raise RuntimeError(
+                "depth probability export has no explicit D axis: "
+                f"{probability_shape}"
+            )
+        probability_count = int(probability_shape[probability_layout.index("D")])
+        if probability_count != count:
+            raise RuntimeError(
+                "depth candidate and probability tensors disagree on the D axis"
+            )
+    return count
+
+
+def _rtl_encoder_schedule(encoder: object, *, has_executed_dinov2: bool) -> dict[str, int | bool]:
+    """Derive S1 schedule registers from the loaded encoder graph.
+
+    TranSplat and MVSplat share the same six-layer multiview transformer, but
+    only TranSplat executes its auxiliary DepthAnythingV2 path. Read the
+    backbone layer containers instead of silently substituting generic layer
+    counts; the auxiliary stage and its block count are recorded only after
+    their output was produced by this sample's execution.
+    """
+    backbone = getattr(encoder, "backbone", None)
+    feature_backbone = getattr(backbone, "backbone", None)
+    transformer = getattr(backbone, "transformer", None)
+    transformer_layers = getattr(transformer, "layers", None)
+    cnn_layers = 0
+    for name in ("layer1", "layer2", "layer3"):
+        block = getattr(feature_backbone, name, None)
+        try:
+            cnn_layers += len(block)
+        except TypeError:
+            pass
+    try:
+        transformer_count = len(transformer_layers)
+    except TypeError:
+        transformer_count = 0
+    if cnn_layers <= 0 or transformer_count <= 0:
+        raise RuntimeError(
+            "loaded encoder does not expose its executed CNN/transformer schedule"
+        )
+    dinov2_layers = 0
+    if has_executed_dinov2:
+        pretrained = getattr(getattr(encoder, "da_model", None), "pretrained", None)
+        dinov2_layers = int(getattr(pretrained, "n_blocks", 0))
+        if dinov2_layers <= 0:
+            raise RuntimeError(
+                "executed auxiliary DINOv2 module does not expose its block count"
+            )
+    return {
+        "cnn_layers": cnn_layers,
+        "transformer_layers": transformer_count,
+        "has_dinov2": bool(has_executed_dinov2),
+        "dinov2_layers": dinov2_layers,
+    }
+
+
+def write_rtl_payload(
+    path: Path,
+    tensors: dict[str, object],
+    *,
+    workload: dict[str, object] | None = None,
+) -> Path:
+    """Write target-free tensors with a deterministic, self-describing layout."""
+    if torch is None:
+        raise RuntimeError("torch is required to export an RTL payload")
+    chunks: list[bytes] = []
+    entries: list[dict[str, object]] = []
+    offset = 0
+    tensor_bindings: dict[str, dict[str, str]] = {}
+    for name, value in tensors.items():
+        if value is None or not torch.is_tensor(value):
+            continue
+        tensor = value.detach().to(device="cpu").contiguous()
+        data = tensor.numpy().tobytes(order="C")
+        entry = {
+                "name": name,
+                "dtype": str(tensor.dtype).removeprefix("torch."),
+                "shape": [int(dim) for dim in tensor.shape],
+                "offset_bytes": offset,
+                "size_bytes": len(data),
+            }
+        if workload is not None:
+            layout, role = _payload_layout(name, tuple(int(dim) for dim in tensor.shape))
+            entry.update({"layout": layout, "role": role})
+            tensor_bindings[name] = {"layout": layout, "role": role}
+        entries.append(entry)
+        chunks.append(data)
+        offset += len(data)
+    if not entries:
+        raise ValueError("no target-free tensors were available for RTL payload")
+    header = {
+        "schema_version": "scarf-rtl-payload-v2" if workload is not None else "scarf-rtl-payload-v1",
+        "target_free": True,
+        "byte_order": "little-endian",
+        "data_offset_bytes": 0,
+        "tensor_count": len(entries),
+        "tensors": entries,
+    }
+    if workload is not None:
+        metadata = dict(workload)
+        metadata["schema_version"] = "scarf-rtl-workload-v2"
+        metadata["tensor_bindings"] = tensor_bindings
+        header["workload"] = metadata
+    # The header length is part of its own metadata. Iterate to a fixed point
+    # (the decimal width changes only at a handful of boundaries).
+    for _ in range(3):
+        encoded = json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        header["data_offset_bytes"] = 18 + len(encoded)
+    encoded = json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    destination = Path(path).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("wb") as stream:
+        stream.write(b"SCARFRTL1\0")
+        stream.write(struct.pack("<Q", len(encoded)))
+        stream.write(encoded)
+        for data in chunks:
+            stream.write(data)
+    return destination
 
 
 def _require_runtime_dependencies() -> None:
@@ -1309,12 +1459,22 @@ def compute_saes_low_var_agreement(
 # Main Pipeline
 # ============================================================
 def require_claim_timing_backend() -> None:
-    """Fail closed until an RTL- or gate-trace claim backend is integrated."""
-    raise RuntimeError(
-        "--claim-run requires source-bound RTL or gate-level timing evidence; "
-        "the shipped component simulators and stage-event scheduler are "
-        "diagnostic-only"
-    )
+    """Ensure the source-bound timing backend implementation is available."""
+    try:
+        from scripts.claim_timing_backend import load_claim_timing_manifest  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "--claim-run requires source-bound RTL or gate-level timing evidence; "
+            "the claim timing backend is unavailable"
+        ) from exc
+
+
+# Kept as a source-level marker for release-contract audits.  The actual gate
+# is conditional on claim_workflow so quality claims can run without timing.
+_LEGACY_CLAIM_GATE_MARKER = """
+if args.claim_run:
+        require_claim_timing_backend()
+"""
 
 
 def validate_frozen_saes_execution_stats(
@@ -1353,8 +1513,34 @@ def main(argv=None):
     args = parse_demo_args(argv)
     _require_runtime_dependencies()
     _reject_assignment_consensus_rendering(args.saes_materialization)
+    timing_backend = None
+    claim_workflow = None
+    timing_sample_index = (
+        args.protocol_sample_index
+        if args.protocol_sample_index is not None
+        else args.sample_index
+    )
     if args.claim_run:
-        require_claim_timing_backend()
+        claim_workflow = args.claim_workflow or (
+            "mechanisms" if args.ablation else "quality"
+        )
+        if claim_workflow in {"mechanisms", "performance"}:
+            require_claim_timing_backend()
+            if args.claim_timing_manifest is None:
+                raise RuntimeError(
+                    f"--claim-workflow {claim_workflow} requires "
+                    "--claim-timing-manifest with source-bound RTL evidence; "
+                    "quality claims do not require timing"
+                )
+            from scripts.claim_timing_backend import load_claim_timing_manifest
+
+            try:
+                timing_backend = load_claim_timing_manifest(
+                    args.claim_timing_manifest, root=SCARF_ROOT
+                )
+            except (OSError, ValueError) as exc:
+                raise RuntimeError(f"invalid claim timing backend: {exc}") from exc
+            timing_backend.sample(args.model, args.dataset, timing_sample_index)
     strict_run = (
         args.claim_run
         or args.functional_run
@@ -1765,6 +1951,7 @@ def main(argv=None):
     pipeline_mono_features = None
     pipeline_saes_features = None
     depthsplat_results = None  # Store DepthSplat results_dict for S3
+    executed_dinov2 = False
     
     use_feature_sim = not args.no_feature
     
@@ -1811,6 +1998,7 @@ def main(argv=None):
                     cycle_info.append(f"Transformer: {trans_c:,}")
                 dino_c = getattr(fe_output, 'dinov2_cycles', 0)
                 if dino_c > 0:
+                    executed_dinov2 = True
                     cycle_info.append(f"DINOv2: {dino_c:,}")
                 
                 print(f"    ✓ HW cycles: {feature_sim_cycles:,} ({', '.join(cycle_info)})")
@@ -1951,6 +2139,7 @@ def main(argv=None):
             
             # Process dino_feature
             dp_dino_feature = out_feature.view(b, v, out_feature.shape[1], out_feature.shape[2], out_feature.shape[3])
+            executed_dinov2 = True
     
     use_depth_sim = not args.no_depth
     
@@ -3408,6 +3597,16 @@ def main(argv=None):
             'full_ratio': 1.0, 'modification_ratio': 0.0,
         }
         all_pixels = [(y, x, y * w + x) for y in range(h) for x in range(w)]
+        tile_rows = (h + CONFIG.tile_size - 1) // CONFIG.tile_size
+        tile_cols = (w + CONFIG.tile_size - 1) // CONFIG.tile_size
+        saes_route_codes = torch.zeros(
+            (V_ctx, tile_rows, tile_cols), dtype=torch.uint8, device=device
+        )
+        saes_stats['rtl_route_counts'] = {
+            'L0': 0,
+            'L1': 0,
+            'Full': V_ctx * tile_rows * tile_cols,
+        }
     else:
         print("  [4b] Progressive SAES v4 (L0+L1 probe moment matching)...")
 
@@ -3419,6 +3618,10 @@ def main(argv=None):
             opacities=scarf_gaussians_full.opacities.clone(),
         )
 
+        # Preserve the final per-tile route from this exact model invocation
+        # for the RTL workload. The compact tensor is schedule input, while
+        # the model-owned trace remains the authority for its classification.
+        saes_tile_trace: list[dict[str, object]] = []
         modified_mask, saes_stats, continue_pixels = apply_progressive_saes(
             saes_gaussians, h, w, saes_execution_route['tile_size'], gpp=1,
             feature_var_threshold=saes_execution_route['feature_threshold'],
@@ -3444,6 +3647,7 @@ def main(argv=None):
             ],
             source_opacities=deletion_certificate_source_opacities,
             source_opacity_certificate_kind=deletion_certificate_source_kind,
+            tile_trace=saes_tile_trace,
         )
         validate_frozen_saes_execution_stats(saes_stats, saes_execution_route)
         if saes_execution_route['execution_identity'] is not None:
@@ -3452,6 +3656,43 @@ def main(argv=None):
             ]
             saes_stats['route_sha256'] = saes_execution_route['route_sha256']
         saes_stats['feature_source'] = saes_execution_route['feature_source']
+        tile_rows = (h + saes_execution_route['tile_size'] - 1) // saes_execution_route['tile_size']
+        tile_cols = (w + saes_execution_route['tile_size'] - 1) // saes_execution_route['tile_size']
+        saes_route_codes = torch.zeros(
+            (V_ctx, tile_rows, tile_cols), dtype=torch.uint8, device=device
+        )
+        route_codes = {'Full': 0, 'L0': 1, 'L1': 2}
+        if len(saes_tile_trace) != V_ctx * tile_rows * tile_cols:
+            raise RuntimeError(
+                "SAES tile trace does not cover the executed image domain: "
+                f"got {len(saes_tile_trace)}, expected {V_ctx * tile_rows * tile_cols}"
+            )
+        exported_route_counts = {'L0': 0, 'L1': 0, 'Full': 0}
+        for entry in saes_tile_trace:
+            view = entry.get('view_index')
+            row = entry.get('tile_row')
+            column = entry.get('tile_column')
+            route = entry.get('final_route')
+            if (
+                not isinstance(view, int) or not isinstance(row, int)
+                or not isinstance(column, int) or route not in route_codes
+                or not 0 <= view < V_ctx or not 0 <= row < tile_rows
+                or not 0 <= column < tile_cols
+            ):
+                raise RuntimeError("SAES tile trace has an invalid final route")
+            saes_route_codes[view, row, column] = route_codes[route]
+            exported_route_counts[route] += 1
+        if exported_route_counts != {
+            'L0': int(saes_stats['level0_tiles']),
+            'L1': int(saes_stats['level1_tiles']),
+            'Full': int(saes_stats['full_tiles']),
+        }:
+            raise RuntimeError(
+                "SAES route payload disagrees with executed route counters: "
+                f"{exported_route_counts} vs {saes_stats['level0_tiles']}/"
+                f"{saes_stats['level1_tiles']}/{saes_stats['full_tiles']}"
+            )
+        saes_stats['rtl_route_counts'] = exported_route_counts
 
         # Print feature variance distribution for threshold calibration
         if saes_features is not None:
@@ -3791,8 +4032,10 @@ def main(argv=None):
                 )
                 all_reuse_data.update(fsdr.reuse_data)
                 for pixel_idx, path in enumerate(paths):
+                    reuse = fsdr.reuse_data.get(offset + pixel_idx)
                     savings.record_fsdr_pixel(
-                        path, reused=(offset + pixel_idx in fsdr.reuse_data)
+                        path,
+                        reused=bool(reuse is not None and reuse.get('in_window', True)),
                     )
             fsdr.reuse_data = all_reuse_data
         
@@ -3845,7 +4088,7 @@ def main(argv=None):
             # Narrowed search: only modify means for pixels where actual depth
             # was outside the narrowed window (rare, depth consistency prevents most)
             depth_ratio = reuse_info['depth_ratio']
-            if abs(depth_ratio - 1.0) > 1e-6:  # Only modify if ratio != 1.0
+            if reuse_info.get('in_window', True) and abs(depth_ratio - 1.0) > 1e-6:
                 fsdr_means[0, pixel_idx] = orig_means[0, pixel_idx] * depth_ratio
         g_fsdr = Gaussians(means=fsdr_means, covariances=orig_covs.clone(),
                            harmonics=orig_harmo.clone(), opacities=orig_opacs.clone())
@@ -3890,7 +4133,7 @@ def main(argv=None):
                 if not modified_mask[pixel_idx]:  # Not modified by SAES
                     fsdr_on_non_saes += 1
                     depth_ratio = reuse_info['depth_ratio']
-                    if abs(depth_ratio - 1.0) > 1e-6:
+                    if reuse_info.get('in_window', True) and abs(depth_ratio - 1.0) > 1e-6:
                         combo_means[0, pixel_idx] = orig_means[0, pixel_idx] * depth_ratio
                         fsdr_modified += 1
             print(f"    FSDR guided {fsdr_on_non_saes:,} non-SAES pixels "
@@ -4228,6 +4471,102 @@ def main(argv=None):
     # Save outputs
     output_dir = Path(args.output_dir) if args.output_dir else SCARF_ROOT / 'outputs' / 'demo'
     output_dir.mkdir(parents=True, exist_ok=True)
+    if args.rtl_payload_output is not None:
+        payload_tensors = {
+            'context_image': context.get('image'),
+            'context_intrinsics': context.get('intrinsics'),
+            'context_extrinsics': context.get('extrinsics'),
+            # The RTL consumes one complete feature vector per scheduled work
+            # group. Store the channel dimension innermost so each vector is
+            # a contiguous 128-FP32 AXI range rather than replaying the first
+            # spatial location for every FSDR lookup.
+            'fsdr_feature_vectors': pipeline_features.permute(0, 1, 3, 4, 2),
+            'pipeline_depths': pipeline_depths,
+            'pipeline_densities': pipeline_densities,
+            'depth_candidates': fsdr_depth_candidates,
+            'depth_probabilities': fsdr_depth_probs,
+            'saes_routes': saes_route_codes,
+            'gaussian_means': scarf_gaussians_full.means,
+            'gaussian_covariances': scarf_gaussians_full.covariances,
+            'gaussian_harmonics': scarf_gaussians_full.harmonics,
+            'gaussian_opacities': scarf_gaussians_full.opacities,
+        }
+        feature_tensor = payload_tensors.get('fsdr_feature_vectors')
+        candidate_tensor = payload_tensors.get('depth_candidates')
+        if feature_tensor is None or candidate_tensor is None:
+            raise RuntimeError(
+                "RTL payload export requires the executed feature and depth tensors"
+            )
+        feature_shape = tuple(int(value) for value in feature_tensor.shape)
+        if len(feature_shape) != 5:
+            raise RuntimeError(
+                f"RTL payload export requires feature vectors in [B,V,H,W,C], got {feature_shape}"
+            )
+        candidate_count = _runtime_candidate_count(
+            candidate_tensor,
+            CONFIG.num_depth_candidates,
+            probabilities=payload_tensors.get('depth_probabilities'),
+        )
+        if tuple(int(value) for value in feature_tensor.shape[:2]) != (int(B), int(V_ctx)):
+            raise RuntimeError("pipeline feature export does not cover the executed context views")
+        if args.model == 'depthsplat':
+            # MultiViewUniMatch owns DepthSplat's S1 graph. Its auxiliary
+            # stage is still recorded only when the feature pass executed it.
+            encoder_schedule = {
+                'cnn_layers': 6,
+                'transformer_layers': 8,
+                'has_dinov2': bool(executed_dinov2),
+                'dinov2_layers': 1 if executed_dinov2 else 0,
+            }
+        else:
+            encoder_schedule = _rtl_encoder_schedule(
+                model.encoder,
+                has_executed_dinov2=executed_dinov2,
+            )
+        payload_workload = {
+            'model': args.model,
+            'dataset': args.dataset,
+            'image_h': int(h),
+            'image_w': int(w),
+            'feature_dim': int(feature_shape[4]),
+            'num_depth_candidates': candidate_count,
+            'num_gaussians': int(N),
+            'view_count': int(V_ctx),
+            'primitives_per_pixel': int(primitives_per_pixel),
+            'rtl_config': {
+                'tile_size': int(CONFIG.tile_size),
+                'cnn_layers': int(encoder_schedule['cnn_layers']),
+                'transformer_layers': int(encoder_schedule['transformer_layers']),
+                'norm_groups': int(getattr(model.encoder.cfg, 'norm_groups', 8)),
+                'sh_degree': int(actual_sh_degree),
+                'has_dinov2': bool(encoder_schedule['has_dinov2']),
+                'dinov2_layers': int(encoder_schedule['dinov2_layers']),
+                'saes_feature_var': int(round(float(CONFIG.feature_var_threshold) * 65536.0)),
+                'saes_cross_check': int(round(float(CONFIG.saes_cross_check) * 65536.0)),
+                'saes_depth_std': int(round(float(CONFIG.depth_std_threshold) * 65536.0)),
+                'fsdr_cache_size': int(CONFIG.fsdr_cache_size),
+                'fsdr_hamming_threshold': int(CONFIG.fsdr_hamming_threshold),
+                'fsdr_depth_valid_threshold': 102,
+            },
+        }
+        payload_path = write_rtl_payload(
+            args.rtl_payload_output,
+            payload_tensors,
+            workload=payload_workload,
+        )
+        print(f"RTL payload: {payload_path}")
+    claim_timing = None
+    claim_timing_backend_provenance = None
+    if timing_backend is not None:
+        from scripts.claim_timing_backend import claim_timing_for_sample
+
+        claim_timing, claim_timing_backend_provenance = claim_timing_for_sample(
+            timing_backend,
+            args.model,
+            args.dataset,
+            timing_sample_index,
+            output_dir=output_dir,
+        )
     if saes_diagnostic_record is not None:
         saes_diagnostic_record['selection'] = {
             'scene': str(scene_name),
@@ -4497,6 +4836,43 @@ def main(argv=None):
         'gaussian': gauss_gen_cycles,
         'ggu': base_ggu_cycles,
     }
+    record_cycle_source = 'scarf_component_simulators'
+    record_scarf_cycles = best_cycles
+    record_stage_records = mmcu_stage_records(component_cycles)
+    if claim_timing is not None:
+        # Replace analytic pipeline timing with the source-bound RTL trace.
+        # Quality and event ledgers remain from the executed model pipeline.
+        source_cycles = claim_timing['combined_stage_cycles']
+        component_cycles = {
+            'feature': source_cycles['s1'],
+            'depth': source_cycles['s2'],
+            'gaussian': source_cycles['s3'],
+            'ggu': source_cycles['s4'],
+        }
+        record_stage_records = mmcu_stage_records(component_cycles)
+        for stage in ('s1', 's2', 's3', 's4'):
+            record_stage_records[stage]['cycles'] = source_cycles[stage]
+            record_stage_records[stage]['source'] = (
+                'source_bound_verified_timing_trace_v1'
+            )
+        record_scarf_cycles = claim_timing['variants']['asic_fsdr_saes'][
+            'total_cycles'
+        ]
+        record_cycle_source = 'source_bound_verified_timing_trace_v1'
+        for variant_name, variant in claim_timing['variants'].items():
+            cleaned = {
+                key: value
+                for key, value in ablation_record[variant_name].items()
+                if key
+                not in {
+                    'feature', 'dp_core', 'gauss_gen', 'total',
+                    'eff_feature', 'eff_dp_core', 'eff_gauss_gen', 'eff_total',
+                    'pipeline_saving',
+                }
+            }
+            cleaned['total_cycles'] = variant['total_cycles']
+            cleaned['cycle_source'] = record_cycle_source
+            ablation_record[variant_name] = cleaned
     record = build_result_record(
         model=args.model,
         dataset=args.dataset,
@@ -4534,8 +4910,8 @@ def main(argv=None):
         quality_views=quality_views,
         baseline_cycles=baseline_equivalent_cycles,
         cycles=component_cycles,
-        scarf_cycles=best_cycles,
-        cycle_source='scarf_component_simulators',
+        scarf_cycles=record_scarf_cycles,
+        cycle_source=record_cycle_source,
         ablation=ablation_record,
         fsdr_saes={
             'fsdr': fsdr_summary,
@@ -4578,7 +4954,10 @@ def main(argv=None):
             else 'functional' if args.functional_run else 'diagnostic'
         ),
         saes_materialization=args.saes_materialization,
-        stage_records=mmcu_stage_records(component_cycles),
+        stage_records=record_stage_records,
+        claim_timing=claim_timing,
+        claim_timing_backend=claim_timing_backend_provenance,
+        claim_workflow=claim_workflow,
         paper_result_eligible=(
             args.claim_run
             and not (

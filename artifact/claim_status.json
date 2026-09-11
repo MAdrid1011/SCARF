@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "generated_on": "2026-07-17",
+  "generated_on": "2026-09-03",
   "software_pairs": {
     "transplat/re10k": "NOT_CLAIMED_SAES_SPARSE_QUALITY_MISMATCH",
     "transplat/acid": "NOT_CLAIMED_SAES_SPARSE_QUALITY_MISMATCH",
@@ -26,7 +26,7 @@
   "figure8": "CLAIMED_AWAITING_INDEPENDENT_ORIN_EVALUATION",
   "figure11": "NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX",
   "sensitivity": "NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX",
-  "rtl": "CLAIMED",
+  "rtl": "NOT_CLAIMED_NO_SOURCE_BOUND_RTL_EVIDENCE",
   "dram": "FUNCTIONAL_ONLY",
   "physical_asap7": "NOT_CLAIMED_RESOURCE_LIMIT",
   "deepscale": "NOT_CLAIMED_NO_PHYSICAL_INPUT"

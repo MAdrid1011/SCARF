@@ -12,9 +12,8 @@ uses probe statistics to select an L0, L1, or Full materialization route.
 | FSDR | Feature-space similarity | S2 depth prediction | Reuse a cached depth anchor to narrow the candidate window |
 | SAES | Local 3D continuity | Gaussian materialization | Classify tiles and materialize retained output |
 
-FSDR and SAES are represented as distinct mechanism paths. Their events,
-selection, retained descriptors, and cycle accounting are carried in the
-structured execution record.
+FSDR and SAES are distinct mechanism paths: FSDR changes the S2 candidate
+search, while SAES changes the S3 materialization route.
 
 ## 2. FSDR
 
@@ -44,13 +43,19 @@ The FSDR cache is indexed by a compact locality-sensitive hash of the feature
 vector:
 
 ```text
-feature[128] -> random projection ROM -> sign bits -> 16-bit signature
+feature[128] -> seed-42 projection ROM -> striped MAC reduction -> 16-bit signature
 ```
 
 The hardware compares the query signature against all valid cache entries in
 parallel. The closest entry is selected by Hamming distance. A query is guided
 only when the signature distance is within the threshold and the cached depth
 passes the confidence and depth-consistency checks.
+
+The submitted RTL evaluates four consecutive feature terms per hash row on each
+projection cycle, then reduces the lane products before updating its 72-bit
+accumulator. This preserves the fixed projection and resulting signature while
+reducing the 128-element projection from 128 cycles to 32, followed by a
+sign-pack cycle. The cache and depth-validity conditions are unchanged.
 
 ### 2.3 Safety Checks
 
@@ -128,23 +133,9 @@ python scripts/demo.py --model transplat --no-saes
 python scripts/demo.py --model transplat --no-fsdr --no-saes
 ```
 
-The demo reports path statistics, cache hit rates, Gaussian counts, image
-metrics, and architectural accounting. The full AE workflow records the
-execution trace, hardware counters, and device timing in the result schema.
-
-### 4.1 Execution Contract
-
-The simulation path materializes the S3 descriptor tensors before SAES routing.
-The result schema records that boundary together with the selected FSDR and
-SAES events. The full evaluation workflow combines those records with the
-configured quality, hardware, and validation paths.
-
-### 4.2 FSDR Trace Isolation
-
-`--claim-run --fsdr-only` runs the FSDR path under the global configuration
-bound by the calibration contract. The target-free FSDR mode removes target RGB
-before device transfer and records that boundary in its result. The aggregate
-schema keeps this trace kind separate from a full matrix result.
+The selected model supplies the feature and depth inputs used by both
+mechanisms. SAES chooses its route after the probe checks, while FSDR keeps the
+normal depth path whenever its cache conditions do not pass.
 
 ## 5. Related Documentation
 

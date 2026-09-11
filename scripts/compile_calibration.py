@@ -265,12 +265,17 @@ def _evaluation_rows(dataset: str) -> tuple[list[dict[str, Any]], dict[str, Any]
 
 
 def compile_manifest(
-    output_dir: Path, calibration_root: Path = DEFAULT_CALIBRATION_ROOT
+    output_dir: Path,
+    calibration_root: Path = DEFAULT_CALIBRATION_ROOT,
+    datasets_to_compile: tuple[str, ...] = DATASETS,
 ) -> dict[str, Any]:
     output_dir = output_dir.resolve()
     calibration_root = calibration_root.resolve()
     datasets: dict[str, dict[str, Any]] = {}
-    for dataset in DATASETS:
+    unknown = set(datasets_to_compile) - set(DATASETS)
+    if unknown or not datasets_to_compile:
+        raise ValueError(f"unsupported calibration dataset(s): {sorted(unknown)}")
+    for dataset in datasets_to_compile:
         evaluation, evaluation_identity = _evaluation_rows(dataset)
         examples, source = _selected_examples(calibration_root / dataset, dataset)
         counts = {
@@ -329,9 +334,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--calibration-root", type=Path, default=DEFAULT_CALIBRATION_ROOT)
+    parser.add_argument("--dataset", choices=DATASETS, action="append")
     args = parser.parse_args()
     try:
-        record = compile_manifest(args.output_dir, args.calibration_root)
+        record = compile_manifest(
+            args.output_dir,
+            args.calibration_root,
+            tuple(args.dataset or DATASETS),
+        )
         path = args.output_dir.resolve() / "manifest.json"
         path.write_text(
             json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"

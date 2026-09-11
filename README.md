@@ -4,29 +4,42 @@ SCARF is a hardware-realizable accelerator for depth-guided generalizable 3D Gau
 
 ## MICRO 2026 Artifact Evaluation
 
-Zenodo DOI: [10.5281/zenodo.21482385](https://doi.org/10.5281/zenodo.21482385)
+<p align="center">
+  <a href="https://doi.org/10.5281/zenodo.22434931"><img src="docs/images/badges/acm-artifacts-available-v1.1.png" alt="ACM Artifacts Available" width="120"></a>
+  <a href="ARTIFACT_EVALUATION.md"><img src="docs/images/badges/acm-artifacts-functional-v1.1.png" alt="ACM Artifacts Evaluated — Functional" width="120"></a>
+  <a href="ARTIFACT_EVALUATION.md"><img src="docs/images/badges/acm-results-reproduced-v1.1.png" alt="ACM Results Reproduced" width="120"></a>
+</p>
 
-The reviewer-facing setup, command mapping, and hardware scope are documented
-in the [artifact evaluation guide](ARTIFACT_EVALUATION.md). The fastest CUDA
-path is the packaged Functional quick workflow:
+SCARF received all three requested artifact badges at MICRO 2026: **Artifacts
+Available**, **Artifacts Evaluated — Functional**, and **Results Reproduced**.
+The immutable artifact evaluated by the committee is available as
+[SCARF-AE v1.0.4 on Zenodo](https://doi.org/10.5281/zenodo.22434931). This
+branch mirrors that public source release. Its model submodules point to
+author-controlled forks and commits whose contents match the source trees in
+the evaluated archive.
+
+## Getting Started
+
+The [artifact guide](ARTIFACT_EVALUATION.md) covers installation, external
+assets, model commands, and RTL regeneration. The fastest CUDA path is the
+packaged quick workflow:
 
 ```bash
-docker build -t scarf-ae:1.0.0 .
+docker build -t scarf-ae:1.0.4 .
 mkdir -p outputs/docker-quick
 docker run --rm --gpus all --user "$(id -u):$(id -g)" \
-  -v "$PWD/outputs/docker-quick:/results" scarf-ae:1.0.0
+  -v "$PWD/outputs/docker-quick:/results" scarf-ae:1.0.4
 ```
 
-The container resolves the hash-pinned MVSplat checkpoint on first use and
-writes a structured Functional result below `outputs/docker-quick/quick/`.
+The container resolves the quick checkpoint on first use and writes its files
+below `outputs/docker-quick/quick/`.
 
 ## Key Features
 
 ### End-to-End Hardware Simulation
 - Full pipeline runs through ASIC hardware unit simulators by default
 - Feature Extractor → Depth Predictor → GGU, with each stage feeding the next
-- Result provenance records the simulated stages and rejects missing cycle data
-  in artifact-evaluation mode
+- Each stage is executed through the corresponding hardware-oriented module
 
 ### Hardware Units (encoder/)
 
@@ -46,14 +59,13 @@ writes a structured Functional result below `outputs/docker-quick/quick/`.
 - Uses probe feature variance followed by probe-depth standard deviation to
   select L0, L1, or Full at tile granularity
 - Keeps the pretrained adaptor as the source of every retained probe descriptor
-- Binds retained descriptors, route decisions, and Gaussian materialization to
-  the execution record
+- Uses retained descriptors and route decisions during Gaussian materialization
 
 ### FSDR (Feature Similarity Depth Reuse)
 - Caches depth results using LSH-based feature signatures
 - Narrows only a valid Hamming-matched local candidate set and otherwise falls
   back to full search
-- Records cache eligibility and depth-reuse events in the same result schema
+- Applies cache eligibility and depth-reuse checks at each tile
 
 ## Supported Models
 
@@ -102,20 +114,20 @@ SCARF/
 ├── scripts/
 │   └── demo.py            # Complete end-to-end demo
 ├── docs/                  # Documentation
-├── transplat/             # TranSplat submodule
+├── transplat/             # TranSplat submodule (AE snapshot)
 ├── mvsplat/               # MVSplat submodule
 └── depthsplat/            # DepthSplat submodule
 ```
 
 ## Quick Start
 
-### 1. Clone with Submodules
+### 1. Clone
 
 ```bash
 git clone --recursive https://github.com/MAdrid1011/SCARF.git
 cd SCARF
 
-# If already cloned without --recursive:
+# If the repository was cloned without --recursive:
 git submodule update --init --recursive
 ```
 
@@ -255,20 +267,28 @@ Module-level documentation:
 
 ## License
 
-MIT License
+SCARF is released under the [Apache License 2.0](LICENSE). Vendored upstream
+components retain their original licenses; see [THIRD_PARTY.md](THIRD_PARTY.md)
+for provenance and terms.
 
 ## Related Projects
 
-- [TranSplat](https://github.com/xingyoujun/transplat), the original AAAI 2025 implementation
+- [TranSplat](https://github.com/xingyoujun/transplat)
+- [MVSplat](https://github.com/donydchen/mvsplat)
+- [DepthSplat](https://github.com/cvg/depthsplat)
 
 ## Citation
 
-If you use SCARF in your research, please cite:
+If you use the evaluated artifact, please cite the versioned Zenodo record:
 
 ```bibtex
-@misc{scarf2025,
+@software{ma_scarf_2026,
+  author    = {Zirui Ma},
   title={SCARF: A Scene-Adaptive Depth-Guided G-3DGS Encoder Accelerator with Semantic Reuse and Fused Dataflow},
-  author={...},
-  year={2025}
+  version   = {v1.0.4},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.22434931},
+  url       = {https://doi.org/10.5281/zenodo.22434931}
 }
 ```

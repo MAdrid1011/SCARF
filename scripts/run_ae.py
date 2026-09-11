@@ -86,6 +86,7 @@ MODES = tuple(
             "validate",
             "calibrate",
             "pilot",
+            "proxy",
             SAES_QUALITY_MODE,
         }
     )
@@ -209,7 +210,7 @@ def _quick_selection() -> ClaimSelection:
 
 def saes_quality_gate_preflight() -> dict[str, Any]:
     """Check whether the current candidate has a safe sample-0 quality path."""
-    from scripts.mechanism_config import require_calibrated_mechanism
+    from scripts.mechanism_config import DEFAULT_CONFIG, require_calibrated_mechanism
 
     preflight: dict[str, Any] = {
         "model": "transplat",
@@ -230,7 +231,10 @@ def saes_quality_gate_preflight() -> dict[str, Any]:
         ),
     }
     try:
-        _config, provenance = require_calibrated_mechanism()
+        # This diagnostic gate reports the preregistered root baseline and is
+        # intentionally separate from reviewer claim execution, which resolves
+        # the verified frozen bundle through the default claim path.
+            _config, provenance = require_calibrated_mechanism()
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         if not DEFAULT_DL3DV_CALIBRATION_MANIFEST.is_file():
             return {
@@ -333,6 +337,10 @@ def build_software_plan(
     evidence_profile: str = "full",
     claim_execution: bool = True,
     orin_available: bool | None = None,
+    claim_timing_manifest: Path | None = None,
+    selection_file: Path | None = None,
+    run_selection_sha256: str | None = None,
+    export_rtl_payload: bool = False,
 ) -> list[dict[str, Any]]:
     if num_samples is not None and num_samples <= 0:
         raise ValueError("num_samples must be positive")
@@ -345,6 +353,10 @@ def build_software_plan(
         mode_pairs = tuple(pair for pair in pair_filter if pair in mode_pairs)
     experiments = []
     for model, dataset in mode_pairs:
+        # ``performance`` is the public Figure 8 command name.  Its evidence
+        # has always been named ``speedup`` by the validator, report generator,
+        # and release stager; retain that one canonical on-disk workflow name.
+        result_workflow = "speedup" if mode == "performance" else mode
         config = resolve_experiment(model, dataset, ROOT)
         selection = (
             _quick_selection()
@@ -357,7 +369,7 @@ def build_software_plan(
             else (1 if mode == "quick" else selection.sample_count)
         )
         profile_python = _python_for(config.environment_profile, python_override)
-        output_dir = output_root / mode / f"{model}_{dataset}"
+        output_dir = output_root / result_workflow / f"{model}_{dataset}"
         dataset_root = (
             ROOT / "datasets/quick-re10k"
             if mode == "quick"
@@ -391,6 +403,21 @@ def build_software_plan(
             "--seed",
             "0",
         ]
+        if claim_execution:
+            claim_surface = (
+                "quality"
+                if mode == "quality"
+                else "performance"
+                if mode in {"performance", "speedup", "orin", "utilization"}
+                else "mechanisms"
+            )
+            demo_command.extend(
+                ("--claim-workflow", claim_surface)
+            )
+            if claim_timing_manifest is not None:
+                demo_command.extend(
+                    ("--claim-timing-manifest", str(claim_timing_manifest))
+                )
         if mode in {"ablation", "mechanisms", "all", "all-eval"}:
             demo_command.append("--ablation")
         if mode == "quality":
@@ -411,9 +438,19 @@ def build_software_plan(
             "--num-samples",
             str(sample_count),
             "--resume",
-            "--",
-            *demo_command,
         ]
+        if selection_file is not None:
+            command.extend(
+                [
+                    "--selection-file",
+                    str(selection_file),
+                    "--pair",
+                    f"{model}/{dataset}",
+                ]
+            )
+        if export_rtl_payload:
+            command.append("--export-rtl-payload")
+        command.extend(["--", *demo_command])
         commands = [command]
         if mode == "fsdr":
             aggregate_command = [
@@ -440,6 +477,7 @@ def build_software_plan(
         experiments.append(
             {
                 "workflow": mode,
+                "result_workflow": result_workflow,
                 "model": model,
                 "dataset": dataset,
                 "experiment": config.experiment,
@@ -455,6 +493,12 @@ def build_software_plan(
                 "aggregate_command": aggregate_command,
                 "sample_count": sample_count,
                 "evidence_profile": evidence_profile,
+                "claim_timing_manifest": (
+                    str(claim_timing_manifest)
+                    if claim_execution and claim_timing_manifest
+                    else None
+                ),
+                "run_selection_sha256": run_selection_sha256,
                 "result": str(output_dir / "results.json"),
             }
         )
@@ -532,10 +576,11 @@ def build_dataset_validation_commands(
 def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     num_samples = getattr(args, "num_samples", None)
     evidence_profile = getattr(args, "profile", "full")
+    claim_timing_manifest = getattr(args, "claim_timing_manifest", None)
     pair_filter = parse_pair_filter(getattr(args, "pairs", None))
     if pair_filter is not None and args.mode not in SOFTWARE_MODES | {"all", "all-eval", "pilot"}:
         raise ValueError(f"--pairs is not supported by {args.mode}")
-    if args.mode == SAES_QUALITY_MODE:
+    if args.mode in {SAES_QUALITY_MODE, "proxy"}:
         experiments = []
     elif args.mode == "calibrate":
         experiments = []
@@ -567,6 +612,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
                     claimed_pair_filter,
                     True,
                     evidence_profile,
+                    claim_timing_manifest=claim_timing_manifest,
                 )
             )
     elif args.mode == "all-eval":
@@ -581,6 +627,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
                     pair_filter,
                     True,
                     evidence_profile,
+                    claim_timing_manifest=claim_timing_manifest,
                 )
             )
     else:
@@ -592,6 +639,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             pair_filter,
             False,
             evidence_profile,
+            claim_timing_manifest=claim_timing_manifest,
         )
     effective_profile = (
         "calibration"
@@ -599,7 +647,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         else "pilot"
         if args.mode == "pilot"
         else "not-applicable"
-        if args.mode == SAES_QUALITY_MODE
+        if args.mode in {SAES_QUALITY_MODE, "proxy"}
         else evidence_profile
     )
     allow_low_memory_attempt = bool(
@@ -634,11 +682,16 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "allow_low_memory_attempt": allow_low_memory_attempt,
         "calibration_root": str(calibration_root),
         "calibration_manifest": str(calibration_manifest),
+        "claim_timing_manifest": (
+            str(claim_timing_manifest) if claim_timing_manifest is not None else None
+        ),
     }
     plan["software_claim_scope"] = {
         "status": (
             "DIAGNOSTIC_PREFLIGHT"
             if args.mode == SAES_QUALITY_MODE
+            else "PROXY_ONLY"
+            if args.mode == "proxy"
             else
             "NO_CLAIMED_PAIRS"
             if args.mode in CLAIM_ONLY_SOFTWARE_MODES | {"all", "all-eval"}
@@ -673,7 +726,26 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     ]
     if num_samples is not None:
         sensitivity_command.extend(("--num-samples", str(num_samples)))
-    if args.mode == "calibrate":
+    if args.mode == "proxy":
+        proxy_input = getattr(args, "proxy_input", None)
+        if proxy_input is None:
+            raise ValueError("proxy workflow requires --proxy-input")
+        plan["proxy_scope"] = {
+            "status": "PROXY_ONLY",
+            "claim_eligible": False,
+            "evidence_class": "hardware_proxy",
+        }
+        plan["commands"] = [
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "normalize_orin_proxy.py"),
+                "--input",
+                str(Path(proxy_input).resolve()),
+                "--output",
+                str(args.output_root / "reports" / "orin-nx-proxy.json"),
+            ]
+        ]
+    elif args.mode == "calibrate":
         sweep_dir = args.output_root / "sweep"
         calibration_python = _python_for("classic", args.python)
         plan["calibration_python"] = calibration_python
@@ -954,6 +1026,19 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_DL3DV_CALIBRATION_MANIFEST,
         help="Prepared 24-train/8-holdout DL3DV calibration protocol manifest",
     )
+    parser.add_argument(
+        "--claim-timing-manifest",
+        type=Path,
+        help=(
+            "Source-bound RTL timing manifest for mechanisms and performance "
+            "claim workflows; quality claims do not require timing"
+        ),
+    )
+    parser.add_argument(
+        "--proxy-input",
+        type=Path,
+        help="filled reviewer-GPU proxy JSON (only for the proxy workflow)",
+    )
     args = parser.parse_args()
     if args.num_samples is not None and args.num_samples <= 0:
         parser.error("--num-samples must be positive")
@@ -977,6 +1062,18 @@ def parse_args() -> argparse.Namespace:
         and args.mode != "calibrate"
     ):
         parser.error("--calibration-manifest is only valid with calibrate")
+    if args.claim_timing_manifest is not None and args.mode not in (
+        CLAIM_ONLY_SOFTWARE_MODES | {"all", "all-eval"}
+    ):
+        parser.error(
+            "--claim-timing-manifest is only valid with claim result workflows"
+        )
+    if args.mode == "proxy" and args.proxy_input is None:
+        parser.error("proxy workflow requires --proxy-input")
+    if args.mode == "proxy" and args.device != "auto":
+        parser.error("proxy workflow does not accept --device orin")
+    if args.mode != "proxy" and args.proxy_input is not None:
+        parser.error("--proxy-input is only valid with the proxy workflow")
     return args
 
 

@@ -4,17 +4,32 @@ SCARF uses one SHA256-bound mechanism configuration across all model and
 dataset pairs. Calibration fixes implementation-level constants while preserving
 the FSDR and SAES decision rules.
 
-## DL3DV Split Contract
+## Split Contract
 
-The calibration protocol selects 24 DL3DV calibration scenes and eight holdout
-scenes from the pinned `DL3DV/DL3DV-ALL-480P` revision. Both sets are disjoint
-from the 140-scene evaluation index. The plan records the dataset revision,
-terms URL, archive tree hash, evaluation-index hash, selected archive hashes,
-and prepared-tree provenance.
+The publication protocol is the 24-scene plus eight-scene DL3DV split described
+below. The shipped 1.0.4 checkout currently uses the explicit
+`acid_train_holdout_v1` fallback because DL3DV calibration is gated and was not
+available in this environment. Its frozen bundle is measured from real ACID
+target-free traces, has one disjoint train scene and one disjoint holdout scene,
+and is not labeled as DL3DV evidence. A release that makes the full paper
+calibration claim must replace it with a real `dl3dv_train_holdout_v1` export.
+
+Both protocols require disjoint train/holdout scenes and real target-free
+forward traces. `scripts/freeze_acid_calibration.py` rejects missing metrics,
+target RGB access, overlapping scenes, and placeholder hashes.
 
 The published evaluation workflows consume the frozen configuration in
-`artifact/mechanism_config.json`. Full training archives and prepared images
+`artifact/calibration/frozen/mechanism_config.json`. The bundle includes the
+selected tuple, calibration result, manifest summary, and SHA256 bindings;
+`scripts.mechanism_config.require_calibrated_mechanism()` verifies all of them
+before a claim workflow starts. Full training archives and prepared images
 remain at their official source and are not included in the release package.
+
+Claim workflows do not calibrate on the evaluator's machine. The release
+bundle already contains a `status: calibrated` configuration with train/holdout
+hashes and companion provenance. The preregistered root file remains a
+pre-calibration baseline and is intentionally rejected when passed explicitly
+to `--claim-run`; the default claim path resolves the verified frozen bundle.
 
 ## Preparation
 
@@ -69,6 +84,18 @@ python scripts/calibrate_mechanisms.py \
   --config-output artifact/mechanism_config.json
 ```
 
+The equivalent one-command entry point is:
+
+```bash
+python scripts/run_calibration.py --output-root outputs/calibration
+```
+
+On success it writes the frozen configuration both to
+`artifact/mechanism_config.json` and to
+`outputs/calibration/calibration/mechanism_config.json`, together with a
+SHA256 sidecar. The latter is the prerequisite file consumed by
+`install_claim_prerequisites.py`.
+
 Each tuple is evaluated on the same calibration traces. Feasible tuples meet
 the configured PSNR, SSIM, and LPIPS limits; the selection rule chooses the
 largest event-derived S2+S3 reduction, then the deterministic tie break. The
@@ -83,3 +110,11 @@ probe depth-standard-deviation first-hit hierarchy. At `T=4`, L0 uses four
 corner probes and L1 uses those corners plus eight fixed boundary anchors. The
 configuration, route, retained descriptors, Gaussian materialization, and
 execution trace are all bound into the resulting record.
+
+Timing is a separate release input. Quality claims consume the frozen
+`status: calibrated` configuration and do not require a timing manifest.
+Mechanism and performance claims additionally prepare the source-bound RTL
+timing bundle described in `docs/claim-timing-backend.md` and pass
+`--claim-timing-manifest` to `scripts/run_ae.sh`. The available component
+simulators and diagnostic stage scheduler do not satisfy this contract and are
+never promoted automatically.

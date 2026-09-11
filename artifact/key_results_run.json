@@ -1,0 +1,9 @@
+{
+  "schema_version": "scarf-key-results-run-v1",
+  "profile": "reviewer",
+  "samples_per_pair": 1,
+  "pairs": "all",
+  "figure8_device": "auto",
+  "continue_if_gpu_contended": true,
+  "output_root": "outputs/ae"
+}

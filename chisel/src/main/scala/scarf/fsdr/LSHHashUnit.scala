@@ -10,15 +10,20 @@ import scarf.ScarfConfig
  * Projects feature vector onto K random hyperplanes (ProjROM),
  * accumulates via MAC units, extracts sign bits, packs into K-bit signature.
  *
- * Uses one signed MAC per hash bit and streams one feature per cycle.
- * Latency: D projection cycles + 1 pack cycle.
+ * The projection front end consumes a fixed-width feature stripe per cycle.
+ * Every lane uses the same seed-42 ROM coefficient it would use in the
+ * serialized implementation, then a local reduction contributes one partial
+ * sum to each hash accumulator. Latency is ceil(D / lanes) projection cycles
+ * plus one sign-pack cycle.
  */
 class LSHHashUnit(
   val lshDim: Int = ScarfConfig.LSHDim,
   val featureDim: Int = ScarfConfig.LSHFeatureDim,
+  val lanes: Int = 4,
 ) extends Module {
   require(lshDim == LSHProjectionROM.Rows)
   require(featureDim == LSHProjectionROM.Columns)
+  require(lanes > 0 && lanes <= featureDim)
 
   val io = IO(new Bundle {
     val featureIn   = Input(Vec(featureDim, UInt(ScarfConfig.DataWidth.W)))
@@ -53,7 +58,6 @@ class LSHHashUnit(
   val accum = RegInit(VecInit(Seq.fill(lshDim)(0.S(accumWidth.W))))
 
   val elemIdx = RegInit(0.U(log2Ceil(featureDim + 1).W))
-  val chunkSize = 1
 
   val sigReg = RegInit(0.U(lshDim.W))
 
@@ -70,7 +74,7 @@ class LSHHashUnit(
     }
     is(sProject) {
       for (k <- 0 until lshDim) {
-        val products = (0 until chunkSize).map { j =>
+        val products = (0 until lanes).map { j =>
           val idx = elemIdx + j.U
           val idxTrunc = idx(log2Ceil(featureDim) - 1, 0)
           val feature = fp16ToQ24(io.featureIn(idxTrunc))
@@ -80,8 +84,8 @@ class LSHHashUnit(
         val partialSum = products.reduce(_ +& _)
         accum(k) := accum(k) + partialSum
       }
-      elemIdx := elemIdx + chunkSize.U
-      when(elemIdx + chunkSize.U >= featureDim.U) {
+      elemIdx := elemIdx + lanes.U
+      when(elemIdx + lanes.U >= featureDim.U) {
         state := sPack
       }
     }

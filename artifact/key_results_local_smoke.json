@@ -1,0 +1,13 @@
+{
+  "schema_version": "scarf-key-results-run-v1",
+  "profile": "reviewer",
+  "samples_per_pair": 1,
+  "pairs": [
+    "transplat/re10k",
+    "mvsplat/re10k",
+    "depthsplat/re10k"
+  ],
+  "figure8_device": "proxy",
+  "continue_if_gpu_contended": true,
+  "output_root": "outputs/local-three-model-smoke"
+}

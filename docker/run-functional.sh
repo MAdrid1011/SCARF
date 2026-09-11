@@ -6,7 +6,7 @@ OUTPUT_ROOT="${SCARF_OUTPUT_ROOT:-/results}"
 
 usage() {
     cat <<'EOF'
-Usage: docker run --rm --gpus all -v "$PWD/outputs:/results" scarf-ae:1.0.0 [quick [run_ae options...]]
+Usage: docker run --rm --gpus all -v "$PWD/outputs:/results" scarf-ae:1.0.4 [quick [run_ae options...]]
 
 The default command downloads the hash-pinned quick checkpoint if needed and
 runs the CUDA Functional quick workflow. Results are written to /results.

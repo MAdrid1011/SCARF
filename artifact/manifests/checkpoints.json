@@ -46,10 +46,10 @@
       "model": "depthsplat",
       "dataset": "re10k",
       "evaluation_datasets": ["re10k", "acid"],
-      "url": "https://huggingface.co/haofeixu/depthsplat/resolve/ed5116c11f7932fff3714989e2b65716730f6f87/depthsplat-gs-large-re10k-256x256-view2-e0f0f27a.pth",
+      "url": "https://huggingface.co/haofeixu/depthsplat/resolve/ed5116c11f7932fff3714989e2b65716730f6f87/depthsplat-gs-small-re10k-256x256-view2-cfeab6b1.pth",
       "path": "depthsplat/checkpoints/re10k.ckpt",
-      "size": 1417795172,
-      "sha256": "e0f0f27a1213e69b0bfd7758e2408b2bcb2ce0928b3559a78c2ba2b934939c4b"
+      "size": 153661476,
+      "sha256": "cfeab6b10077ad9bd4097b82b029737221bfbbbd3b4dfca5fc0feaf860276506"
     },
     {
       "profile": "depthsplat",

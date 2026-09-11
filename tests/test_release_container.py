@@ -33,7 +33,7 @@ def test_release_metadata_and_orin_reference_table_are_available() -> None:
 
     doi, failures = check_doi()
 
-    assert doi == "10.5281/zenodo.21482385"
+    assert doi == "10.5281/zenodo.22434931"
     assert failures == []
     reference = ROOT / "artifact/reference_results/orin_nx_reference.csv"
     rows = reference.read_text(encoding="utf-8").splitlines()

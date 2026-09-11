@@ -128,10 +128,21 @@ class MMCU(val arraySize: Int = ScarfConfig.PEArraySize) extends Module {
   val outBufReg = Reg(Vec(arraySize, Vec(arraySize, UInt(ScarfConfig.AccWidth.W))))
   val snapMTile = RegInit(0.U(10.W))
   val snapNTile = RegInit(0.U(10.W))
+  // The final M tile may contain fewer rows than the array.  Snapshot its
+  // extent with the result so writeback does not emit rows outside effM.
+  val snapRows = RegInit(0.U(log2Ceil(arraySize + 1).W))
 
   // DMA sub-FSM
   val dmaActive = RegInit(false.B)
   val dmaRow    = RegInit(0.U(log2Ceil(arraySize + 1).W))
+
+  val remainingRows = effM - mTile * arraySize.U
+  val activeRows = Wire(UInt(log2Ceil(arraySize + 1).W))
+  activeRows := Mux(
+    remainingRows >= arraySize.U,
+    arraySize.U(log2Ceil(arraySize + 1).W),
+    remainingRows(log2Ceil(arraySize + 1) - 1, 0),
+  )
 
   val doneReg = RegInit(false.B)
   val busyReg = RegInit(false.B)
@@ -175,7 +186,7 @@ class MMCU(val arraySize: Int = ScarfConfig.PEArraySize) extends Module {
         outBufReg(dmaRowIdx)(j))
     }
     dmaRow := dmaRow + 1.U
-    when(dmaRow === (arraySize - 1).U) {
+    when(dmaRow === (snapRows - 1.U)) {
       dmaActive := false.B
       dmaRow    := 0.U
     }
@@ -183,9 +194,12 @@ class MMCU(val arraySize: Int = ScarfConfig.PEArraySize) extends Module {
 
   switch(state) {
     is(MMCUState.sIdle) {
-      doneReg := false.B
       busyReg := false.B
       when(io.start) {
+        // Keep completion asserted until the controller observes it. Clearing
+        // it unconditionally in idle would make a same-edge completion pulse
+        // invisible to PipelineController.
+        doneReg := false.B
         state   := MMCUState.sCompute
         busyReg := true.B
         mTile   := 0.U
@@ -210,6 +224,7 @@ class MMCU(val arraySize: Int = ScarfConfig.PEArraySize) extends Module {
         }
         snapMTile := mTile
         snapNTile := nTile
+        snapRows := activeRows
         dmaActive := true.B
         dmaRow    := 0.U
         array.io.clear := true.B

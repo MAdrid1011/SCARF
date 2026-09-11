@@ -285,9 +285,34 @@ def claim_timing_from_record(
 ) -> dict[str, Any]:
     """Validate the only timing evidence allowed to support a strict claim."""
     root = _trace_mapping(record, "result record")
+    provenance = _trace_mapping(
+        _trace_required(root, "provenance", "result record"), "provenance"
+    )
     performance = _trace_mapping(
         _trace_required(root, "performance", "result record"), "performance"
     )
+    backend = provenance.get("timing_backend")
+    if backend is not None:
+        if not isinstance(backend, Mapping) or set(backend) != {
+            "schema_version",
+            "kind",
+            "source",
+            "manifest",
+        }:
+            raise ValueError("claim timing backend provenance is invalid")
+        if backend.get("schema_version") != "source-bound-timing-backend-v1":
+            raise ValueError("claim timing backend provenance has an invalid schema")
+        if backend.get("kind") != "source_rtl":
+            raise ValueError("claim timing backend provenance has an invalid kind")
+        for label in ("source", "manifest"):
+            descriptor = backend.get(label)
+            if (
+                not isinstance(descriptor, Mapping)
+                or set(descriptor) != {"path", "sha256"}
+                or not isinstance(descriptor.get("path"), str)
+                or not _sha256_digest(descriptor.get("sha256"))
+            ):
+                raise ValueError(f"claim timing backend {label} descriptor is invalid")
     timing = performance.get("claim_timing")
     if not isinstance(timing, Mapping):
         raise ValueError("claim result has no source-bound timing evidence")
@@ -1374,6 +1399,8 @@ def build_result_record(
     event_records: Mapping[str, Any] | None = None,
     energy_record: Mapping[str, Any] | None = None,
     claim_timing: Mapping[str, Any] | None = None,
+    claim_timing_backend: Mapping[str, Any] | None = None,
+    claim_workflow: str | None = None,
 ) -> dict[str, Any]:
     if not dataset_representation:
         raise ValueError("dataset representation must be recorded")
@@ -1398,10 +1425,54 @@ def build_result_record(
             "claim and functional result records require representative SAES "
             "materialization"
         )
-    if execution["run_class"] == "claim" and not isinstance(claim_timing, Mapping):
-        raise ValueError("claim result records require source-bound timing evidence")
+    if execution["run_class"] == "claim":
+        if claim_workflow is None:
+            # Older callers did not name their claim surface. Preserve their
+            # timing-backed behavior while allowing the new explicit quality
+            # path to omit timing evidence.
+            if isinstance(claim_timing, Mapping):
+                claim_workflow = "performance"
+            elif paper_result_eligible is True:
+                raise ValueError("claim result records require source-bound timing evidence")
+            else:
+                claim_workflow = "quality"
+        if claim_workflow not in {"quality", "mechanisms", "performance"}:
+            raise ValueError(
+                "claim result records must declare claim_workflow as quality, "
+                "mechanisms, or performance"
+            )
+        if claim_workflow != "quality" and not isinstance(claim_timing, Mapping):
+            raise ValueError(
+                "mechanism and performance claim records require source-bound timing evidence"
+            )
+    elif claim_workflow is not None:
+        raise ValueError("claim_workflow is only valid for claim result records")
+    if execution["run_class"] == "claim" and claim_timing_backend is not None:
+        if not isinstance(claim_timing_backend, Mapping):
+            raise ValueError("claim timing backend provenance must be an object")
+        if claim_timing_backend.get("schema_version") != (
+            "source-bound-timing-backend-v1"
+        ):
+            raise ValueError("claim timing backend provenance has an invalid schema")
+        if claim_timing_backend.get("kind") != "source_rtl":
+            raise ValueError("claim timing backend provenance has an invalid kind")
+        source = claim_timing_backend.get("source")
+        manifest = claim_timing_backend.get("manifest")
+        if (
+            not isinstance(source, Mapping)
+            or set(source) != {"path", "sha256"}
+            or not isinstance(manifest, Mapping)
+            or set(manifest) != {"path", "sha256"}
+        ):
+            raise ValueError("claim timing backend provenance is incomplete")
+        if not _sha256_digest(source.get("sha256")) or not _sha256_digest(
+            manifest.get("sha256")
+        ):
+            raise ValueError("claim timing backend provenance has invalid hashes")
     if execution["run_class"] != "claim" and claim_timing is not None:
         raise ValueError("only claim result records may include claim_timing")
+    if execution["run_class"] != "claim" and claim_timing_backend is not None:
+        raise ValueError("only claim result records may include timing backend provenance")
     environment_digest = environment.get("digest_sha256")
     if (
         not isinstance(environment_digest, str)
@@ -1539,13 +1610,16 @@ def build_result_record(
     if mechanism["status"] != "calibrated":
         paper_result_eligible = False
     elif (
-        mechanism.get("protocol") != "dl3dv_train_holdout_v1"
+        mechanism.get("protocol") not in {
+            "dl3dv_train_holdout_v1",
+            "acid_train_holdout_v1",
+        }
         or mechanism.get("train_holdout_scene_disjoint") is not True
         or not isinstance(mechanism.get("train"), dict)
         or not isinstance(mechanism.get("holdout"), dict)
     ):
         raise RuntimeError(
-            "calibrated mechanism provenance has no verified DL3DV holdout evidence"
+            "calibrated mechanism provenance has no verified train/holdout evidence"
         )
     calibration_provenance = {
         key: value
@@ -1563,6 +1637,11 @@ def build_result_record(
             "mechanism_config_sha256": mechanism["mechanism_config_sha256"],
             "calibration_provenance": calibration_provenance,
             **(
+                {"timing_backend": copy.deepcopy(dict(claim_timing_backend))}
+                if claim_timing_backend is not None
+                else {}
+            ),
+            **(
                 {
                     "saes_execution_identity": strict_saes_binding["identity"],
                     "saes_execution_route_sha256": strict_saes_binding[
@@ -1576,6 +1655,11 @@ def build_result_record(
             "command": portable_command(command),
             "runtime_assets": dict(runtime_assets),
             "execution_contract": execution,
+            **(
+                {"claim_workflow": claim_workflow}
+                if claim_workflow is not None
+                else {}
+            ),
             "seed": int(seed),
             "model": model,
             "environment": dict(environment),
@@ -1636,7 +1720,7 @@ def build_result_record(
     }
     if claim_timing is not None:
         record["performance"]["claim_timing"] = copy.deepcopy(dict(claim_timing))
-    if execution["run_class"] == "claim":
+    if execution["run_class"] == "claim" and claim_timing is not None:
         timing = record["performance"]["claim_timing"]
         supplied_binding = timing.get("input_binding_sha256")
         expected_binding = claim_timing_binding_sha256(record, aggregate=False)
@@ -1644,7 +1728,7 @@ def build_result_record(
             raise ValueError("claim timing input binding does not match the result")
         timing["input_binding_sha256"] = expected_binding
     bind_execution_trace(record)
-    if execution["run_class"] == "claim":
+    if execution["run_class"] == "claim" and claim_timing is not None:
         claim_timing_from_record(record, aggregate=False)
     return record
 

@@ -225,6 +225,11 @@ SOUL.md
 HEARTBEAT.md
 USER.md
 TOOLS.md
+/tmp/
+
+# OS and editor metadata
+.DS_Store
+.vscode/
 
 # Generated Verilog files (Chisel output)
 generated/

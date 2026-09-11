@@ -1,8 +1,8 @@
 # Multi-Model Demo Guide
 
 This guide explains how to run SCARF with different 3D Gaussian Splatting
-models. The artifact workflows in `ARTIFACT_EVALUATION.md` provide the
-corresponding structured evaluation records.
+models. Use `ARTIFACT_EVALUATION.md` for environment setup and the quick
+workflow.
 
 ## Supported Models
 
@@ -64,8 +64,8 @@ SCARF/depthsplat/checkpoints/
 
 **Download:**
 ```bash
-# From DepthSplat repository
-wget https://huggingface.co/cvlab-epfl/depthsplat/resolve/main/re10k.ckpt \
+# ViT-S Re10K checkpoint used by the default 384-wide configuration
+wget https://huggingface.co/haofeixu/depthsplat/resolve/ed5116c11f7932fff3714989e2b65716730f6f87/depthsplat-gs-small-re10k-256x256-view2-cfeab6b1.pth \
      -O SCARF/depthsplat/checkpoints/re10k.ckpt
 ```
 
@@ -88,20 +88,18 @@ ln -s /path/to/re10k SCARF/depthsplat/datasets/re10k
 ln -s /path/to/dl3dv SCARF/depthsplat/datasets/dl3dv
 ```
 
-## Execution Model
+## Execution Flow
 
-The demo performs model S2/S3 evaluation, materializes Gaussian descriptors,
-then applies SAES tile routing and materialization. It emits image metrics,
-route counts, retained-descriptor counts, and the architectural event ledger.
-The AE workflows bind those records to the full data-selection and hardware
-measurement contracts.
+The demo runs the selected model encoder, builds depth-conditioned Gaussian
+descriptors, and applies the enabled FSDR and SAES mechanisms. The same command
+shape is used for all three adapters; model-specific configuration is loaded by
+the selected adapter.
 
-## Configuration Boundary
+## Configuration
 
-The demo supplies one global mechanism configuration. The calibration contract
-uses 24 DL3DV calibration scenes and eight disjoint DL3DV holdout scenes, and
-binds the selected configuration to the resulting execution records. The
-configuration is shared across models, datasets, scenes, and samples.
+The runner loads one mechanism configuration for a command. Keep the same
+configuration when comparing model runs, and use the `--no-fsdr` and
+`--no-saes` switches when an ablation is needed.
 
 ## Troubleshooting
 
@@ -167,10 +165,8 @@ git submodule update --init --recursive
 [SAES route and materialization]
       |
       v
-[Output image and metrics]
+[Gaussian output]
 ```
-
-FSDR accounting is reported with the same execution record.
 
 ## See Also
 

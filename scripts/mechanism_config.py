@@ -10,6 +10,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "artifact/mechanism_config.json"
+FROZEN_CONFIG = ROOT / "artifact/calibration/frozen/mechanism_config.json"
 CALIBRATION_CONTRACT = ROOT / "artifact/CALIBRATION.md"
 SHA256 = re.compile(r"[0-9a-f]{64}")
 FIXED = {
@@ -23,7 +24,10 @@ FIXED = {
     "saes_moment_geometry": "c2w-probe-depth-ray-v1",
     "saes_tile_size": 4,
 }
-CALIBRATED_SPLIT_PROTOCOL = "dl3dv_train_holdout_v1"
+CALIBRATED_SPLIT_PROTOCOLS = {
+    "dl3dv_train_holdout_v1",
+    "acid_train_holdout_v1",
+}
 CALIBRATED_SPLIT_HASHES = (
     "selection_sha256",
     "scene_set_sha256",
@@ -31,6 +35,11 @@ CALIBRATED_SPLIT_HASHES = (
     "trace_set_sha256",
     "candidate_set_sha256",
 )
+FROZEN_BUNDLE_FILES = {
+    "candidate_records": "candidates.json",
+    "calibration_result": "calibration-result.json",
+    "manifest_summary": "manifest-summary.json",
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -53,8 +62,9 @@ def _validated_split_provenance(
     calibration: dict[str, Any], selected: dict[str, Any]
 ) -> dict[str, Any]:
     """Validate the train/holdout evidence bound into a frozen config."""
-    if calibration.get("protocol") != CALIBRATED_SPLIT_PROTOCOL:
-        raise ValueError("calibrated mechanism config has no DL3DV train/holdout protocol")
+    protocol = calibration.get("protocol")
+    if protocol not in CALIBRATED_SPLIT_PROTOCOLS:
+        raise ValueError("calibrated mechanism config has no supported train/holdout protocol")
     if calibration.get("train_holdout_scene_disjoint") is not True:
         raise ValueError("calibrated mechanism config train/holdout split is not disjoint")
     split_records: dict[str, dict[str, Any]] = {}
@@ -92,10 +102,55 @@ def _validated_split_provenance(
     return split_records
 
 
+def _validate_frozen_bundle(path: Path, calibration: dict[str, Any]) -> None:
+    """Close the shipped claim config over its auditable companion files."""
+    if path not in {FROZEN_CONFIG.resolve(), DEFAULT_CONFIG.resolve()}:
+        return
+    bundle = FROZEN_CONFIG.parent
+    files = calibration.get("frozen_files")
+    if not isinstance(files, dict) or set(files) != set(FROZEN_BUNDLE_FILES):
+        raise ValueError("frozen calibration bundle file map is incomplete")
+    for key, name in FROZEN_BUNDLE_FILES.items():
+        record = files.get(key)
+        if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
+            raise ValueError(f"frozen calibration file record is invalid: {key}")
+        if record["path"] != name:
+            raise ValueError(f"frozen calibration file path is invalid: {key}")
+        digest = _digest(record.get("sha256"), f"calibration.frozen_files.{key}.sha256")
+        file_path = bundle / name
+        if not file_path.is_file() or sha256_file(file_path) != digest:
+            raise ValueError(f"frozen calibration file hash mismatch: {name}")
+    result = json.loads((bundle / FROZEN_BUNDLE_FILES["calibration_result"]).read_text(encoding="utf-8"))
+    candidates = json.loads((bundle / FROZEN_BUNDLE_FILES["candidate_records"]).read_text(encoding="utf-8"))
+    summary = json.loads((bundle / FROZEN_BUNDLE_FILES["manifest_summary"]).read_text(encoding="utf-8"))
+    if result.get("schema_version") != "scarf-calibration-result-v1":
+        raise ValueError("frozen calibration result schema is invalid")
+    if summary.get("schema_version") != "scarf-calibration-manifest-summary-v1":
+        raise ValueError("frozen calibration manifest summary schema is invalid")
+    if candidates.get("schema_version") != "scarf-calibration-candidates-v1":
+        raise ValueError("frozen calibration candidate summary schema is invalid")
+    if candidates.get("protocol") != calibration.get("protocol"):
+        raise ValueError("frozen calibration candidate protocol is invalid")
+    if candidates.get("claim_eligible") is not True:
+        raise ValueError("frozen calibration candidate summary is not claim-eligible")
+    if candidates.get("selected") != calibration.get("selected_parameters"):
+        raise ValueError("frozen calibration candidates do not match selected tuple")
+    if result.get("protocol") != calibration.get("protocol"):
+        raise ValueError("frozen calibration result protocol is invalid")
+    if result.get("status") != "PASS" or result.get("evaluation_disjoint") is not True:
+        raise ValueError("frozen calibration result is not a passing disjoint result")
+    if result.get("selected") != calibration.get("selected_parameters"):
+        raise ValueError("frozen calibration result does not match selected tuple")
+    if summary.get("protocol") != calibration.get("protocol"):
+        raise ValueError("frozen calibration manifest protocol is invalid")
+    if summary.get("evaluation_disjoint") is not True:
+        raise ValueError("frozen calibration manifest is not evaluation-disjoint")
+
+
 def load_mechanism_config(
-    path: Path = DEFAULT_CONFIG,
+    path: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    path = Path(path).resolve()
+    path = Path(path or DEFAULT_CONFIG).resolve()
     config = json.loads(path.read_text(encoding="utf-8"))
     if config.get("schema_version") != "1.0":
         raise ValueError("mechanism config schema must be 1.0")
@@ -171,6 +226,7 @@ def load_mechanism_config(
         if calibration.get("evaluation_disjoint") is not True:
             raise ValueError("calibrated mechanism config is not evaluation-disjoint")
         split_provenance = _validated_split_provenance(calibration, selected)
+        _validate_frozen_bundle(path, calibration)
         provenance = {
             "status": status,
             "manifest_sha256": manifest_sha256,
@@ -178,7 +234,7 @@ def load_mechanism_config(
             "evaluation_disjoint": True,
             "expected_results_accessed": False,
             "global_configuration": True,
-            "protocol": CALIBRATED_SPLIT_PROTOCOL,
+            "protocol": calibration.get("protocol"),
             "train_holdout_scene_disjoint": True,
             "train": split_provenance["train"],
             "holdout": split_provenance["holdout"],
@@ -192,9 +248,9 @@ def load_mechanism_config(
 
 
 def require_calibrated_mechanism(
-    path: Path = DEFAULT_CONFIG,
+    path: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    config, provenance = load_mechanism_config(path)
+    config, provenance = load_mechanism_config(path or FROZEN_CONFIG)
     if provenance["status"] != "calibrated":
         raise RuntimeError(
             "artifact/mechanism_config.json has not been calibrated; "

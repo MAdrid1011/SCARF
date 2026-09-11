@@ -63,7 +63,9 @@ def archive_files() -> list[Path]:
     from scripts.build_archive import include_in_source_release, normalize_archive_relative
 
     release_manifest = ROOT / "release-manifest.json"
-    if release_manifest.is_file():
+    # Keep live-checkout validation strict; only use the embedded identity when
+    # Git metadata is absent, as it is in a source archive.
+    if release_manifest.is_file() and not (ROOT / ".git").exists():
         record = json.loads(release_manifest.read_text(encoding="utf-8"))
         files = record.get("files")
         if (
@@ -137,6 +139,22 @@ def check_local_paths(files: list[Path]) -> list[str]:
 
 
 def submodule_record() -> tuple[dict[str, str], list[str]]:
+    # A source archive intentionally has no .git directory.  Its immutable
+    # release-manifest.json is the authoritative submodule identity in that
+    # environment, so use it instead of attempting Git discovery.
+    release_manifest = ROOT / "release-manifest.json"
+    if release_manifest.is_file() and not (ROOT / ".git").exists():
+        try:
+            record = json.loads(release_manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {}, [f"release manifest is not valid JSON: {exc}"]
+        declared = record.get("submodules")
+        if isinstance(declared, dict) and all(
+            isinstance(declared.get(name), str)
+            and re.fullmatch(r"[0-9a-f]{40}", declared[name])
+            for name in SUBMODULES
+        ):
+            return {name: declared[name] for name in SUBMODULES}, []
     records = {}
     failures = []
     for name in SUBMODULES:
@@ -431,6 +449,30 @@ def check_evaluation_protocol(path: Path | None = None) -> list[str]:
     return []
 
 
+def check_frozen_calibration_bundle(root: Path = ROOT) -> list[str]:
+    """Require the shipped calibrated config and its companion provenance."""
+    try:
+        from scripts.mechanism_config import require_calibrated_mechanism
+
+        config, provenance = require_calibrated_mechanism(
+            root / "artifact/calibration/frozen/mechanism_config.json"
+        )
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        return [f"frozen calibration bundle is not claim-ready: {exc}"]
+    failures: list[str] = []
+    if config.get("status") != "calibrated" or provenance.get("evaluation_disjoint") is not True:
+        failures.append("frozen calibration bundle is not evaluation-disjoint calibrated")
+    for relative in (
+        "artifact/calibration/frozen/mechanism_config.json",
+        "artifact/calibration/frozen/candidates.json",
+        "artifact/calibration/frozen/calibration-result.json",
+        "artifact/calibration/frozen/manifest-summary.json",
+    ):
+        if not (root / relative).is_file():
+            failures.append(f"frozen calibration file is missing: {relative}")
+    return failures
+
+
 def check_claim_status(path: Path | None = None) -> list[str]:
     path = path or ROOT / "artifact/claim_status.json"
     if not path.is_file():
@@ -471,7 +513,7 @@ def check_claim_status(path: Path | None = None) -> list[str]:
         },
         "figure11": {"CLAIMED", "NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX"},
         "sensitivity": {"CLAIMED", "NOT_CLAIMED_INCOMPLETE_NINE_PAIR_MATRIX"},
-        "rtl": {"CLAIMED"},
+        "rtl": {"CLAIMED", "NOT_CLAIMED_NO_SOURCE_BOUND_RTL_EVIDENCE"},
         "dram": {"FUNCTIONAL_ONLY"},
         "physical_asap7": {"CLAIMED", "NOT_CLAIMED_RESOURCE_LIMIT"},
         "deepscale": {"CLAIMED", "NOT_CLAIMED_NO_PHYSICAL_INPUT"},
@@ -707,6 +749,7 @@ def build_manifest(
     failures.extend(check_dataset_sources())
     failures.extend(check_checkpoint_manifest())
     failures.extend(check_runtime_asset_manifest())
+    failures.extend(check_frozen_calibration_bundle())
     failures.extend(check_deepscale_assets())
     failures.extend(check_orin_contract())
     failures.extend(check_claim_status())
@@ -721,7 +764,12 @@ def build_manifest(
         failures.extend(doi_failures)
     return {
         "schema_version": "1.0",
-        "git_commit": git("rev-parse", "HEAD"),
+        "git_commit": (
+            json.loads((ROOT / "release-manifest.json").read_text(encoding="utf-8"))
+            .get("git_commit", "unknown")
+            if (ROOT / "release-manifest.json").is_file() and not (ROOT / ".git").exists()
+            else git("rev-parse", "HEAD")
+        ),
         "submodules": submodules,
         "zenodo_doi": doi,
         "reference_evidence_required": bool(require_reference_evidence),
@@ -750,11 +798,36 @@ def main() -> int:
                 raise ValueError("archive manifest has no Zenodo DOI")
             print(json.dumps(record, indent=2, sort_keys=True))
             return 0
-        manifest = build_manifest(args.require_doi)
-        args.manifest.parent.mkdir(parents=True, exist_ok=True)
-        args.manifest.write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        # Source-only archives carry an immutable manifest that explicitly
+        # omits Results-Reproduced evidence.  Honor that scope when checking a
+        # clean extraction; live full-release builds retain the strict default.
+        require_reference_evidence = True
+        embedded = ROOT / "release-manifest.json"
+        if embedded.is_file() and not (ROOT / ".git").exists():
+            embedded_record = json.loads(embedded.read_text(encoding="utf-8"))
+            require_reference_evidence = bool(
+                embedded_record.get("reference_evidence_required", True)
+            )
+        manifest = build_manifest(
+            args.require_doi,
+            require_reference_evidence=require_reference_evidence,
         )
+        # Never replace the authoritative manifest embedded in a clean source
+        # archive.  It carries bundle scope and archive metadata in addition
+        # to the generated identity fields.
+        if embedded.is_file() and not (ROOT / ".git").exists() and args.manifest.resolve() == embedded.resolve():
+            existing = json.loads(embedded.read_text(encoding="utf-8"))
+            fields = ("git_commit", "submodules", "files", "validation")
+            if args.require_doi:
+                fields = (*fields, "zenodo_doi")
+            for field in fields:
+                if existing.get(field) != manifest.get(field):
+                    raise ValueError(f"embedded release manifest mismatch in {field}")
+        else:
+            args.manifest.parent.mkdir(parents=True, exist_ok=True)
+            args.manifest.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
     except (OSError, RuntimeError, json.JSONDecodeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

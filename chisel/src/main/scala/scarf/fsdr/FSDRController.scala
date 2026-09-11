@@ -45,6 +45,9 @@ class FSDRController extends Module {
     val narrowCandidates   = Output(UInt(8.W))
 
     val computedDepth      = Input(UInt(ScarfConfig.DataWidth.W))
+    // A constant feature vector cannot establish feature-space locality.
+    // It must not turn a cache hit into a narrowed depth search.
+    val featureInformative = Input(Bool())
     val pixelIdx    = Output(UInt(8.W))
     val totalPixels = Input(UInt(8.W))
   })
@@ -97,7 +100,7 @@ class FSDRController extends Module {
       state := FSDRState.sDecide
     }
     is(FSDRState.sDecide) {
-      when(io.cacheHit && localValidity.io.valid) {
+      when(io.cacheHit && localValidity.io.valid && io.featureInformative) {
         isNarrow    := true.B
         cachedDepth := io.cacheHitDepth
         state       := FSDRState.sNarrow

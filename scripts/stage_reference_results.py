@@ -263,7 +263,12 @@ def validate_aggregate_lineage(
             failures.append(f"aggregate sample lineage does not match staged samples: {label}")
             continue
         try:
-            rebuilt = aggregate(sample_paths, sample_count)
+            aggregate_path = paths_by_relative.get(aggregate_relative.as_posix())
+            if aggregate_path is None:
+                raise ValueError("aggregate result is not staged")
+            rebuilt = aggregate(
+                sample_paths, sample_count, output=aggregate_path
+            )
         except (OSError, KeyError, TypeError, ValueError) as exc:
             failures.append(f"aggregate sample lineage cannot be rebuilt: {label} ({exc})")
             continue
@@ -290,6 +295,65 @@ def validate_claim_timing_artifacts(
             else None
         )
         if not isinstance(contract, Mapping) or contract.get("run_class") != "claim":
+            continue
+        backend = provenance.get("timing_backend") if isinstance(provenance, Mapping) else None
+        if not isinstance(backend, Mapping):
+            failures.append(
+                f"claim timing backend provenance is missing: evidence/{relative_text}"
+            )
+            continue
+        source = backend.get("source")
+        manifest = backend.get("manifest")
+        if (
+            not isinstance(source, Mapping)
+            or not isinstance(manifest, Mapping)
+            or not isinstance(source.get("path"), str)
+            or not isinstance(manifest.get("path"), str)
+            or not isinstance(source.get("sha256"), str)
+            or not isinstance(manifest.get("sha256"), str)
+        ):
+            failures.append(
+                f"claim timing backend provenance is malformed: evidence/{relative_text}"
+            )
+            continue
+        result_parent = Path(relative_text).parent
+        source_relative = PurePosixPath(source["path"])
+        manifest_relative = PurePosixPath(manifest["path"])
+        if source_relative.is_absolute() or ".." in source_relative.parts:
+            failures.append(
+                f"claim timing RTL source path is unsafe: evidence/{relative_text}"
+            )
+            continue
+        if manifest_relative.is_absolute() or ".." in manifest_relative.parts:
+            failures.append(
+                f"claim timing manifest path is unsafe: evidence/{relative_text}"
+            )
+            continue
+        source_key = (result_parent / Path(*source_relative.parts)).as_posix()
+        source_path = paths_by_relative.get(source_key)
+        if source_path is None or sha256_file(source_path) != source["sha256"]:
+            failures.append(
+                f"claim timing RTL source is not present or hash-bound: evidence/{relative_text}"
+            )
+            continue
+        manifest_key = (result_parent / Path(*manifest_relative.parts)).as_posix()
+        manifest_path = paths_by_relative.get(manifest_key)
+        if manifest_path is None or sha256_file(manifest_path) != manifest["sha256"]:
+            failures.append(
+                f"claim timing manifest is not present or hash-bound: evidence/{relative_text}"
+            )
+            continue
+        try:
+            from scripts.claim_timing_backend import load_claim_timing_manifest
+
+            load_claim_timing_manifest(
+                manifest_path,
+                root=manifest_path.parent,
+            )
+        except (OSError, ValueError) as exc:
+            failures.append(
+                f"claim timing backend bundle is invalid: evidence/{relative_text} ({exc})"
+            )
             continue
         timing = record.get("performance", {}).get("claim_timing")
         trace = timing.get("trace") if isinstance(timing, Mapping) else None
@@ -673,17 +737,29 @@ def selected_files(source: Path) -> dict[Path, Path]:
         "quick/*/progress.jsonl",
         "quick/*/samples/*/results.json",
         "quick/*/timing-trace/*",
+        "quick/*/timing-trace/**/*",
+        "quick/*/timing-backend/**/*",
         "quick/*/samples/*/timing-trace/*",
+        "quick/*/samples/*/timing-trace/**/*",
+        "quick/*/samples/*/timing-backend/**/*",
         "quality/*/results.json",
         "quality/*/pair-execution.json",
         "quality/*/progress.jsonl",
         "quality/*/samples/*/results.json",
         "quality/*/timing-trace/*",
+        "quality/*/timing-trace/**/*",
+        "quality/*/timing-backend/**/*",
         "quality/*/samples/*/timing-trace/*",
+        "quality/*/samples/*/timing-trace/**/*",
+        "quality/*/samples/*/timing-backend/**/*",
         "speedup/*/results.json",
         "speedup/*/samples/*/results.json",
         "speedup/*/timing-trace/*",
+        "speedup/*/timing-trace/**/*",
+        "speedup/*/timing-backend/**/*",
         "speedup/*/samples/*/timing-trace/*",
+        "speedup/*/samples/*/timing-trace/**/*",
+        "speedup/*/samples/*/timing-backend/**/*",
         "speedup/*/samples/*/orin-evidence/measurement.json",
         "speedup/*/samples/*/orin-evidence/cuda-events.json",
         "speedup/*/samples/*/orin-evidence/tegrastats.log",
@@ -698,9 +774,17 @@ def selected_files(source: Path) -> dict[Path, Path]:
         "mechanisms/*/progress.jsonl",
         "mechanisms/*/samples/*/results.json",
         "ablation/*/timing-trace/*",
+        "ablation/*/timing-trace/**/*",
+        "ablation/*/timing-backend/**/*",
         "ablation/*/samples/*/timing-trace/*",
+        "ablation/*/samples/*/timing-trace/**/*",
+        "ablation/*/samples/*/timing-backend/**/*",
         "mechanisms/*/timing-trace/*",
+        "mechanisms/*/timing-trace/**/*",
+        "mechanisms/*/timing-backend/**/*",
         "mechanisms/*/samples/*/timing-trace/*",
+        "mechanisms/*/samples/*/timing-trace/**/*",
+        "mechanisms/*/samples/*/timing-backend/**/*",
         "utilization/*/timing-trace/*",
         "utilization/*/samples/*/timing-trace/*",
         "sensitivity/results.json",

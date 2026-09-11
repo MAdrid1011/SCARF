@@ -56,6 +56,7 @@ class ModelConfig extends Bundle {
   val normGroups         = UInt(4.W)
   val shDegree           = UInt(3.W)
   val hasDINOv2          = Bool()
+  val dinov2Layers       = UInt(6.W)
 
   val saesFeatureVarThresh = UInt(16.W)
   val saesCrossCheckThresh = UInt(16.W)
@@ -66,6 +67,28 @@ class ModelConfig extends Bundle {
   val fsdrCacheSize     = UInt(10.W)
   val fsdrHammingThresh = UInt(4.W)
   val fsdrDepthValidThresh = UInt(10.W) // Q0.10 relative depth tolerance
+
+  // Workload descriptor supplied by the source-bound RTL timing harness.
+  val payloadBase        = UInt(32.W)
+  val payloadBytes       = UInt(32.W)
+  val payloadTensorCount = UInt(16.W)
+  val numGaussians       = UInt(32.W)
+  // Data-section-relative offsets programmed from the validated v2 binding
+  // table.  The packed JSON header is never an RTL addressable tensor.
+  val payloadFeatureOffset = UInt(32.W)
+  val payloadDepthOffset   = UInt(32.W)
+  val payloadCandidateOffset = UInt(32.W)
+  val payloadProbabilityOffset = UInt(32.W)
+  val payloadFeatureBytes = UInt(32.W)
+  val payloadDepthBytes = UInt(32.W)
+  val payloadCandidateBytes = UInt(32.W)
+  val payloadProbabilityBytes = UInt(32.W)
+  // Optional target-free per-tile route stream. One byte encodes the final
+  // model decision: Full=0, L0=1, L1=2. A missing stream preserves the
+  // conservative Full-path behavior used by legacy payloads.
+  val payloadSAESRouteOffset = UInt(32.W)
+  val payloadSAESRouteBytes = UInt(32.W)
+  val payloadValid       = Bool()
 }
 
 object ModelPresets {
@@ -80,6 +103,7 @@ object ModelPresets {
     "normGroups"         -> 8,
     "shDegree"           -> 4,
     "hasDINOv2"          -> 0,
+    "dinov2Layers"       -> 0,
     "saesEnabled"        -> 1,
     "fsdrEnabled"        -> 1,
     "fsdrCacheSize"      -> 32,
@@ -98,6 +122,7 @@ object ModelPresets {
     "normGroups"         -> 8,
     "shDegree"           -> 4,
     "hasDINOv2"          -> 0,
+    "dinov2Layers"       -> 0,
     "saesEnabled"        -> 1,
     "fsdrEnabled"        -> 1,
     "fsdrCacheSize"      -> 32,
@@ -116,6 +141,7 @@ object ModelPresets {
     "normGroups"         -> 4,
     "shDegree"           -> 2,
     "hasDINOv2"          -> 1,
+    "dinov2Layers"       -> 12,
     "saesEnabled"        -> 1,
     "fsdrEnabled"        -> 1,
     "fsdrCacheSize"      -> 32,

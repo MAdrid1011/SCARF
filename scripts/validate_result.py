@@ -334,8 +334,11 @@ def _validate_v21_evidence(record: dict[str, Any]) -> None:
             )
         if calibration.get("evaluation_disjoint") is not True:
             raise ValueError("calibration provenance is not evaluation-disjoint")
-        if calibration.get("protocol") != "dl3dv_train_holdout_v1":
-            raise ValueError("calibrated result has no DL3DV train/holdout protocol")
+        if calibration.get("protocol") not in {
+            "dl3dv_train_holdout_v1",
+            "acid_train_holdout_v1",
+        }:
+            raise ValueError("calibrated result has no supported train/holdout protocol")
         if calibration.get("train_holdout_scene_disjoint") is not True:
             raise ValueError("calibrated result train/holdout split is not disjoint")
         split_hashes = (
@@ -879,11 +882,17 @@ def validate(record: dict[str, Any]) -> None:
     _validate_execution_trace_binding(record)
     contract = execution_contract(record)
     if contract is not None and contract["run_class"] == "claim":
-        from scripts.result_record import claim_timing_from_record
+        workflow = _get(record, "provenance").get("claim_workflow")
+        if workflow not in {"quality", "mechanisms", "performance"}:
+            raise ValueError(
+                "claim result must declare provenance.claim_workflow"
+            )
+        if workflow != "quality":
+            from scripts.result_record import claim_timing_from_record
 
-        claim_timing_from_record(
-            record, aggregate=evaluation["kind"] == "dataset_aggregate"
-        )
+            claim_timing_from_record(
+                record, aggregate=evaluation["kind"] == "dataset_aggregate"
+            )
 
     baseline = _positive(record, "performance.baseline_cycles")
     scarf = _positive(record, "performance.scarf_cycles")

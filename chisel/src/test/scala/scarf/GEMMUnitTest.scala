@@ -127,4 +127,39 @@ class GEMMUnitTest extends AnyFlatSpec with ChiselScalatestTester {
       dut.io.done.expect(true.B)
     }
   }
+
+  it should "write only the valid rows of a final M tile" in {
+    test(new MMCU(arraySize = 2)) { dut =>
+      dut.io.mode.poke(MMCUMode.mGEMM)
+      dut.io.M.poke(1.U)
+      dut.io.K.poke(1.U)
+      dut.io.N.poke(2.U)
+      dut.io.useBias.poke(false.B)
+      dut.io.kernelSize.poke(1.U)
+      dut.io.stride.poke(1.U)
+      dut.io.inChannels.poke(1.U)
+      dut.io.outChannels.poke(1.U)
+      for (i <- 0 until 2) {
+        dut.io.aData(i).poke(1.U)
+        dut.io.bData(i).poke(1.U)
+        dut.io.biasData(i).poke(0.U)
+      }
+
+      dut.io.start.poke(true.B)
+      dut.clock.step(1)
+      dut.io.start.poke(false.B)
+
+      var writes = 0
+      var cycles = 0
+      while (!dut.io.done.peekBoolean() && cycles < 50) {
+        if (dut.io.cWr.peekBoolean()) {
+          writes += 1
+        }
+        dut.clock.step(1)
+        cycles += 1
+      }
+      assert(cycles < 50, s"MMCU did not finish within 50 cycles (ran $cycles)")
+      assert(writes == 1, s"expected one valid-row writeback, observed $writes")
+    }
+  }
 }

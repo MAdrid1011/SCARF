@@ -18,6 +18,11 @@ class SAESController extends Module {
     val probeFeatureVar = Input(UInt(ScarfConfig.DataWidth.W))
     val probeDepthStd   = Input(UInt(ScarfConfig.DataWidth.W))
     val crossCheckError = Input(UInt(ScarfConfig.DataWidth.W))
+    // The model exporter has already applied the complete feature/depth and
+    // materialization policy.  Its compact final route is the authoritative
+    // sparse-work request for source-bound timing.
+    val routeValid = Input(Bool())
+    val routeLevel = Input(SAESLevel())
     // Probe-only materialization checks are Control inputs. Their producer
     // reads only selected native descriptors; an L0 rejection still permits
     // the existing L1 depth decision, while an L1 rejection is fail-closed.
@@ -50,7 +55,10 @@ class SAESController extends Module {
     }
     is(sCheckL0) {
       decisionCycles := decisionCycles + 1.U
-      when(
+      when(io.routeValid) {
+        resultLevel := io.routeLevel
+        state := sResult
+      }.elsewhen(
         io.probeFeatureVar < io.config.saesFeatureVarThresh &&
           io.l0MaterializationValid
       ) {

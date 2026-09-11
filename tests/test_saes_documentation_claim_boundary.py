@@ -10,16 +10,15 @@ def _text(relative_path: str) -> str:
     return " ".join((ROOT / relative_path).read_text(encoding="utf-8").split())
 
 
-def test_saes_mechanism_docs_keep_the_dense_execution_boundary() -> None:
+def test_saes_mechanism_docs_explain_the_public_execution_flow() -> None:
     mechanisms = _text("docs/fsdr-saes-mechanisms.md")
     guide = _text("docs/multi-model-demo-guide.md")
 
-    assert "materializes the S3 descriptor tensors before SAES routing" in mechanisms
-    assert "full evaluation workflow combines those records" in mechanisms
+    assert "FSDR changes the S2 candidate search" in mechanisms
+    assert "SAES changes the S3 materialization route" in mechanisms
     assert "twelve anchors total" in mechanisms
-    assert "The demo performs model S2/S3 evaluation" in guide
-    assert "The calibration contract uses 24 DL3DV calibration scenes" in guide
-    assert "The configuration is shared across models" in guide
+    assert "The demo runs the selected model encoder" in guide
+    assert "The same command shape is used for all three adapters" in guide
     assert "Expected Performance" not in guide
     assert "Each model has optimized SAES thresholds" not in guide
 

@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import math
+import shutil
 import statistics
 import sys
 from pathlib import Path
@@ -19,8 +20,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.result_record import (
+    CLAIM_TIMING_CYCLE_SOURCE,
+    CLAIM_TIMING_SCHEMA_VERSION,
+    CLAIM_TIMING_VARIANTS,
     EXECUTION_TRACE_SET_SCHEMA_VERSION,
     build_quality_record,
+    claim_timing_binding_sha256,
     execution_trace_performance_evidence_from_record,
     execution_trace_set_sha256,
     portable_command,
@@ -317,7 +322,109 @@ def _aggregate_v2_evidence(records: list[dict[str, Any]]) -> dict[str, Any]:
     return {"stages": stages, "events": events}
 
 
-def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
+def _positive_mean(values: list[Any], label: str) -> int:
+    if not values or any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value <= 0
+        for value in values
+    ):
+        raise ValueError(f"{label} must contain positive finite cycles")
+    rounded = int(round(statistics.fmean(float(value) for value in values)))
+    return max(1, rounded)
+
+
+def _aggregate_claim_timing(
+    records: list[dict[str, Any]], sample_paths: list[Path], output: Path | None
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Aggregate source-bound sample traces and materialize a trace-set file."""
+    if output is None:
+        raise ValueError(
+            "claim aggregate requires an output path to stage timing-trace/aggregate.json"
+        )
+    source_bundle = Path(sample_paths[0]).resolve().parent / "timing-backend"
+    aggregate_bundle = Path(output).resolve().parent / "timing-backend"
+    if not source_bundle.is_dir():
+        raise ValueError("claim sample is missing its staged timing-backend bundle")
+    for source in sorted(source_bundle.rglob("*")):
+        if source.is_file():
+            destination = aggregate_bundle / source.relative_to(source_bundle)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+    timings = [record["performance"]["claim_timing"] for record in records]
+    clock_mhz = _invariant(records, ("performance", "claim_timing", "clock_mhz"))
+    variants = {
+        name: {
+            "total_cycles": _positive_mean(
+                [timing["variants"][name]["total_cycles"] for timing in timings],
+                f"claim timing variant {name}",
+            )
+        }
+        for name in CLAIM_TIMING_VARIANTS
+    }
+    stages = {
+        stage: _positive_mean(
+            [timing["combined_stage_cycles"][stage] for timing in timings],
+            f"claim timing {stage}",
+        )
+        for stage in ("s1", "s2", "s3", "s4")
+    }
+    trace_set = [
+        {
+            "model": record["provenance"]["model"],
+            "dataset": record["provenance"]["dataset"]["name"],
+            "sample_index": record["provenance"]["evaluation"]["sample_index"],
+            "trace": copy.deepcopy(timing["trace"]),
+            "variants": copy.deepcopy(timing["variants"]),
+            "combined_stage_cycles": copy.deepcopy(timing["combined_stage_cycles"]),
+        }
+        for record, timing in zip(records, timings)
+    ]
+    trace_set.sort(key=lambda item: item["sample_index"])
+    trace_path = Path(output).resolve().parent / "timing-trace" / "aggregate.json"
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text(
+        json.dumps(
+            {
+                "schema_version": CLAIM_TIMING_SCHEMA_VERSION,
+                "kind": "dataset_aggregate",
+                "samples": trace_set,
+                "aggregate": {
+                    "variants": variants,
+                    "combined_stage_cycles": stages,
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    digest = sha256_file(trace_path)
+    backend_values = [record["provenance"].get("timing_backend") for record in records]
+    backend = None
+    if any(value is not None for value in backend_values):
+        if not all(value is not None for value in backend_values):
+            raise ValueError("sample provenance mismatch: timing backend")
+        backend = _invariant(records, ("provenance", "timing_backend"))
+    return (
+        {
+            "schema_version": CLAIM_TIMING_SCHEMA_VERSION,
+            "timing_class": "rtl_cycle_equivalent_source_bound",
+            "rtl_cycle_equivalent": True,
+            "clock_mhz": clock_mhz,
+            "trace": {"path": "timing-trace/aggregate.json", "sha256": digest},
+            "variants": variants,
+            "combined_stage_cycles": stages,
+        },
+        backend,
+    )
+
+
+def aggregate(
+    paths: list[Path], expected_count: int, *, output: Path | None = None
+) -> dict[str, Any]:
     if expected_count <= 0:
         raise ValueError("expected_count must be positive")
     if len(paths) != expected_count:
@@ -327,7 +434,8 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
     evidence = []
     indices = []
     execution_indices = []
-    for path in sorted(path.resolve() for path in paths):
+    resolved_paths = sorted(path.resolve() for path in paths)
+    for path in resolved_paths:
         record = json.loads(path.read_text(encoding="utf-8"))
         reject_reference_only_record(record)
         validate(record)
@@ -396,6 +504,18 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
         selections, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     selection_sha256 = hashlib.sha256(selection_bytes).hexdigest()
+    run_selection_values = [
+        record["provenance"]["evaluation"].get("run_selection_sha256")
+        for record in records
+    ]
+    if any(value is not None for value in run_selection_values):
+        if not all(isinstance(value, str) and len(value) == 64 for value in run_selection_values):
+            raise ValueError("sample provenance mismatch: run selection binding")
+        if any(value != run_selection_values[0] for value in run_selection_values[1:]):
+            raise ValueError("sample provenance mismatch: run selection binding")
+        run_selection_sha256 = run_selection_values[0]
+    else:
+        run_selection_sha256 = None
     trace_set: list[dict[str, Any]] | None = None
     trace_set_sha256: str | None = None
     if all(trace_bound):
@@ -459,6 +579,16 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
                 lambda item: item["provenance"]["calibration_provenance"],
             ),
         )
+    is_claim = (
+        execution_contracts[0] is not None
+        and execution_contracts[0].get("run_class") == "claim"
+    )
+    claim_workflow = first["provenance"].get("claim_workflow") if is_claim else None
+    if is_claim and claim_workflow not in {"quality", "mechanisms", "performance"}:
+        raise ValueError("claim sample must declare provenance.claim_workflow")
+    needs_claim_timing = is_claim and claim_workflow in {"mechanisms", "performance"}
+    if needs_claim_timing:
+        invariants = (*invariants, ("timing_backend", lambda item: item["provenance"].get("timing_backend")))
     for label, getter in invariants:
         expected = getter(first)
         if any(getter(record) != expected for record in records[1:]):
@@ -491,6 +621,8 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
         "aggregation": "arithmetic mean over deterministic sample indices",
         "sample_results": sorted(evidence, key=lambda item: item["sample_index"]),
     }
+    if run_selection_sha256 is not None:
+        provenance["evaluation"]["run_selection_sha256"] = run_selection_sha256
     if trace_set is not None:
         provenance["evaluation"].update(
             {
@@ -507,7 +639,11 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
             "scarf_cycles": scarf_cycles,
             "speedup": baseline_cycles / scarf_cycles,
             "baseline_source": first["performance"]["baseline_source"],
-            "cycle_source": first["performance"]["cycle_source"] + ":sample_mean",
+            "cycle_source": (
+                CLAIM_TIMING_CYCLE_SOURCE
+                if needs_claim_timing
+                else first["performance"]["cycle_source"] + ":sample_mean"
+            ),
             "components": components,
         },
         "ablation": _mean_tree([item["ablation"] for item in records]),
@@ -533,6 +669,28 @@ def aggregate(paths: list[Path], expected_count: int) -> dict[str, Any]:
         record["performance"]["stages"] = evidence["stages"]
         record["events"] = evidence["events"]
         record["energy"] = _mean_tree([item["energy"] for item in records])
+    if needs_claim_timing:
+        claim_timing, backend = _aggregate_claim_timing(
+            records, resolved_paths, output
+        )
+        record["performance"]["claim_timing"] = claim_timing
+        record["performance"]["scarf_cycles"] = claim_timing["variants"][
+            "asic_fsdr_saes"
+        ]["total_cycles"]
+        record["performance"]["speedup"] = (
+            record["performance"]["baseline_cycles"]
+            / record["performance"]["scarf_cycles"]
+        )
+        for stage, cycles in claim_timing["combined_stage_cycles"].items():
+            record["performance"]["stages"][stage]["cycles"] = cycles
+            record["performance"]["stages"][stage]["source"] = (
+                CLAIM_TIMING_CYCLE_SOURCE
+            )
+        if backend is not None:
+            record["provenance"]["timing_backend"] = backend
+        record["performance"]["claim_timing"]["input_binding_sha256"] = (
+            claim_timing_binding_sha256(record, aggregate=True)
+        )
     if trace_set is not None:
         aggregate_performance_evidence = (
             execution_trace_performance_evidence_from_record(record)
@@ -560,7 +718,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         paths = list(args.input_dir.glob("sample_*/results.json"))
-        record = aggregate(paths, args.expected_count)
+        record = aggregate(paths, args.expected_count, output=args.output)
         write_result(record, args.output)
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
