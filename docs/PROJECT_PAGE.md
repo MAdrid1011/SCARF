@@ -35,9 +35,12 @@ The presentation links in the hero and talk section point to the published
 Xiaohongshu video. Its opening frame is stored locally as `media/talk-cover.jpg`
 so the page does not depend on a third-party image endpoint.
 
-The bundled paper PDF and figures came from the local MICRO 2026 camera-ready
-sources. Update those assets together when the official paper changes. The
-Artifact links use the evaluated SCARF-AE v1.0.4 record,
+The bundled paper is the author-confirmed final 17-page MICRO 2026 proceedings
+PDF, supplied as `SCARF.pdf` on November 10, 2026 (SHA-256
+`a66ae5fd8553889665641bf9a8f739cf75c3e5a52b0c8d255667f975484f62f9`).
+Keep this final version when regenerating the figures from the local camera-ready
+sources; do not overwrite it with an earlier manuscript build. The Artifact
+links use the evaluated SCARF-AE v1.0.4 record,
 `https://doi.org/10.5281/zenodo.22434931`.
 
 The method section includes the complete dataflow and architecture figures,
