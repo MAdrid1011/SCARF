@@ -43,7 +43,8 @@ Artifact links use the evaluated SCARF-AE v1.0.4 record,
 The method section includes the complete dataflow and architecture figures,
 with editable FSDR and SAES schematics in `docs/figures/`. Each schematic has
 a separate mobile layout; `picture` selects it below 700px. The BibTeX block
-and template attribution follow the VGGT page's presentation.
+follows the VGGT page's presentation. The footer identifies SCARF and MICRO 2026
+and displays the public page-view count.
 
 Maintainers can regenerate assets from the repository root in this order.
 The PDF exporter requires the original `micro59-camera-ready/figures/`
