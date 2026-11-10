@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#f7f8f6">
+    <meta name="description" content="SCARF: a scene-adaptive accelerator for depth-guided generalizable 3D Gaussian Splatting. MICRO 2026 paper, results, and reproducible artifact.">
+    <link rel="canonical" href="https://madrid1011.github.io/SCARF/">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="SCARF">
+    <meta property="og:title" content="SCARF | MICRO 2026">
+    <meta property="og:description" content="Scene-adaptive acceleration for depth-guided 3D Gaussian Splatting encoders. Paper, mechanisms, results, and reproducible artifact with three ACM AE badges.">
+    <meta property="og:url" content="https://madrid1011.github.io/SCARF/">
+    <meta property="og:image" content="https://madrid1011.github.io/SCARF/media/talk-cover.jpg">
+    <meta property="og:image:width" content="672">
+    <meta property="og:image:height" content="378">
+    <meta property="og:image:alt" content="Opening slide of the SCARF MICRO 2026 presentation">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="SCARF | MICRO 2026">
+    <meta name="twitter:description" content="Scene-adaptive acceleration for depth-guided 3D Gaussian Splatting encoders.">
+    <meta name="twitter:image" content="https://madrid1011.github.io/SCARF/media/talk-cover.jpg">
+    <title>SCARF | MICRO 2026</title>
+    <link rel="icon" href="media/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="site.css">
+    <script src="site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <main id="main">
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <div class="wrap hero-inner">
+          <h1 id="hero-title">SCARF: A Scene-Adaptive Depth-Guided G-3DGS Encoder Accelerator with Semantic Reuse and Fused Dataflow</h1>
+          <p class="authors">Zirui Ma · Zhihua Fan · Haibin Wu · Wenxing Li · Fulin Zhang · Dongrui Fan · Xiaochun Ye · Wenming Li</p>
+          <p class="affiliations">Institute of Computing Technology, Chinese Academy of Sciences · University of Chinese Academy of Sciences</p>
+          <p class="venue-line">MICRO 2026</p>
+          <div class="hero-badges" aria-label="MICRO 2026 artifact evaluation badges">
+            <div><img src="media/acm-artifacts-available.png" alt="ACM Artifacts Available badge" width="104" height="104"><span>Available</span></div>
+            <div><img src="media/acm-artifacts-evaluated.png" alt="ACM Artifacts Evaluated Functional badge" width="104" height="104"><span>Functional</span></div>
+            <div><img src="media/acm-results-reproduced.png" alt="ACM Results Reproduced badge" width="104" height="104"><span>Reproduced</span></div>
+          </div>
+          <div class="hero-actions">
+            <a class="button button-dark" href="media/scarf-paper.pdf">Paper <span aria-hidden="true">↗</span></a>
+            <a class="button button-outline" href="https://github.com/MAdrid1011/SCARF">Code <span aria-hidden="true">↗</span></a>
+            <a class="button button-outline" href="https://doi.org/10.5281/zenodo.22434931">Artifact <span aria-hidden="true">↗</span></a>
+            <a class="button button-outline" href="https://xhslink.cn/o/870mNNKr43L" target="_blank" rel="noopener noreferrer">Talk <span aria-hidden="true">↗</span></a>
+          </div>
+        </div>
+      </section>
+
+      <section class="concept-section" aria-label="SCARF visual overview">
+        <div class="wrap">
+          <div class="concept-demo" data-mode="saes" data-phase="0">
+            <div class="concept-toolbar">
+              <div class="concept-switch" role="group" aria-label="Choose a mechanism">
+                <button type="button" data-concept="fsdr" aria-pressed="false">FSDR <small>Depth search</small></button>
+                <button type="button" data-concept="saes" aria-pressed="true">SAES <small>Gaussian generation</small></button>
+              </div>
+              <button class="concept-play" type="button" aria-label="Pause diagram animation" title="Pause animation">Ⅱ</button>
+            </div>
+            <div class="concept-stage">
+              <figure class="concept-scene">
+                <div class="concept-scene-image"><img src="media/scene-bedroom.webp" alt="Bedroom scene used for Gaussian similarity analysis in the paper" width="768" height="768"><span class="scene-roi" aria-hidden="true"></span></div>
+                <div class="feature-field" role="img" aria-label="Schematic encoder feature map: two distant pixels have similar features">
+                  <span class="feature-line" aria-hidden="true"></span><span class="feature-pin feature-cache">C</span><span class="feature-pin feature-query">Q</span>
+                </div>
+                <figcaption class="caption-saes">Scene with one example tile</figcaption>
+                <figcaption class="caption-fsdr">Encoder features · schematic</figcaption>
+              </figure>
+              <div class="concept-connector" aria-hidden="true"><span class="caption-saes">enlarge tile</span><span class="caption-fsdr">compare features</span><b>→</b></div>
+              <figure class="concept-zoom">
+                <div class="crop-image"><span class="crop-grid" aria-hidden="true"></span><span class="crop-probes" aria-hidden="true"><i></i><i></i><i></i><i></i></span></div>
+                <div class="feature-match">
+                  <span>Query Q · 16-bit LSH</span><div class="signature-grid" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                  <b>Hamming distance ≤ threshold</b>
+                  <span>Cached C · 16-bit LSH</span><div class="signature-grid signature-cached" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                  <strong>Cached depth anchor d<sub>c</sub></strong>
+                </div>
+                <figcaption class="caption-saes">Same image pixels · corner probes</figcaption>
+                <figcaption class="caption-fsdr">Semantic match · cached depth</figcaption>
+              </figure>
+              <div class="concept-connector concept-connector-work" aria-hidden="true"><span class="caption-saes">tile decision</span><span class="caption-fsdr">depth anchor</span><b>→</b></div>
+              <div class="concept-work concept-work-fsdr" aria-label="On a cache hit, FSDR retains a local subset of global depth candidates">
+                <div class="work-choice">
+                  <span>Depth candidates · same global set</span>
+                  <div class="work-candidate"><b>Baseline</b><div class="candidate-scale candidate-full" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><strong>D</strong></div>
+                  <div class="work-candidate"><b>Cache hit</b><div class="candidate-scale candidate-hit" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><strong>D/R</strong></div>
+                  <small>A miss retains all D candidates.</small>
+                </div>
+                <div class="work-output">Cross-view sampling → cost volume → U-Net → depth</div>
+              </div>
+              <div class="concept-work concept-work-saes" aria-label="SAES computes probe Gaussians, then selects one conditional tile path">
+                <div class="work-input"><span>4 × 4 TILE · CORNER PROBES</span><strong>Original S2 depth + Gaussian adaptor</strong></div>
+                <div class="saes-route"><b>L0</b><span>Low feature variance</span><strong>Representative</strong><i class="gaussian-mark" aria-hidden="true"></i></div>
+                <div class="saes-route"><b>L1</b><span>Else, low depth spread</span><strong>Depth-weighted</strong><i class="gaussian-mark gaussian-mark-l1" aria-hidden="true"></i></div>
+                <div class="saes-route"><b>Full</b><span>Else, irregular tile</span><strong>Per-pixel adaptor</strong><i class="gaussian-mark gaussian-mark-full" aria-hidden="true"></i></div>
+                <div class="work-output">Only non-probe pixels follow the selected path.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section overview-section" id="overview" aria-labelledby="overview-title">
+        <div class="wrap">
+          <div class="section-lead"><h2 id="overview-title">Abstract</h2><p>Depth-guided G-3DGS encoders reconstruct scenes directly from multi-view images without per-scene optimization. SCARF addresses two sources of redundant encoder work: FSDR reuses depth information across semantically similar features, while SAES selects a Gaussian generation path from local scene regularity before unnecessary primitives are created. A fused accelerator implements both mechanisms and delivers a 2.94-fold geometric-mean end-to-end speedup on the evaluated workloads, with maximum PSNR degradation below 0.072 percent.</p></div>
+        </div>
+      </section>
+
+      <section class="section method-section" id="method" aria-labelledby="method-title">
+        <div class="wrap">
+          <div class="section-head"><h2 id="method-title">Dataflow and Architecture</h2></div>
+          <figure class="paper-figure dataflow-figure">
+            <a href="media/dataflow.webp" target="_blank" rel="noopener" aria-label="Open the complete SCARF dataflow"><img src="media/dataflow.webp" alt="Complete SCARF dataflow: feature extraction, FSDR depth search, probe-driven SAES materialization, and Gaussian conversion." width="2600" height="852" loading="lazy"></a>
+          </figure>
+          <div class="mechanisms">
+            <figure class="mechanism-figure">
+              <figcaption><h3>FSDR: Feature Similarity Depth Reuse</h3></figcaption>
+              <a href="media/fsdr.svg" target="_blank" rel="noopener" aria-label="Open the FSDR mechanism diagram">
+                <picture><source media="(max-width: 700px)" srcset="media/fsdr-mobile.svg"><img src="media/fsdr.svg" alt="FSDR matches a query signature against the semantic cache. A hit selects D/R original candidates around the cached depth; a miss retains all D. Both paths use the original depth predictor and update the cache." width="1240" height="500" loading="lazy"></picture>
+              </a>
+            </figure>
+            <figure class="mechanism-figure">
+              <figcaption><h3>SAES: Scene-Adaptive Early Sparsification</h3></figcaption>
+              <a href="media/saes.svg" target="_blank" rel="noopener" aria-label="Open the SAES mechanism diagram">
+                <picture><source media="(max-width: 700px)" srcset="media/saes-mobile.svg"><img src="media/saes.svg" alt="SAES computes four corner probes with the original depth predictor and Gaussian adaptor. Non-probe pixels use L0 soft assignment and moment matching for low feature variance, otherwise L1 depth-weighted aggregation for low depth spread, otherwise full per-pixel computation." width="1140" height="570" loading="lazy"></picture>
+              </a>
+            </figure>
+          </div>
+          <figure class="paper-figure architecture-figure">
+            <a href="media/architecture.webp" target="_blank" rel="noopener" aria-label="Open the complete SCARF architecture"><img src="media/architecture.webp" alt="SCARF architecture with FSDR cache, matrix-vector unit, shared compute array, local buffers, pipeline controller, and Gaussian generation unit." width="2600" height="1174" loading="lazy"></a>
+          </figure>
+        </div>
+      </section>
+
+      <section class="section qualitative-section" id="qualitative" aria-labelledby="qualitative-title">
+        <div class="wrap">
+          <div class="section-head"><h2 id="qualitative-title">Qualitative Visualization</h2></div>
+          <div class="qualitative-controls" role="tablist" aria-label="Worst-view analysis">
+            <button type="button" role="tab" aria-selected="true" aria-controls="qualitative-fsdr" id="qual-tab-fsdr" tabindex="0">FSDR / depth reuse</button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="qualitative-saes" id="qual-tab-saes" tabindex="-1">SAES / Gaussian paths</button>
+          </div>
+          <div id="qualitative-fsdr" role="tabpanel" aria-labelledby="qual-tab-fsdr">
+            <div class="quality-grid"><figure><figcaption>Quality change</figcaption><a href="media/quality-fsdr-metric.webp" target="_blank" rel="noopener"><img src="media/quality-fsdr-metric.webp" alt="FSDR worst-view quality change" width="621" height="576" loading="lazy"></a></figure><figure><figcaption>Stage latency</figcaption><a href="media/quality-fsdr-latency.webp" target="_blank" rel="noopener"><img src="media/quality-fsdr-latency.webp" alt="FSDR worst-view stage latency" width="567" height="576" loading="lazy"></a></figure><figure><figcaption>Rendered view</figcaption><a href="media/quality-fsdr-render.webp" target="_blank" rel="noopener"><img src="media/quality-fsdr-render.webp" alt="FSDR worst-view rendered view" width="461" height="461" loading="lazy"></a></figure><figure><figcaption>RGB error</figcaption><div class="quality-error"><a href="media/quality-fsdr-error.webp" target="_blank" rel="noopener"><img src="media/quality-fsdr-error.webp" alt="FSDR worst-view RGB error" width="461" height="461" loading="lazy"></a><img class="quality-colorbar" src="media/quality-colorbar.webp" alt="Original RGB error color scale" width="270" height="1206" loading="lazy"></div></figure></div>
+          </div>
+          <div id="qualitative-saes" role="tabpanel" aria-labelledby="qual-tab-saes" hidden>
+            <div class="quality-grid"><figure><figcaption>Quality change</figcaption><a href="media/quality-saes-metric.webp" target="_blank" rel="noopener"><img src="media/quality-saes-metric.webp" alt="SAES worst-view quality change" width="621" height="577" loading="lazy"></a></figure><figure><figcaption>Stage latency</figcaption><a href="media/quality-saes-latency.webp" target="_blank" rel="noopener"><img src="media/quality-saes-latency.webp" alt="SAES worst-view stage latency" width="567" height="577" loading="lazy"></a></figure><figure><figcaption>Rendered view</figcaption><a href="media/quality-saes-render.webp" target="_blank" rel="noopener"><img src="media/quality-saes-render.webp" alt="SAES worst-view rendered view" width="461" height="460" loading="lazy"></a></figure><figure><figcaption>RGB error</figcaption><div class="quality-error"><a href="media/quality-saes-error.webp" target="_blank" rel="noopener"><img src="media/quality-saes-error.webp" alt="SAES worst-view RGB error" width="461" height="460" loading="lazy"></a><img class="quality-colorbar" src="media/quality-colorbar.webp" alt="Original RGB error color scale" width="270" height="1206" loading="lazy"></div></figure></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section results-section" id="results" aria-labelledby="results-title">
+        <div class="wrap">
+          <div class="section-head result-heading"><h2 id="results-title">Quantitative Comparison</h2></div>
+          <div class="result-tabs" role="tablist" aria-label="Result figures">
+            <button class="result-tab" type="button" role="tab" id="tab-performance" aria-controls="panel-performance" aria-selected="true" tabindex="0">Performance</button>
+            <button class="result-tab" type="button" role="tab" id="tab-ablation" aria-controls="panel-ablation" aria-selected="false" tabindex="-1">Ablation</button>
+          </div>
+          <div class="result-panel" id="panel-performance" role="tabpanel" aria-labelledby="tab-performance">
+            <h3>Faster end to end.</h3>
+            <a class="result-image" href="media/performance.webp" target="_blank" rel="noopener"><img src="media/performance.webp" alt="End-to-end speedup over Orin NX for nine model-dataset pairs and normalized stage latency breakdown." width="2600" height="1961" loading="lazy"></a>
+          </div>
+          <div class="result-panel" id="panel-ablation" role="tabpanel" aria-labelledby="tab-ablation" hidden>
+            <h3>Both ideas contribute.</h3>
+            <a class="result-image" href="media/ablation.webp" target="_blank" rel="noopener"><img src="media/ablation.webp" alt="Speedup of FSDR only, SAES only, and their combination across nine model-dataset pairs." width="2600" height="890" loading="lazy"></a>
+          </div>
+        </div>
+      </section>
+
+      <section class="section talk-section" id="talk" aria-labelledby="talk-title">
+        <div class="wrap talk-inner"><div><h2 id="talk-title">Presentation</h2></div><a class="talk-cover" href="https://xhslink.cn/o/870mNNKr43L" target="_blank" rel="noopener noreferrer" aria-label="Watch the SCARF presentation on Xiaohongshu"><img src="media/talk-cover.jpg" alt="Opening slide of the SCARF conference presentation video" width="672" height="378" loading="lazy"><span class="talk-play" aria-hidden="true">▶</span><span class="talk-platform">XIAOHONGSHU ↗</span></a></div>
+      </section>
+
+      <section class="section artifact-section" id="artifact" aria-labelledby="artifact-title">
+        <div class="wrap">
+          <div class="section-head"><h2 id="artifact-title">Artifact</h2></div>
+          <div class="resource-list">
+            <a href="media/scarf-paper.pdf"><strong>Paper</strong><b aria-hidden="true">↗</b></a>
+            <a href="https://github.com/MAdrid1011/SCARF"><strong>Source code</strong><b aria-hidden="true">↗</b></a>
+            <a href="https://github.com/MAdrid1011/SCARF/blob/main/ARTIFACT_EVALUATION.md"><strong>Reproduction guide</strong><b aria-hidden="true">↗</b></a>
+            <a href="https://doi.org/10.5281/zenodo.22434931"><strong>Archived artifact</strong><b aria-hidden="true">↗</b></a>
+          </div>
+        </div>
+      </section>
+
+      <section class="section citation-section" id="bibtex" aria-labelledby="bibtex-title">
+        <div class="wrap citation">
+          <h2 id="bibtex-title">BibTeX</h2>
+          <pre><code>@inproceedings{ma2026scarf,
+  title={SCARF: A Scene-Adaptive Depth-Guided G-3DGS Encoder Accelerator with Semantic Reuse and Fused Dataflow},
+  author={Ma, Zirui and Fan, Zhihua and Wu, Haibin and Li, Wenxing and Zhang, Fulin and Fan, Dongrui and Ye, Xiaochun and Li, Wenming},
+  booktitle={Proceedings of the 59th IEEE/ACM International Symposium on Microarchitecture},
+  year={2026}
+}</code></pre>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer"><div class="wrap"><p>Page layout inspired by <a href="https://vgg-t.github.io/">VGGT</a> and <a href="https://nerfies.github.io/">Nerfies</a>.</p></div></footer>
+  </body>
+</html>

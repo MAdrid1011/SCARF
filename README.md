@@ -1,6 +1,17 @@
 # SCARF: A Scene-Adaptive Depth-Guided G-3DGS Encoder Accelerator with Semantic Reuse and Fused Dataflow
 
+<p align="center">
+  <a href="https://madrid1011.github.io/SCARF/"><b>Project Page</b></a> ·
+  <a href="https://madrid1011.github.io/SCARF/media/scarf-paper.pdf">Paper</a> ·
+  <a href="https://doi.org/10.5281/zenodo.22434931">Artifact</a> ·
+  <a href="https://xhslink.cn/o/870mNNKr43L">中文讲解</a>
+</p>
+
 SCARF is a hardware-realizable accelerator for depth-guided generalizable 3D Gaussian Splatting (G-3DGS) encoders, co-designed with a scene-adaptive dataflow that exploits semantic similarity in 2D feature space (FSDR) and geometric continuity in 3D space (SAES).
+
+<p align="center">
+  <a href="https://madrid1011.github.io/SCARF/"><img src="docs/media/dataflow.webp" alt="SCARF dataflow: feature extraction, semantic depth reuse, scene-adaptive Gaussian generation, and conversion" width="960"></a>
+</p>
 
 ## MICRO 2026 Artifact Evaluation
 
