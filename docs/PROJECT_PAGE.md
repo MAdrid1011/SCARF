@@ -22,6 +22,15 @@ Use an empty output directory. Keep relative asset paths so the page works
 under `/SCARF/`. The canonical URL and sharing metadata in `index.html`, the
 README links, and the repository's About website should use the published URL.
 
+The footer shows the page-view count from [Busuanzi](https://busuanzi.ibruce.info/)
+starting November 10, 2026. It uses `page_pv`, so other projects under the same
+GitHub Pages hostname do not share this count. Views include repeat visits and
+reloads; they are not unique visitors. `site.js` loads the provider only at the
+public `/SCARF/` URL. The count remains hidden until the provider responds, so
+local previews, blocked requests, and outages do not show a fabricated number.
+The provider's official script sends the page URL as the request referrer to
+identify the page; no account, API secret, or Cloudflare dashboard is involved.
+
 The presentation links in the hero and talk section point to the published
 Xiaohongshu video. Its opening frame is stored locally as `media/talk-cover.jpg`
 so the page does not depend on a third-party image endpoint.

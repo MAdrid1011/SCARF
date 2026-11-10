@@ -170,6 +170,7 @@ img { display: block; max-width: 100%; }
 .site-footer p { margin: 0; text-align: center; color: #666; font-size: 14px; line-height: 1.7; }
 .site-footer a { color: #277ca4; text-decoration: none; }
 .site-footer a:hover { text-decoration: underline; }
+.footer-views { white-space: nowrap; font-variant-numeric: tabular-nums; }
 
 @media (max-width: 760px) {
   .wrap { width: min(100% - 32px, 1030px); }

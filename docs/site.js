@@ -59,3 +59,12 @@ document.querySelectorAll('[role="tablist"]').forEach((tabList) => {
     });
   });
 });
+
+// Load the page counter only on the public site, keeping local previews out.
+if (window.location.origin === "https://madrid1011.github.io"
+    && window.location.pathname === "/SCARF/") {
+  const counterScript = document.createElement("script");
+  counterScript.src = "https://busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js";
+  counterScript.async = true;
+  document.head.appendChild(counterScript);
+}
