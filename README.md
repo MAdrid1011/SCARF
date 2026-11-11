@@ -290,6 +290,24 @@ for provenance and terms.
 
 ## Citation
 
+If you use SCARF in your research, please cite the paper:
+
+```bibtex
+@inproceedings{ma2026scarf,
+  author    = {Zirui Ma and Zhihua Fan and Haibin Wu and Wenxing Li and
+               Fulin Zhang and Dongrui Fan and Xiaochun Ye and Wenming Li},
+  title     = {{SCARF}: A Scene-Adaptive Depth-Guided {G-3DGS}
+               Encoder Accelerator with Semantic Reuse and Fused Dataflow},
+  booktitle = {2026 59th IEEE/ACM International Symposium
+               on Microarchitecture (MICRO)},
+  year      = {2026},
+  pages     = {2512--2528},
+  publisher = {IEEE},
+  doi       = {10.1109/MICRO67795.2026.00172},
+  url       = {https://doi.org/10.1109/MICRO67795.2026.00172}
+}
+```
+
 If you use the evaluated artifact, please cite the versioned Zenodo record:
 
 ```bibtex
